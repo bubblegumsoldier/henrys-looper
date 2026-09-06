@@ -6,7 +6,7 @@ use super::metro::Metronome;
 use super::process::is_fresh;
 use super::sim::{Played, Sim, SimSpec, TrackSpec, mono, silence};
 use super::timeline::{TimeSignature, Timeline};
-use super::track::TrackState;
+use super::track::{TrackLatency, TrackState};
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 128;
@@ -272,6 +272,326 @@ fn wrong_compensation_value_shifts_the_recording() {
     // shifted by the full roundtrip.
     assert_eq!(content[0], fingerprint(start));
     assert_ne!(content[0], fingerprint(start + R));
+}
+
+// -------------------------------------------------------------------------------------------
+// 3b. Latency compensation per track
+//
+// Everything above holds for one number shared by every track. It stops holding the moment two
+// sources take different ways in - a microphone through the AD converter of the interface and a
+// plugin host handing us digital audio over an ASIO router. The four tests below are the same
+// proofs again, one per property that the per-track value has to have.
+// -------------------------------------------------------------------------------------------
+
+/// The impulse position `k` an on-beat note arrives at, and the signal that produces it: the
+/// musician plays on the beat *as he hears it*, so his note reaches the input `roundtrip` frames
+/// after the beat it belongs to. `level` identifies the signal when several are compared.
+fn played_on_every_beat(timeline: Timeline, roundtrip: u64, level: f32) -> Played {
+    mono(move |k: u64| {
+        if k < roundtrip {
+            return 0.0;
+        }
+        let musical = k - roundtrip;
+        if timeline.beat_start(timeline.beat_index_at(musical)) == musical {
+            level
+        } else {
+            0.0
+        }
+    })
+}
+
+/// Loop indices of every beat boundary in a take from `start` to `end`.
+fn beat_indices(timeline: &Timeline, start: u64, end: u64) -> Vec<usize> {
+    (0..(end - start))
+        .filter(|i| {
+            let musical = start + i;
+            timeline.beat_start(timeline.beat_index_at(musical)) == musical
+        })
+        .map(|i| i as usize)
+        .collect()
+}
+
+/// A track that says nothing about its latency behaves exactly as it did when there was one global
+/// number - and a track that spells out the same number behaves identically to it, so inheriting is
+/// not a code path of its own.
+#[test]
+fn a_track_without_its_own_value_records_exactly_like_the_global_default() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let start = timeline.bar_start(4);
+    let end = timeline.bar_start(8);
+
+    let spec = SimSpec {
+        // Track 0 inherits, track 1 spells the same number out, both on the same input.
+        tracks: vec![TrackSpec::on(0), TrackSpec::on(0).compensating(R as u32)],
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, mono(fingerprint));
+    for track in 0..2 {
+        sim.send(Command::StartRecord { track, at: start });
+        sim.send(Command::StopRecord { track, at: end });
+    }
+    sim.run_to(end + R + 4 * BLOCK as u64);
+
+    let inherited = layer_content(&sim, 0, 0);
+    let spelled_out = layer_content(&sim, 1, 0);
+    assert_eq!(inherited.len() as u64, end - start);
+    assert_eq!(
+        inherited, spelled_out,
+        "geerbt und ausgeschrieben muessen dieselbe Aufnahme ergeben"
+    );
+    // And it really is the compensated material, not what happened to arrive.
+    for (i, &got) in inherited.iter().enumerate() {
+        assert_eq!(got, fingerprint(start + R + i as u64), "Sample {i}");
+    }
+}
+
+/// **The point of the whole change.** Two tracks record the *same* input signal with different
+/// compensation values, and the two takes end up displaced by exactly the difference of the two -
+/// not approximately, and not by anything that depends on the block size.
+///
+/// That difference is what a global value hides: it is inaudible until the two takes are laid on
+/// top of each other, and then it is a flam.
+#[test]
+fn two_tracks_with_different_values_land_exactly_their_difference_apart() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let start = timeline.bar_start(4);
+    let end = timeline.bar_start(8);
+    // Not a multiple of the block size and not a multiple of a beat, so nothing can line up by
+    // luck. Positive: the second track subtracts too little and therefore stores too late.
+    const D: u64 = 137;
+
+    let spec = SimSpec {
+        tracks: vec![
+            // Right for this input: a microphone through the converter.
+            TrackSpec::on(0),
+            // Wrong for this input on purpose - the number a digital return would need.
+            TrackSpec::on(0).compensating((R - D) as u32),
+        ],
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, played_on_every_beat(timeline, R, 1.0));
+    for track in 0..2 {
+        sim.send(Command::StartRecord { track, at: start });
+        sim.send(Command::StopRecord { track, at: end });
+    }
+    sim.run_to(end + R + 4 * BLOCK as u64);
+
+    let matching = layer_content(&sim, 0, 0);
+    let off = layer_content(&sim, 1, 0);
+    let beats = beat_indices(&timeline, start, end);
+    assert_eq!(beats.len(), 4 * 4, "vier Takte zu vier Schlaegen");
+
+    // Tolerance zero on the track whose value fits the way in.
+    for (i, &got) in matching.iter().enumerate() {
+        let want = if beats.contains(&i) { 1.0 } else { 0.0 };
+        assert_eq!(got, want, "passender Wert, Loop-Index {i}");
+    }
+
+    // And exactly `D` frames late on the other one - every impulse, all the way through the take.
+    for (i, &got) in off.iter().enumerate() {
+        let want = if i >= D as usize && beats.contains(&(i - D as usize)) {
+            1.0
+        } else {
+            0.0
+        };
+        assert_eq!(got, want, "falscher Wert, Loop-Index {i}");
+    }
+    // Stated once more as the number a musician would measure: nothing sits on the grid.
+    let on_grid = beats.iter().filter(|&&i| off[i] != 0.0).count();
+    assert_eq!(
+        on_grid, 0,
+        "ein um {D} Frames falscher Wert darf das Raster nicht zufaellig treffen"
+    );
+}
+
+/// The core proof in the shape the mono and the stereo case already have it: a simulated roundtrip
+/// of a known length, and the recorded click has to sit **bit-identically** on the grid for the
+/// track whose value matches it, while the track with the wrong value misses it.
+///
+/// The two tracks record the same cable in the same run, which is what makes this a comparison and
+/// not two measurements.
+#[test]
+fn a_matching_track_value_hits_the_grid_and_a_wrong_one_provably_does_not() {
+    let timeline = Timeline::new(RATE, 137.0, TimeSignature::new(7, 8));
+    let metro = Metronome::new(RATE);
+    let start = timeline.bar_start(4);
+    let end = timeline.bar_start(12);
+    // The hardware delays by this much; the engine's default is deliberately something else, so
+    // "the right value" can only come from the track and not from the global fallback.
+    const TRUE_ROUNDTRIP: u64 = 640;
+    const DEFAULT: u64 = R;
+
+    let spec = SimSpec {
+        bpm: 137.0,
+        signature: TimeSignature::new(7, 8),
+        bars: 8,
+        latency: DEFAULT,
+        roundtrip: TRUE_ROUNDTRIP,
+        block: BLOCK,
+        click: true,
+        tracks: vec![
+            TrackSpec::on(0).compensating(TRUE_ROUNDTRIP as u32),
+            // Follows the global default, which is wrong for this cable.
+            TrackSpec::on(0),
+        ],
+        ..Default::default()
+    };
+    let mut sim = Sim::new(spec, silence());
+    for track in 0..2 {
+        sim.send(Command::StartRecord { track, at: start });
+        sim.send(Command::StopRecord { track, at: end });
+    }
+    sim.run_to(end + 2 * R + 4 * BLOCK as u64);
+
+    // Zero tolerance, sample by sample, for the track whose value matches the cable.
+    let matching = layer_content(&sim, 0, 0);
+    assert_eq!(matching.len() as u64, end - start);
+    for (i, &got) in matching.iter().enumerate() {
+        assert_eq!(
+            got,
+            metro.sample_at(&timeline, start + i as u64),
+            "Loop-Index {i}"
+        );
+    }
+
+    // The other one subtracts `DEFAULT - TRUE_ROUNDTRIP` frames too many, so what it stores at
+    // musical position `p` is the click of `p + shift`: its whole take sits that far early in the
+    // loop. Comparing against exactly that click means a shift in the other direction fails too.
+    let off = layer_content(&sim, 1, 0);
+    let shift = DEFAULT - TRUE_ROUNDTRIP;
+    for (i, &got) in off.iter().enumerate() {
+        assert_eq!(
+            got,
+            metro.sample_at(&timeline, start + i as u64 + shift),
+            "falscher Wert, Loop-Index {i}"
+        );
+    }
+    let mismatches = matching
+        .iter()
+        .zip(off.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        mismatches > 1_000,
+        "die beiden Aufnahmen muessen sich deutlich unterscheiden, sonst belegt der Test nichts"
+    );
+}
+
+/// Changing the value while the engine runs affects what is recorded **from then on**, and nothing
+/// that is already in a buffer. Anything else would mean the engine rewrites takes behind the
+/// musician's back - and a layer that moves because a number was corrected is worse than the wrong
+/// number.
+#[test]
+fn a_latency_changed_at_runtime_moves_later_takes_and_leaves_recorded_ones_alone() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let start = timeline.bar_start(4);
+    let end = timeline.bar_start(12);
+    let loop_len = end - start;
+    const D: u64 = 137;
+
+    let spec = SimSpec {
+        tracks: vec![TrackSpec::on(0)],
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, played_on_every_beat(timeline, R, 1.0));
+    sim.send(Command::StartRecord { track: 0, at: start });
+    sim.send(Command::StopRecord { track: 0, at: end });
+    sim.run_to(end + R + 4 * BLOCK as u64);
+
+    let first_layer_before: Vec<f32> = layer_content(&sim, 0, 0);
+    let beats = beat_indices(&timeline, start, end);
+    for (i, &got) in first_layer_before.iter().enumerate() {
+        let want = if beats.contains(&i) { 1.0 } else { 0.0 };
+        assert_eq!(got, want, "erste Ebene, Loop-Index {i}");
+    }
+
+    // Now the musician corrects the value - the source turned out to come in earlier than the
+    // default said - and records a second layer against the first.
+    sim.send(Command::SetTrackLatency {
+        track: 0,
+        latency: TrackLatency::measured((R - D) as u32),
+    });
+    // The next point on *this track's* grid, `origin + 2 * loop_len`, so the overdub addresses the
+    // same loop indices as the first take and is still in the future when it is sent.
+    let second_start = end + loop_len;
+    sim.send(Command::StartOverdub {
+        track: 0,
+        at: second_start,
+    });
+    sim.send(Command::StopRecord {
+        track: 0,
+        at: second_start + loop_len,
+    });
+    sim.run_to(second_start + loop_len + R + 4 * BLOCK as u64);
+
+    // The take that was already in the buffer has not moved by a single sample.
+    assert_eq!(
+        layer_content(&sim, 0, 0),
+        first_layer_before,
+        "eine schon aufgenommene Ebene darf sich nicht ruecklings verschieben"
+    );
+
+    // The new one carries the change, and by exactly the difference.
+    assert_eq!(sim.core.track(0).layer_count(), 2);
+    let second = layer_content(&sim, 0, 1);
+    for (i, &got) in second.iter().enumerate() {
+        let want = if i >= D as usize && beats.contains(&(i - D as usize)) {
+            1.0
+        } else {
+            0.0
+        };
+        assert_eq!(got, want, "zweite Ebene, Loop-Index {i}");
+    }
+}
+
+/// The manual surcharge is a full part of the value: a track that follows the global default still
+/// takes its trim, which is the case a plugin host needs - nobody can measure what happens inside
+/// it, so the number comes from an ear and rides on top of whatever the base is.
+#[test]
+fn a_manual_surcharge_shifts_a_take_on_top_of_the_inherited_default() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let start = timeline.bar_start(4);
+    let end = timeline.bar_start(8);
+    const TRIM: i64 = -137;
+
+    let spec = SimSpec {
+        tracks: vec![
+            TrackSpec::on(0),
+            // No measured value at all, only a surcharge on the default.
+            TrackSpec::on(0).trimmed(TRIM as i32),
+        ],
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, played_on_every_beat(timeline, R, 1.0));
+    for track in 0..2 {
+        sim.send(Command::StartRecord { track, at: start });
+        sim.send(Command::StopRecord { track, at: end });
+    }
+    sim.run_to(end + R + 4 * BLOCK as u64);
+
+    let beats = beat_indices(&timeline, start, end);
+    let trimmed = layer_content(&sim, 1, 0);
+    // Subtracting less (a negative trim) stores later: `m = k - (R + trim)`.
+    let shift = (-TRIM) as usize;
+    for (i, &got) in trimmed.iter().enumerate() {
+        let want = if i >= shift && beats.contains(&(i - shift)) {
+            1.0
+        } else {
+            0.0
+        };
+        assert_eq!(got, want, "Zuschlagsspur, Loop-Index {i}");
+    }
+    // The status says where the number came from, so a display can tell a set value from an
+    // inherited one.
+    let status = sim.latest_status().expect("Status");
+    assert!(status.tracks()[0].latency.inherits());
+    assert!(status.tracks()[1].latency.inherits(), "nur ein Zuschlag, kein Messwert");
+    assert_eq!(status.tracks()[0].latency_frames, R as u32);
+    assert_eq!(status.tracks()[1].latency_frames, (R as i64 + TRIM) as u32);
 }
 
 // -------------------------------------------------------------------------------------------

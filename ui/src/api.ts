@@ -71,6 +71,16 @@ export const api = {
   trackMonitor: (track: number, on: boolean) => call<void>("track_monitor", { track, on }),
   /** Where the track sits between the speakers: -1 hard left, 0 centre, +1 hard right. */
   trackPan: (track: number, pan: number) => call<void>("track_pan", { track, pan }),
+  /**
+   * What this track subtracts while recording, in frames.
+   *
+   * `measured` is the loopback value for this input, or null to follow the engine's default;
+   * `trim` is the manual surcharge on top, for the part of the way no measurement can see (a
+   * plugin host's own buffer). The two stay apart because a calibration overwrites the first and
+   * must never lose the second. Takes effect for what is recorded from now on.
+   */
+  trackLatency: (track: number, measured: number | null, trim: number) =>
+    call<void>("track_latency", { track, measured, trim }),
 
   // --- per layer -----------------------------------------------------------
   layerMute: (track: number, layer: number, muted: boolean) =>

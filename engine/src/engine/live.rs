@@ -39,9 +39,13 @@
 //!    then output, so that both frame counters start on the same driver callback and share the
 //!    origin the 827 samples were measured against.
 //!
-//! `--latency-samples` still deserves one check against the real path: record the click through a
+//! `--latency-frames` still deserves one check against the real path: record the click through a
 //! loopback cable and look at where it lands (subcommand `calibrate`). That is the honest way to
 //! confirm the number for a different device, sample rate or buffer size.
+//!
+//! Since a plugin host on an ASIO router does not travel the same way in as a microphone, that
+//! number is a **default**: `--track-latency NAME:WERT[+ZUSCHLAG]` gives one track its own, and
+//! `calibrate --for-track` measures it. See [`super::track::TrackLatency`].
 
 use std::io::Write;
 use std::sync::Arc;
@@ -63,12 +67,12 @@ use super::command::{
 use super::frame::{Channels, TrackInput};
 use super::fx::{DelayNote, FxParam, FxPreset, FxSlot, FxStatus};
 use super::process::{
-    EngineConfig, EngineCore, OUT_CHANNELS, check_loop, limits_line, loop_capacity,
+    EngineConfig, EngineCore, OUT_CHANNELS, check_loop, limits_line, loop_capacity, max_latency,
     spare_channels, spare_slots_for, spread_frame, total_channels,
 };
 use super::schedule::{Lead, Quantize, Scheduled, Scheduler};
 use super::timeline::{TimeSignature, Timeline};
-use super::track::{MAX_LAYERS, Track, TrackState};
+use super::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
 
 /// Input FIFO size in units of the audio buffer size. Generous on purpose: it costs a few dozen kB
 /// and it is the difference between a hiccup and a permanently misaligned recording.
@@ -82,7 +86,7 @@ const DISPLAY_INTERVAL: Duration = Duration::from_millis(100);
 /// same bar, and one in reserve.
 const SPARE_SLOTS: usize = 3;
 /// Width the status block is padded to, so remains of a longer previous line are erased.
-const LINE_WIDTH: usize = 186;
+const LINE_WIDTH: usize = 208;
 
 #[derive(Args, Debug, Clone)]
 pub struct LiveOpts {
@@ -114,12 +118,19 @@ pub struct LiveOpts {
     #[arg(long, value_enum, default_value_t = Quantize::Loop)]
     pub quantize: Quantize,
 
-    /// Roundtrip-Latenz in Frames, die beim Aufnehmen herausgerechnet wird. Ein Frame ist ein
-    /// Zeitpunkt: ein Sample bei einer Mono-Quelle, zwei bei einer Stereo-Quelle. Bei Mono ist
-    /// das dieselbe Zahl wie frueher.
+    /// Roundtrip-Latenz in Frames, die beim Aufnehmen herausgerechnet wird - die Vorgabe fuer
+    /// jeden Track, der nichts eigenes sagt. Ein Frame ist ein Zeitpunkt: ein Sample bei einer
+    /// Mono-Quelle, zwei bei einer Stereo-Quelle.
     /// Standard ist der Messwert aus Phase 0 (128 Frames, 48 kHz, Scarlett 2i2 an ASIO).
-    #[arg(long, default_value_t = 827)]
-    pub latency_samples: u64,
+    #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = 827)]
+    pub latency_frames: u64,
+
+    /// Eigene Latenzkompensation fuer einen Track, mehrfach angebbar:
+    /// NAME:FRAMES fuer den gemessenen Wert, NAME:FRAMES+ZUSCHLAG mit manuellem Aufschlag,
+    /// NAME:+ZUSCHLAG nur Aufschlag auf die globale Vorgabe.
+    /// Beispiel: --track-latency cantabile:512+96
+    #[arg(long = "track-latency", value_name = "NAME:FRAMES[+ZUSCHLAG]")]
+    pub track_latencies: Vec<String>,
 
     /// Verstaerkung des mitgehoerten Eingangssignals
     #[arg(long, default_value_t = 1.0)]
@@ -151,12 +162,137 @@ pub struct TrackDef {
     pub input: TrackInput,
     /// Position in the stereo field, -1.0 to +1.0. Centre unless the argument said otherwise.
     pub pan: f32,
+    /// Latency compensation of this track. Follows the global default unless `--track-latency`
+    /// (or the app, or the score) said otherwise.
+    pub latency: TrackLatency,
 }
 
 impl TrackDef {
     pub fn channels(&self) -> Channels {
         self.input.channels()
     }
+
+    /// A mono track on one input channel, centred, on the global compensation - the shape the
+    /// default setup and most tests want.
+    pub fn mono(name: &str, channel: usize) -> Self {
+        Self {
+            name: name.to_string(),
+            input: TrackInput::Mono(channel),
+            pan: 0.0,
+            latency: TrackLatency::INHERITED,
+        }
+    }
+}
+
+/// Highest latency any track may be given, in frames: two seconds at 48 kHz.
+///
+/// Not a technical limit but a typo catch. A roundtrip beyond this is not a setup, it is a missing
+/// digit - and the error it would produce (a loop that cannot be shorter than the compensation)
+/// would point at the loop length instead of at the number that is wrong.
+pub const MAX_LATENCY_FRAMES: i64 = 96_000;
+
+/// Parse one `--track-latency` argument into a track name and its compensation.
+///
+/// ```text
+/// cantabile:512        gemessener Wert 512 Frames, kein Zuschlag
+/// cantabile:512+96     gemessen 512, plus 96 Frames von Hand
+/// cantabile:512-40     gemessen 512, minus 40
+/// cantabile:+96        globale Vorgabe plus 96 - fuer eine Quelle, die nie gemessen wurde
+/// ```
+///
+/// The two halves stay separate all the way through the program: a calibration writes the first
+/// one and never the second. See [`TrackLatency`].
+pub fn parse_track_latency_arg(spec: &str) -> Result<(String, TrackLatency), String> {
+    let spec = spec.trim();
+    let Some((name, value)) = spec.rsplit_once(':') else {
+        return Err(format!(
+            "--track-latency \"{spec}\" ist unvollstaendig. Erwartet wird NAME:FRAMES, \
+             NAME:FRAMES+ZUSCHLAG oder NAME:+ZUSCHLAG, z.B. --track-latency cantabile:512+96"
+        ));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!(
+            "--track-latency \"{spec}\": vor dem Doppelpunkt fehlt der Trackname."
+        ));
+    }
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!(
+            "--track-latency \"{spec}\": hinter dem Doppelpunkt fehlt die Zahl."
+        ));
+    }
+
+    let number = |text: &str, what: &str| -> Result<i64, String> {
+        text.trim().parse::<i64>().map_err(|_| {
+            format!(
+                "--track-latency \"{spec}\": \"{}\" ist keine {what} in Frames.",
+                text.trim()
+            )
+        })
+    };
+    let in_range = |value: i64, what: &str| -> Result<(), String> {
+        if value.abs() > MAX_LATENCY_FRAMES {
+            return Err(format!(
+                "--track-latency \"{spec}\": {what} liegt mit {value} Frames ausserhalb von \
+                 {MAX_LATENCY_FRAMES} Frames (zwei Sekunden bei 48 kHz). Das ist keine Latenz, \
+                 sondern ein Tippfehler."
+            ));
+        }
+        Ok(())
+    };
+
+    // A leading sign means "only a surcharge"; anything else starts with the measured value, and a
+    // sign further along splits the two. `char_indices` rather than byte indexing, so a stray
+    // umlaut produces the German parse error and not a panic on a char boundary.
+    let mut chars = value.char_indices();
+    let first = chars.next().expect("nicht leer").1;
+    let (measured, trim) = if first == '+' || first == '-' {
+        (None, number(value, "Zuschlagszahl")?)
+    } else {
+        match chars.find(|(_, c)| *c == '+' || *c == '-').map(|(i, _)| i) {
+            Some(cut) => (
+                Some(number(&value[..cut], "Frame-Zahl")?),
+                number(&value[cut..], "Zuschlagszahl")?,
+            ),
+            None => (Some(number(value, "Frame-Zahl")?), 0),
+        }
+    };
+    in_range(trim, "der Zuschlag")?;
+    if let Some(measured) = measured {
+        in_range(measured, "der gemessene Wert")?;
+    }
+
+    Ok((
+        name.to_string(),
+        TrackLatency {
+            measured: measured.map(|m| m as u32),
+            trim: trim as i32,
+        },
+    ))
+}
+
+/// Apply every `--track-latency` argument to the tracks it names.
+///
+/// An argument naming a track that does not exist is an error rather than a silent no-op: a typo
+/// there would leave the source it was meant for on the wrong number, and that is exactly the kind
+/// of mistake nobody hears until two takes are laid on top of each other.
+pub fn apply_track_latencies(defs: &mut [TrackDef], specs: &[String]) -> Result<(), String> {
+    for spec in specs {
+        let (name, latency) = parse_track_latency_arg(spec)?;
+        match defs.iter_mut().find(|d| d.name == name) {
+            Some(def) => def.latency = latency,
+            None => {
+                let known: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+                return Err(format!(
+                    "--track-latency \"{spec}\": den Track \"{name}\" gibt es nicht. \
+                     Vorhanden: {}.",
+                    known.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse one `--track` argument.
@@ -242,6 +378,9 @@ pub fn parse_track_arg(spec: &str) -> Result<TrackDef, String> {
         name: name.to_string(),
         input,
         pan,
+        // The compensation is a separate argument: it is set once per interface and cabling, while
+        // the channel and the pan are set per song.
+        latency: TrackLatency::INHERITED,
     })
 }
 
@@ -260,11 +399,7 @@ pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackD
             .iter()
             .take(in_channels.min(2))
             .enumerate()
-            .map(|(i, name)| TrackDef {
-                name: name.to_string(),
-                input: TrackInput::Mono(i),
-                pan: 0.0,
-            })
+            .map(|(i, name)| TrackDef::mono(name, i))
             .collect()
     } else {
         specs
@@ -342,6 +477,10 @@ struct TrackUi {
     name: String,
     input: TrackInput,
     gains: Vec<f32>,
+    /// This track's compensation as the control thread last set it. Mirrored here - like the
+    /// gains - because a tempo change has to be checked against the *largest* one before the
+    /// engine sees the command, and the newest status snapshot may be a few milliseconds old.
+    latency: TrackLatency,
 }
 
 /// Everything the main thread needs to schedule commands.
@@ -353,6 +492,7 @@ struct Control {
     cmd: CommandSender,
     pool: LayerPool,
     sched: Scheduler,
+    /// The global default, i.e. what a track without a measured value of its own compensates.
     latency: u64,
     tracks: Vec<TrackUi>,
     active: usize,
@@ -455,6 +595,7 @@ impl Control {
                 self.message = format!("Klick {}.", if on { "an" } else { "aus" });
             }
             "n" => self.set_pan(parts.next()),
+            "i" => self.set_latency(parts.next(), parts.next(), ts),
             "f" => self.fx_bypass(ts),
             "x" => self.fx_slot(parts.next(), ts),
             "v" => self.fx_preset(parts.next()),
@@ -470,7 +611,7 @@ impl Control {
             }
             other => {
                 self.message = format!(
-                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m n k e w l t f x v d q",
+                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m n i k e w l t f x v d q",
                     self.tracks.len()
                 );
             }
@@ -494,6 +635,60 @@ impl Control {
             "\"{}\": Panorama {}.",
             self.tracks[track].name,
             pan_label(pan)
+        );
+    }
+
+    /// `i <frames|-> [zuschlag]` - what this track subtracts while recording.
+    ///
+    /// `-` puts the track back on the global default; leaving the surcharge out keeps whatever it
+    /// had, because the two numbers are set by different people at different times - a
+    /// measurement writes the first, an ear the second.
+    fn set_latency(&mut self, base: Option<&str>, trim: Option<&str>, ts: TrackStatus) {
+        let usage = "i <frames|-> [zuschlag]  (Latenzkompensation dieses Tracks; - nimmt die globale Vorgabe)";
+        let Some(base) = base else {
+            self.message = format!("Aufruf: {usage}");
+            return;
+        };
+        let measured = if base == "-" {
+            None
+        } else {
+            match base.parse::<i64>() {
+                Ok(value) if (0..=MAX_LATENCY_FRAMES).contains(&value) => Some(value as u32),
+                _ => {
+                    self.message = format!(
+                        "Die Latenz muss eine ganze Zahl von 0 bis {MAX_LATENCY_FRAMES} Frames \
+                         sein, oder \"-\" fuer die globale Vorgabe."
+                    );
+                    return;
+                }
+            }
+        };
+        let trim = match trim {
+            None => ts.latency.trim,
+            Some(text) => match text.parse::<i64>() {
+                Ok(value) if value.abs() <= MAX_LATENCY_FRAMES => value as i32,
+                _ => {
+                    self.message = format!(
+                        "Der Zuschlag muss eine ganze Zahl zwischen -{MAX_LATENCY_FRAMES} und \
+                         {MAX_LATENCY_FRAMES} Frames sein."
+                    );
+                    return;
+                }
+            },
+        };
+        let latency = TrackLatency { measured, trim };
+        let track = self.active;
+        self.tracks[track].latency = latency;
+        self.send(Command::SetTrackLatency { track, latency });
+        let rate = self.sched.timeline.sample_rate().max(1) as f64;
+        let effective = latency.resolve(self.latency);
+        self.message = format!(
+            "\"{}\": Latenzkompensation {} Frames ({:.2} ms) - {}. Wirkt auf kommende Aufnahmen, \
+             nicht auf schon Aufgenommenes.",
+            self.tracks[track].name,
+            effective,
+            effective as f64 * 1000.0 / rate,
+            latency_origin(latency, self.latency),
         );
     }
 
@@ -709,7 +904,8 @@ impl Control {
             return;
         }
         let timeline = Timeline::new(rate, bpm, signature);
-        if let Err(e) = check_loop(&timeline, self.sched.bars, self.latency) {
+        let worst = max_latency(self.latency, self.tracks.iter().map(|t| t.latency));
+        if let Err(e) = check_loop(&timeline, self.sched.bars, worst) {
             self.message = e;
             return;
         }
@@ -778,6 +974,29 @@ fn pan_label(pan: f32) -> String {
 /// end up in the loop buffer is the one setup fact worth repeating on every line.
 fn input_text(input: TrackInput) -> String {
     format!("Ein {:<4} {:<6}", input.label(), input.channels().label())
+}
+
+/// Where a track's compensation comes from, as a sentence fragment: `gemessen 512 + 96 Zuschlag`,
+/// `Vorgabe 827`. Never just a number - a value that looks like a setting but is inherited is
+/// exactly the thing this is here to prevent.
+fn latency_origin(latency: TrackLatency, default: u64) -> String {
+    let base = match latency.measured {
+        Some(frames) => format!("gemessen {frames}"),
+        None => format!("Vorgabe {default}"),
+    };
+    match latency.trim {
+        0 => base,
+        trim => format!("{base} {} {} Zuschlag", if trim < 0 { '-' } else { '+' }, trim.abs()),
+    }
+}
+
+/// The latency column of a track line: the effective number, and whether it is the track's own.
+fn latency_text(ts: &TrackStatus) -> String {
+    let mark = if ts.latency.inherits() { "geerbt" } else { "eigen " };
+    match ts.latency.trim {
+        0 => format!("{:>5} {mark}", ts.latency_frames),
+        trim => format!("{:>5} {mark}{trim:+}", ts.latency_frames),
+    }
 }
 
 /// `[1 2* 3]`, with `*` for muted and the gain appended where it is not 1.
@@ -889,7 +1108,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
         _ => format!("{}      ", fmt_dbfs(ts.input_peak[0])),
     };
     format!(
-        "{} {:<10} {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Pan {:<5} | Mithoeren {} | FX {:<22}",
+        "{} {:<10} {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Pan {:<5} | Lat {:<14} | Mithoeren {} | FX {:<22}",
         if active { '>' } else { ' ' },
         ui.name,
         input_text(ui.input),
@@ -899,6 +1118,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
         layer_list(ts, &ui.gains),
         level,
         pan_label(ts.pan),
+        latency_text(ts),
         on_off(ts.monitor),
         fx_text(&ts.fx),
     )
@@ -932,11 +1152,19 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     }
     Timeline::validate(rate, opts.bpm, signature)?;
     let timeline = Timeline::new(rate, opts.bpm, signature);
-    check_loop(&timeline, opts.bars, opts.latency_samples)?;
 
     let in_channels = setup.in_plan.config.channels as usize;
     let out_channels = setup.out_plan.config.channels as usize;
-    let defs = resolve_tracks(&opts.tracks, in_channels)?;
+    let mut defs = resolve_tracks(&opts.tracks, in_channels)?;
+    apply_track_latencies(&mut defs, &opts.track_latencies)?;
+    // The loop has to be longer than the *largest* compensation any track uses, not than the
+    // default: a track whose value is bigger is the one that would write into a loop it has
+    // already played past.
+    let worst_latency = max_latency(
+        opts.latency_frames,
+        defs.iter().map(|d| d.latency),
+    );
+    check_loop(&timeline, opts.bars, worst_latency)?;
 
     audio::print_setup(&setup);
     let loop_len = timeline.span_bars(0, opts.bars);
@@ -972,24 +1200,30 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     );
     println!("Tracks:");
     for (i, def) in defs.iter().enumerate() {
+        let effective = def.latency.resolve(opts.latency_frames);
         println!(
-            "  {} {:<10} Eingang {} ({}, von {} Kanaelen), Panorama {}",
+            "  {} {:<10} Eingang {} ({}, von {} Kanaelen), Panorama {}, Latenz {} Frames ({:.2} ms, {})",
             i + 1,
             def.name,
             def.input.label(),
             def.input.channels().label(),
             in_channels,
-            pan_label(def.pan)
+            pan_label(def.pan),
+            effective,
+            effective as f64 * 1000.0 / rate as f64,
+            latency_origin(def.latency, opts.latency_frames),
         );
     }
     println!(
-        "Latenz:   {} Frames ({:.2} ms) werden beim Aufnehmen herausgerechnet",
-        opts.latency_samples,
-        opts.latency_samples as f64 * 1000.0 / rate as f64
+        "Latenz:   Vorgabe {} Frames ({:.2} ms) - sie gilt fuer jeden Track, der nichts eigenes sagt",
+        opts.latency_frames,
+        opts.latency_frames as f64 * 1000.0 / rate as f64
     );
     println!(
         "          Der Wert stammt aus der Loopback-Messung. Nach jeder Aenderung von Geraet,\n\
-         \x20         Samplerate oder Puffergroesse neu messen (Subcommand calibrate)."
+         \x20         Samplerate oder Puffergroesse neu messen (Subcommand calibrate). Eine Quelle,\n\
+         \x20         die ueber einen Plugin-Host hereinkommt, hat einen eigenen Weg und braucht\n\
+         \x20         einen eigenen Wert: calibrate --for-track, dann --track-latency NAME:FRAMES."
     );
 
     let buffer_frames = setup.buffer_frames().max(1);
@@ -1015,11 +1249,11 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
 
     let tracks: Vec<Track> = defs
         .iter()
-        .map(|d| Track::new(d.input, opts.monitor, d.pan, rate))
+        .map(|d| Track::new(d.input, opts.monitor, d.pan, rate).with_latency(d.latency))
         .collect();
     let core = EngineCore::new(EngineConfig {
         timeline,
-        latency_samples: opts.latency_samples,
+        latency_frames: opts.latency_frames,
         input_channels: in_channels,
         tracks,
         spares: [Vec::with_capacity(slots[0]), Vec::with_capacity(slots[1])],
@@ -1142,6 +1376,8 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
          \x20 w <nr>        Ebene weg\n\
          \x20 l <nr> <wert> Lautstaerke einer Ebene (0.0 bis 4.0)\n\
          \x20 n <wert>      Panorama: -1 ganz links, 0 Mitte, 1 ganz rechts\n\
+         \x20 i <frames|-> [zuschlag]  Latenzkompensation dieses Tracks; - nimmt die globale Vorgabe.\n\
+         \x20               Wirkt auf kommende Aufnahmen, nicht auf schon Aufgenommenes.\n\
          \x20 k   Klick an/aus\n\
          \x20 t   Tempo aendern, z.B. \"t 120\" oder \"t 120 7 8\" (nur wenn alles leer ist)\n\
          Effekte - wirken auf Wiedergabe und Mithoeren, die Aufnahme bleibt immer trocken:\n\
@@ -1162,13 +1398,14 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         // The head start is four buffers plus 20 ms; the Scheduler works it out and owns every
         // other rule about when a command may take effect.
         sched: Scheduler::new(timeline, opts.bars, buffer_frames, opts.quantize),
-        latency: opts.latency_samples,
+        latency: opts.latency_frames,
         tracks: defs
             .iter()
             .map(|d| TrackUi {
                 name: d.name.clone(),
                 input: d.input,
                 gains: Vec::new(),
+                latency: d.latency,
             })
             .collect(),
         active: 0,
@@ -1259,14 +1496,7 @@ mod tests {
 
     #[test]
     fn track_arguments_are_parsed_one_based() {
-        assert_eq!(
-            parse_track_arg("stimme:1").unwrap(),
-            TrackDef {
-                name: "stimme".to_string(),
-                input: TrackInput::Mono(0),
-                pan: 0.0,
-            }
-        );
+        assert_eq!(parse_track_arg("stimme:1").unwrap(), TrackDef::mono("stimme", 0));
         assert_eq!(
             parse_track_arg(" gitarre : 2 ").unwrap().input,
             TrackInput::Mono(1)
@@ -1341,6 +1571,108 @@ mod tests {
 
         let many: Vec<String> = (1..=MAX_TRACKS + 1).map(|i| format!("t{i}:1")).collect();
         assert!(resolve_tracks(&many, 8).is_err(), "Obergrenze greift");
+    }
+
+    /// The argument that makes the compensation per track. Every spelling, including the one that
+    /// only adds a surcharge to the global default - which is what a source nobody can measure
+    /// (a plugin host's own buffer) needs.
+    #[test]
+    fn a_track_latency_argument_carries_a_measured_value_a_trim_or_both() {
+        assert_eq!(
+            parse_track_latency_arg("cantabile:512").unwrap(),
+            ("cantabile".to_string(), TrackLatency::measured(512))
+        );
+        assert_eq!(
+            parse_track_latency_arg("cantabile:512+96").unwrap(),
+            ("cantabile".to_string(), TrackLatency::measured(512).with_trim(96))
+        );
+        assert_eq!(
+            parse_track_latency_arg(" cantabile : 512-40 ").unwrap(),
+            ("cantabile".to_string(), TrackLatency::measured(512).with_trim(-40))
+        );
+        let (name, only_trim) = parse_track_latency_arg("stimme:+96").unwrap();
+        assert_eq!(name, "stimme");
+        assert!(only_trim.inherits(), "ohne Zahl davor bleibt die Vorgabe stehen");
+        assert_eq!(only_trim.trim, 96);
+        assert_eq!(only_trim.resolve(827), 923);
+
+        for (bad, needle) in [
+            ("cantabile", "unvollstaendig"),
+            (":512", "Trackname"),
+            ("cantabile:", "fehlt die Zahl"),
+            ("cantabile:viel", "Frame-Zahl"),
+            ("cantabile:512+viel", "Zuschlagszahl"),
+            ("cantabile:999999", "Tippfehler"),
+            ("cantabile:+999999", "Tippfehler"),
+            // A non-ASCII first character must produce the German message, not a panic on a char
+            // boundary.
+            ("cantabile:ue512", "Frame-Zahl"),
+        ] {
+            let err = parse_track_latency_arg(bad).expect_err(bad);
+            assert!(err.contains(needle), "\"{bad}\" meldet: {err}");
+        }
+    }
+
+    /// The arguments are matched to tracks by name, and a name that does not exist is refused:
+    /// silently ignoring it would leave the source it was meant for on the wrong number.
+    #[test]
+    fn track_latencies_are_applied_by_name_and_an_unknown_name_is_refused() {
+        let mut defs = resolve_tracks(&specs(&["stimme:1", "cantabile:3-4"]), 4).unwrap();
+        assert!(defs.iter().all(|d| d.latency.inherits()), "ohne Angabe: die Vorgabe");
+
+        apply_track_latencies(&mut defs, &specs(&["cantabile:512+96"])).unwrap();
+        assert!(defs[0].latency.inherits(), "die Stimme bleibt auf der Vorgabe");
+        assert_eq!(defs[0].latency.resolve(827), 827);
+        assert_eq!(defs[1].latency.resolve(827), 608);
+
+        let err = apply_track_latencies(&mut defs, &specs(&["klavier:512"])).expect_err("kein Track");
+        assert!(err.contains("klavier"), "{err}");
+        assert!(err.contains("stimme"), "die Meldung zaehlt auf, was es gibt: {err}");
+    }
+
+    /// The loop must be longer than the *worst* compensation, not than the default - otherwise a
+    /// track with a bigger value would write into a loop it has already played past.
+    #[test]
+    fn the_loop_check_uses_the_largest_latency_of_all_tracks() {
+        use super::super::process::max_latency;
+        let default = 827u64;
+        assert_eq!(max_latency(default, []), 827);
+        assert_eq!(
+            max_latency(default, [TrackLatency::measured(400), TrackLatency::INHERITED]),
+            827,
+            "die Vorgabe zaehlt mit, auch wenn ein Track darunter liegt"
+        );
+        assert_eq!(
+            max_latency(default, [TrackLatency::measured(400), TrackLatency::measured(2_000)]),
+            2_000
+        );
+        assert_eq!(
+            max_latency(default, [TrackLatency::INHERITED.with_trim(500)]),
+            1_327
+        );
+    }
+
+    #[test]
+    fn the_latency_column_says_where_the_number_comes_from() {
+        let inherited = TrackStatus {
+            latency: TrackLatency::INHERITED,
+            latency_frames: 827,
+            ..Default::default()
+        };
+        assert_eq!(latency_text(&inherited).trim(), "827 geerbt");
+        assert_eq!(latency_origin(inherited.latency, 827), "Vorgabe 827");
+
+        let own = TrackStatus {
+            latency: TrackLatency::measured(512).with_trim(96),
+            latency_frames: 608,
+            ..Default::default()
+        };
+        assert_eq!(latency_text(&own).trim(), "608 eigen +96");
+        assert_eq!(latency_origin(own.latency, 827), "gemessen 512 + 96 Zuschlag");
+        assert_eq!(
+            latency_origin(TrackLatency::INHERITED.with_trim(-40), 827),
+            "Vorgabe 827 - 40 Zuschlag"
+        );
     }
 
     #[test]

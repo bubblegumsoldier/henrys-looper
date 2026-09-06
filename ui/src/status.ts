@@ -118,6 +118,9 @@ export function structureSignature(status: LooperStatus): string {
     // of renders per bar rather than twenty a second - and a countdown that does not count is
     // useless.
     sig += `~${t.pending_kind ?? ""}~${t.pending_bars}~${t.pending_beats}`;
+    // The latency belongs here for the same reason the pan does: it is a setting, so it changes
+    // when somebody types a number and never on its own.
+    sig += `~${t.latency_frames}~${t.latency_measured ?? ""}~${t.latency_trim}`;
     for (const l of t.layers) sig += `${l.index}${l.muted ? 1 : 0}${l.gain}`;
   }
   return sig;

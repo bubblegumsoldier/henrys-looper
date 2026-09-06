@@ -27,6 +27,7 @@ use super::map::OrderedMap;
 use crate::engine::frame::TrackInput;
 use crate::engine::schedule::Quantize;
 use crate::engine::timeline::TimeSignature;
+use crate::engine::track::TrackLatency;
 
 /// What a track is supposed to do during a section. The complete state, not a delta: a section
 /// that does not mention a track puts it on [`TrackState::Stop`].
@@ -92,13 +93,19 @@ impl TrackState {
 ///
 /// ```yaml
 /// tracks:
-///   voice:   {input: 1}
-///   gitarre: {input: 2, monitor: false}
-///   klavier: {input: [3, 4], pan: 0.2}
+///   voice:     {input: 1}
+///   gitarre:   {input: 2, monitor: false}
+///   klavier:   {input: [3, 4], pan: 0.2}
+///   cantabile: {input: [5, 6], latency: 512, latency_trim: 96}
 /// ```
 ///
 /// `input` is either one channel (the track records mono) or a pair (it records stereo). Which two
 /// inputs belong together is a wiring decision, so it is always written out and never guessed.
+///
+/// `latency` and `latency_trim` belong to the same family of facts: they describe the way this
+/// source takes into the machine, which is a property of the setup the score is played on. A track
+/// that says nothing follows the engine's global default, which is what every microphone and every
+/// instrument on the same interface wants.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrackSource {
     /// Input channel of the audio interface, **1-based**, as printed on the device. On a stereo
@@ -116,6 +123,14 @@ pub struct TrackSource {
     /// Default `true`.
     #[serde(default = "default_true")]
     pub monitor: bool,
+    /// Measured latency compensation of this input, in frames. Absent means "the engine's global
+    /// default", which is right for everything hanging on the same converter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<u32>,
+    /// Manual surcharge on top, in frames - what a calibration cannot see because it happens
+    /// inside an external host. Never overwritten by a measurement. Default 0.
+    #[serde(default)]
+    pub latency_trim: i32,
 }
 
 fn default_true() -> bool {
@@ -217,9 +232,23 @@ pub struct CompiledTrack {
     /// Position in the stereo field, -1.0 to +1.0.
     pub pan: f32,
     pub monitor: bool,
+    /// Measured latency compensation in frames; `None` means the engine's global default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<u32>,
+    /// Manual surcharge in frames, added to whichever of the two the track ends up using.
+    #[serde(default)]
+    pub latency_trim: i32,
 }
 
 impl CompiledTrack {
+    /// The latency compensation in the form the engine wants it.
+    pub fn track_latency(&self) -> TrackLatency {
+        TrackLatency {
+            measured: self.latency,
+            trim: self.latency_trim,
+        }
+    }
+
     /// The input in the form the engine wants it.
     pub fn track_input(&self) -> TrackInput {
         match self.input_channel_right {

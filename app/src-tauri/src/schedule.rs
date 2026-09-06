@@ -9,7 +9,7 @@
 
 use looper_engine::engine::command::MAX_TRACKS;
 use looper_engine::engine::frame::TrackInput;
-use looper_engine::engine::live::TrackDef;
+use looper_engine::engine::live::{MAX_LATENCY_FRAMES, TrackDef};
 use looper_engine::engine::process::check_loop;
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
 
@@ -21,18 +21,21 @@ use crate::proto::TrackConfig;
 ///
 /// Both German messages come from the engine: [`Timeline::validate`] for the tempo and
 /// [`check_loop`] for the loop that would be shorter than the latency compensation.
+/// `latency_frames` is the **largest** compensation any track uses, not the default: the loop has
+/// to be longer than the write pointer trails the play pointer on the worst of them. Callers get
+/// that number from `looper_engine::engine::process::max_latency`.
 pub fn build_timeline(
     sample_rate: u32,
     bpm: f64,
     beats_per_bar: u32,
     beat_unit: u32,
     bars: u32,
-    latency_samples: u64,
+    latency_frames: u64,
 ) -> Result<Timeline, String> {
     let signature = TimeSignature::new(beats_per_bar, beat_unit);
     Timeline::validate(sample_rate, bpm, signature)?;
     let timeline = Timeline::new(sample_rate, bpm, signature);
-    check_loop(&timeline, bars, latency_samples)?;
+    check_loop(&timeline, bars, latency_frames)?;
     Ok(timeline)
 }
 
@@ -104,10 +107,20 @@ pub fn resolve_tracks(
                 "Der Trackname \"{name}\" kommt zweimal vor. Namen muessen eindeutig sein."
             ));
         }
+        if config.latency_trim.unsigned_abs() as i64 > MAX_LATENCY_FRAMES
+            || config.latency_frames.map(i64::from).unwrap_or(0) > MAX_LATENCY_FRAMES
+        {
+            return Err(format!(
+                "Track \"{name}\": die Latenzkompensation muss innerhalb von {MAX_LATENCY_FRAMES} \
+                 Frames liegen (zwei Sekunden bei 48 kHz). Das ist keine Latenz, sondern ein \
+                 Tippfehler."
+            ));
+        }
         defs.push(TrackDef {
             name: name.to_string(),
             input,
             pan: config.pan,
+            latency: config.track_latency(),
         });
     }
     Ok(defs)
@@ -197,6 +210,41 @@ mod tests {
         };
         let err = resolve_tracks(&[far], 2).expect_err("Panorama zu weit");
         assert!(err.contains("Panorama"), "{err}");
+    }
+
+    /// The per-track compensation travels from the start configuration into the track definition
+    /// unchanged, and an absurd number is caught before a device is opened.
+    #[test]
+    fn a_track_configuration_carries_its_latency_into_the_engine() {
+        let plain = resolve_tracks(&[config("stimme", 1)], 2).unwrap();
+        assert!(
+            plain[0].latency.inherits(),
+            "ohne Angabe folgt ein Track der globalen Vorgabe"
+        );
+
+        let cantabile = TrackConfig {
+            latency_frames: Some(512),
+            latency_trim: 96,
+            ..TrackConfig::mono("cantabile", 1)
+        };
+        let resolved = resolve_tracks(&[cantabile], 2).unwrap();
+        assert_eq!(resolved[0].latency.measured, Some(512));
+        assert_eq!(resolved[0].latency.trim, 96);
+        assert_eq!(resolved[0].latency.resolve(827), 608);
+
+        for bad in [
+            TrackConfig {
+                latency_frames: Some(999_999),
+                ..TrackConfig::mono("a", 1)
+            },
+            TrackConfig {
+                latency_trim: -999_999,
+                ..TrackConfig::mono("a", 1)
+            },
+        ] {
+            let err = resolve_tracks(&[bad], 2).expect_err("absurde Latenz");
+            assert!(err.contains("Tippfehler"), "{err}");
+        }
     }
 
     /// The scheduler itself is proven in the engine library, where it now lives. This checks the

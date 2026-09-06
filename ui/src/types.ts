@@ -50,6 +50,22 @@ export interface LooperTrackStatus {
   channels_label: string;
   /** Position between the speakers: -1 hard left, 0 centre, +1 hard right. */
   pan: number;
+
+  // --- latency compensation, in frames -------------------------------------
+  // Four fields rather than one, because a display that shows only the effective value cannot say
+  // whether it is a setting or something this track inherited - and that difference is the reason
+  // the value became per track in the first place.
+  /** What this track really subtracts while recording: base plus surcharge. */
+  latency_frames: number;
+  /** The same in milliseconds. */
+  latency_ms: number;
+  /** The measured part as configured, or null while the track follows the engine's default. */
+  latency_measured: number | null;
+  /** Manual surcharge in frames. A calibration never changes it. */
+  latency_trim: number;
+  /** True while `latency_measured` is null, i.e. while the base is inherited. */
+  latency_inherited: boolean;
+
   state: LooperTrackState;
   /** German word for the state, ready to print. */
   state_label: string;
@@ -101,7 +117,8 @@ export interface LooperStatus {
   /** Grid a recording and an overdub currently snap to. Changeable while the engine runs. */
   quantize: Quantize;
   sample_rate: number;
-  latency_samples: number;
+  /** The engine's **default** compensation in frames; a track with its own reports it itself. */
+  latency_frames: number;
   click: boolean;
   /** Louder side of the master bus. */
   output_peak: number;
@@ -137,7 +154,7 @@ export const IDLE_STATUS: LooperStatus = {
   loop_seconds: 0,
   quantize: "loop",
   sample_rate: 0,
-  latency_samples: 0,
+  latency_frames: 0,
   click: false,
   output_peak: 0,
   output_dbfs: null,
@@ -201,6 +218,16 @@ export interface StartTrack {
   input_channel_right: number | null;
   /** Position between the speakers: -1 hard left, 0 centre, +1 hard right. */
   pan: number;
+  /**
+   * Measured latency compensation of this input, in frames; null takes the global default. This
+   * is the half `calibrate` writes.
+   */
+  latency_frames: number | null;
+  /**
+   * Manual surcharge on top, in frames - what a measurement cannot see because it happens inside
+   * an external plugin host. Survives every calibration.
+   */
+  latency_trim: number;
 }
 
 export interface StartConfig {
@@ -220,7 +247,8 @@ export interface StartConfig {
   bars: number;
   /** Grid a recording and an overdub snap to. */
   quantize: Quantize;
-  latency_samples: number;
+  /** Default compensation in frames, for every track that brings none of its own. */
+  latency_frames: number;
   monitor_gain: number;
   click_gain: number;
   click: boolean;
@@ -247,7 +275,7 @@ export interface EngineInfo {
   bars: number;
   loop_samples: number;
   loop_seconds: number;
-  latency_samples: number;
+  latency_frames: number;
   latency_ms: number;
   layer_capacity: number;
   max_layers: number;

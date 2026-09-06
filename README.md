@@ -82,13 +82,23 @@ looper-engine list
 looper-engine live --host asio --device Focusrite --buffer 128 `
     --track stimme:1 --track gitarre:2 --bpm 100 --bars 8
 
+# Eine Quelle über einen Plugin-Host kommt früher an als ein Mikrofon: eigener Wert je Track
+looper-engine live --host asio --buffer 128 `
+    --track stimme:1 --track cantabile:5-6 `
+    --latency-frames 827 --track-latency cantabile:512+96
+
 # Latenzkompensation prüfen (Loopback-Kabel von Ausgang 1 in Eingang 1)
 looper-engine calibrate --host asio --buffer 128 --click-gain 4.0
+
+# ... für den zweiten Track; über einen ASIO-Router braucht es dafür kein Kabel
+looper-engine calibrate --host asio --buffer 128 --click-gain 4.0 `
+    --track stimme:1 --track cantabile:5-6 --for-track 2
 ```
 
 Tasten in `live` (jeweils mit Enter): `1`–`N` Track wählen · `r` neuer Loop · `o` Overdub ·
 `s` Stopp · `p` Wiedergabe · `c` Track leeren · `a` alles leeren · `m` Mithören ·
-`e <nr>` Layer stumm · `w <nr>` Layer weg · `l <nr> <wert>` Layer-Lautstärke · `k` Klick ·
+`e <nr>` Layer stumm · `w <nr>` Layer weg · `l <nr> <wert>` Layer-Lautstärke ·
+`n <wert>` Panorama · `i <frames|-> [zuschlag]` Latenzkompensation dieses Tracks · `k` Klick ·
 `t` Tempo · `q` Ende.
 
 ### Messwerkzeuge aus Phase 0

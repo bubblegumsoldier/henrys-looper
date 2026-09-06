@@ -25,15 +25,18 @@ use super::process::{
     EngineConfig, EngineCore, OUT_CHANNELS, loop_capacity, spare_slots_for,
 };
 use super::timeline::{TimeSignature, Timeline};
-use super::track::{MAX_LAYERS, Track};
+use super::track::{MAX_LAYERS, Track, TrackLatency};
 
-/// One simulated track: which input it records, whether it monitors from the start, and where it
-/// sits in the stereo field.
+/// One simulated track: which input it records, whether it monitors from the start, where it sits
+/// in the stereo field, and what it compensates.
 #[derive(Clone, Copy, Debug)]
 pub struct TrackSpec {
     pub input: TrackInput,
     pub monitor: bool,
     pub pan: f32,
+    /// Latency compensation of this track. The default follows the engine's global value, which is
+    /// what every test written before the per-track value expects.
+    pub latency: TrackLatency,
 }
 
 impl TrackSpec {
@@ -43,6 +46,7 @@ impl TrackSpec {
             input: TrackInput::Mono(channel),
             monitor: false,
             pan: 0.0,
+            latency: TrackLatency::INHERITED,
         }
     }
 
@@ -52,7 +56,20 @@ impl TrackSpec {
             input: TrackInput::Stereo { left, right },
             monitor: false,
             pan: 0.0,
+            latency: TrackLatency::INHERITED,
         }
+    }
+
+    /// This track compensates its own measured number instead of the engine's default.
+    pub fn compensating(mut self, frames: u32) -> Self {
+        self.latency = TrackLatency::measured(frames);
+        self
+    }
+
+    /// A manual surcharge on top of whatever this track's base is.
+    pub fn trimmed(mut self, trim: i32) -> Self {
+        self.latency.trim = trim;
+        self
     }
 
     pub fn monitoring(mut self) -> Self {
@@ -75,7 +92,8 @@ pub struct SimSpec {
     pub bpm: f64,
     pub signature: TimeSignature,
     pub bars: u32,
-    /// What the engine compensates for, in frames.
+    /// What the engine compensates by default, in frames. A track can override it - see
+    /// [`TrackSpec::compensating`].
     pub latency: u64,
     /// What the simulated hardware actually does. Normally the same as `latency`; making them
     /// differ is how a test can show that a wrong value really does misalign the recording.
@@ -171,11 +189,13 @@ impl Sim {
         let tracks: Vec<Track> = spec
             .tracks
             .iter()
-            .map(|t| Track::new(t.input, t.monitor, t.pan, spec.sample_rate))
+            .map(|t| {
+                Track::new(t.input, t.monitor, t.pan, spec.sample_rate).with_latency(t.latency)
+            })
             .collect();
         let core = EngineCore::new(EngineConfig {
             timeline,
-            latency_samples: spec.latency,
+            latency_frames: spec.latency,
             input_channels: spec.input_channels,
             tracks,
             spares: [

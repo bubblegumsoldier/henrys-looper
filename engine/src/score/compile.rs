@@ -49,6 +49,11 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
             channels: if spec.input_right.is_some() { 2 } else { 1 },
             pan: spec.pan,
             monitor: spec.monitor,
+            // Passed through as written. Resolving `latency` against the engine's default cannot
+            // happen here: the default belongs to the device the score is played on, which a
+            // compiled score knows nothing about.
+            latency: spec.latency,
+            latency_trim: spec.latency_trim,
         })
         .collect();
 

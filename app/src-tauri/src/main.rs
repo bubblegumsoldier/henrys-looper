@@ -25,6 +25,7 @@ use tauri::{Emitter, Manager, State};
 use host::{Action, EngineHandle, READY_EVENT};
 use logfile::log;
 use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
+use looper_engine::engine::track::TrackLatency as EngineTrackLatency;
 use proto::{
     AppInfo, BandKindName, CalibrateConfig, CalibrateOutcome, DelayNoteName, DeviceReport,
     EngineInfo, FxParamName, FxPresetName, FxSlotName, QuantizeName, StartConfig,
@@ -135,6 +136,37 @@ async fn track_monitor(
 #[tauri::command(rename_all = "snake_case")]
 async fn track_pan(track: usize, pan: f32, engine: State<'_, EngineHandle>) -> Result<(), String> {
     act(engine, Action::SetPan { track, pan }).await
+}
+
+/// What this track subtracts while recording, in **frames**, as the two numbers it is made of.
+///
+/// * `measured` - what a loopback measurement found for this input, or `null` to follow the
+///   engine's global default. This is the half `calibrate` writes.
+/// * `trim` - a manual surcharge on top, for what no measurement can see: the latency an external
+///   plugin host has inside itself. A calibration never touches it, which is why it is a separate
+///   number and not folded into the first.
+///
+/// Takes effect for input arriving from now on. Material that is already in a layer was stored
+/// with the old value and stays where it was played - a take that moves because a number was
+/// corrected would be worse than the wrong number.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_latency(
+    track: usize,
+    measured: Option<u32>,
+    trim: Option<i32>,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    act(
+        engine,
+        Action::SetTrackLatency {
+            track,
+            latency: EngineTrackLatency {
+                measured,
+                trim: trim.unwrap_or(0),
+            },
+        },
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -398,6 +430,7 @@ fn main() {
             track_clear,
             track_monitor,
             track_pan,
+            track_latency,
             layer_mute,
             layer_remove,
             layer_gain,

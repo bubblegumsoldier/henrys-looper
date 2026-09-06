@@ -54,7 +54,8 @@ andere ist die Eintrittskarte.
 | 4 | UI | vorgezogen, siehe unten |
 | 5 | Bühnentauglichkeit, MIDI | offen |
 | 6 | Effekte | DSP, Kommandos und CLI gebaut, Abnahme am Instrument offen. UI folgt |
-| 7 | Stereo | **gebaut**, 233 Tests grün, Abnahme am Instrument offen. Aufnahme mono oder stereo je Quelle, Kette und Mixbus stereo, Panorama je Track |
+| 7 | Stereo | **gebaut**, Abnahme am Instrument offen. Aufnahme mono oder stereo je Quelle, Kette und Mixbus stereo, Panorama je Track |
+| 8 | Latenzkompensation je Track | **gebaut**, 252 Tests grün, Abnahme am Instrument offen. Globaler Wert als Vorgabe, eigener Wert je Track aus Messwert plus Zuschlag, `calibrate --for-track`. Siehe Abschnitt 4 |
 
 Der Python- und React-Code des Ableton-Prototypen liegt unangetastet im Repo
 (`backend/`, `looper/`, `spike/`, `ui/`). Er wird ersetzt, nicht angebunden.
@@ -170,26 +171,86 @@ gemeinsam und erfahren dieselbe Ausgangslatenz, liegen für das Ohr also per Kon
 übereinander. Eine zweite Korrektur würde den Loop `R` Samples **vor** den Klick schieben.
 
 Das gilt, solange der Musiker den Klick **aus diesem Interface** hört. Bei einem externen
-Monitor stimmt die Rechnung nicht mehr, deshalb ist der Wert justierbar
-(`--latency-samples`, Standard 827 für 128 Frames an diesem Gerät).
+Monitor stimmt die Rechnung nicht mehr, deshalb ist der Wert justierbar.
+
+### `R` gehört zum Track, nicht zur Engine (gebaut)
+
+Die Herleitung oben verfolgt **ein** Signal auf **einem** Weg herein. Zwei Quellen müssen sich
+diesen Weg nicht teilen: Mikrofon und Gitarre tun es (derselbe AD-Wandler desselben Interfaces),
+ein Plugin-Host wie Cantabile über einen ASIO-Router nicht. Dessen Audio ist bereits digital,
+durchläuft keinen Wandler und kommt deshalb **früher** an. Mit einem globalen Wert sitzt dann eine
+der beiden Quellen dauerhaft daneben — unhörbar, bis man die Spuren übereinanderlegt.
+
+Deshalb hat **jeder Track seinen eigenen Wert**, und der globale ist nur noch die **Vorgabe** für
+alle, die nichts eigenes sagen. Die allermeisten Setups haben eine einzige Quelle; dort pflegt
+niemand acht Zahlen.
+
+**Der Track-Wert besteht aus zwei Zahlen, und das ist keine Bequemlichkeit:**
+
+| Anteil | woher | wer schreibt ihn |
+|---|---|---|
+| `measured` | Loopback-Messung dieses Eingangs, in Frames. Leer = globale Vorgabe | `calibrate` |
+| `trim` | manueller Zuschlag, vorzeichenbehaftet | der Mensch, nach Gehör |
+| **wirksam** | `measured (oder Vorgabe) + trim`, nie unter 0 | die Engine |
+
+Der Grund für die Trennung ist die **Grenze der Messung**: Wir messen den Weg von einem Ausgang
+dieser Maschine bis zu einem ihrer Eingänge. Was ein externer Host *intern* an Latenz hat — sein
+eigener ASIO-Puffer, die von seinen Plugins gemeldete Verzögerung —, liegt nicht auf diesem Weg.
+Das Loopback, das ein Router für einen Cantabile-Return bereitstellt, geht am Plugin *vorbei*,
+nicht hindurch. Dieser Anteil kann nur von Hand kommen. Läge er im selben Feld wie der Messwert,
+würfe ihn die nächste Kalibrierung still weg — und man merkte es Wochen später an einem Take, der
+nicht mehr dort sitzt, wo die anderen sitzen. Mit zwei Feldern schreibt `calibrate` das erste, das
+Ohr das zweite, und die Summe ist, was die Engine abzieht.
+
+**Wo der Wert konfiguriert wird:**
+
+| Ort | global (Vorgabe) | je Track |
+|---|---|---|
+| CLI | `--latency-frames 827` | `--track-latency cantabile:512+96` (auch `NAME:+96` für nur Zuschlag) |
+| CLI zur Laufzeit | — | Taste `i <frames\|-> [zuschlag]` |
+| Partitur | — | `cantabile: {input: [5,6], latency: 512, latency_trim: 96}` |
+| App | `StartConfig.latency_frames` | `TrackConfig.latency_frames` / `latency_trim`, Kommando `track_latency` |
+
+Der alte Name `--latency-samples` bleibt als Alias erhalten, und `latency_samples` wird in
+`StartConfig` weiter gelesen: Die Zahl zählte immer Frames, nur der Name sagte es nicht.
+
+**Laufzeitänderung wirkt nach vorn, nie rückwärts.** Ein geänderter Wert entscheidet, wohin die
+*nächsten* Eingangsframes geschrieben werden. Was schon in einem Ebenen-Puffer steht, wurde mit dem
+alten Wert abgelegt und bleibt dort — eine Ebene, die sich verschiebt, weil jemand eine Zahl
+korrigiert hat, wäre schlimmer als die falsche Zahl. Ein Test hält beides fest.
+
+Zwei Nebenrechnungen folgen daraus: `check_loop` prüft gegen den **größten** Wert aller Tracks
+(`process::max_latency`), nicht gegen die Vorgabe — der Schreibzeiger läuft dem Lesezeiger auf dem
+ungünstigsten Track um so viel hinterher. Und `musical_input_pos` ist je Track verschieden, weshalb
+ein Kommando, das nicht in der Vergangenheit landen darf, gegen den richtigen geprüft wird.
+
+### Kalibrierung je Eingang
 
 **Neu messen nach jedem Wechsel von Gerät, Samplerate oder Puffergröße.** Dafür gibt es
-`calibrate`: Die Engine nimmt ihren eigenen Klick über ein Loopback-Kabel auf und rechnet die
-Abweichung von den Schlaggrenzen aus.
+`calibrate`: Die Engine nimmt ihren eigenen Klick über ein Loopback auf und rechnet die
+Abweichung von den Schlaggrenzen aus. Herleitung: `R_wahr = R + Abweichung`.
 
-**Offen: Kompensation pro Track statt global.** Der Wert gilt derzeit für alle Tracks
-gemeinsam. Das stimmt, solange jedes Signal denselben Weg nimmt — Mikrofon oder Instrument
-durch den AD-Wandler desselben Interfaces. Sobald ein Plugin-Host wie Cantabile über einen
-ASIO-Router danebenläuft, ist das falsch: Dessen Audio ist bereits digital und durchläuft
-keinen Wandler, hat also eine **kürzere** Eingangslatenz als das Mikrofon. Mit einem globalen
-Wert sitzt dann eine der beiden Quellen dauerhaft daneben — unhörbar, bis man die Spuren
-übereinanderlegt. Der Wert muss von global auf **pro Track** wandern, bevor mit externen
-Klangerzeugern ernsthaft aufgenommen wird.
+Gemessen wird **ein Eingang**, nämlich der des mit `--for-track` gewählten Tracks (Standard: der
+erste, also das alte Verhalten). Für eine Quelle, die über einen ASIO-Router hereinkommt, braucht
+es dazu **kein Kabel** — der Router schleift den Ausgang selbst auf den Eingang zurück. Das
+Ergebnis wird als fertige Kommandozeile ausgegeben, jetzt mit `--track-latency NAME:WERT`. Der
+Zuschlag bleibt dabei außen vor, und die Ausgabe sagt das auch.
 
 Fallstrick bei `calibrate`: **Die Onset-Erkennung ist pegelabhängig.** Bei −27 dBFS Loop-Peak
 zeigte sie 32 Samples Abweichung, bei −18 dBFS nur noch 7,2 — dieselbe Engine, dieselbe
-Latenz. Klick laut einpegeln (`--click-gain`), sonst kalibriert man ein Messartefakt ein.
+Latenz. Ein Signal, das langsam ansteigt, braucht länger durch eine feste Schwelle, und jedes
+Sample dieses Anstiegs landet im Ergebnis. Klick laut einpegeln (`--click-gain`), sonst kalibriert
+man ein Messartefakt ein. **Die Messung sagt es inzwischen selbst:** unterhalb von −18 dBFS
+Loop-Peak steht die Warnung samt dieser Zahlen in jedem Lauf und noch einmal im Ergebnis.
 Eine Kreuzkorrelation wäre der pegelunabhängige Weg, ist aber nicht gebaut.
+
+### Was das UI zeigt
+
+Auf der Track-Karte und im Setup steht je Track der wirksame Wert in Frames und Millisekunden,
+daneben die beiden Felder, aus denen er entsteht. Ein Track ohne eigenen Messwert lässt das erste
+Feld **leer** (mit der Vorgabe als Platzhalter) und wird als „geerbt (827)" beschriftet — eine Zahl,
+die aussieht wie eine Einstellung, aber geerbt ist, war genau der Fehler, gegen den dieses Kapitel
+gebaut ist.
 
 ## 5. Threads
 

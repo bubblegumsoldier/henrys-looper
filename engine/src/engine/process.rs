@@ -54,6 +54,14 @@
 //! would push every recorded layer 827 frames (17 ms) behind the click, and a second layer recorded
 //! against the first would sit another 17 ms further back.
 //!
+//! **`R` belongs to a track, not to the engine.** The derivation above follows *one* signal on
+//! *one* way in, and two sources need not share that way. A microphone and a guitar do - both go
+//! through the AD converter of the same interface - but a plugin host such as Cantabile feeding us
+//! over an ASIO router does not: its audio is already digital, passes no converter, and therefore
+//! arrives *earlier*. Every track carries its own `R` ([`super::track::TrackLatency`]);
+//! [`EngineConfig::latency_frames`] is the default the tracks that do not follow. The recording
+//! loop reads `track.latency_frames()`, and everything above holds per track.
+//!
 //! **Stereo changes nothing in this formula, and that is the point of stating its unit.** `R` was
 //! measured as a delay in time and is therefore a number of frames; a stereo track's two channels
 //! travel through the same converter at the same instant and are therefore stored at the same `m`.
@@ -113,7 +121,7 @@ use super::command::{
 use super::frame::{Channels, Frame};
 use super::metro::Metronome;
 use super::timeline::Timeline;
-use super::track::{MAX_LAYERS, Track};
+use super::track::{MAX_LAYERS, Track, TrackLatency};
 
 /// Size of the waiting room for commands that have been taken out of the queue but are not due
 /// yet. Allocated once, in the control thread; the audio thread only ever pushes into it and
@@ -126,8 +134,10 @@ pub const OUT_CHANNELS: usize = 2;
 /// Everything the engine needs to exist. Assembled by the control thread.
 pub struct EngineConfig {
     pub timeline: Timeline,
-    /// Roundtrip latency in **frames**, see the module comment.
-    pub latency_samples: u64,
+    /// Default roundtrip latency in **frames**, see the module comment. It applies to every track
+    /// that carries no measured value of its own, which is all of them in a setup with a single
+    /// source - nobody should have to maintain eight numbers for one microphone.
+    pub latency_frames: u64,
     /// Number of channels in one interleaved device input frame.
     pub input_channels: usize,
     /// The tracks, with their input channels. Built by the control thread, never resized here.
@@ -151,6 +161,7 @@ pub struct EngineConfig {
 pub struct EngineCore {
     timeline: Timeline,
     metro: Metronome,
+    /// Default compensation for tracks without one of their own, in frames.
     latency: u64,
     /// Musical timeline position of the next output sample.
     out_pos: u64,
@@ -183,14 +194,21 @@ pub struct EngineCore {
 impl EngineCore {
     pub fn new(cfg: EngineConfig) -> Self {
         let spare_slots = [cfg.spares[0].capacity(), cfg.spares[1].capacity()];
+        let mut tracks = cfg.tracks;
+        // The control thread builds the tracks and knows what each of them was configured with;
+        // only here is the default known, so this is where the two are added up. From now on every
+        // track answers with a plain number.
+        for track in tracks.iter_mut() {
+            track.resolve_latency(cfg.latency_frames);
+        }
         Self {
             timeline: cfg.timeline,
             metro: Metronome::new(cfg.timeline.sample_rate()),
-            latency: cfg.latency_samples,
+            latency: cfg.latency_frames,
             out_pos: 0,
             in_index: 0,
             input_channels: cfg.input_channels.max(1),
-            tracks: cfg.tracks,
+            tracks,
             spares: cfg.spares,
             spare_slots,
             layer_frames: cfg.layer_frames,
@@ -507,18 +525,23 @@ impl EngineCore {
     /// frame of its loop buffer. Both therefore land at the same musical position `m = k - R`,
     /// which is what keeps the two sides of a stereo take exactly aligned - see the module comment
     /// on why `R` is a frame count and never a sample count.
+    ///
+    /// `R` is read **per track**, because two tracks need not share a way in. The same input frame
+    /// `k` therefore lands at different musical positions on two tracks with different values -
+    /// displaced by exactly the difference of the two, which is the point of the whole exercise.
     #[inline]
     fn record_input(&mut self, input: &[f32], frames: usize) {
         let ch = self.input_channels;
         for j in 0..frames {
             let k = self.in_index + j as u64;
             let base = j * ch;
-            // Nothing that arrives in the first R frames of the session was played after position
-            // 0, so there is no musical position to store it at.
-            let recordable = k >= self.latency;
-            // The one line the whole compensation comes down to. See the module comment.
-            let pos = k.wrapping_sub(self.latency);
             for t in 0..self.tracks.len() {
+                let latency = self.tracks[t].latency_frames();
+                // Nothing that arrives in the first R frames of the session was played after
+                // position 0, so there is no musical position to store it at.
+                let recordable = k >= latency;
+                // The one line the whole compensation comes down to. See the module comment.
+                let pos = k.wrapping_sub(latency);
                 let input_of = self.tracks[t].input();
                 let count = self.tracks[t].channels().count();
                 // One device sample per recorded channel. A frame that is short (the device
@@ -611,7 +634,7 @@ impl EngineCore {
                 // The past cannot be recorded: input frames older than the current musical input
                 // position are already gone, so a late command starts here instead. This also
                 // guarantees the first layer is written strictly sequentially.
-                let start = at.max(self.musical_input_pos());
+                let start = at.max(self.musical_input_pos(track));
                 if self.tracks[track].take_is_finishing() {
                     // The running take is only waiting for its tail; queue this one behind it.
                     self.schedule_take(track, start, true);
@@ -621,7 +644,7 @@ impl EngineCore {
                 }
             }
             Command::StartOverdub { track, at } => {
-                let start = at.max(self.musical_input_pos());
+                let start = at.max(self.musical_input_pos(track));
                 let finishing = self.tracks[track].take_is_finishing();
                 if self.tracks[track].take().is_some() && !finishing {
                     self.refuse(Refusal::Busy);
@@ -661,6 +684,15 @@ impl EngineCore {
             }
             Command::SetMonitor { track, on } => self.tracks[track].set_monitor(on),
             Command::SetPan { track, pan } => self.tracks[track].set_pan(pan),
+            // Two integer additions and a store, on a track that already exists. Nothing is
+            // allocated and nothing already recorded is moved: the new value decides where the
+            // *next* input frame goes, which is the only honest way to change it while a loop is
+            // playing - the material in the buffer was stored with the old one and stays where it
+            // was played.
+            Command::SetTrackLatency { track, latency } => {
+                let default = self.latency;
+                self.tracks[track].set_latency(latency, default);
+            }
             Command::SetLayerMute {
                 track,
                 layer,
@@ -813,18 +845,25 @@ impl EngineCore {
         self.refusal = reason;
     }
 
-    /// Musical position of the next input frame to be consumed.
+    /// Musical position of the next input frame to be consumed **on this track**. Two tracks with
+    /// different compensation are at different musical positions at the same instant, and a
+    /// command that must not land in the past has to be measured against the right one.
     #[inline]
-    fn musical_input_pos(&self) -> u64 {
-        self.in_index.saturating_sub(self.latency)
+    fn musical_input_pos(&self, track: usize) -> u64 {
+        let latency = match self.tracks.get(track) {
+            Some(track) => track.latency_frames(),
+            None => self.latency,
+        };
+        self.in_index.saturating_sub(latency)
     }
 
     fn publish_status(&mut self) {
         let here = self.timeline.locate(self.out_pos);
-        let musical_input = self.musical_input_pos();
+        let in_index = self.in_index;
         let mut tracks = [TrackStatus::default(); MAX_TRACKS];
         for (i, slot) in tracks.iter_mut().enumerate().take(self.tracks.len()) {
             let track = &mut self.tracks[i];
+            let musical_input = in_index.saturating_sub(track.latency_frames());
             *slot = TrackStatus {
                 state: track.state(musical_input),
                 layers: track.layer_count() as u8,
@@ -842,6 +881,8 @@ impl EngineCore {
                 },
                 channels: track.channels().count() as u8,
                 pan: track.pan(),
+                latency: track.latency(),
+                latency_frames: track.latency_frames().min(u32::MAX as u64) as u32,
                 fx: track.fx_mut().status(),
             };
         }
@@ -899,6 +940,9 @@ pub fn spread_frame(bus: &[f32], out: &mut [f32]) {
 }
 
 /// Validate a loop configuration before any buffer is allocated.
+///
+/// `latency` is the **largest** compensation any track uses, because the loop has to be longer
+/// than the write pointer trails the play pointer on the worst of them - see [`max_latency`].
 pub fn check_loop(timeline: &Timeline, bars: u32, latency: u64) -> Result<(), String> {
     if bars == 0 {
         return Err("--bars muss mindestens 1 sein.".to_string());
@@ -907,10 +951,22 @@ pub fn check_loop(timeline: &Timeline, bars: u32, latency: u64) -> Result<(), St
     if len <= latency {
         return Err(format!(
             "Der Loop waere mit {len} Frames kuerzer als die Latenzkompensation ({latency} Frames). \
-             Mehr Takte, hoeheres Tempo pruefen oder --latency-samples korrigieren."
+             Mehr Takte, hoeheres Tempo pruefen oder --latency-frames korrigieren."
         ));
     }
     Ok(())
+}
+
+/// The largest compensation in a set of tracks, given the engine's default - the number
+/// [`check_loop`] has to be fed.
+///
+/// The default is included even when every track has its own, because a track added later would
+/// follow it, and because a session without any track is still checked.
+pub fn max_latency(default: u64, tracks: impl IntoIterator<Item = TrackLatency>) -> u64 {
+    tracks
+        .into_iter()
+        .map(|latency| latency.resolve(default))
+        .fold(default, u64::max)
 }
 
 /// Memory one full session can occupy at most, in bytes - the number behind the layer ceiling.

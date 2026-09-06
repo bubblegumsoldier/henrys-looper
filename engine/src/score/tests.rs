@@ -763,6 +763,71 @@ fn a_track_with_a_bad_input_and_a_bad_pan_reports_both() {
     assert_eq!(err.issues.len(), 2, "{err}");
 }
 
+// ---------------------------------------------------------------------------------------------
+// Latency per track
+// ---------------------------------------------------------------------------------------------
+
+/// A track may bring its own latency compensation, in the two halves the engine keeps apart: the
+/// measured number and the manual surcharge. A track that says nothing carries neither, which is
+/// how it ends up on the engine's global default.
+#[test]
+fn a_track_can_bring_its_own_latency_and_its_own_surcharge() {
+    let score = compiled(
+        "bpm: 120\n\
+         tracks:\n\
+        \x20 stimme:    {input: 1}\n\
+        \x20 cantabile: {input: [5, 6], latency: 512, latency_trim: 96}\n\
+        \x20 router:    {input: 7, latency_trim: -40}\n\
+         sections: [{id: a, bars: 1}]\n",
+    );
+
+    let stimme = score.track("stimme").unwrap();
+    assert_eq!(stimme.latency, None, "ohne Angabe gilt die Vorgabe der Engine");
+    assert_eq!(stimme.latency_trim, 0);
+    assert!(stimme.track_latency().inherits());
+    assert_eq!(stimme.track_latency().resolve(827), 827);
+
+    let cantabile = score.track("cantabile").unwrap();
+    assert_eq!(cantabile.latency, Some(512));
+    assert_eq!(cantabile.latency_trim, 96);
+    assert_eq!(cantabile.track_latency().resolve(827), 608);
+
+    // Only a surcharge: the base stays the engine's default, which is the case a source nobody can
+    // measure needs.
+    let router = score.track("router").unwrap();
+    assert_eq!(router.latency, None);
+    assert!(router.track_latency().inherits());
+    assert_eq!(router.track_latency().resolve(827), 787);
+}
+
+/// Both fields are checked, and the surcharge is the one value in the format that may be negative -
+/// a digital return can arrive earlier than the converter path the default was measured on.
+#[test]
+fn a_malformed_latency_is_refused_in_german() {
+    for (yaml, needle) in [
+        ("tracks: {a: {input: 1, latency: -5}}", "zwischen 0 und"),
+        ("tracks: {a: {input: 1, latency: 999999}}", "zwischen 0 und"),
+        ("tracks: {a: {input: 1, latency: viel}}", "ganze Zahl"),
+        ("tracks: {a: {input: 1, latency: 512.5}}", "ganze Zahl"),
+        ("tracks: {a: {input: 1, latency_trim: 999999}}", "zwischen -96000 und"),
+        ("tracks: {a: {input: 1, latency_trim: viel}}", "ganze Zahl"),
+    ] {
+        let yaml = format!("bpm: 120\n{yaml}\nsections: [{{id: x, bars: 1}}]\n");
+        let err = compile_score(&yaml).expect_err(&yaml);
+        assert!(
+            err.to_string().contains(needle),
+            "\"{needle}\" fehlt in: {err}"
+        );
+        assert!(err.issues[0].line.is_some(), "ohne Zeilennummer: {err}");
+    }
+
+    // A negative surcharge is not a mistake.
+    let score = compiled(
+        "bpm: 120\ntracks: {a: {input: 1, latency_trim: -300}}\nsections: [{id: x, bars: 1}]\n",
+    );
+    assert_eq!(score.track("a").unwrap().latency_trim, -300);
+}
+
 /// `pan` is a known field now, so a typo next to it suggests it rather than listing the world.
 #[test]
 fn a_misspelt_pan_suggests_the_real_field() {

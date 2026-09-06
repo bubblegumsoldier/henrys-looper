@@ -31,7 +31,8 @@ interface Tempo {
   click: boolean;
   quantize: Quantize;
   sampleRate: number;
-  latencySamples: number;
+  /** The engine's default compensation in frames; a track can carry its own. */
+  latencyFrames: number;
 }
 
 function pickTempo(s: LooperStatus): Tempo {
@@ -44,7 +45,7 @@ function pickTempo(s: LooperStatus): Tempo {
     click: s.click,
     quantize: s.quantize,
     sampleRate: s.sample_rate,
-    latencySamples: s.latency_samples,
+    latencyFrames: s.latency_frames,
   };
 }
 
@@ -58,7 +59,7 @@ function sameTempo(a: Tempo, b: Tempo): boolean {
     a.click === b.click &&
     a.quantize === b.quantize &&
     a.sampleRate === b.sampleRate &&
-    a.latencySamples === b.latencySamples
+    a.latencyFrames === b.latencyFrames
   );
 }
 
@@ -149,6 +150,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
       clear: (t) => run(() => api.trackClear(t)),
       monitor: (t, on) => run(() => api.trackMonitor(t, on)),
       pan: (t, pan) => run(() => api.trackPan(t, pan)),
+      latency: (t, measured, trim) => run(() => api.trackLatency(t, measured, trim)),
       layerMute: (t, l, muted) => run(() => api.layerMute(t, l, muted)),
       layerRemove: (t, l) => run(() => api.layerRemove(t, l)),
       layerGain: (t, l, gain) => run(() => api.layerGain(t, l, gain)),
@@ -245,7 +247,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
             <b>{tempo.bars}</b> Takte · <b>{tempo.loopSeconds.toFixed(2)}</b> s Loop
           </span>
           <span className="live-fact muted mono">
-            {tempo.sampleRate} Hz · {tempo.latencySamples} Samples Kompensation
+            {tempo.sampleRate} Hz · {tempo.latencyFrames} Frames Kompensation (Vorgabe)
           </span>
         </div>
         <div className="spacer" />
@@ -291,6 +293,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
             selected={t.index === selected}
             onSelect={setSelected}
             actions={actions}
+            defaultLatency={tempo.latencyFrames}
           />
         ))}
       </div>

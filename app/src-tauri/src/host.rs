@@ -42,12 +42,13 @@ use looper_engine::engine::command::{
 };
 use looper_engine::engine::frame::{Channels, TrackInput};
 use looper_engine::engine::fx::{FxParam, FxPreset, FxSlot};
+use looper_engine::engine::live::MAX_LATENCY_FRAMES;
 use looper_engine::engine::process::{
-    EngineConfig, EngineCore, OUT_CHANNELS, loop_capacity, max_memory_bytes, spare_channels,
-    spare_slots_for, spread_frame, total_channels,
+    EngineConfig, EngineCore, OUT_CHANNELS, loop_capacity, max_latency, max_memory_bytes,
+    spare_channels, spare_slots_for, spread_frame, total_channels,
 };
 use looper_engine::engine::timeline::Timeline;
-use looper_engine::engine::track::{MAX_LAYERS, Track, TrackState};
+use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
 
 use crate::logfile::{self, log};
 use crate::proto::{
@@ -93,6 +94,12 @@ pub enum Action {
     SetMonitor { track: usize, on: bool },
     /// Where a track sits between the speakers: -1.0 hard left, 0.0 centre, +1.0 hard right.
     SetPan { track: usize, pan: f32 },
+    /// What this track subtracts while recording, in frames. Takes effect for input arriving from
+    /// now on; nothing already in a layer buffer moves.
+    SetTrackLatency {
+        track: usize,
+        latency: TrackLatency,
+    },
     LayerMute { track: usize, layer: usize, muted: bool },
     LayerRemove { track: usize, layer: usize },
     LayerGain { track: usize, layer: usize, gain: f32 },
@@ -129,6 +136,7 @@ impl Action {
             | Action::ClearTrack { track }
             | Action::SetMonitor { track, .. }
             | Action::SetPan { track, .. }
+            | Action::SetTrackLatency { track, .. }
             | Action::LayerMute { track, .. }
             | Action::LayerRemove { track, .. }
             | Action::LayerGain { track, .. }
@@ -265,14 +273,18 @@ fn handle(request: Request, session: &mut Option<Session>, app: &AppHandle) {
                     let stereo = info.tracks.iter().filter(|t| t.channels() == 2).count();
                     log!(
                         "Engine gestartet: {} / {} @ {} Hz, {} Frames, {} Tracks ({} davon stereo), \
-                         Latenz {} Samples.",
+                         Latenz-Vorgabe {} Frames, {} Tracks mit eigenem Wert.",
                         info.host,
                         info.output_device,
                         info.sample_rate,
                         info.buffer_frames,
                         info.tracks.len(),
                         stereo,
-                        info.latency_samples
+                        info.latency_frames,
+                        info.tracks
+                            .iter()
+                            .filter(|t| t.latency_frames.is_some() || t.latency_trim != 0)
+                            .count()
                     );
                     *session = Some(active);
                     let _ = reply.send(Ok(info));
@@ -479,23 +491,35 @@ fn run_calibration(config: CalibrateConfig, engine_running: bool) -> Result<Cali
     let opts = CalibrateOpts {
         bpm: config.bpm,
         bars: config.bars,
-        latency_samples: config.latency_samples,
+        latency_frames: config.latency_frames,
         runs: config.runs,
         click_gain: config.click_gain,
+        // The measurement is per input, so it needs the same track list the session uses; the
+        // CLI's own `--track` spelling is what `CalibrateOpts` takes.
+        tracks: config
+            .tracks
+            .iter()
+            .map(|t| match t.input_channel_right {
+                Some(right) => format!("{}:{}-{}", t.name, t.input_channel, right),
+                None => format!("{}:{}", t.name, t.input_channel),
+            })
+            .collect(),
+        for_track: config.for_track,
     };
     let path = logfile::path().display().to_string();
     log!(
-        "Kalibrierung startet: {} Laeufe, {} Takte, Pruefwert {} Samples.",
+        "Kalibrierung startet: {} Laeufe, {} Takte, Pruefwert {} Frames, Track {}.",
         opts.runs,
         opts.bars,
-        opts.latency_samples
+        opts.latency_frames,
+        opts.for_track
     );
     cmd_calibrate(&dev, &opts)?;
     log!("Kalibrierung fertig.");
     Ok(CalibrateOutcome {
         message: format!(
-            "Kalibrierung abgeschlossen. Der vollstaendige Bericht mit der Empfehlung fuer \
-             --latency-samples steht in der Logdatei: {path}"
+            "Kalibrierung abgeschlossen. Der vollstaendige Bericht mit der Empfehlung fuer die \
+             Latenzkompensation dieses Tracks steht in der Logdatei: {path}"
         ),
         log_path: path,
     })
@@ -544,6 +568,10 @@ struct TrackUi {
     /// needed here to work out the memory ceiling after a tempo change.
     channels: Channels,
     gains: Vec<f32>,
+    /// This track's compensation as this thread last set it. Mirrored here - like the gains -
+    /// because a tempo change is checked against the largest one before the engine sees the
+    /// command, and the newest status snapshot may be a few milliseconds old.
+    latency: TrackLatency,
 }
 
 struct Session {
@@ -586,18 +614,19 @@ impl Session {
                 rate, setup.out_plan.config.sample_rate
             ));
         }
+        let in_channels = setup.in_plan.config.channels as usize;
+        let out_channels = setup.out_plan.config.channels as usize;
+        // The tracks come first now: the loop length has to be checked against the *largest*
+        // compensation in the session, and that is not known before they are resolved.
+        let defs = resolve_tracks(&config.tracks, in_channels)?;
         let timeline = build_timeline(
             rate,
             config.bpm,
             config.beats_per_bar,
             config.beat_unit,
             config.bars,
-            config.latency_samples,
+            max_latency(config.latency_frames, defs.iter().map(|d| d.latency)),
         )?;
-
-        let in_channels = setup.in_plan.config.channels as usize;
-        let out_channels = setup.out_plan.config.channels as usize;
-        let defs = resolve_tracks(&config.tracks, in_channels)?;
         let capacity = loop_capacity(&timeline, config.bars);
 
         let buffer_frames = setup.buffer_frames().max(1);
@@ -625,11 +654,11 @@ impl Session {
 
         let tracks: Vec<Track> = defs
             .iter()
-            .map(|d| Track::new(d.input, config.monitor, d.pan, rate))
+            .map(|d| Track::new(d.input, config.monitor, d.pan, rate).with_latency(d.latency))
             .collect();
         let mut core = EngineCore::new(EngineConfig {
             timeline,
-            latency_samples: config.latency_samples,
+            latency_frames: config.latency_frames,
             input_channels: in_channels,
             tracks,
             spares: [Vec::with_capacity(slots[0]), Vec::with_capacity(slots[1])],
@@ -749,8 +778,8 @@ impl Session {
             bars: config.bars,
             loop_samples,
             loop_seconds: timeline.samples_to_secs(loop_samples),
-            latency_samples: config.latency_samples,
-            latency_ms: config.latency_samples as f64 * 1000.0 / rate as f64,
+            latency_frames: config.latency_frames,
+            latency_ms: config.latency_frames as f64 * 1000.0 / rate as f64,
             layer_capacity: capacity,
             max_layers: MAX_LAYERS as u32,
             max_tracks: MAX_TRACKS as u32,
@@ -768,6 +797,8 @@ impl Session {
                         TrackInput::Mono(_) => None,
                     },
                     pan: d.pan,
+                    latency_frames: d.latency.measured,
+                    latency_trim: d.latency.trim,
                     ..TrackConfig::mono(&d.name, d.input.first() as u32 + 1)
                 })
                 .collect(),
@@ -792,6 +823,7 @@ impl Session {
                     name: d.name.clone(),
                     channels: d.input.channels(),
                     gains: Vec::new(),
+                    latency: d.latency,
                 })
                 .collect(),
             info,
@@ -883,7 +915,7 @@ impl Session {
                 .samples_to_secs(self.scheduler.timeline.span_bars(0, self.scheduler.bars)),
             quantize: QuantizeName::from(self.scheduler.quantize),
             sample_rate: rate,
-            latency_samples: self.info.latency_samples,
+            latency_frames: self.info.latency_frames,
             click: status.click,
             output_peak: status.output_peak_max(),
             output_dbfs: dbfs(status.output_peak_max()),
@@ -1046,6 +1078,7 @@ impl Session {
                 // make the status line flicker. The new value comes back in the status.
                 Ok(())
             }
+            Action::SetTrackLatency { track, latency } => self.set_track_latency(track, latency),
             Action::SetClick { on } => {
                 self.cmd.send(Command::SetClick { on })?;
                 self.message = Some(format!("Klick {}.", if on { "an" } else { "aus" }));
@@ -1153,6 +1186,51 @@ impl Session {
         }
     }
 
+    /// New latency compensation for one track.
+    ///
+    /// Refused when it would make the loop shorter than the compensation, because that is the one
+    /// state the recording arithmetic cannot be in: the write pointer trails the play pointer by
+    /// this much, so a loop below it would be overwritten while it is still being written.
+    fn set_track_latency(&mut self, track: usize, latency: TrackLatency) -> Result<(), String> {
+        if latency.trim.unsigned_abs() as i64 > MAX_LATENCY_FRAMES
+            || latency.measured.map(i64::from).unwrap_or(0) > MAX_LATENCY_FRAMES
+        {
+            return Err(format!(
+                "Die Latenzkompensation muss innerhalb von {MAX_LATENCY_FRAMES} Frames liegen \
+                 (zwei Sekunden bei 48 kHz)."
+            ));
+        }
+        let worst = max_latency(
+            self.info.latency_frames,
+            self.tracks
+                .iter()
+                .enumerate()
+                .map(|(i, ui)| if i == track { latency } else { ui.latency }),
+        );
+        looper_engine::engine::process::check_loop(
+            &self.scheduler.timeline,
+            self.scheduler.bars,
+            worst,
+        )?;
+
+        self.cmd.send(Command::SetTrackLatency { track, latency })?;
+        self.tracks[track].latency = latency;
+        let rate = self.info.sample_rate.max(1) as f64;
+        let effective = latency.resolve(self.info.latency_frames);
+        self.message = Some(format!(
+            "\"{}\": Latenzkompensation {effective} Frames ({:.2} ms){}. Wirkt auf kommende \
+             Aufnahmen, nicht auf schon Aufgenommenes.",
+            self.tracks[track].name,
+            effective as f64 * 1000.0 / rate,
+            if latency.inherits() {
+                format!(" - globale Vorgabe {}", self.info.latency_frames)
+            } else {
+                String::new()
+            },
+        ));
+        Ok(())
+    }
+
     /// A new tempo redefines what every sample position means, so it is only accepted while every
     /// track is empty. The German sentence for the refusal is the engine's own.
     fn set_tempo(&mut self, bpm: f64, beats_per_bar: u32, beat_unit: u32) -> Result<(), String> {
@@ -1172,7 +1250,10 @@ impl Session {
             beats_per_bar,
             beat_unit,
             self.scheduler.bars,
-            self.info.latency_samples,
+            max_latency(
+                self.info.latency_frames,
+                self.tracks.iter().map(|ui| ui.latency),
+            ),
         )?;
         let layer_frames = loop_capacity(&timeline, self.scheduler.bars);
         self.cmd.send(Command::SetTempo {

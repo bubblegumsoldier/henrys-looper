@@ -35,7 +35,7 @@ use looper_engine::engine::fx::{
     BandKind, DelayNote, EQ_BANDS, FxParam, FxPreset, FxSlot, FxStatus,
 };
 use looper_engine::engine::schedule::{Lead, PendingKind, Quantize};
-use looper_engine::engine::track::TrackState;
+use looper_engine::engine::track::{TrackLatency, TrackState};
 
 /// dBFS for display, or `None` at digital silence.
 pub fn dbfs(linear: f32) -> Option<f64> {
@@ -107,6 +107,10 @@ pub struct ConfigInfo {
 /// Naming one input makes a **mono** track, naming two makes a **stereo** one - which two inputs
 /// belong together is a wiring fact and is never guessed. `pan` and `input_channel_right` both
 /// default, so a mono track in the middle is still `{"name": "stimme", "input_channel": 1}`.
+///
+/// The two latency fields default as well, and their default is the important one: absent means
+/// "take [`StartConfig::latency_frames`]", so a setup with a single source has one number to
+/// maintain, not one per track.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct TrackConfig {
@@ -119,22 +123,41 @@ pub struct TrackConfig {
     /// -1.0 hard left, 0.0 centre, +1.0 hard right. Absent means centre.
     #[serde(default)]
     pub pan: f32,
+    /// Measured latency compensation of this input, in **frames**; `null` or absent means the
+    /// engine's global default. This is the half a calibration writes.
+    #[serde(default)]
+    pub latency_frames: Option<u32>,
+    /// Manual surcharge in frames on top of that, for what a measurement cannot see - the latency
+    /// an external plugin host has inside itself. Never touched by a calibration.
+    #[serde(default)]
+    pub latency_trim: i32,
 }
 
 impl TrackConfig {
-    /// A mono track in the centre - what the default setup and most tracks are.
+    /// A mono track in the centre, on the engine's default compensation - what the default setup
+    /// and most tracks are.
     pub fn mono(name: &str, input_channel: u32) -> Self {
         Self {
             name: name.to_string(),
             input_channel,
             input_channel_right: None,
             pan: 0.0,
+            latency_frames: None,
+            latency_trim: 0,
         }
     }
 
     /// 1 for a mono track, 2 for a stereo one.
     pub fn channels(&self) -> u32 {
         if self.input_channel_right.is_some() { 2 } else { 1 }
+    }
+
+    /// The compensation in the form the engine wants it.
+    pub fn track_latency(&self) -> TrackLatency {
+        TrackLatency {
+            measured: self.latency_frames,
+            trim: self.latency_trim,
+        }
     }
 }
 
@@ -238,10 +261,14 @@ pub struct StartConfig {
     /// loop boundary, so one early press is enough; `bar` is the old next-bar behaviour.
     #[serde(default)]
     pub quantize: QuantizeName,
-    /// Roundtrip latency removed while recording. Measure it with `calibrate` after every change
-    /// of device, sample rate or buffer size.
-    #[serde(default = "default_latency_samples")]
-    pub latency_samples: u64,
+    /// Roundtrip latency removed while recording, in **frames** - the default for every track that
+    /// brings no value of its own. Measure it with `calibrate` after every change of device,
+    /// sample rate or buffer size.
+    ///
+    /// The old spelling `latency_samples` is still accepted, so a stored configuration keeps
+    /// working; the number always counted frames, the name did not say so.
+    #[serde(default = "default_latency_frames", alias = "latency_samples")]
+    pub latency_frames: u64,
     #[serde(default = "default_gain")]
     pub monitor_gain: f32,
     #[serde(default = "default_gain")]
@@ -275,7 +302,7 @@ fn default_beat_unit() -> u32 {
 fn default_bars() -> u32 {
     8
 }
-fn default_latency_samples() -> u64 {
+fn default_latency_frames() -> u64 {
     827
 }
 fn default_gain() -> f32 {
@@ -312,7 +339,8 @@ pub struct EngineInfo {
     pub loop_samples: u64,
     pub loop_seconds: f64,
 
-    pub latency_samples: u64,
+    /// Default compensation in **frames**, for every track that brings none of its own.
+    pub latency_frames: u64,
     pub latency_ms: f64,
 
     /// Length one layer buffer is allocated at, in samples.
@@ -390,6 +418,25 @@ pub struct TrackStatusEvent {
     pub channels_label: String,
     /// Position in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
     pub pan: f32,
+
+    // --- latency compensation ----------------------------------------------------------------
+    // Four fields rather than one number, because a display that shows only the effective value
+    // cannot say whether it is a setting or something this track happens to have inherited - and
+    // that difference is the whole reason the value became per track.
+    /// What this track really subtracts while recording, in **frames**. Measured part (or the
+    /// engine's default) plus the surcharge.
+    pub latency_frames: u64,
+    /// The same in milliseconds, for a display.
+    pub latency_ms: f64,
+    /// The measured part as it is configured, or `null` while this track follows the default.
+    pub latency_measured: Option<u32>,
+    /// The manual surcharge in frames. A calibration never changes it.
+    pub latency_trim: i32,
+    /// True while `latency_measured` is `null`, i.e. while the base comes from the engine's
+    /// default rather than from this track. Redundant and sent anyway: it is the one thing the
+    /// display has to switch on, and deriving it in three places is how three places disagree.
+    pub latency_inherited: bool,
+
     pub state: TrackStateName,
     /// German word for the state, ready to print.
     pub state_label: String,
@@ -459,7 +506,9 @@ pub struct StatusEvent {
     /// Grid a recording and an overdub currently snap to. Changeable while the engine runs.
     pub quantize: QuantizeName,
     pub sample_rate: u32,
-    pub latency_samples: u64,
+    /// The engine's **default** compensation in frames. A track that brings its own reports it in
+    /// its own entry; this is what the others follow.
+    pub latency_frames: u64,
     pub click: bool,
     /// Louder side of the produced output block.
     pub output_peak: f32,
@@ -508,7 +557,7 @@ impl StatusEvent {
             loop_seconds: 0.0,
             quantize: QuantizeName::default(),
             sample_rate: 0,
-            latency_samples: 0,
+            latency_frames: 0,
             click: false,
             output_peak: 0.0,
             output_dbfs: None,
@@ -559,6 +608,11 @@ pub fn track_event(
         channels: ts.channels as u32,
         channels_label: if ts.channels >= 2 { "stereo" } else { "mono" }.to_string(),
         pan: ts.pan,
+        latency_frames: u64::from(ts.latency_frames),
+        latency_ms: f64::from(ts.latency_frames) * 1000.0 / rate,
+        latency_measured: ts.latency.measured,
+        latency_trim: ts.latency.trim,
+        latency_inherited: ts.latency.inherits(),
         state: ts.state.into(),
         state_label: ts.state.label().to_string(),
         monitor: ts.monitor,
@@ -948,13 +1002,26 @@ pub struct CalibrateConfig {
     /// Length of one measurement recording in bars.
     #[serde(default = "default_calibrate_bars")]
     pub bars: u32,
-    /// The value to check.
-    #[serde(default = "default_latency_samples")]
-    pub latency_samples: u64,
+    /// The value to check, in frames.
+    #[serde(default = "default_latency_frames", alias = "latency_samples")]
+    pub latency_frames: u64,
     #[serde(default = "default_runs")]
     pub runs: u32,
     #[serde(default = "default_gain")]
     pub click_gain: f32,
+
+    /// The tracks of the session, so the measurement can pick one of them. Empty means the same
+    /// default `live` uses (stimme on input 1, gitarre on input 2).
+    #[serde(default)]
+    pub tracks: Vec<TrackConfig>,
+    /// Which track is measured, **one-based**. 1 - the default - measures the first track's input,
+    /// which is what this command did when there was a single global number.
+    #[serde(default = "default_for_track")]
+    pub for_track: usize,
+}
+
+fn default_for_track() -> usize {
+    1
 }
 
 fn default_calibrate_bars() -> u32 {
@@ -1015,6 +1082,9 @@ mod tests {
             input_channels: [1, 0],
             channels: 1,
             pan: 0.0,
+            // Follows the engine's default, which the engine has already resolved to 827.
+            latency: TrackLatency::INHERITED,
+            latency_frames: 827,
             // A track nobody has touched: chain bypassed, everything off, "trocken".
             fx: FxStatus::default(),
         }
@@ -1232,7 +1302,7 @@ mod tests {
                 "fifo_overruns",
                 "fifo_underruns",
                 "ignored_commands",
-                "latency_samples",
+                "latency_frames",
                 "loop_samples",
                 "loop_seconds",
                 "max_callback_ms",
@@ -1288,6 +1358,11 @@ mod tests {
                 "input_dbfs",
                 "input_peak",
                 "input_peaks",
+                "latency_frames",
+                "latency_inherited",
+                "latency_measured",
+                "latency_ms",
+                "latency_trim",
                 "layers",
                 "loop_samples",
                 "loop_seconds",
@@ -1468,7 +1543,7 @@ mod tests {
             QuantizeName::Loop,
             "ohne Angabe rastet eine Aufnahme auf den Loop-Anfang ein"
         );
-        assert_eq!(config.latency_samples, 827);
+        assert_eq!(config.latency_frames, 827);
         assert_eq!(config.monitor_gain, 1.0);
         assert_eq!(config.click_gain, 1.0);
         assert!(config.click, "der Klick ist standardmaessig an");
@@ -1500,7 +1575,7 @@ mod tests {
             "beat_unit": 8,
             "bars": 4,
             "quantize": "bar",
-            "latency_samples": 900,
+            "latency_frames": 900,
             "monitor_gain": 0.5,
             "click_gain": 0.25,
             "click": false,
@@ -1519,6 +1594,83 @@ mod tests {
         assert_eq!(config.quantize, QuantizeName::Bar);
     }
 
+    /// The per-track compensation on the wire, in the three shapes a setup produces: nothing at
+    /// all, a measured value, and a surcharge on the default for a source nobody can measure.
+    #[test]
+    fn a_track_can_carry_its_own_latency_and_defaults_to_the_engines() {
+        let config: StartConfig = serde_json::from_value(json!({
+            "tracks": [
+                {"name": "stimme", "input_channel": 1},
+                {"name": "cantabile", "input_channel": 5, "input_channel_right": 6,
+                 "latency_frames": 512, "latency_trim": 96},
+                {"name": "router", "input_channel": 7, "latency_trim": -40}
+            ]
+        }))
+        .expect("Latenz-Konfiguration");
+        assert_eq!(config.latency_frames, 827, "die Vorgabe steht weiter global");
+
+        assert_eq!(config.tracks[0].track_latency(), TrackLatency::INHERITED);
+        assert_eq!(config.tracks[0].track_latency().resolve(827), 827);
+        assert_eq!(config.tracks[1].track_latency().resolve(827), 608);
+        assert!(
+            config.tracks[2].track_latency().inherits(),
+            "nur ein Zuschlag laesst die Vorgabe als Basis stehen"
+        );
+        assert_eq!(config.tracks[2].track_latency().resolve(827), 787);
+
+        // A configuration stored before the rename still loads: the number always counted frames.
+        let old: StartConfig = serde_json::from_value(json!({
+            "tracks": [{"name": "stimme", "input_channel": 1}],
+            "latency_samples": 900
+        }))
+        .expect("alte Schreibweise");
+        assert_eq!(old.latency_frames, 900);
+    }
+
+    /// What the window needs in order to show an inherited value as inherited rather than as a
+    /// setting: the effective number, both halves it is made of, and the flag to switch on.
+    #[test]
+    fn a_track_event_says_whether_its_latency_is_its_own() {
+        let inherited = track_event(0, "stimme", &sample_status(), &[], RATE, Lead::default());
+        assert_eq!(inherited.latency_frames, 827);
+        assert!((inherited.latency_ms - 17.229).abs() < 0.001);
+        assert_eq!(inherited.latency_measured, None);
+        assert_eq!(inherited.latency_trim, 0);
+        assert!(inherited.latency_inherited);
+
+        let own = TrackStatus {
+            latency: TrackLatency::measured(512).with_trim(96),
+            latency_frames: 608,
+            ..sample_status()
+        };
+        let event = track_event(1, "cantabile", &own, &[], RATE, Lead::default());
+        assert_eq!(event.latency_frames, 608);
+        assert_eq!(event.latency_measured, Some(512));
+        assert_eq!(event.latency_trim, 96);
+        assert!(!event.latency_inherited);
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["latency_frames"], json!(608));
+        assert_eq!(value["latency_measured"], json!(512));
+        assert_eq!(value["latency_inherited"], json!(false));
+    }
+
+    #[test]
+    fn a_calibration_configuration_can_name_the_track_it_measures() {
+        let config: CalibrateConfig = serde_json::from_value(json!({
+            "tracks": [
+                {"name": "stimme", "input_channel": 1},
+                {"name": "cantabile", "input_channel": 5, "input_channel_right": 6}
+            ],
+            "for_track": 2,
+            "latency_frames": 512
+        }))
+        .expect("Track-Auswahl");
+        assert_eq!(config.for_track, 2);
+        assert_eq!(config.tracks.len(), 2);
+        assert_eq!(config.latency_frames, 512);
+    }
+
     #[test]
     fn a_calibration_configuration_defaults_to_the_measurement_from_phase_zero() {
         let config: CalibrateConfig = serde_json::from_value(json!({})).expect("leer geht");
@@ -1528,8 +1680,10 @@ mod tests {
         assert_eq!(config.bpm, 100.0);
         assert_eq!(config.bars, 4);
         assert_eq!(config.runs, 5);
-        assert_eq!(config.latency_samples, 827);
+        assert_eq!(config.latency_frames, 827);
         assert_eq!(config.click_gain, 1.0);
+        assert_eq!(config.for_track, 1, "gemessen wird der erste Track");
+        assert!(config.tracks.is_empty(), "ohne Angabe gilt die Standardbelegung");
     }
 
     #[test]

@@ -1,5 +1,19 @@
-//! `calibrate` subcommand: check `--latency-samples` against the real hardware, with a number
+//! `calibrate` subcommand: check the latency compensation against the real hardware, with a number
 //! instead of an opinion.
+//!
+//! # One input at a time, because one number no longer fits
+//!
+//! The compensation is per track (see [`super::track::TrackLatency`]), so a measurement is per
+//! *input*: `--for-track` picks which of the configured tracks the engine records its click on,
+//! and the recommendation that comes out is that track's measured value. The default is the first
+//! track, which on the default setup is input 1 - exactly what this command did when there was
+//! only one number.
+//!
+//! For a source that arrives through an ASIO router (a plugin host, say) this needs **no cable**:
+//! the router loops the output back into the input itself. What such a measurement covers is the
+//! way from the host's output to ours - not what the host does inside itself, which is why the
+//! track value has a manual surcharge next to the measured one. This command never touches that
+//! surcharge.
 //!
 //! The offline test `recorded_click_loopback_lands_bit_identical_on_the_grid` in `tests.rs` proves
 //! the compensation arithmetic against a simulated delay line. This is the same experiment on the
@@ -10,7 +24,8 @@
 //! # Why the deviation is exactly the correction, and why the sign is `+`
 //!
 //! From the derivation in `process.rs`: an input sample arriving at input index `k` is stored at
-//! musical position `m = k - R`, where `R` is the value of `--latency-samples`. Let `R_true` be
+//! musical position `m = k - R`, where `R` is the value under test (`--latency-frames`, or a
+//! track's own). Let `R_true` be
 //! what the hardware actually does. The click for beat `B` leaves the engine at output position
 //! `B`, comes back at input index `B + R_true`, and is therefore stored at
 //!
@@ -49,6 +64,14 @@
 //! one envelope, so downbeat and offbeat carry the same bias and the measurement does not depend on
 //! which of the two it looks at.
 //!
+//! **This bias is level-dependent, and that is the trap of the whole procedure.** Measured on this
+//! machine at one and the same latency: a loop peaking at -27 dBFS showed 32 samples of deviation,
+//! the same run at -18 dBFS showed 7.2. A signal that climbs slowly needs longer to cross a fixed
+//! threshold, and every sample of that climb is added to the result. Calibrating from a quiet loop
+//! therefore does not measure the latency, it measures the level - and burns the difference into
+//! the setup. Hence [`GOOD_PEAK`]: below it the report says so, on every run and again at the end.
+//! A cross-correlation would be the level-independent way and is not built.
+//!
 //! Real-time rules are unchanged: the audio callbacks only push into a FIFO and drive
 //! [`EngineCore`]. All analysis happens on the finished loop buffer in the main thread, after the
 //! recording is over.
@@ -68,6 +91,7 @@ use super::command::{
     BufferChannel, Command, Status, StatusReceiver, buffer_channel, command_channel, status_channel,
 };
 use super::frame::TrackInput;
+use super::live::{TrackDef, resolve_tracks};
 use super::metro::Metronome;
 use super::process::{
     EngineConfig, EngineCore, OUT_CHANNELS, check_loop, loop_capacity, spread_frame,
@@ -90,6 +114,13 @@ const MIN_THRESHOLD: f32 = 0.02;
 const MAX_THRESHOLD: f32 = 0.2;
 /// Deviation up to this many samples is inside the residual error of the onset detection.
 const GOOD_ENOUGH_SAMPLES: f64 = 10.0;
+/// Loop peak from which the onset detection is trustworthy: -18 dBFS.
+///
+/// Not a round number picked for looks. Measured on this machine at an unchanged latency: -27 dBFS
+/// gave 32 samples of deviation, -18 dBFS gave 7.2. Below this the result says more about the gain
+/// than about the interface, and the report has to say so - a musician who trims his input too
+/// quietly would otherwise calibrate a measurement artefact into his setup.
+const GOOD_PEAK: f32 = 0.126;
 /// A run is only conclusive if at least this share of the expected clicks was found.
 const MIN_DETECTION_RATIO: f64 = 0.9;
 /// Extra time granted on top of the musical duration before a run is given up on.
@@ -105,9 +136,9 @@ pub struct CalibrateOpts {
     #[arg(long, default_value_t = 4)]
     pub bars: u32,
 
-    /// Zu pruefende Latenzkompensation in Samples (Standard: Messwert aus Phase 0)
-    #[arg(long, default_value_t = 827)]
-    pub latency_samples: u64,
+    /// Zu pruefende Latenzkompensation in Frames (Standard: Messwert aus Phase 0)
+    #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = 827)]
+    pub latency_frames: u64,
 
     /// Anzahl der Messdurchlaeufe
     #[arg(long, default_value_t = 5)]
@@ -116,6 +147,16 @@ pub struct CalibrateOpts {
     /// Lautstaerke des Klicks
     #[arg(long, default_value_t = 1.0)]
     pub click_gain: f32,
+
+    /// Track als NAME:KANAL (mono) oder NAME:KANAL-KANAL (stereo), mehrfach angebbar - dieselbe
+    /// Schreibweise wie bei live. Ohne Angabe gilt dieselbe Vorgabe wie dort (stimme:1, gitarre:2).
+    #[arg(long = "track", value_name = "NAME:KANAL[-KANAL][@PANORAMA]")]
+    pub tracks: Vec<String>,
+
+    /// Welcher Track gemessen wird, 1-basiert. Gemessen wird auf dessen Eingang; bei einem
+    /// Stereo-Track auf dem linken der beiden.
+    #[arg(long = "for-track", default_value_t = 1)]
+    pub for_track: usize,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -266,6 +307,47 @@ fn verdict(mean: f64) -> String {
     }
 }
 
+/// German warning about a loop that was recorded too quietly to trust.
+///
+/// The numbers in it are the ones from the module comment, and they are in it on purpose: "Pegel
+/// zu leise" invites a shrug, "32 Samples statt 7,2 bei gleicher Latenz" does not.
+fn low_peak_warning(peak: f32) -> String {
+    format!(
+        "  ACHTUNG: Der Loop erreicht nur {} - die Impulserkennung ist pegelabhaengig.\n\
+         \x20 Gemessen auf diesem Rechner bei unveraenderter Latenz: -27 dBFS ergaben 32 Samples\n\
+         \x20 Abweichung, -18 dBFS nur noch 7,2. Wer zu leise einpegelt, kalibriert ein\n\
+         \x20 Messartefakt ein. Erst lauter machen (--click-gain, Eingangs-Gain am Interface,\n\
+         \x20 Ziel mindestens {}), dann neu messen.",
+        fmt_dbfs(peak),
+        fmt_dbfs(GOOD_PEAK)
+    )
+}
+
+/// Which of the configured tracks is being measured, or a German sentence saying why not.
+fn pick_track(defs: &[TrackDef], for_track: usize) -> Result<usize, String> {
+    if for_track == 0 || for_track > defs.len() {
+        let list: Vec<String> = defs
+            .iter()
+            .enumerate()
+            .map(|(i, d)| format!("{} {} (Eingang {})", i + 1, d.name, d.input.label()))
+            .collect();
+        return Err(format!(
+            "--for-track {for_track} gibt es nicht. Vorhanden: {}.",
+            list.join(", ")
+        ));
+    }
+    Ok(for_track - 1)
+}
+
+/// The `--track` arguments that describe this set of tracks, so a recommendation can be printed as
+/// a command line that really names the track it talks about.
+fn track_flags(defs: &[TrackDef]) -> String {
+    defs.iter()
+        .map(|d| format!("--track {}:{}", d.name, d.input.label().replace('+', "-")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Rebuild the device flags so the recommendation can be printed as a command line the user can
 /// paste without thinking about it.
 fn device_flags(dev: &DeviceOpts) -> String {
@@ -387,7 +469,15 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     }
     Timeline::validate(rate, opts.bpm, signature)?;
     let timeline = Timeline::new(rate, opts.bpm, signature);
-    check_loop(&timeline, opts.bars, opts.latency_samples)?;
+    check_loop(&timeline, opts.bars, opts.latency_frames)?;
+
+    let in_channels = setup.in_plan.config.channels as usize;
+    let defs = resolve_tracks(&opts.tracks, in_channels)?;
+    let target = pick_track(&defs, opts.for_track)?;
+    // The left channel of a pair: both halves of a stereo source pass the same converter at the
+    // same instant and therefore share one latency - measuring the second one would produce the
+    // same number and cost another run.
+    let measure_channel = defs[target].input.first();
 
     audio::print_setup(&setup);
     let loop_len_nominal = timeline.span_bars(0, opts.bars);
@@ -404,18 +494,44 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         opts.bars * 4
     );
     println!(
-        "Pruefwert: --latency-samples {} ({:.2} ms)",
-        opts.latency_samples,
-        opts.latency_samples as f64 * 1000.0 / rate as f64
+        "Pruefwert: --latency-frames {} ({:.2} ms)",
+        opts.latency_frames,
+        opts.latency_frames as f64 * 1000.0 / rate as f64
     );
     println!("Laeufe:   {}", opts.runs);
     println!(
-        "\nAufbau: Kabel von Ausgang 1 zurueck in Eingang 1, Direct Monitor am Interface aus.\n\
+        "Gemessen wird Track {} \"{}\" auf Eingang {} (von {} Kanaelen).",
+        target + 1,
+        defs[target].name,
+        measure_channel + 1,
+        in_channels
+    );
+    if defs.len() > 1 {
+        let others: Vec<String> = defs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != target)
+            .map(|(i, d)| format!("{} {}", i + 1, d.name))
+            .collect();
+        println!(
+            "Andere Tracks messen mit --for-track: {}. Jede Quelle mit eigenem Weg braucht einen\n\
+             eigenen Wert - ein Plugin-Host ueber einen ASIO-Router hat keinen Wandler im Weg und\n\
+             kommt frueher an als ein Mikrofon.",
+            others.join(", ")
+        );
+    }
+    println!(
+        "\nAufbau: Kabel von Ausgang 1 zurueck in Eingang {}, Direct Monitor am Interface aus.\n\
+         Kommt die Quelle ueber einen ASIO-Router herein, braucht es kein Kabel - der Router\n\
+         schleift den Ausgang selbst auf diesen Eingang zurueck.\n\
          Die Engine spielt ihren eigenen Klick ueber den Ausgang und nimmt ihn wieder auf.\n\
-         Kopfhoerer vorher abnehmen oder leise drehen.\n"
+         Kopfhoerer vorher abnehmen oder leise drehen.\n\
+         Pegel hoch genug einstellen: die Impulserkennung ist pegelabhaengig, unter {} Loop-Peak\n\
+         misst sie den Pegel mit statt nur die Latenz.\n",
+        measure_channel + 1,
+        fmt_dbfs(GOOD_PEAK)
     );
 
-    let in_channels = setup.in_plan.config.channels as usize;
     let out_channels = setup.out_plan.config.channels as usize;
     let buffer_frames = setup.buffer_frames().max(1);
     let scratch_frames = (buffer_frames * 16) as usize;
@@ -436,14 +552,14 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         buffers.install(vec![0.0f32; capacity])?;
     }
 
-    // One track on input channel 1, the channel the loopback cable feeds. The click starts
-    // switched off: the noise floor has to be measured in silence, and it is switched on by command
-    // as soon as the threshold is known.
+    // One track on the measured channel, the one the loopback feeds. The click starts switched
+    // off: the noise floor has to be measured in silence, and it is switched on by command as soon
+    // as the threshold is known.
     let core = EngineCore::new(EngineConfig {
         timeline,
-        latency_samples: opts.latency_samples,
-        // The input callback below feeds the FIFO with channel 1 only, so the engine sees one
-        // channel per frame.
+        latency_frames: opts.latency_frames,
+        // The input callback below feeds the FIFO with the measured channel only, so the engine
+        // sees one channel per frame whichever input is being calibrated.
         input_channels: 1,
         // The chain stays bypassed for the whole measurement: a calibration compares recorded
         // samples with the grid they were played against, and an effect on the playback path would
@@ -474,7 +590,9 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
             let measuring = sh_in.measure_noise.load(Ordering::Relaxed);
             let mut frames = 0u64;
             for frame in data.chunks_exact(in_channels) {
-                let s = frame[0];
+                // `measure_channel` was checked against the device's channel count while the
+                // tracks were resolved, so this cannot be out of range.
+                let s = frame[measure_channel];
                 if producer.push(s).is_err() {
                     overrun = true;
                 }
@@ -618,6 +736,8 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     let mut total_matched = 0usize;
     let mut total_spurious = 0usize;
     let mut run_means: Vec<f64> = Vec::new();
+    // Quietest loop of all runs - the one that decides whether the result is a latency or a level.
+    let mut worst_peak = f32::INFINITY;
     // Four buffers plus 20 ms of head start, as in `live`: a scheduled command always reaches the
     // audio thread before its own timestamp.
     let guard = (buffer_frames * 4 + rate / 50) as u64;
@@ -632,7 +752,7 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         cmd_tx.send(Command::StartRecord { track: 0, at: start })?;
         cmd_tx.send(Command::StopRecord { track: 0, at: end })?;
 
-        let ahead = (end + opts.latency_samples).saturating_sub(est);
+        let ahead = (end + opts.latency_frames).saturating_sub(est);
         let timeout = Duration::from_secs_f64(timeline.samples_to_secs(ahead) + RUN_SLACK);
         let done = poll_until(&mut status_rx, &mut last, timeout, |s| {
             let t = s.tracks()[0];
@@ -680,6 +800,8 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
                  \x20 korrekte Kalibrierung, sondern ein Hinweis auf einen zu leisen Pegel, ein\n\
                  \x20 fehlendes Loopback-Kabel oder einen leeren Loop."
             );
+        } else if analysis.peak < GOOD_PEAK {
+            println!("{}", low_peak_warning(analysis.peak));
         }
         if analysis.deviations.is_empty() {
             println!("  Keine Abweichung berechenbar.\n");
@@ -691,6 +813,7 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         total_expected += analysis.expected;
         total_matched += analysis.matched;
         total_spurious += analysis.spurious;
+        worst_peak = worst_peak.min(analysis.peak);
         if let Some(mean) = analysis.mean() {
             run_means.push(mean);
         }
@@ -749,7 +872,8 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     let mean = Stats::of(&all_deviations)
         .map(|s| s.mean)
         .expect("mindestens ein Messwert, sonst waere oben abgebrochen worden");
-    let recommended = (opts.latency_samples as f64 + mean).round().max(0.0) as u64;
+    let recommended = (opts.latency_frames as f64 + mean).round().max(0.0) as u64;
+    let name = &defs[target].name;
 
     println!("\n{}", verdict(mean));
     if !conclusive {
@@ -759,34 +883,59 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
              Pegel oder die Verkabelung in Ordnung bringen und neu messen."
         );
     }
+    if worst_peak.is_finite() && worst_peak < GOOD_PEAK {
+        println!("{}", low_peak_warning(worst_peak));
+    }
     println!(
-        "\nAktuell {} Samples, mittlere Abweichung {:+.1} Samples ({:+.3} ms).",
-        opts.latency_samples,
+        "\nAktuell {} Frames, mittlere Abweichung {:+.1} Frames ({:+.3} ms).",
+        opts.latency_frames,
         mean,
         mean * 1000.0 / rate as f64
     );
     println!(
-        "Empfehlung: --latency-samples {recommended}\n\
+        "Empfehlung fuer Track {} \"{name}\" auf Eingang {}: {recommended} Frames\n\
          (Herleitung: der aufgenommene Klick landet bei R_wahr - R vom Raster entfernt, also ist\n\
-         R_wahr = R + Abweichung. Zu spaet aufgenommen heisst: zu wenig abgezogen.)"
+         R_wahr = R + Abweichung. Zu spaet aufgenommen heisst: zu wenig abgezogen.)",
+        target + 1,
+        measure_channel + 1
     );
     println!(
-        "\nUebernehmen mit:\n  looper-engine live {} --bpm {} --latency-samples {recommended}",
-        device_flags(dev),
-        opts.bpm
-    );
-    println!(
-        "  looper-engine calibrate {} --bpm {} --bars {} --latency-samples {recommended}   (zur Gegenprobe)",
+        "\nUebernehmen mit:\n  looper-engine live {} --bpm {} {} --track-latency {name}:{recommended}",
         device_flags(dev),
         opts.bpm,
-        opts.bars
+        track_flags(&defs),
+    );
+    if defs.len() == 1 || target == 0 {
+        println!(
+            "  ... oder als globale Vorgabe fuer alle Quellen am selben Wandler:\n\
+             \x20 looper-engine live {} --bpm {} --latency-frames {recommended}",
+            device_flags(dev),
+            opts.bpm
+        );
+    }
+    println!(
+        "  looper-engine calibrate {} --bpm {} --bars {} {} --for-track {} --latency-frames {recommended}   (zur Gegenprobe)",
+        device_flags(dev),
+        opts.bpm,
+        opts.bars,
+        track_flags(&defs),
+        target + 1
     );
     println!(
         "\nHinweis: Die Onset-Detektion erkennt den Klick erst, wenn er die Schwelle ueberschreitet,\n\
-         also systematisch ein paar Samples zu spaet. Abweichungen unter {:.0} Samples ({:.2} ms)\n\
+         also systematisch ein paar Frames zu spaet. Abweichungen unter {:.0} Frames ({:.2} ms)\n\
          sind deshalb Messrauschen und kein Korrekturbedarf.",
         GOOD_ENOUGH_SAMPLES,
         GOOD_ENOUGH_SAMPLES * 1000.0 / rate as f64
+    );
+    println!(
+        "Was hier gemessen wurde, ist der Weg vom Ausgang bis zu diesem Eingang. Was ein externer\n\
+         Host (Cantabile und dergleichen) intern an Latenz hat - sein eigener ASIO-Puffer, die von\n\
+         seinen Plugins gemeldete Verzoegerung -, liegt nicht auf diesem Weg und laesst sich von\n\
+         aussen nicht messen. Dafuer gibt es den manuellen Zuschlag: --track-latency \
+         {name}:{recommended}+<zuschlag>.\n\
+         Der Zuschlag bleibt bei der naechsten Kalibrierung stehen, gemessen wird nur die Zahl \
+         davor."
     );
     Ok(())
 }
@@ -970,6 +1119,48 @@ mod tests {
             "erwartet rund {error} Samples, gemessen {mean}"
         );
         assert!((827.0 + mean).round() as u64 >= 863);
+    }
+
+    /// The track selection, which is what makes a measurement per input possible at all. Default
+    /// is the first track, i.e. exactly what this command did when there was one global number.
+    #[test]
+    fn the_measured_track_defaults_to_the_first_one_and_names_the_others_when_it_is_wrong() {
+        let defs = resolve_tracks(
+            &["stimme:1".to_string(), "cantabile:3-4".to_string()],
+            4,
+        )
+        .expect("Tracks");
+        assert_eq!(pick_track(&defs, 1).unwrap(), 0, "Standard ist das alte Verhalten");
+        assert_eq!(pick_track(&defs, 2).unwrap(), 1);
+        // A stereo track is measured on its left input; both halves share one converter.
+        assert_eq!(defs[1].input.first(), 2);
+
+        for wrong in [0usize, 3, 99] {
+            let err = pick_track(&defs, wrong).expect_err("gibt es nicht");
+            assert!(err.contains("cantabile"), "die Meldung zaehlt auf: {err}");
+            assert!(err.contains("Eingang 3+4"), "{err}");
+        }
+
+        // The command line the recommendation prints has to describe the same tracks again, in the
+        // spelling `live` parses - a stereo pair with a dash, not a plus.
+        assert_eq!(
+            track_flags(&defs),
+            "--track stimme:1 --track cantabile:3-4"
+        );
+    }
+
+    /// The trap the architecture document warns about, in the output: a quiet loop has to say so
+    /// with the numbers that make it convincing.
+    #[test]
+    fn a_quiet_loop_is_called_out_with_the_measurement_behind_the_rule() {
+        let text = low_peak_warning(0.045); // about -27 dBFS
+        assert!(text.contains("pegelabhaengig"), "{text}");
+        assert!(text.contains("32 Samples"), "{text}");
+        assert!(text.contains("7,2"), "{text}");
+        assert!(text.contains("--click-gain"), "{text}");
+        // -18 dBFS is the line, and the constant really is that.
+        assert!((dbfs(GOOD_PEAK) + 18.0).abs() < 0.1, "{}", dbfs(GOOD_PEAK));
+        assert!(0.045 < GOOD_PEAK && 0.2 > GOOD_PEAK);
     }
 
     #[test]

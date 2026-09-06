@@ -15,6 +15,7 @@ export interface TrackActions {
   clear: (track: number) => void;
   monitor: (track: number, on: boolean) => void;
   pan: (track: number, pan: number) => void;
+  latency: (track: number, measured: number | null, trim: number) => void;
   layerMute: (track: number, layer: number, muted: boolean) => void;
   layerRemove: (track: number, layer: number) => void;
   layerGain: (track: number, layer: number, gain: number) => void;
@@ -26,6 +27,8 @@ interface Props {
   selected: boolean;
   onSelect: (track: number) => void;
   actions: TrackActions;
+  /** The engine's global compensation in frames - what a track without its own value follows. */
+  defaultLatency: number;
 }
 
 /** A dragged slider would otherwise send a command per pixel. */
@@ -118,6 +121,119 @@ function PanRow({ track, pan, actions }: { track: number; pan: number; actions: 
         Mitte
       </button>
       <span className="live-pan-value mono">{panLabel(local)}</span>
+    </div>
+  );
+}
+
+/**
+ * What this track subtracts while recording, and where that number comes from.
+ *
+ * Two fields rather than one, mirroring the engine: `Latenz` is the measured way in (empty means
+ * the global default, and the field says so instead of showing a number that looks like a
+ * setting), `Zuschlag` is the manual part for what no measurement can reach - a plugin host's own
+ * buffer. The engine keeps them apart so the next calibration overwrites the first and leaves the
+ * second standing, and the two boxes here are that promise made visible.
+ *
+ * Text fields, not sliders: this is set once per interface and cabling, not dragged during a song.
+ * The value is sent when the field loses focus or on Enter, so typing "1" of "1100" does not
+ * shift the take by a thousand frames on the way.
+ */
+function LatencyRow({
+  track,
+  actions,
+  defaultLatency,
+}: {
+  track: LooperTrackStatus;
+  actions: TrackActions;
+  defaultLatency: number;
+}) {
+  const i = track.index;
+  const [base, setBase] = useState<string>(
+    track.latency_measured === null ? "" : String(track.latency_measured),
+  );
+  const [trim, setTrim] = useState<string>(String(track.latency_trim));
+  const editing = useRef(false);
+
+  // Follow the engine while nobody is typing, so a value set elsewhere (or refused) shows up.
+  useEffect(() => {
+    if (editing.current) return;
+    setBase(track.latency_measured === null ? "" : String(track.latency_measured));
+    setTrim(String(track.latency_trim));
+  }, [track.latency_measured, track.latency_trim]);
+
+  const send = useCallback(
+    (baseText: string, trimText: string) => {
+      const measured = baseText.trim() === "" ? null : Math.max(0, Math.round(Number(baseText) || 0));
+      const value = Math.round(Number(trimText) || 0);
+      actions.latency(i, measured, value);
+    },
+    [actions, i],
+  );
+
+  const commit = () => {
+    editing.current = false;
+    send(base, trim);
+  };
+
+  return (
+    <div className={`live-track-latency${track.latency_inherited ? " live-latency-inherited" : ""}`}>
+      <span className="live-latency-label">Latenz</span>
+      <label className="live-latency-field">
+        <span>gemessen</span>
+        <input
+          type="number"
+          min={0}
+          step={1}
+          value={base}
+          placeholder={String(defaultLatency)}
+          title={`Gemessener Weg dieses Eingangs in Frames. Leer heißt: die globale Vorgabe von ${defaultLatency} Frames.`}
+          onFocus={() => {
+            editing.current = true;
+          }}
+          onChange={(e) => setBase(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+        />
+      </label>
+      <label className="live-latency-field">
+        <span>Zuschlag</span>
+        <input
+          type="number"
+          step={1}
+          value={trim}
+          title="Manueller Aufschlag in Frames für das, was keine Messung sieht — etwa der interne Puffer eines Plugin-Hosts. Bleibt beim Kalibrieren stehen."
+          onFocus={() => {
+            editing.current = true;
+          }}
+          onChange={(e) => setTrim(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+          }}
+        />
+      </label>
+      <span className="live-latency-value mono">
+        {track.latency_frames} F · {track.latency_ms.toFixed(2)} ms
+      </span>
+      {track.latency_inherited ? (
+        <span className="live-latency-origin" title="Dieser Track folgt der globalen Vorgabe">
+          geerbt ({defaultLatency})
+        </span>
+      ) : (
+        <button
+          className="btn btn-mini"
+          onClick={() => {
+            editing.current = false;
+            setBase("");
+            send("", trim);
+          }}
+          title="Wieder der globalen Vorgabe folgen"
+        >
+          eigen ✕
+        </button>
+      )}
     </div>
   );
 }
@@ -246,7 +362,7 @@ function LayerRow({
   );
 }
 
-function TrackCardInner({ track, selected, onSelect, actions }: Props) {
+function TrackCardInner({ track, selected, onSelect, actions, defaultLatency }: Props) {
   const i = track.index;
   const stereo = track.channels >= 2;
   // One picker per bar. A stereo track shows its two input channels separately - a dead cable on
@@ -300,6 +416,7 @@ function TrackCardInner({ track, selected, onSelect, actions }: Props) {
       </div>
 
       <PanRow track={i} pan={track.pan} actions={actions} />
+      <LatencyRow track={track} actions={actions} defaultLatency={defaultLatency} />
 
       <div className="live-track-buttons">
         <button className="btn btn-big btn-record" onClick={() => actions.record(i)} title="Taste R">

@@ -35,7 +35,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use super::frame::Channels;
 use super::fx::{FxParam, FxPreset, FxSlot, FxStatus};
 use super::timeline::TimeSignature;
-use super::track::TrackState;
+use super::track::{TrackLatency, TrackState};
 
 /// Hard ceiling of tracks. Bounds the fixed-size status snapshot, which has to stay `Copy`.
 pub const MAX_TRACKS: usize = 8;
@@ -74,6 +74,14 @@ pub enum Command {
     /// Untimed - a pan is a mix decision, not a musical event, and it is set before a take rather
     /// than during one.
     SetPan { track: usize, pan: f32 },
+    /// Latency compensation of one track, in frames. Untimed: it decides where *later* input
+    /// frames are stored and has no business moving anything already recorded - a take that is
+    /// running keeps writing with the new value from the next frame on, which is the only
+    /// behaviour that does not rewrite the past.
+    SetTrackLatency {
+        track: usize,
+        latency: TrackLatency,
+    },
     SetLayerMute {
         track: usize,
         layer: usize,
@@ -127,6 +135,7 @@ impl Command {
             | Command::ClearAll { at } => Some(*at),
             Command::SetMonitor { .. }
             | Command::SetPan { .. }
+            | Command::SetTrackLatency { .. }
             | Command::SetLayerMute { .. }
             | Command::SetLayerGain { .. }
             | Command::RemoveLayer { .. }
@@ -151,6 +160,7 @@ impl Command {
             | Command::ClearTrack { track, .. }
             | Command::SetMonitor { track, .. }
             | Command::SetPan { track, .. }
+            | Command::SetTrackLatency { track, .. }
             | Command::SetLayerMute { track, .. }
             | Command::SetLayerGain { track, .. }
             | Command::RemoveLayer { track, .. }
@@ -233,6 +243,12 @@ pub struct TrackStatus {
     pub channels: u8,
     /// Position in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
     pub pan: f32,
+    /// How this track's latency compensation is configured: the measured part (or "follow the
+    /// engine's default") and the manual surcharge.
+    pub latency: TrackLatency,
+    /// The number that configuration works out to, in **frames** - the `R` of `m = k - R` for this
+    /// track. Sent alongside `latency` so no reader has to know the engine's default to print it.
+    pub latency_frames: u32,
     /// State of this track's effect chain: what is on, which preset, and the parameters behind
     /// it. Fixed size and `Copy`, like everything else that crosses the thread boundary.
     pub fx: FxStatus,
@@ -257,6 +273,8 @@ impl Default for TrackStatus {
             input_channels: [0; 2],
             channels: 1,
             pan: 0.0,
+            latency: TrackLatency::INHERITED,
+            latency_frames: 0,
             fx: FxStatus::default(),
         }
     }
@@ -635,6 +653,14 @@ mod tests {
         );
         assert_eq!(Command::SetPan { track: 2, pan: -0.5 }.at(), None);
         assert_eq!(Command::SetPan { track: 2, pan: -0.5 }.track(), Some(2));
+        // A latency is a property of the wiring, not a musical event: it addresses a track and
+        // carries no timestamp.
+        let latency = Command::SetTrackLatency {
+            track: 1,
+            latency: TrackLatency::measured(512).with_trim(64),
+        };
+        assert_eq!(latency.at(), None);
+        assert_eq!(latency.track(), Some(1));
         assert_eq!(Command::Stop.at(), None);
         assert_eq!(Command::StartOverdub { track: 3, at: 1 }.track(), Some(3));
         assert_eq!(Command::ClearAll { at: 1 }.track(), None);
@@ -653,7 +679,9 @@ mod tests {
     /// The snapshot is memcpy'd into the queue **inside the audio callback**, so its size is a
     /// real-time concern and not just a memory one. Phase 6 put the effect state into it; the
     /// stereo rebuild added a second peak per meter, the channel count, the second input channel
-    /// and the pan - fourteen bytes per track, which the padding rounds to sixteen.
+    /// and the pan - fourteen bytes per track, which the padding rounds to sixteen. The per-track
+    /// latency added another sixteen (an `Option<u32>`, an `i32` and the resolved frame count),
+    /// bringing the whole thing to 1624 bytes.
     ///
     /// 1.6 kB at 200 snapshots per second is a copy of well under a microsecond per callback,
     /// against a budget of 2667 - and the queue of 1024 slots costs 1.6 MB, allocated once in the

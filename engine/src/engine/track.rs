@@ -63,6 +63,18 @@
 //!
 //! Recording never touches either of them: `process::record_input` writes the raw input samples
 //! into the layer buffer, exactly as it did before effects and before stereo existed.
+//!
+//! # Why the latency compensation lives here and not only in the engine
+//!
+//! `m = k - R` is derived in [`super::process`], and `R` used to be one number for the whole
+//! engine. That is right exactly as long as every source travels the same way - a microphone or a
+//! guitar through the AD converter of the same interface. A plugin host such as Cantabile feeding
+//! us over an ASIO router does not: its audio is already digital and never passes a converter, so
+//! its input latency is *shorter*. One global value then puts one of the two sources permanently
+//! beside the beat - inaudible until the takes are laid on top of each other.
+//!
+//! So every track carries its own [`TrackLatency`], and the engine's value is only the **default**
+//! for tracks that do not. See that type for why it is two numbers rather than one.
 
 use super::frame::{Channels, Frame, TrackInput, pan_gains};
 use super::fx::Chain;
@@ -71,6 +83,72 @@ use super::fx::Chain;
 /// loop length. It exists so a runaway overdub hits a clear German message instead of the memory
 /// limit of the machine.
 pub const MAX_LAYERS: usize = 16;
+
+/// The latency compensation of one track, in **frames**, as two numbers that mean different
+/// things.
+///
+/// * `measured` is what a loopback measurement found for *this* input, or `None` for "take the
+///   engine's global default". A calibration overwrites it and nothing else.
+/// * `trim` is a manual surcharge, added on top. A calibration never touches it.
+///
+/// # Why two numbers and not one
+///
+/// What we can measure is the way from an output of this machine back into one of its inputs. What
+/// an external host has *inside* itself - its own ASIO buffer, the latency its plugins report - is
+/// not on that path and cannot be measured from outside: the loopback that a router provides for a
+/// Cantabile return goes around the plugin, not through it. That part is therefore a number a human
+/// has to supply, by ear or from the host's own display.
+///
+/// Keeping it separate is what makes the two survive each other. With a single field, the next
+/// calibration would silently throw the hand-dialled part away - and the musician would find out
+/// weeks later, on a take that no longer sits where the previous ones do. With two, `calibrate`
+/// writes `measured`, the ear writes `trim`, and the sum is what the engine subtracts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TrackLatency {
+    /// Measured part in frames, or `None` while this track uses the engine's default.
+    pub measured: Option<u32>,
+    /// Manual surcharge in frames, added to the measured part. Signed, because a digital return
+    /// can be *shorter* than the converter path the default was measured on.
+    pub trim: i32,
+}
+
+impl TrackLatency {
+    /// Takes the engine's default and adds nothing - what every track starts as.
+    pub const INHERITED: TrackLatency = TrackLatency {
+        measured: None,
+        trim: 0,
+    };
+
+    /// A track with its own measured value.
+    pub fn measured(frames: u32) -> Self {
+        Self {
+            measured: Some(frames),
+            trim: 0,
+        }
+    }
+
+    pub fn with_trim(mut self, trim: i32) -> Self {
+        self.trim = trim;
+        self
+    }
+
+    /// Whether this track follows the engine's default instead of a value of its own.
+    #[inline]
+    pub fn inherits(self) -> bool {
+        self.measured.is_none()
+    }
+
+    /// The number the engine actually subtracts: measured part (or `default`) plus trim, never
+    /// below zero. A negative result would mean the input arrives *before* it was played.
+    #[inline]
+    pub fn resolve(self, default: u64) -> u64 {
+        let base = match self.measured {
+            Some(frames) => u64::from(frames),
+            None => default,
+        };
+        (base as i64 + self.trim as i64).max(0) as u64
+    }
+}
 
 /// What the track is doing, for the display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -220,6 +298,15 @@ pub struct Track {
     /// This track's effect chain. Playback and monitoring both run through it; see the module
     /// comment.
     fx: Chain,
+    /// Latency compensation of this track as it was configured - the two numbers a human sets.
+    latency: TrackLatency,
+    /// The same, resolved against the engine's default and added up: the `R` of `m = k - R` for
+    /// this track, in frames.
+    ///
+    /// Kept as a plain number so the recording loop reads one field per track instead of doing the
+    /// arithmetic once per frame. It is recomputed whenever the configuration or the default
+    /// changes, which happens in the audio thread but only on a command - never per sample.
+    latency_frames: u64,
 }
 
 impl Track {
@@ -244,6 +331,9 @@ impl Track {
             input_peak: [0.0; 2],
             output_peak: [0.0; 2],
             fx: Chain::new(sample_rate),
+            latency: TrackLatency::INHERITED,
+            // Resolved by `EngineCore::new`, which is the only place that knows the default.
+            latency_frames: 0,
         }
     }
 
@@ -252,6 +342,37 @@ impl Track {
     #[cfg(test)]
     pub fn mono(input_channel: usize, monitor: bool, sample_rate: u32) -> Self {
         Self::new(TrackInput::Mono(input_channel), monitor, 0.0, sample_rate)
+    }
+
+    /// Give this track its own latency compensation while it is being built in the control thread.
+    /// It is resolved against the engine's default in [`super::process::EngineCore::new`].
+    pub fn with_latency(mut self, latency: TrackLatency) -> Self {
+        self.latency = latency;
+        self
+    }
+
+    /// How this track's compensation is configured: the measured part and the manual surcharge.
+    #[inline]
+    pub fn latency(&self) -> TrackLatency {
+        self.latency
+    }
+
+    /// The `R` this track's recording is shifted by, in frames.
+    #[inline]
+    pub fn latency_frames(&self) -> u64 {
+        self.latency_frames
+    }
+
+    /// New configuration; `default` is the engine's global value, needed because a track without a
+    /// measured value of its own follows it.
+    pub fn set_latency(&mut self, latency: TrackLatency, default: u64) {
+        self.latency = latency;
+        self.latency_frames = latency.resolve(default);
+    }
+
+    /// Recompute the effective value after the engine's default changed (or was first supplied).
+    pub fn resolve_latency(&mut self, default: u64) {
+        self.latency_frames = self.latency.resolve(default);
     }
 
     #[inline]
@@ -707,6 +828,10 @@ impl Track {
     /// it. Between two songs a musician presses "alles leeren" and would be furious to find his
     /// voice back to dry. What is left of a reverb tail dies away on its own, because a cleared
     /// track feeds its chain nothing but zeros.
+    ///
+    /// **The latency compensation is left alone for the same reason, and a stronger one.** It
+    /// describes the cable, the converter and the router this input hangs on; none of that changed
+    /// because the loops were emptied. Resetting it would mean re-measuring after every song.
     pub fn restore_defaults(&mut self) {
         self.monitor = self.monitor_default;
         // The pan is part of the arrangement, not of the channel: two mono tracks placed left and
@@ -989,6 +1114,63 @@ mod tests {
             t.take_output_peak(),
             [0.0, 0.0],
             "der Peak wird beim Lesen geleert"
+        );
+    }
+
+    /// The arithmetic behind "gemessener Anteil plus manueller Zuschlag", including the two cases
+    /// that make it worth having two fields: a track that follows the default still takes its
+    /// surcharge, and a surcharge survives a new measurement.
+    #[test]
+    fn a_track_latency_is_its_measured_part_plus_its_trim() {
+        let default = 827u64;
+
+        let inherited = TrackLatency::INHERITED;
+        assert!(inherited.inherits());
+        assert_eq!(inherited.resolve(default), 827, "ohne eigenen Wert gilt die Vorgabe");
+
+        let own = TrackLatency::measured(512);
+        assert!(!own.inherits());
+        assert_eq!(own.resolve(default), 512);
+
+        // The surcharge rides on the default as well as on a measured value.
+        assert_eq!(inherited.with_trim(64).resolve(default), 891);
+        assert_eq!(own.with_trim(64).resolve(default), 576);
+        assert_eq!(own.with_trim(-100).resolve(default), 412);
+
+        // A new measurement replaces the measured part and leaves the surcharge standing - the
+        // whole point of keeping them apart.
+        let after_calibration = TrackLatency {
+            measured: Some(540),
+            ..own.with_trim(64)
+        };
+        assert_eq!(after_calibration.trim, 64);
+        assert_eq!(after_calibration.resolve(default), 604);
+
+        // A compensation cannot go below zero: that would mean the input arrived before it was
+        // played.
+        assert_eq!(TrackLatency::measured(10).with_trim(-999).resolve(default), 0);
+        assert_eq!(inherited.with_trim(-9_999).resolve(default), 0);
+    }
+
+    /// The track keeps the resolved number ready, so the recording loop reads a field instead of
+    /// doing arithmetic per frame - and emptying the track must not touch it.
+    #[test]
+    fn a_track_resolves_its_latency_once_and_keeps_it_when_it_is_cleared() {
+        let mut t = Track::mono(0, false, 48_000).with_latency(TrackLatency::measured(512).with_trim(20));
+        assert_eq!(t.latency_frames(), 0, "vor dem Aufloesen steht noch nichts fest");
+        t.resolve_latency(827);
+        assert_eq!(t.latency_frames(), 532);
+
+        t.set_latency(TrackLatency::INHERITED, 827);
+        assert_eq!(t.latency_frames(), 827);
+        assert!(t.latency().inherits());
+
+        t.set_latency(TrackLatency::measured(900), 827);
+        t.restore_defaults();
+        assert_eq!(
+            t.latency_frames(),
+            900,
+            "die Latenz beschreibt die Verkabelung, nicht das Material"
         );
     }
 

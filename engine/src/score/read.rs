@@ -29,7 +29,7 @@ const ROOT_FIELDS: [&str; 7] = [
     "midi",
     "sections",
 ];
-const TRACK_FIELDS: [&str; 3] = ["input", "pan", "monitor"];
+const TRACK_FIELDS: [&str; 5] = ["input", "pan", "monitor", "latency", "latency_trim"];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
 const MIDI_FIELDS: [&str; 2] = ["next_section", "stop_all"];
 const MIDI_BINDING_FIELDS: [&str; 3] = ["note", "cc", "channel"];
@@ -65,6 +65,9 @@ const RETIRED_TRACK_FIELDS: [(&str, &str); 5] = [
 const BPM_MIN: f64 = 20.0;
 const BPM_MAX: f64 = 400.0;
 const MAX_INPUT_CHANNEL: u32 = 64;
+/// Bound on both latency fields, in frames: two seconds at 48 kHz. Not a technical limit but a
+/// typo catch - see `engine::live::MAX_LATENCY_FRAMES`, which is the same number for the CLI.
+const MAX_LATENCY: i64 = crate::engine::live::MAX_LATENCY_FRAMES;
 const MAX_BEATS_PER_BAR: u32 = 16;
 const MAX_BARS: u32 = 999;
 const BEAT_UNITS: [u32; 6] = [1, 2, 4, 8, 16, 32];
@@ -187,6 +190,34 @@ impl Reader {
             return None;
         }
         Some(value as u32)
+    }
+
+    /// A whole number in a **signed** range. Separate from [`Reader::as_int`] because that one
+    /// takes `u32` bounds, and a latency surcharge is the one value in the format that may be
+    /// negative - a digital return can arrive earlier than the converter path.
+    fn as_signed_int(&mut self, node: &Node<'_>, what: &str, min: i64, max: i64) -> Option<i64> {
+        let value = match &node.kind {
+            NodeKind::Int(value) => *value,
+            _ => {
+                self.error(
+                    Some(node.pos),
+                    format!(
+                        "{what} muss eine ganze Zahl sein, gefunden: {}.",
+                        node.describe()
+                    ),
+                );
+                return None;
+            }
+        };
+        if value < min || value > max {
+            self.error_with(
+                Some(node.pos),
+                format!("{what} muss zwischen {min} und {max} liegen, gefunden: {value}."),
+                format!("Erlaubt sind {min} bis {max}."),
+            );
+            return None;
+        }
+        Some(value)
     }
 
     fn as_number(&mut self, node: &Node<'_>, what: &str) -> Option<f64> {
@@ -466,12 +497,34 @@ impl Reader {
             Some(node) => self.as_bool(node, &format!("'monitor' von Track '{name}'")),
             None => Some(true),
         };
+        // Two fields rather than one, and they mean different things: `latency` is what a
+        // measurement found and gets overwritten by the next one, `latency_trim` is what a human
+        // added by ear and survives it. See `engine::track::TrackLatency`.
+        let latency = match fields.get("latency") {
+            Some(node) => self
+                .as_int(node, &format!("'latency' von Track '{name}'"), 0, MAX_LATENCY as u32)
+                .map(Some),
+            None => Some(None),
+        };
+        let latency_trim = match fields.get("latency_trim") {
+            Some(node) => self
+                .as_signed_int(
+                    node,
+                    &format!("'latency_trim' von Track '{name}'"),
+                    -MAX_LATENCY,
+                    MAX_LATENCY,
+                )
+                .map(|v| v as i32),
+            None => Some(0),
+        };
         let (input, input_right) = input?;
         Some(TrackSource {
             input,
             input_right,
             pan: pan?,
             monitor: monitor?,
+            latency: latency?,
+            latency_trim: latency_trim?,
         })
     }
 

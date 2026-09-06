@@ -31,15 +31,29 @@ export const DEFAULT_SETUP: StartConfig = {
   output_channels: null,
   force_buffer: false,
   tracks: [
-    { name: "stimme", input_channel: 1, input_channel_right: null, pan: 0 },
-    { name: "gitarre", input_channel: 2, input_channel_right: null, pan: 0 },
+    {
+      name: "stimme",
+      input_channel: 1,
+      input_channel_right: null,
+      pan: 0,
+      latency_frames: null,
+      latency_trim: 0,
+    },
+    {
+      name: "gitarre",
+      input_channel: 2,
+      input_channel_right: null,
+      pan: 0,
+      latency_frames: null,
+      latency_trim: 0,
+    },
   ],
   bpm: 100,
   beats_per_bar: 4,
   beat_unit: 4,
   bars: 8,
   quantize: "loop",
-  latency_samples: 827,
+  latency_frames: 827,
   monitor_gain: 1,
   click_gain: 1,
   click: true,
@@ -55,17 +69,25 @@ function loadStored(): StartConfig {
     // keeps a setup stored before the stereo rebuild loadable.
     const tracks: StartTrack[] = parsed.tracks?.length
       ? parsed.tracks.map((entry) => {
-          // A setup stored before the stereo rebuild has neither of the last two fields.
+          // A setup stored before the stereo rebuild has neither of the two channel fields, one
+          // stored before the per-track latency has neither latency field.
           const stored = entry as Partial<StartTrack>;
           return {
             name: stored.name ?? "track",
             input_channel: stored.input_channel ?? 1,
             input_channel_right: stored.input_channel_right ?? null,
             pan: stored.pan ?? 0,
+            latency_frames: stored.latency_frames ?? null,
+            latency_trim: stored.latency_trim ?? 0,
           };
         })
       : DEFAULT_SETUP.tracks;
-    return { ...DEFAULT_SETUP, ...parsed, tracks };
+    // `latency_samples` was the old name of the global default; it always counted frames, the name
+    // just did not say so. A setup stored under it keeps its number instead of silently falling
+    // back to 827.
+    const legacy = (parsed as { latency_samples?: number }).latency_samples;
+    const latency_frames = parsed.latency_frames ?? legacy ?? DEFAULT_SETUP.latency_frames;
+    return { ...DEFAULT_SETUP, ...parsed, latency_frames, tracks };
   } catch {
     return DEFAULT_SETUP;
   }
@@ -98,6 +120,11 @@ function covers(configs: ConfigInfo[], rate: number): boolean {
 function maxChannels(device: DeviceInfo | null): number {
   if (!device || device.input_configs.length === 0) return 8;
   return Math.max(...device.input_configs.map((c) => c.channels));
+}
+
+/** A frame count as milliseconds, which is the unit an ear has for it. */
+function ms(frames: number, sampleRate: number): string {
+  return `${((frames / (sampleRate || 48000)) * 1000).toFixed(2)} ms`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -324,12 +351,12 @@ export function Setup({ info, busy, onStart, onError }: Props) {
             )}
 
             <NumberField
-              label="Latenzkompensation (Samples)"
-              value={config.latency_samples}
-              onChange={(v) => patch({ latency_samples: Math.max(0, Math.round(v)) })}
+              label="Latenzkompensation (Frames)"
+              value={config.latency_frames}
+              onChange={(v) => patch({ latency_frames: Math.max(0, Math.round(v)) })}
               min={0}
               step={1}
-              hint={`≈ ${(config.latency_samples / (config.sample_rate || 48000) * 1000).toFixed(2)} ms · nach jedem Wechsel von Gerät, Rate oder Puffer neu messen`}
+              hint={`≈ ${ms(config.latency_frames, config.sample_rate)} · Vorgabe für jeden Track, der nichts eigenes sagt · nach jedem Wechsel von Gerät, Rate oder Puffer neu messen`}
             />
           </div>
         </section>
@@ -394,6 +421,10 @@ export function Setup({ info, busy, onStart, onError }: Props) {
                       input_channel: Math.min(config.tracks.length + 1, channels),
                       input_channel_right: null,
                       pan: 0,
+                      // Null, not the global number: a new track inherits, and the field shows
+                      // that by staying empty.
+                      latency_frames: null,
+                      latency_trim: 0,
                     },
                   ],
                 })
@@ -450,6 +481,46 @@ export function Setup({ info, busy, onStart, onError }: Props) {
                       />
                     </label>
                   )}
+                  <label className="setup-track-in setup-track-lat">
+                    <span>Latenz</span>
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={t.latency_frames ?? ""}
+                      placeholder={String(config.latency_frames)}
+                      title={
+                        t.latency_frames === null
+                          ? `Leer: dieser Track nimmt die globale Vorgabe von ${config.latency_frames} Frames.`
+                          : "Gemessener Wert dieses Eingangs in Frames. Leeren nimmt wieder die globale Vorgabe."
+                      }
+                      onChange={(e) =>
+                        setTrack(i, {
+                          latency_frames:
+                            e.target.value.trim() === ""
+                              ? null
+                              : Math.max(0, Math.round(Number(e.target.value) || 0)),
+                        })
+                      }
+                    />
+                  </label>
+                  <label className="setup-track-in setup-track-lat">
+                    <span>Zuschlag</span>
+                    <input
+                      type="number"
+                      step={1}
+                      value={t.latency_trim}
+                      title="Manueller Aufschlag in Frames, für den Teil des Weges, den keine Messung sieht — den internen Puffer eines Plugin-Hosts. Bleibt beim Kalibrieren stehen."
+                      onChange={(e) =>
+                        setTrack(i, { latency_trim: Math.round(Number(e.target.value) || 0) })
+                      }
+                    />
+                  </label>
+                  <span className="setup-track-lat-sum mono" title="Was dieser Track beim Aufnehmen abzieht">
+                    ={(t.latency_frames ?? config.latency_frames) + t.latency_trim} F ·{" "}
+                    {ms((t.latency_frames ?? config.latency_frames) + t.latency_trim, config.sample_rate)}
+                    {t.latency_frames === null && <em> geerbt</em>}
+                  </span>
                   <button
                     className="btn btn-mini btn-danger"
                     onClick={() => patch({ tracks: config.tracks.filter((_, j) => j !== i) })}
@@ -466,6 +537,15 @@ export function Setup({ info, busy, onStart, onError }: Props) {
               anders. Ein Klavier oder eine Fläche aus einer Sample-Bibliothek gehört auf ein
               Eingangspaar; die beiden müssen nicht nebeneinander liegen. Panorama und Lautstärke
               werden später auf der Track-Karte gesetzt.
+            </p>
+            <p className="field-hint">
+              <b>Latenz</b> ist der gemessene Weg dieses Eingangs in Frames — leer heißt: die globale
+              Vorgabe von {config.latency_frames} Frames gilt. Das stimmt, solange jede Quelle
+              denselben Weg nimmt. Eine Quelle, die über einen Plugin-Host und einen ASIO-Router
+              hereinkommt, ist schon digital und kommt früher an; sie braucht einen eigenen Wert
+              (Subcommand <code>calibrate --for-track</code>). Der <b>Zuschlag</b> kommt oben drauf
+              und steht für das, was keine Messung sieht: was der fremde Host intern an Latenz hat.
+              Er bleibt beim nächsten Kalibrieren stehen.
             </p>
           </div>
         </section>
