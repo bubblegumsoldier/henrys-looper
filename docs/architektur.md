@@ -205,9 +205,9 @@ bereits null-sicher behandelt.
 und `ui/src/useWebSocket.ts` (Status-Stream). Die Umstellung auf Tauris `invoke` und `emit`
 fasst nur diese beiden an, die Komponenten bleiben unberührt.
 
-Offener Widerspruch: `docs/contracts-v0.md` verspricht `beats_per_bar` und `time_signature` im
-`state`-Event, das UI liest sie dort nie und holt die Taktart aus der kompilierten Partitur.
-Beim Festlegen der Statusmeldungen entscheiden, welche Seite recht behält.
+Der frühere Widerspruch um `beats_per_bar` und `time_signature` im Status ist entschieden:
+Das Status-Event führt `beats_per_bar` und `beat_unit` als **Zahlen** (kein `"3/4"`-String),
+und die Live-Ansicht liest die Taktart von dort statt aus der kompilierten Partitur.
 
 ## 8. Was ausdrücklich nicht gemacht wird
 
