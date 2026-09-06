@@ -167,6 +167,15 @@ Monitor stimmt die Rechnung nicht mehr, deshalb ist der Wert justierbar
 `calibrate`: Die Engine nimmt ihren eigenen Klick über ein Loopback-Kabel auf und rechnet die
 Abweichung von den Schlaggrenzen aus.
 
+**Offen: Kompensation pro Track statt global.** Der Wert gilt derzeit für alle Tracks
+gemeinsam. Das stimmt, solange jedes Signal denselben Weg nimmt — Mikrofon oder Instrument
+durch den AD-Wandler desselben Interfaces. Sobald ein Plugin-Host wie Cantabile über einen
+ASIO-Router danebenläuft, ist das falsch: Dessen Audio ist bereits digital und durchläuft
+keinen Wandler, hat also eine **kürzere** Eingangslatenz als das Mikrofon. Mit einem globalen
+Wert sitzt dann eine der beiden Quellen dauerhaft daneben — unhörbar, bis man die Spuren
+übereinanderlegt. Der Wert muss von global auf **pro Track** wandern, bevor mit externen
+Klangerzeugern ernsthaft aufgenommen wird.
+
 Fallstrick bei `calibrate`: **Die Onset-Erkennung ist pegelabhängig.** Bei −27 dBFS Loop-Peak
 zeigte sie 32 Samples Abweichung, bei −18 dBFS nur noch 7,2 — dieselbe Engine, dieselbe
 Latenz. Klick laut einpegeln (`--click-gain`), sonst kalibriert man ein Messartefakt ein.
