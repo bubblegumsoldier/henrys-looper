@@ -121,17 +121,6 @@ pub fn track_defs(score: &CompiledScore) -> Vec<TrackDef> {
         .collect()
 }
 
-/// German word for a target state, for the section table and the track lines.
-fn state_label(state: ScoreState) -> &'static str {
-    match state {
-        ScoreState::Record => "Aufnahme",
-        ScoreState::Overdub => "Overdub",
-        ScoreState::Play => "Wiedergabe",
-        ScoreState::Stop => "still",
-        ScoreState::HearThrough => "mithoeren",
-    }
-}
-
 /// The header: which section, where inside it, and what is armed.
 fn section_line(runner: &Runner, view: &super::runner::RunnerView, status: &Status) -> String {
     let head = match view.section {
@@ -195,7 +184,7 @@ fn track_line(
         "  {:<10} {} | Soll {:<11} | Ist {:<32} | Loop {:>10} | Ebenen {:>2} {:<20} | Pegel {} | Pan {:<5} | Lat {:<14} | Mithoeren {} | FX {:<16}",
         name,
         input_text(def.input),
-        state_label(want),
+        want.label(),
         engine_state,
         loop_text,
         ts.layers,

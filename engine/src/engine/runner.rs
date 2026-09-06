@@ -207,6 +207,10 @@ pub struct RunnerView {
 pub struct ArmedView {
     /// `voice_2` or `Ende`.
     pub label: String,
+    /// Index of the section the change leads to, or `None` when it leads past the last one. A
+    /// display needs the number rather than the name: two sections may carry the same id, and a
+    /// block preview highlights a card by position.
+    pub section: Option<usize>,
     pub bars: u32,
     pub beats: u32,
     /// Whether this is the count-in rather than a section change.
@@ -594,6 +598,10 @@ impl Runner {
             let (bars, beats) = self.sched.distance(pos, a.at);
             ArmedView {
                 label: self.target_label(a.target),
+                section: match a.target {
+                    Target::Section(index) => Some(index),
+                    Target::End => None,
+                },
                 bars,
                 beats,
                 count_in: self.phase == Phase::CountIn,

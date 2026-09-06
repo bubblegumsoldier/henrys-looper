@@ -10,17 +10,16 @@ import type {
   AppInfo,
   BandKindName,
   CalibrateOutcome,
-  CompileResult,
+  CompileOutcome,
   DelayNoteName,
   DeviceReport,
   EngineInfo,
   FxParamName,
   FxPresetName,
   FxSlotName,
-  LoadResult,
   Quantize,
+  ScoreLoaded,
   StartConfig,
-  StateEvent,
 } from "./types";
 
 /**
@@ -125,28 +124,36 @@ export const api = {
 };
 
 // ---------------------------------------------------------------------------------------------
-// Score commands - phase 3
+// The score - phase 3
 // ---------------------------------------------------------------------------------------------
+//
+// Two things here are unlike the rest of this file.
+//
+// * `compile` reaches nothing: no device, no engine, not even the audio thread. That is what lets
+//   the editor call it while somebody types, with the engine stopped or with a score playing.
+// * The four transport calls resolve with a **German sentence**, and that sentence is the answer,
+//   not a nicety. The runner does not fail: `goto` while a change is armed reports how far the
+//   armed change still is and sends not one command. A caller that ignores the string has silently
+//   thrown away the only feedback there is.
 
-/** Whether the Rust side understands `compile`, `load` and the transport. It does not, yet. */
-export const SCORE_AVAILABLE = false;
-
-export const SCORE_HINT = "Kommt mit der Partitur-Phase (Phase 3) - die Engine kennt diese Kommandos noch nicht.";
-
-function notYet<T>(): Promise<T> {
-  return Promise.reject(new ApiError(SCORE_HINT, 501));
-}
-
-/**
- * The score editor is written against these. They reject without touching the Rust side, so a
- * component that still calls one gets a single German sentence instead of a retry loop.
- */
 export const scoreApi = {
-  compile: (_yaml: string) => notYet<CompileResult>(),
-  load: (_yaml: string) => notYet<LoadResult>(),
-  transport: (_action: "start" | "stop_all" | "next") => notYet<{ ok: boolean; state: StateEvent }>(),
-  state: () => notYet<StateEvent>(),
-  score: () => notYet<{ yaml: string; score: unknown; stub: boolean }>(),
-  engines: () => notYet<{ current: string; connected: boolean; available: string[] }>(),
-  setEngine: (_engine: string) => notYet<{ current: string; connected: boolean }>(),
+  /**
+   * Translate a score without loading it. `ok` decides; `errors` carries **every** problem at
+   * once, each with line, column, message and often a suggestion.
+   */
+  compile: (yaml: string) => call<CompileOutcome>("score_compile", { yaml }),
+  /**
+   * Compile and hand to the runner. Needs a running engine whose tracks match the score and every
+   * track empty; tempo, time signature and the layer length then come from the score.
+   */
+  load: (yaml: string, countIn?: number) =>
+    call<ScoreLoaded>("score_load", { yaml, count_in: countIn ?? null }),
+  /** Count-in, then the first section. */
+  start: () => call<string>("score_start"),
+  /** The release button. Pressing it twice skips nothing. */
+  next: () => call<string>("score_next"),
+  /** Jump to a section, zero-based. Refused while a change is armed - the answer says so. */
+  goto: (section: number) => call<string>("score_goto", { section }),
+  /** Stop every track and end the run. */
+  stopAll: () => call<string>("score_stop_all"),
 };

@@ -16,8 +16,9 @@
 //! hands are on an instrument. Anything typed into a field is left alone.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../api";
+import { api, scoreApi } from "../api";
 import { currentStatus, structureSignature, useStatusSlice } from "../status";
+import { Transport } from "../components/Transport";
 import { Position } from "./Position";
 import { Setup } from "./Setup";
 import { TrackCard, type TrackActions } from "./TrackCard";
@@ -205,6 +206,25 @@ export function LiveView({ info }: { info: AppInfo | null }) {
 
   const tempo = useStatusSlice(pickTempo, sameTempo);
 
+  // --- the score, if one is loaded -----------------------------------------
+  // The strip above the cards, so a running score never costs the meters and the layers. What the
+  // score asks of each track travels down to the card next to what the engine really does - the
+  // CLI's `Soll | Ist`, which is the one comparison that catches a score drifting from reality.
+  const scoreLoaded = useStatusSlice((s) => s.score !== null);
+  const targetSignature = useStatusSlice((s) => (s.score?.tracks ?? []).map((t) => t.state).join("|"));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const targets = useMemo(() => currentStatus().score?.tracks ?? [], [targetSignature]);
+
+  /** Every score transport press answers with a German sentence; the runner never fails silently. */
+  const say = useCallback(
+    (work: () => Promise<string>) => {
+      work()
+        .then((message) => note(message, "engine"))
+        .catch((e) => fail((e as Error).message));
+    },
+    [note, fail],
+  );
+
   // --- keyboard ------------------------------------------------------------
   // Kept in refs so the listener is installed once and never sees a stale track list.
   const state = useRef({ tracks, selected, actions, click: tempo.click });
@@ -239,6 +259,10 @@ export function LiveView({ info }: { info: AppInfo | null }) {
     if (!running) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
+      // Shift belongs to the score transport (Shift+S stops the whole run). Without this guard a
+      // slipped Shift would turn "end the song" into "stop the selected track", which is the sort
+      // of neighbouring pair one must not have on stage.
+      if (e.shiftKey) return;
       const target = e.target as HTMLElement | null;
       if (target) {
         const tag = target.tagName;
@@ -381,6 +405,16 @@ export function LiveView({ info }: { info: AppInfo | null }) {
         </button>
       </header>
 
+      {scoreLoaded && (
+        <Transport
+          compact
+          loaded
+          onStart={() => say(() => scoreApi.start())}
+          onNext={() => say(() => scoreApi.next())}
+          onStopAll={() => say(() => scoreApi.stopAll())}
+        />
+      )}
+
       <Warnings />
       <Position />
       <Notes notes={notes} onClear={() => setNotes([])} />
@@ -415,6 +449,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
             onSelect={setSelected}
             actions={actions}
             defaultLatency={tempo.latencyFrames}
+            target={targets[t.index]?.state ?? null}
           />
         ))}
       </div>

@@ -43,17 +43,21 @@ use looper_engine::engine::command::{
 use looper_engine::engine::frame::{Channels, TrackInput};
 use looper_engine::engine::fx::{FxParam, FxPreset, FxSlot};
 use looper_engine::engine::live::MAX_LATENCY_FRAMES;
+use looper_engine::engine::live::TrackDef;
 use looper_engine::engine::process::{
     EngineConfig, EngineCore, OUT_CHANNELS, loop_capacity, max_latency, max_memory_bytes,
     spare_channels, spare_slots_for, spread_frame, total_channels,
 };
+use looper_engine::engine::runner::{DEFAULT_COUNT_IN_BARS, Phase, Runner, check_tracks};
 use looper_engine::engine::timeline::Timeline;
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
+use looper_engine::score::{ScoreError, compile_score};
 
 use crate::logfile::{self, log};
 use crate::proto::{
-    AppInfo, CalibrateConfig, CalibrateOutcome, ConfigInfo, DeviceInfo, DeviceReport, EngineInfo,
-    HostInfo, QuantizeName, StartConfig, StatusEvent, TrackConfig, dbfs, track_event,
+    AppInfo, CalibrateConfig, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
+    DeviceReport, EngineInfo, HostInfo, QuantizeName, ScoreLoaded, StartConfig, StatusEvent,
+    TrackConfig, dbfs, score_event, track_event,
 };
 use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tracks};
 
@@ -77,6 +81,8 @@ const SPARE_SLOTS: usize = 3;
 const RUNNING_TICK: Duration = Duration::from_millis(4);
 /// The same while nothing runs - then there is nothing to service and only requests matter.
 const IDLE_TICK: Duration = Duration::from_millis(200);
+/// The one sentence for "there is nothing to talk to yet", so every command says it the same way.
+const NO_ENGINE: &str = "Die Engine laeuft nicht. Erst starten.";
 
 // ---------------------------------------------------------------------------------------------
 // What the frontend can ask for
@@ -125,7 +131,48 @@ pub enum Action {
     FxPreset { track: usize, preset: FxPreset },
 }
 
+/// One press of the score transport.
+///
+/// Separate from [`Action`] because every one of these answers with a German sentence rather than
+/// with success or failure: the runner has no failure. `goto` while a change is armed reports how
+/// far that change still is and sends nothing, and that sentence is the whole answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoreAction {
+    /// Count-in, then the first section.
+    Start,
+    /// The release button: arm the change to the next section.
+    Next,
+    /// Jump to a section instead of taking the next one. Zero-based.
+    Goto(usize),
+    /// Stop every track and end the run.
+    StopAll,
+}
+
 impl Action {
+    /// Whether this action moves the transport of a track, which is the runner's business while a
+    /// score is playing.
+    ///
+    /// The split is deliberate and it is the whole rule: **the runner owns the transport, the human
+    /// owns the mix.** A manual `record` against a running score would put a take on the timeline
+    /// the runner did not schedule, and the runner's predicted loop geometry - the thing that makes
+    /// every later overdub land on the right sample - would be wrong from that moment on (see the
+    /// module comment of `looper_engine::engine::runner`). Panning, layer gains, mutes, the effect
+    /// chains and the click change nothing about where a take sits, so they stay available: that is
+    /// exactly the work one does *while* a score runs.
+    fn moves_transport(&self) -> bool {
+        matches!(
+            self,
+            Action::Record { .. }
+                | Action::Overdub { .. }
+                | Action::StopTrack { .. }
+                | Action::Play { .. }
+                | Action::ClearTrack { .. }
+                | Action::ClearAll
+                | Action::SetTempo { .. }
+                | Action::SetQuantize { .. }
+        )
+    }
+
     /// The track this action addresses, if it addresses one.
     fn track(&self) -> Option<usize> {
         match *self {
@@ -157,6 +204,8 @@ enum Request {
     Start(Box<StartConfig>, Sender<Result<EngineInfo, String>>),
     Stop(Sender<Result<(), String>>),
     Act(Action, Sender<Result<(), String>>),
+    ScoreLoad(String, Option<u32>, Sender<Result<ScoreLoaded, String>>),
+    ScoreAct(ScoreAction, Sender<Result<String, String>>),
     Calibrate(Box<CalibrateConfig>, Sender<Result<CalibrateOutcome, String>>),
 }
 
@@ -202,6 +251,14 @@ impl EngineHandle {
 
     pub fn act(&self, action: Action) -> Result<(), String> {
         self.call(|reply| Request::Act(action, reply))
+    }
+
+    pub fn score_load(&self, yaml: String, count_in: Option<u32>) -> Result<ScoreLoaded, String> {
+        self.call(|reply| Request::ScoreLoad(yaml, count_in, reply))
+    }
+
+    pub fn score_act(&self, action: ScoreAction) -> Result<String, String> {
+        self.call(|reply| Request::ScoreAct(action, reply))
     }
 
     pub fn calibrate(&self, config: CalibrateConfig) -> Result<CalibrateOutcome, String> {
@@ -307,10 +364,31 @@ fn handle(request: Request, session: &mut Option<Session>, app: &AppHandle) {
         Request::Act(action, reply) => {
             let result = match session.as_mut() {
                 Some(active) => active.apply(action),
-                None => Err("Die Engine laeuft nicht. Erst starten.".to_string()),
+                None => Err(NO_ENGINE.to_string()),
             };
             if let Err(e) = &result {
                 log!("Kommando abgelehnt: {e}");
+            }
+            let _ = reply.send(result);
+        }
+        Request::ScoreLoad(yaml, count_in, reply) => {
+            let result = match session.as_mut() {
+                Some(active) => active.load_score(&yaml, count_in),
+                None => Err(NO_ENGINE.to_string()),
+            };
+            match &result {
+                Ok(loaded) => log!("Partitur geladen: {}", loaded.message),
+                Err(e) => log!("Partitur nicht geladen: {e}"),
+            }
+            let _ = reply.send(result);
+        }
+        Request::ScoreAct(action, reply) => {
+            let result = match session.as_mut() {
+                Some(active) => active.score_act(action),
+                None => Err(NO_ENGINE.to_string()),
+            };
+            if let Ok(message) = &result {
+                log!("Partitur: {message}");
             }
             let _ = reply.send(result);
         }
@@ -459,6 +537,37 @@ pub fn app_info() -> AppInfo {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The score compiler
+// ---------------------------------------------------------------------------------------------
+
+/// Translate a score without loading it - what the editor calls while somebody types.
+///
+/// It opens nothing, needs no engine and does not touch the host thread, so it is safe at any time
+/// and while a score is playing. The compiler reports **every** problem at once, each with line,
+/// column and often a suggestion (see `looper_engine::score::error`), and that list travels
+/// unflattened: an editor needs the positions to put markers on, not a paragraph.
+pub fn compile(yaml: &str) -> CompileOutcome {
+    match compile_score(yaml) {
+        Ok(score) => CompileOutcome::ok(score),
+        Err(error) => CompileOutcome::failed(error.issues),
+    }
+}
+
+/// The same complaints as one German block, for a caller with nowhere to put markers - the load
+/// command, whose answer is a single sentence.
+fn render_issues(error: &ScoreError) -> String {
+    let mut out = format!(
+        "Die Partitur laesst sich nicht uebersetzen ({} Fehler):",
+        error.issues.len()
+    );
+    for issue in &error.issues {
+        out.push_str("\n  ");
+        out.push_str(&issue.to_string());
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------------------------
 // Calibration
 // ---------------------------------------------------------------------------------------------
 
@@ -585,6 +694,12 @@ struct Session {
     stats: Arc<HostStats>,
     scheduler: Scheduler,
     tracks: Vec<TrackUi>,
+    /// The engine's track layout as it was resolved at start. Kept because a score is checked
+    /// against it (`check_tracks`) and that check compares names *and* inputs, which the display
+    /// mirror above does not carry.
+    defs: Vec<TrackDef>,
+    /// The loaded score, or `None`. It owns the whole transport while it is there.
+    runner: Option<Runner>,
     info: EngineInfo,
     /// Newest snapshot and when it arrived, for the position estimate.
     last: Option<(Status, Instant)>,
@@ -826,6 +941,8 @@ impl Session {
                     latency: d.latency,
                 })
                 .collect(),
+            defs,
+            runner: None,
             info,
             last: None,
             last_emit: Instant::now() - EMIT_INTERVAL,
@@ -880,6 +997,19 @@ impl Session {
                 ui.gains.truncate(layers);
             }
             self.last = Some((status, Instant::now()));
+        }
+
+        // The runner's turn of the control loop. It is driven by the position of the newest
+        // snapshot, not by an estimate: this is where an armed change *becomes* the sounding
+        // section and where the one untimed command - monitoring - is sent, so it must not run
+        // ahead of the audio thread.
+        if let Some((status, _)) = self.last
+            && self.runner.is_some()
+        {
+            if let Some(runner) = self.runner.as_mut() {
+                runner.tick(status.pos);
+            }
+            self.pump_runner();
         }
 
         // The only place layer buffers are allocated, zeroed and dropped.
@@ -937,10 +1067,139 @@ impl Session {
             fifo_overruns: stats.overruns.load(Ordering::Relaxed),
             other_errors: stats.other_errors.load(Ordering::Relaxed),
             max_callback_ms: stats.cb_nanos_max.load(Ordering::Relaxed) as f64 / 1e6,
+            score: self.runner.as_ref().map(|runner| {
+                let names: Vec<String> = self.tracks.iter().map(|ui| ui.name.clone()).collect();
+                score_event(&runner.score().title, &runner.view(status.pos), &names)
+            }),
             ignored_commands: status.ignored_commands,
             spares: status.spares_total(),
             message: self.message.clone(),
         }
+    }
+
+    // ---- the score -----------------------------------------------------------------------
+    //
+    // The runner is the whole of phase 3 and it lives in the engine library; everything below is
+    // plumbing. The one rule that is decided *here* rather than there is what a score may be loaded
+    // onto, and it is strict on purpose - see `load_score`.
+
+    /// Hand the runner's freshly produced commands to the engine, oldest first.
+    fn pump_runner(&mut self) {
+        let Some(runner) = self.runner.as_mut() else {
+            return;
+        };
+        for command in runner.take_commands() {
+            if let Err(e) = self.cmd.send(command) {
+                self.message = Some(e);
+                return;
+            }
+        }
+    }
+
+    /// True while the score owns the transport: it has been started and is not over.
+    fn score_is_playing(&self) -> bool {
+        self.runner
+            .as_ref()
+            .is_some_and(|r| matches!(r.phase(), Phase::CountIn | Phase::Running))
+    }
+
+    /// Compile a score and load it onto this session.
+    ///
+    /// **Only onto an empty session, and that is not tidiness.** The runner starts from the belief
+    /// that every track is silent and holds nothing (`TrackRun` in
+    /// `looper_engine::engine::runner`), and it plans overdubs against a loop geometry it predicts
+    /// from the takes it issued itself. A loop somebody recorded by hand beforehand is invisible to
+    /// that prediction, so the first overdub of the score would be quantised to a grid that does
+    /// not exist. Refusing is one sentence; the alternative is a layer that sits a few frames off
+    /// and is only noticed on the recording.
+    ///
+    /// The musical grid comes from the score, not from the setup screen: tempo, time signature and
+    /// the buffer length every layer is allocated at (the longest section). That is the same thing
+    /// the `score` subcommand does by building the engine out of the score - here the device stays
+    /// open and only the grid moves, which the engine allows precisely because nothing is recorded.
+    fn load_score(&mut self, yaml: &str, count_in: Option<u32>) -> Result<ScoreLoaded, String> {
+        if self.score_is_playing() {
+            return Err(
+                "Es laeuft schon eine Partitur. Erst \"Alles stoppen\" - ein Wechsel mitten im Lauf \
+                 wuerde die schon armierten Kommandos im Audio-Thread stehen lassen, die keiner \
+                 mehr zurueckholen kann."
+                    .to_string(),
+            );
+        }
+        let score = compile_score(yaml).map_err(|error| render_issues(&error))?;
+
+        // The layout check comes from the engine library and carries its own German instructions.
+        check_tracks(&score, &self.defs)?;
+
+        if let Some(busy) = self.first_non_empty_track() {
+            return Err(format!(
+                "Track \"{busy}\" ist nicht leer. Eine Partitur wird nur auf eine leere Sitzung \
+                 geladen - der Runner plant jeden Overdub gegen die Loop-Geometrie der Takes, die \
+                 er selbst geschickt hat, und einen von Hand aufgenommenen Loop sieht er nicht. \
+                 Erst \"Alles leeren\", dann laden."
+            ));
+        }
+
+        let bars = score.sections.iter().map(|s| s.bars).max().unwrap_or(1).max(1);
+        let signature = score.signature();
+        self.reconfigure(score.bpm, signature.beats_per_bar, signature.beat_unit, bars)?;
+
+        // Monitoring belongs to the runner from now on (`hear_through` and the takes switch it,
+        // `monitor:` in the score says which tracks may have it at all). The runner's picture starts
+        // at "everything off", so the engine is put into that state rather than left wherever the
+        // setup screen happened to leave it - otherwise a track started with monitoring on would
+        // stay on for the whole score, because the runner would never see a difference to send.
+        for track in 0..self.tracks.len() {
+            self.cmd.send(Command::SetMonitor { track, on: false })?;
+        }
+
+        let count_in = count_in.unwrap_or(DEFAULT_COUNT_IN_BARS);
+        let title = score.title.clone();
+        let sections = score.sections.len();
+        let runner = Runner::new(score.clone(), self.scheduler.timeline, self.info.buffer_frames)?
+            .with_count_in(count_in);
+        self.runner = Some(runner);
+
+        let message = format!(
+            "Partitur \"{title}\" geladen: {sections} Sektionen, {:.1} BPM, {}, laengste Sektion \
+             {bars} Takte, {count_in} Takt{} Einzaehler.",
+            score.bpm,
+            score.time_signature,
+            if count_in == 1 { "" } else { "e" },
+        );
+        self.message = Some(message.clone());
+        Ok(ScoreLoaded { score, message })
+    }
+
+    /// One press of the score transport. The answer is always a German sentence - see
+    /// [`ScoreAction`].
+    fn score_act(&mut self, action: ScoreAction) -> Result<String, String> {
+        let est = self.estimated_pos();
+        let Some(runner) = self.runner.as_mut() else {
+            return Err(
+                "Es ist keine Partitur geladen. Erst im Reiter \"Partitur\" eine laden.".to_string(),
+            );
+        };
+        let message = match action {
+            ScoreAction::Start => runner.start(est),
+            ScoreAction::Next => runner.next(est),
+            ScoreAction::Goto(index) => runner.goto(index, est),
+            ScoreAction::StopAll => runner.stop_all(est),
+        };
+        self.pump_runner();
+        self.message = Some(message.clone());
+        Ok(message)
+    }
+
+    /// The name of the first track that holds something, for the refusal above.
+    fn first_non_empty_track(&self) -> Option<String> {
+        let (status, _) = self.last?;
+        status
+            .tracks()
+            .iter()
+            .take(self.tracks.len())
+            .position(|t| t.state != TrackState::Empty)
+            .map(|i| self.tracks[i].name.clone())
     }
 
     fn status_of(&self, track: usize) -> TrackStatus {
@@ -1013,6 +1272,14 @@ impl Session {
     fn apply(&mut self, action: Action) -> Result<(), String> {
         if let Some(track) = action.track() {
             self.check_track(track)?;
+        }
+        if action.moves_transport() && self.score_is_playing() {
+            return Err(
+                "Die Partitur laeuft - sie schickt die Aufnahme- und Wiedergabekommandos selbst. \
+                 Von Hand geht das erst nach \"Alles stoppen\". Pegel, Panorama, Ebenen und \
+                 Effekte lassen sich waehrenddessen weiter einstellen."
+                    .to_string(),
+            );
         }
         let est = self.estimated_pos();
 
@@ -1234,6 +1501,26 @@ impl Session {
     /// A new tempo redefines what every sample position means, so it is only accepted while every
     /// track is empty. The German sentence for the refusal is the engine's own.
     fn set_tempo(&mut self, bpm: f64, beats_per_bar: u32, beat_unit: u32) -> Result<(), String> {
+        self.reconfigure(bpm, beats_per_bar, beat_unit, self.scheduler.bars)?;
+        self.message = Some(format!("Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}."));
+        Ok(())
+    }
+
+    /// The musical grid: tempo, time signature and the number of bars every layer buffer is
+    /// allocated at.
+    ///
+    /// All four move together because they are one decision. A tempo change alone already reallocs
+    /// every layer buffer (a bar is a different number of frames), and loading a score changes the
+    /// bar count for the same reason - the longest section of a score is the longest loop any take
+    /// in it can define. Only accepted while every track is empty, and the refusal is the engine's
+    /// own sentence.
+    fn reconfigure(
+        &mut self,
+        bpm: f64,
+        beats_per_bar: u32,
+        beat_unit: u32,
+        bars: u32,
+    ) -> Result<(), String> {
         let busy = self
             .last
             .map(|(s, _)| s.tracks().iter().any(|t| t.state != TrackState::Empty))
@@ -1244,18 +1531,19 @@ impl Session {
                 .unwrap_or("Tempo abgelehnt.")
                 .to_string());
         }
+        let bars = bars.max(1);
         let timeline = build_timeline(
             self.info.sample_rate,
             bpm,
             beats_per_bar,
             beat_unit,
-            self.scheduler.bars,
+            bars,
             max_latency(
                 self.info.latency_frames,
                 self.tracks.iter().map(|ui| ui.latency),
             ),
         )?;
-        let layer_frames = loop_capacity(&timeline, self.scheduler.bars);
+        let layer_frames = loop_capacity(&timeline, bars);
         self.cmd.send(Command::SetTempo {
             bpm,
             signature: timeline.signature(),
@@ -1265,8 +1553,8 @@ impl Session {
         // dropped here and the engine hands back what it still holds.
         self.pool.set_layer_frames(layer_frames as usize);
         self.scheduler.timeline = timeline;
+        self.scheduler.bars = bars;
         self.update_timeline_info(&timeline, layer_frames);
-        self.message = Some(format!("Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}."));
         Ok(())
     }
 
@@ -1276,6 +1564,7 @@ impl Session {
         self.info.beats_per_bar = timeline.signature().beats_per_bar;
         self.info.beat_unit = timeline.signature().beat_unit;
         self.info.samples_per_beat = timeline.samples_per_beat();
+        self.info.bars = self.scheduler.bars;
         self.info.loop_samples = loop_samples;
         self.info.loop_seconds = timeline.samples_to_secs(loop_samples);
         self.info.layer_capacity = layer_frames;
@@ -1364,6 +1653,99 @@ mod tests {
         };
         assert!(err.contains("gibtsnicht"), "{err}");
         assert!(err.contains("Verfuegbar"), "die Meldung zaehlt die Hosts auf: {err}");
+    }
+
+    /// The transport belongs to the runner while a score plays, the mix belongs to the human. This
+    /// is the line, and it is the reason the runner's predicted loop geometry stays exact.
+    #[test]
+    fn the_runner_owns_the_transport_and_the_human_owns_the_mix() {
+        for action in [
+            Action::Record { track: 0 },
+            Action::Overdub { track: 0 },
+            Action::StopTrack { track: 0 },
+            Action::Play { track: 0 },
+            Action::ClearTrack { track: 0 },
+            Action::ClearAll,
+            Action::SetTempo {
+                bpm: 120.0,
+                beats_per_bar: 4,
+                beat_unit: 4,
+            },
+            Action::SetQuantize {
+                quantize: Quantize::Bar,
+            },
+        ] {
+            assert!(action.moves_transport(), "{action:?} verschiebt Takes");
+        }
+        for action in [
+            Action::SetPan {
+                track: 0,
+                pan: 0.5,
+            },
+            Action::SetMonitor {
+                track: 0,
+                on: true,
+            },
+            Action::SetClick { on: false },
+            Action::LayerGain {
+                track: 0,
+                layer: 0,
+                gain: 0.5,
+            },
+            Action::LayerMute {
+                track: 0,
+                layer: 0,
+                muted: true,
+            },
+            Action::FxBypass { track: 0, on: true },
+            Action::FxPreset {
+                track: 0,
+                preset: FxPreset::Voice,
+            },
+            Action::SetTrackLatency {
+                track: 0,
+                latency: TrackLatency::INHERITED,
+            },
+        ] {
+            assert!(
+                !action.moves_transport(),
+                "{action:?} gehoert weiter dem Menschen, auch waehrend die Partitur laeuft"
+            );
+        }
+    }
+
+    /// The editor's own command: a score in, either the compiled form or every complaint at once.
+    /// Nothing here opens a device, which is what lets it run while somebody types.
+    #[test]
+    fn compiling_a_score_needs_no_device_and_reports_everything_at_once() {
+        let good = "title: T\nbpm: 100\ntracks:\n  a: {input: 1}\nsections:\n  - id: eins\n    bars: 4\n    tracks:\n      a: record\n";
+        let outcome = compile(good);
+        assert!(outcome.ok);
+        assert!(outcome.errors.is_empty());
+        assert_eq!(outcome.score.expect("Partitur").sections.len(), 1);
+
+        // Two mistakes, two complaints - a compiler that stopped at the first would turn one pass
+        // through the file into two.
+        let bad = "title: T\nbpm: 100\ntracks:\n  a: {input: 1}\nsections:\n  - id: eins\n    bars: 4\n    tracks:\n      b: record\n      a: recrd\n";
+        let outcome = compile(bad);
+        assert!(!outcome.ok);
+        assert!(outcome.score.is_none());
+        assert_eq!(outcome.errors.len(), 2, "{:?}", outcome.errors);
+        assert!(outcome.errors.iter().all(|i| i.line.is_some()));
+    }
+
+    /// The load command has nowhere to put markers, so it says the same thing as one German block -
+    /// with the positions in it, so it can be pasted back into the editor.
+    #[test]
+    fn the_load_command_renders_every_complaint_into_one_german_block() {
+        let error = compile_score("bpm: 100\n").expect_err("ohne tracks und sections");
+        let text = render_issues(&error);
+        assert!(text.starts_with("Die Partitur laesst sich nicht uebersetzen"), "{text}");
+        assert_eq!(
+            text.lines().count(),
+            1 + error.issues.len(),
+            "Kopfzeile plus eine Zeile je Fehler: {text}"
+        );
     }
 
     /// The one fact about the build that decides whether the app is usable at all.

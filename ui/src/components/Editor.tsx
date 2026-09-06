@@ -6,12 +6,12 @@ import { bracketMatching, indentOnInput } from "@codemirror/language";
 import { yaml } from "@codemirror/lang-yaml";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { lintGutter, setDiagnostics, type Diagnostic } from "@codemirror/lint";
-import type { ScoreErr } from "../types";
+import type { ScoreIssue } from "../types";
 
 interface Props {
   value: string;
   onChange: (v: string) => void;
-  errors: ScoreErr[];
+  errors: ScoreIssue[];
   onCompile: () => void;
   onLoad: () => void;
 }

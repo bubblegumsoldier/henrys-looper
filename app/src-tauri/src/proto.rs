@@ -34,8 +34,10 @@ use looper_engine::engine::command::TrackStatus;
 use looper_engine::engine::fx::{
     BandKind, DelayNote, EQ_BANDS, FxParam, FxPreset, FxSlot, FxStatus,
 };
+use looper_engine::engine::runner::{Phase, RunnerView};
 use looper_engine::engine::schedule::{Lead, PendingKind, Quantize};
 use looper_engine::engine::track::{TrackLatency, TrackState};
+use looper_engine::score::{CompiledScore, ScoreIssue, TrackState as ScoreState};
 
 /// dBFS for display, or `None` at digital silence.
 pub fn dbfs(linear: f32) -> Option<f64> {
@@ -517,6 +519,12 @@ pub struct StatusEvent {
     pub output_peaks: Vec<f32>,
     pub tracks: Vec<TrackStatusEvent>,
 
+    /// What the runner is doing, or `null` while no score is loaded. It rides along in the ordinary
+    /// status rather than in an event of its own, so the section, the bar inside it and the levels
+    /// on screen always belong to the same instant - two streams would drift by a frame and the
+    /// stage screen would show a bar number from one snapshot next to a meter from the next.
+    pub score: Option<ScoreStatusEvent>,
+
     /// Buffer underruns reported by cpal. Anything but 0 means the audio was interrupted.
     pub xruns: u64,
     /// Output callbacks that found the input FIFO short. Costs a little delay, no alignment.
@@ -563,6 +571,7 @@ impl StatusEvent {
             output_dbfs: None,
             output_peaks: vec![0.0, 0.0],
             tracks: Vec::new(),
+            score: None,
             xruns: 0,
             fifo_underruns: 0,
             fifo_overruns: 0,
@@ -975,6 +984,190 @@ pub fn fx_event(fx: &FxStatus, sample_rate: u32) -> FxEvent {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The score: compiler output, compiler complaints, and what the runner is doing
+// ---------------------------------------------------------------------------------------------
+//
+// Two things here break the pattern of the rest of this file, and both on purpose.
+//
+// * [`CompiledScore`] and [`ScoreIssue`] are sent **as they are**, without a wire twin. They are
+//   the only types in the engine library that already carry `serde` derives, because the compiled
+//   score has been a serialisable contract towards a UI since the day it was written (see the
+//   module comment of `looper_engine::score::model`). Copying them here would be a second
+//   description of the same format that starts drifting on the first added field.
+// * The runner's buttons answer with a **German sentence, never with an error**. `goto` while a
+//   change is armed is not a failure - the runner says how far the armed change still is and does
+//   nothing, which is the honest answer and the one the musician has to read. So the score
+//   commands return `String`, and the same sentence also travels in the status event.
+
+/// What the runner is doing, mirroring [`Phase`] one to one.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseName {
+    /// Score loaded, nothing scheduled.
+    Idle,
+    /// The count-in is running; the first section is armed.
+    CountIn,
+    /// A section is sounding.
+    Running,
+    /// The last section is over.
+    Finished,
+    /// The musician stopped everything.
+    Stopped,
+}
+
+impl From<Phase> for PhaseName {
+    fn from(phase: Phase) -> Self {
+        match phase {
+            Phase::Idle => PhaseName::Idle,
+            Phase::CountIn => PhaseName::CountIn,
+            Phase::Running => PhaseName::Running,
+            Phase::Finished => PhaseName::Finished,
+            Phase::Stopped => PhaseName::Stopped,
+        }
+    }
+}
+
+/// A change that is scheduled but has not taken effect yet.
+///
+/// "scharf" on its own does not say *when*, which is the same reason the per-track count-in carries
+/// `pending_bars` and `pending_beats`. `section` is the index rather than the name, because a block
+/// preview highlights a card by position and two sections may carry the same id.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ArmedEvent {
+    /// `voice_2`, or `Ende` when the change leads past the last section.
+    pub label: String,
+    /// Zero-based index of the section it leads to; `null` for the end of the score.
+    pub section: Option<usize>,
+    /// Whole bars still to go.
+    pub bars: u32,
+    /// Beats on top of that. Inside the last bar `bars` is 0 and this counts down.
+    pub beats: u32,
+    /// True while this is the count-in rather than a section change.
+    pub count_in: bool,
+    /// The whole thing as one German sentence, ready to print: `Wechsel armiert: "voice_2" in 5
+    /// Takten`.
+    pub text: String,
+}
+
+/// What the score asks of one track in the section that is sounding.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ScoreTargetEvent {
+    /// Zero-based, the same index the `tracks` array of the status event uses.
+    pub index: usize,
+    pub name: String,
+    pub state: ScoreState,
+    /// German word for it, ready to print - same idea as `state_label`.
+    pub label: String,
+}
+
+/// The runner as one snapshot, carried inside every status event while a score is loaded.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct ScoreStatusEvent {
+    pub title: String,
+    pub phase: PhaseName,
+    /// German word for the phase, ready to print.
+    pub phase_label: String,
+    /// Zero-based index of the section that is sounding, or `null` before the first one and after
+    /// the last.
+    pub section: Option<usize>,
+    /// Its id, or an empty string when none is sounding.
+    pub section_id: String,
+    pub section_count: usize,
+    /// Length of the sounding section in bars.
+    pub bars_total: u32,
+    /// One-based bar inside the current pass of it; 0 when nothing is sounding.
+    pub bar: u32,
+    /// One-based beat inside that bar.
+    pub beat: u32,
+    /// One-based pass number - a section without `autorelease` repeats until the release button.
+    pub pass: u32,
+    /// Target state per track, in track order.
+    pub tracks: Vec<ScoreTargetEvent>,
+    /// The armed change, or `null` when nothing is armed.
+    pub armed: Option<ArmedEvent>,
+}
+
+/// Build the runner's part of a status event. `names` is the engine's track list, which
+/// [`looper_engine::engine::runner::check_tracks`] has already matched against the score.
+pub fn score_event(title: &str, view: &RunnerView, names: &[String]) -> ScoreStatusEvent {
+    ScoreStatusEvent {
+        title: title.to_string(),
+        phase: view.phase.into(),
+        phase_label: view.phase.label().to_string(),
+        section: view.section,
+        section_id: view.section_id.clone(),
+        section_count: view.section_count,
+        bars_total: view.bars_total,
+        bar: view.bar,
+        beat: view.beat,
+        pass: view.pass,
+        tracks: view
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(index, &state)| ScoreTargetEvent {
+                index,
+                name: names.get(index).cloned().unwrap_or_default(),
+                state,
+                label: state.label().to_string(),
+            })
+            .collect(),
+        armed: view.armed.as_ref().map(|a| ArmedEvent {
+            label: a.label.clone(),
+            section: a.section,
+            bars: a.bars,
+            beats: a.beats,
+            count_in: a.count_in,
+            text: a.text(),
+        }),
+    }
+}
+
+/// Answer of `score_compile`: the compiled score **or** everything the compiler found.
+///
+/// Not an untagged union: `ok` decides, and the other two fields are always present so a frontend
+/// can read them without a type guard. The issue list is what the editor turns into markers, which
+/// is why it keeps line, column, message and suggestion apart instead of one formatted string.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct CompileOutcome {
+    pub ok: bool,
+    /// The compiled score, or `null` when the compiler found something.
+    pub score: Option<CompiledScore>,
+    /// Every problem at once, sorted by position. Empty when `ok`.
+    pub errors: Vec<ScoreIssue>,
+}
+
+impl CompileOutcome {
+    pub fn ok(score: CompiledScore) -> Self {
+        Self {
+            ok: true,
+            score: Some(score),
+            errors: Vec::new(),
+        }
+    }
+
+    pub fn failed(errors: Vec<ScoreIssue>) -> Self {
+        Self {
+            ok: false,
+            score: None,
+            errors,
+        }
+    }
+}
+
+/// Answer of `score_load`: what the runner now holds, plus the German sentence about it.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct ScoreLoaded {
+    pub score: CompiledScore,
+    pub message: String,
+}
+
+// ---------------------------------------------------------------------------------------------
 // Calibration and app info
 // ---------------------------------------------------------------------------------------------
 
@@ -1316,6 +1509,7 @@ mod tests {
                 "running",
                 "sample_rate",
                 "samples_per_beat",
+                "score",
                 "seconds",
                 "spares",
                 "tracks",
@@ -1325,6 +1519,11 @@ mod tests {
         assert_eq!(object["running"], json!(false));
         assert_eq!(object["tracks"], json!([]));
         assert_eq!(object["message"], Value::Null);
+        assert_eq!(
+            object["score"],
+            Value::Null,
+            "ohne geladene Partitur ist das Feld leer, nicht ein leeres Objekt"
+        );
     }
 
     #[test]
@@ -1684,6 +1883,214 @@ mod tests {
         assert_eq!(config.click_gain, 1.0);
         assert_eq!(config.for_track, 1, "gemessen wird der erste Track");
         assert!(config.tracks.is_empty(), "ohne Angabe gilt die Standardbelegung");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The score
+    // ------------------------------------------------------------------------------------------
+
+    /// A score with one typo in it, so the compiler has something to complain about with a
+    /// position and a suggestion.
+    const BROKEN: &str = "title: Test\n\
+                          bpm: 141\n\
+                          time_signature: 3/4\n\
+                          tracks:\n\
+                          \x20 gitarre: {input: 2}\n\
+                          sections:\n\
+                          \x20 - id: eins\n\
+                          \x20   bars: 8\n\
+                          \x20   tracks:\n\
+                          \x20     gitare: record\n";
+
+    fn a_view() -> RunnerView {
+        RunnerView {
+            phase: Phase::Running,
+            section: Some(1),
+            section_id: "voice_1".to_string(),
+            section_count: 5,
+            bars_total: 8,
+            bar: 3,
+            beat: 2,
+            pass: 1,
+            tracks: vec![ScoreState::Play, ScoreState::Record],
+            armed: Some(looper_engine::engine::runner::ArmedView {
+                label: "voice_2".to_string(),
+                section: Some(2),
+                bars: 5,
+                beats: 0,
+                count_in: false,
+            }),
+        }
+    }
+
+    /// The stage screen prints the section, the bar inside it, the pass and - in big letters - what
+    /// is armed and how far away it is. All of that has to survive the conversion, including the
+    /// index of the armed section, which is what highlights the right card in the block preview.
+    #[test]
+    fn the_runner_reaches_the_frontend_as_section_bar_and_armed_change() {
+        let names = vec!["gitarre".to_string(), "voice".to_string()];
+        let event = score_event("Henry 3/4", &a_view(), &names);
+        assert_eq!(event.title, "Henry 3/4");
+        assert_eq!(event.phase, PhaseName::Running);
+        assert_eq!(event.phase_label, "laeuft");
+        assert_eq!(event.section, Some(1));
+        assert_eq!(event.section_id, "voice_1");
+        assert_eq!(event.section_count, 5);
+        assert_eq!(event.bar, 3);
+        assert_eq!(event.bars_total, 8);
+        assert_eq!(event.beat, 2);
+        assert_eq!(event.pass, 1);
+
+        assert_eq!(event.tracks.len(), 2);
+        assert_eq!(event.tracks[0].index, 0);
+        assert_eq!(event.tracks[0].name, "gitarre");
+        assert_eq!(event.tracks[0].state, ScoreState::Play);
+        assert_eq!(event.tracks[0].label, "Wiedergabe");
+        assert_eq!(event.tracks[1].label, "Aufnahme");
+
+        let armed = event.armed.as_ref().expect("ein Wechsel ist armiert");
+        assert_eq!(armed.section, Some(2), "die Karte, die gleich dran ist");
+        assert_eq!(armed.bars, 5);
+        assert!(!armed.count_in);
+        assert_eq!(armed.text, "Wechsel armiert: \"voice_2\" in 5 Takten");
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["phase"], json!("running"));
+        assert_eq!(value["tracks"][1]["state"], json!("record"));
+        assert_eq!(value["armed"]["section"], json!(2));
+    }
+
+    /// The keys the score view is written against, spelled this way.
+    #[test]
+    fn the_score_part_of_the_status_has_exactly_the_documented_keys() {
+        let event = score_event("t", &a_view(), &["gitarre".to_string()]);
+        let value = serde_json::to_value(&event).unwrap();
+        let mut keys: Vec<&str> = value.as_object().expect("Objekt").keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "armed",
+                "bar",
+                "bars_total",
+                "beat",
+                "pass",
+                "phase",
+                "phase_label",
+                "section",
+                "section_count",
+                "section_id",
+                "title",
+                "tracks",
+            ]
+        );
+        let mut armed: Vec<&str> = value["armed"]
+            .as_object()
+            .expect("Objekt")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        armed.sort_unstable();
+        assert_eq!(armed, ["bars", "beats", "count_in", "label", "section", "text"]);
+        // A track the engine does not know about must not produce a hole in the array.
+        assert_eq!(value["tracks"][1]["name"], json!(""));
+    }
+
+    /// Every phase travels as a snake_case string and keeps the German word beside it - the
+    /// frontend switches on the one and prints the other, exactly as with the track states.
+    #[test]
+    fn phases_serialise_as_snake_case_and_keep_their_german_word() {
+        for (phase, wire, label) in [
+            (Phase::Idle, "idle", "bereit"),
+            (Phase::CountIn, "count_in", "Einzaehler"),
+            (Phase::Running, "running", "laeuft"),
+            (Phase::Finished, "finished", "Ende"),
+            (Phase::Stopped, "stopped", "gestoppt"),
+        ] {
+            let name: PhaseName = phase.into();
+            assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
+            assert_eq!(phase.label(), label);
+        }
+    }
+
+    /// The five target states of a score, in the spelling the YAML uses and with the German word
+    /// the block preview prints.
+    #[test]
+    fn score_target_states_travel_as_the_yaml_spells_them() {
+        for (state, wire, label) in [
+            (ScoreState::Record, "record", "Aufnahme"),
+            (ScoreState::Overdub, "overdub", "Overdub"),
+            (ScoreState::Play, "play", "Wiedergabe"),
+            (ScoreState::Stop, "stop", "still"),
+            (ScoreState::HearThrough, "hear_through", "mithoeren"),
+        ] {
+            assert_eq!(serde_json::to_value(state).unwrap(), json!(wire));
+            assert_eq!(state.as_str(), wire, "Wire-Name und YAML-Schreibweise sind dasselbe");
+            assert_eq!(state.label(), label);
+        }
+    }
+
+    /// The heart of the editor: a compiler complaint has to arrive with its **position** intact, in
+    /// separate fields. One formatted string would be a paragraph the editor cannot put a marker
+    /// on, and the suggestion has to stay apart so it can be rendered differently.
+    #[test]
+    fn a_compiler_complaint_reaches_the_editor_with_line_column_and_suggestion() {
+        let error = looper_engine::score::compile_score(BROKEN).expect_err("'gitare' gibt es nicht");
+        let outcome = CompileOutcome::failed(error.issues);
+        assert!(!outcome.ok);
+        assert!(outcome.score.is_none());
+        assert_eq!(outcome.errors.len(), 1);
+
+        let issue = &outcome.errors[0];
+        assert_eq!(issue.line, Some(10), "die Zeile mit dem Tippfehler");
+        assert!(issue.column.is_some());
+        assert!(issue.message.contains("gitare"), "{}", issue.message);
+        assert_eq!(
+            issue.suggestion.as_deref(),
+            Some("meintest du 'gitarre'?"),
+            "der Vorschlag ist ein eigenes Feld"
+        );
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["ok"], json!(false));
+        assert_eq!(value["score"], Value::Null);
+        let mut keys: Vec<&str> = value["errors"][0]
+            .as_object()
+            .expect("Objekt")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["column", "line", "message", "suggestion"]);
+    }
+
+    /// A score that compiles arrives as the compiled form itself - the same structure the runner
+    /// walks, so the block preview and the runner can never disagree about what a section says.
+    #[test]
+    fn a_score_that_compiles_arrives_as_the_compiled_form() {
+        let good = BROKEN.replace("gitare:", "gitarre:");
+        let outcome = match looper_engine::score::compile_score(&good) {
+            Ok(score) => CompileOutcome::ok(score),
+            Err(e) => panic!("sollte uebersetzen: {e}"),
+        };
+        assert!(outcome.ok);
+        assert!(outcome.errors.is_empty());
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["score"]["title"], json!("Test"));
+        assert_eq!(value["score"]["bpm"], json!(141.0));
+        assert_eq!(value["score"]["beats_per_bar"], json!(3));
+        assert_eq!(value["score"]["beat_unit"], json!(4));
+        assert_eq!(value["score"]["time_signature"], json!("3/4"));
+        assert_eq!(value["score"]["tracks"][0]["name"], json!("gitarre"));
+        assert_eq!(value["score"]["tracks"][0]["input"], json!(2), "eins-basiert, wie beschriftet");
+        assert_eq!(value["score"]["tracks"][0]["input_channel"], json!(1), "null-basiert fuer die Engine");
+        assert_eq!(value["score"]["sections"][0]["id"], json!("eins"));
+        assert_eq!(value["score"]["sections"][0]["bars"], json!(8));
+        // Every section names every track - the compiler fills the gaps, so the preview never has
+        // to guess what an unmentioned track is doing.
+        assert_eq!(value["score"]["sections"][0]["tracks"]["gitarre"], json!("record"));
+        assert_eq!(value["score"]["sections"][0]["source_line"], json!(7));
     }
 
     #[test]

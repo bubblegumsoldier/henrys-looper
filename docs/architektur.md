@@ -690,6 +690,32 @@ Springen, `s` für Stopp aller Tracks, `k` Klick, `q` beenden.
 | `engine/src/engine/score_cli.rs` | `score`-Subcommand: Anzeige und Tastatur, sonst nichts |
 | `engine/src/engine/schedule.rs` | unverändert die *einzige* Stelle, an der Kommandos entstehen — der Runner benutzt die neuen `*_at`-Einstiege, die eine schon bekannte Position hineinreichen statt sie ein zweites Mal zu quantisieren |
 | `engine/src/engine/live.rs` | `start_engine` baut Engine und Streams; `live` und `score` teilen sich das, damit die Startreihenfolge (Eingang vor Ausgang) nur an einer Stelle steht |
+| `app/src-tauri/src/main.rs` | die Kommandos `score_compile`, `score_load`, `score_start`, `score_next`, `score_goto`, `score_stop_all` |
+| `app/src-tauri/src/host.rs` | `Session` haelt den Runner, tickt ihn je Kontrollrunde und schickt seine Kommandos weiter |
+| `ui/src/components/` | Editor (CodeMirror mit Lint aus den echten Compiler-Fehlern), Blockvorschau, Transport |
+
+### Was die Oberflaeche daraus macht
+
+Der Runner-Zustand faehrt im **Status-Event** mit, als Feld `score` (Phase, Sektion mit Index und
+Name, Takt in der Sektion, Durchlauf, armierter Wechsel samt Vorlauf, Sollzustand je Track). Kein
+eigener Stream: Sektion, Takt und Pegel muessen aus demselben Augenblick stammen, sonst steht auf
+dem Buehnenbildschirm eine Taktzahl aus einem Schnappschuss neben einem Pegel aus dem naechsten.
+
+Die vier Transport-Kommandos antworten mit einem **deutschen Satz statt mit Erfolg oder Fehler** —
+der Runner scheitert nicht, er erklaert. `score_goto` bei armiertem Wechsel meldet, wie weit der
+armierte Wechsel noch ist, und schickt kein einziges Kommando; dieser Satz *ist* die Antwort.
+
+Geladen wird nur auf eine **leere** Sitzung, deren Tracks zur Partitur passen (`check_tracks`).
+Grund ist die Vorhersage der Loop-Geometrie: Der Runner startet mit der Annahme, jeder Track sei
+still und leer, und plant Overdubs gegen das Raster der Takes, die er selbst geschickt hat. Einen
+von Hand aufgenommenen Loop sieht er nicht. Tempo, Taktart und die Laenge, auf die die
+Ebenen-Puffer alloziert sind (die laengste Sektion), kommen beim Laden **aus der Partitur** — das
+ist dasselbe, was das `score`-Subcommand tut, indem es die Engine aus der Partitur baut.
+
+Waehrend eine Partitur laeuft, gehoert der **Transport dem Runner und der Mix dem Menschen**:
+`record`, `overdub`, `play`, `stop`, `clear`, Tempo und Quantisierung werden von Hand abgelehnt,
+Panorama, Ebenenlautstaerke, Stummschaltung, Effekte und Klick bleiben bedienbar. Ein Take, den der
+Runner nicht geschickt hat, wuerde seine Vorhersage ab diesem Moment falsch machen.
 
 ## 11. Arbeitsweise
 

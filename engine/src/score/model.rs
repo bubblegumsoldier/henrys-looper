@@ -73,6 +73,22 @@ impl TrackState {
         TrackState::ALL.into_iter().find(|state| state.as_str() == text)
     }
 
+    /// The German word a display prints for this target state.
+    ///
+    /// Beside [`Self::as_str`] rather than in a frontend, for the same reason
+    /// [`crate::engine::track::TrackState::label`] sits next to its enum: the CLI's section table
+    /// and the app's block preview print the same five words, and two copies is how the two start
+    /// disagreeing.
+    pub fn label(self) -> &'static str {
+        match self {
+            TrackState::Record => "Aufnahme",
+            TrackState::Overdub => "Overdub",
+            TrackState::Play => "Wiedergabe",
+            TrackState::Stop => "still",
+            TrackState::HearThrough => "mithoeren",
+        }
+    }
+
     /// All spellings, for "Erlaubt: ..." and typo suggestions.
     pub fn names() -> [&'static str; 5] {
         [

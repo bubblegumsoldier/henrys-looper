@@ -6,7 +6,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Meter } from "./Meter";
 import { FxRow, type FxActions } from "./FxRow";
-import type { LooperStatus, LooperTrackStatus } from "../types";
+import { SCORE_STATE_LABEL, type LooperStatus, type LooperTrackStatus, type ScoreState } from "../types";
 
 /** The transport, the two settings rows, the layers - and the effect chain, which brings its own. */
 export interface TrackActions extends FxActions {
@@ -31,6 +31,15 @@ interface Props {
   actions: TrackActions;
   /** The engine's global compensation in frames - what a track without its own value follows. */
   defaultLatency: number;
+  /**
+   * What a loaded score asks of this track in the section that is sounding, or null when no score
+   * is loaded. The bare state rather than the whole entry, so the memo above keeps working.
+   *
+   * It sits right beside the engine's own state badge on purpose: `Soll` next to `Ist` is what the
+   * CLI prints, and the two drifting apart is the first visible sign that the runner and the engine
+   * no longer agree.
+   */
+  target: ScoreState | null;
 }
 
 /** A dragged slider would otherwise send a command per pixel. */
@@ -364,7 +373,7 @@ function LayerRow({
   );
 }
 
-function TrackCardInner({ track, selected, onSelect, actions, defaultLatency }: Props) {
+function TrackCardInner({ track, selected, onSelect, actions, defaultLatency, target }: Props) {
   const i = track.index;
   const stereo = track.channels >= 2;
   // One picker per bar. A stereo track shows its two input channels separately - a dead cable on
@@ -399,7 +408,14 @@ function TrackCardInner({ track, selected, onSelect, actions, defaultLatency }: 
         <span className={`live-track-channels channels-${track.channels_label}`}>
           {track.channels_label}
         </span>
-        <span className={`live-state state-badge-${track.state}`}>{track.state_label}</span>
+        {target && (
+          <span className={`state state-${target}`} title="Soll: was die geladene Partitur hier verlangt">
+            Soll {SCORE_STATE_LABEL[target]}
+          </span>
+        )}
+        <span className={`live-state state-badge-${track.state}`} title="Ist: was die Engine wirklich tut">
+          {track.state_label}
+        </span>
       </header>
 
       <Countdown track={track} />

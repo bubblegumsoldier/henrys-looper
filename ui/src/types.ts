@@ -219,6 +219,8 @@ export interface LooperStatus {
   /** Left and right of the master bus, always two entries. */
   output_peaks: number[];
   tracks: LooperTrackStatus[];
+  /** What the runner is doing, or null while no score is loaded. */
+  score: ScoreStatus | null;
   xruns: number;
   fifo_underruns: number;
   /** Input samples were lost; every later recording is permanently shifted. The bad one. */
@@ -261,6 +263,7 @@ export const IDLE_STATUS: LooperStatus = {
   ignored_commands: 0,
   spares: 0,
   message: null,
+  score: null,
 };
 
 // --- device survey ---------------------------------------------------------
@@ -392,152 +395,171 @@ export interface CalibrateOutcome {
   message: string;
 }
 
+
 // ---------------------------------------------------------------------------------------------
-// Score types, mirroring docs/contracts-v0.md. Phase 3 - the Rust side has no compiler yet, so
-// nothing below is reachable at the moment; the editor keeps them so it can be switched on again.
+// The score. Mirrors `looper_engine::score` (the compiled form and the compiler's complaints) and
+// the score half of proto.rs.
+//
+// The compiled score is sent **as the engine produces it**: it has carried serde derives since the
+// day it was written, precisely so a UI could read it without a translation layer. That is why the
+// names below are the ones from `engine/src/score/model.rs` rather than app-side inventions.
 // ---------------------------------------------------------------------------------------------
 
-export type TrackState = "record" | "overdub" | "play" | "stop" | "hear_through";
+/** What a score asks of a track during a section. The complete state, never a delta. */
+export type ScoreState = "record" | "overdub" | "play" | "stop" | "hear_through";
 
-export interface ScoreTrack {
+/** A track after compilation. Carries both numberings so nothing has to convert twice. */
+export interface CompiledTrack {
   name: string;
-  type: "single" | "group";
-  /** single tracks only: 0-based index in the Ableton set. */
-  ableton_track?: number | null;
-  /** group tracks only: name of the Ableton group track plus the size of its layer pool. */
-  group?: string | null;
-  layers?: number | null;
-  reserve?: number | null;
-  monitor?: boolean | null;
+  /** Position in `tracks`, which is the index the engine addresses this track by. */
+  index: number;
+  /** One-based input channel as written in the score; the left one of a stereo pair. */
+  input: number;
+  /** The same channel zero-based, ready for the engine. */
+  input_channel: number;
+  /** Right-hand input of a stereo track, one-based. Absent on a mono track. */
+  input_right?: number;
+  input_channel_right?: number;
+  /** 1 for a mono loop buffer, 2 for a stereo one. */
+  channels: number;
+  pan: number;
+  /** Whether this track may be monitored at all. `hear_through` and the takes need it. */
+  monitor: boolean;
+  /** Measured latency compensation in frames; absent means the engine's default. */
+  latency?: number;
+  latency_trim: number;
 }
 
-/** Live occupancy of a group track's layer child tracks (from the runner's state event). */
-export interface GroupLayers {
-  layers_used: number;
-  layers_free: number;
-}
-
-/** What ensure_pool() prepared in Ableton when a score with group tracks was loaded. */
-export interface PoolGroupResult {
-  track: string;
-  group: string;
-  group_index: number;
-  existing_layers: string[];
-  created_layers: string[];
-  monitor: string | null;
-  monitor_created: boolean;
-  layer_indices: number[];
-  monitor_index: number | null;
-  strays: string[];
-  warnings: string[];
-  message: string;
-}
-
-export interface PoolReport {
-  changed: boolean;
-  groups: PoolGroupResult[];
-  messages: string[];
-}
-
-export interface ScoreSection {
+/** A fully resolved section: `repeat:` unrolled, defaults filled in, **every** track named. */
+export interface CompiledSection {
   id: string;
   index: number;
   bars: number;
+  /** True: the follow-up is scheduled the moment this section starts. False: it loops until the
+   *  release button, and the change is then quantised to `quantize`. */
   autorelease: boolean;
-  quantize: "bar" | "loop";
-  tracks: Record<string, TrackState>;
-  source_line: number | null;
+  quantize: Quantize;
+  /** One entry per track of the score, in track order. */
+  tracks: Record<string, ScoreState>;
+  /** One-based line this section starts on, so the preview can point back at the source. */
+  source_line?: number;
 }
 
-export interface Score {
+/** The compiled score - static, fully resolved. What the runner walks and the preview draws. */
+export interface CompiledScore {
   title: string;
   bpm: number;
+  /** `"3/4"`, kept as written. */
+  time_signature: string;
   beats_per_bar: number;
-  tracks: ScoreTrack[];
+  /** Denominator: the note value that gets one beat. */
+  beat_unit: number;
+  tracks: CompiledTrack[];
   midi: Record<string, { id: string }>;
-  sections: ScoreSection[];
+  sections: CompiledSection[];
 }
 
-export interface ScoreErr {
+/**
+ * One complaint of the compiler.
+ *
+ * Four fields rather than one sentence, and that is the point: `line` and `column` are what the
+ * editor puts a marker on, and `suggestion` ("meintest du 'bass'?") is kept apart so it can be
+ * rendered differently from the message.
+ */
+export interface ScoreIssue {
   line: number | null;
   column: number | null;
   message: string;
   suggestion: string | null;
 }
 
-export interface StateEvent {
-  type: "state";
-  running: boolean;
-  section_index: number | null;
-  section_id: string | null;
-  bars_total: number | null;
-  bar: number;
-  beat: number;
-  pending: "next" | null;
-  tracks: Record<string, TrackState>;
-  connected: boolean;
-  engine: "sim" | "ableton" | string;
-  /** Set by the real runner while waiting for the first bar boundary (not in the v0 contract). */
-  countin?: boolean;
-  /** Group tracks report how many of their layer child tracks are taken (M4). */
-  groups?: Record<string, GroupLayers>;
+/** Answer of `score_compile`: the compiled score, or **every** problem at once. */
+export interface CompileOutcome {
+  ok: boolean;
+  score: CompiledScore | null;
+  errors: ScoreIssue[];
 }
 
-/** True while the transport runs but the first section has not started yet. */
-export function isCountIn(s: StateEvent): boolean {
-  return s.running && (s.countin === true || s.section_index === null || s.section_index < 0);
-}
-
-export interface BeatEvent {
-  type: "beat";
-  song_beat: number;
-  bar: number;
-  beat: number;
-}
-
-export interface MidiEvent {
-  type: "midi";
-  device: string;
-  channel: number;
-  kind: "note_on" | "note_off" | "cc" | string;
-  number: number;
-  value: number;
-  id: string;
-}
-
-export interface LogEvent {
-  type: "log";
-  level: "info" | "warn" | "error" | string;
+/** Answer of `score_load`. */
+export interface ScoreLoaded {
+  score: CompiledScore;
   message: string;
 }
 
-export type LooperEvent = StateEvent | BeatEvent | MidiEvent | LogEvent;
+/** What the runner is doing. */
+export type Phase = "idle" | "count_in" | "running" | "finished" | "stopped";
 
-export interface MidiRow extends MidiEvent {
-  seq: number;
-  ts: number;
+/** A change that is scheduled but has not taken effect yet. */
+export interface ArmedChange {
+  /** `voice_2`, or `Ende` when the change leads past the last section. */
+  label: string;
+  /** Zero-based index of the section it leads to; null for the end of the score. */
+  section: number | null;
+  /** Whole bars still to go. */
+  bars: number;
+  /** Beats on top of that; inside the last bar `bars` is 0 and this counts down. */
+  beats: number;
+  /** True while this is the count-in rather than a section change. */
+  count_in: boolean;
+  /** The whole thing as one German sentence, ready to print. */
+  text: string;
 }
 
-export interface LogRow extends LogEvent {
-  seq: number;
-  ts: number;
+/** What the score asks of one track in the section that is sounding. */
+export interface ScoreTarget {
+  /** Zero-based, the same index the status event's `tracks` array uses. */
+  index: number;
+  name: string;
+  state: ScoreState;
+  /** German word for it, ready to print. */
+  label: string;
 }
 
-export type CompileResult = { ok: true; score: Score } | { ok: false; errors: ScoreErr[] };
+/** The runner as one snapshot, carried inside every status event while a score is loaded. */
+export interface ScoreStatus {
+  title: string;
+  phase: Phase;
+  /** German word for the phase, ready to print. */
+  phase_label: string;
+  /** Zero-based index of the sounding section, or null before the first and after the last. */
+  section: number | null;
+  section_id: string;
+  section_count: number;
+  bars_total: number;
+  /** One-based bar inside the current pass; 0 when nothing is sounding. */
+  bar: number;
+  beat: number;
+  /** One-based pass number - a section without `autorelease` repeats until the release button. */
+  pass: number;
+  tracks: ScoreTarget[];
+  armed: ArmedChange | null;
+}
 
-/** POST /api/load additionally reports what was prepared in Ableton (group tracks only). */
-export type LoadResult = CompileResult & { state?: StateEvent; pool?: PoolReport };
+/**
+ * The German word for each target state, and for each phase.
+ *
+ * The wire format carries a `label` beside every one of these, and it is deliberately **not** what
+ * gets printed here: the Rust side spells German without umlauts throughout, because the same
+ * sentences go to a Windows console (`Einzaehler`, `mithoeren`). This window is not a console, and
+ * the rest of it already writes `Mithören`. So the words the UI can derive itself - the five states
+ * and the five phases - are spelled properly here, and only the runner's whole *sentences* are
+ * printed as they arrive.
+ *
+ * The table has to exist anyway: a compiled section carries states, not labels, so the block
+ * preview could not print a word without it.
+ */
+export const SCORE_STATE_LABEL: Record<ScoreState, string> = {
+  record: "Aufnahme",
+  overdub: "Overdub",
+  play: "Wiedergabe",
+  stop: "still",
+  hear_through: "mithören",
+};
 
-export const IDLE_STATE: StateEvent = {
-  type: "state",
-  running: false,
-  section_index: null,
-  section_id: null,
-  bars_total: null,
-  bar: 0,
-  beat: 0,
-  pending: null,
-  tracks: {},
-  connected: false,
-  engine: "sim",
+export const PHASE_LABEL: Record<Phase, string> = {
+  idle: "bereit",
+  count_in: "Einzähler",
+  running: "läuft",
+  finished: "Ende",
+  stopped: "gestoppt",
 };

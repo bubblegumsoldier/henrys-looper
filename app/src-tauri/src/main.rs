@@ -22,13 +22,14 @@ mod schedule;
 
 use tauri::{Emitter, Manager, State};
 
-use host::{Action, EngineHandle, READY_EVENT};
+use host::{Action, EngineHandle, READY_EVENT, ScoreAction};
 use logfile::log;
 use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
 use looper_engine::engine::track::TrackLatency as EngineTrackLatency;
 use proto::{
-    AppInfo, BandKindName, CalibrateConfig, CalibrateOutcome, DelayNoteName, DeviceReport,
-    EngineInfo, FxParamName, FxPresetName, FxSlotName, QuantizeName, StartConfig,
+    AppInfo, BandKindName, CalibrateConfig, CalibrateOutcome, CompileOutcome, DelayNoteName,
+    DeviceReport, EngineInfo, FxParamName, FxPresetName, FxSlotName, QuantizeName, ScoreLoaded,
+    StartConfig,
 };
 
 /// Run blocking work on Tauri's blocking pool and translate a lost worker into German.
@@ -378,6 +379,85 @@ async fn set_quantize(
     .await
 }
 
+// ---------------------------------------------------------------------------------------------
+// The score. Phase 3: the compiler makes a `CompiledScore` out of YAML, the runner plays it.
+//
+// Two things about this group are unlike the rest of the file, and both follow from the runner:
+//
+// * `score_compile` is the only command that reaches nothing at all. It is what the editor calls
+//   while somebody types, so it must work with the engine stopped, with the engine running and
+//   with a score playing - and it must hand back the compiler's issue list *positioned*, because
+//   the editor turns each entry into a marker on a line.
+// * The four transport commands answer with a **German sentence instead of nothing**. The runner
+//   does not fail: `score_goto` while a change is armed reports how far the armed change still is
+//   and sends not one command. That sentence is the answer, so the frontend prints it rather than
+//   guessing from a silent success.
+// ---------------------------------------------------------------------------------------------
+
+/// Translate a score without loading it. Returns the compiled score, or **every** problem the
+/// compiler found - each with line, column, message and often a suggestion.
+///
+/// Opens nothing and touches no engine, so it is safe at any time.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_compile(yaml: String) -> Result<CompileOutcome, String> {
+    offload(move || Ok(host::compile(&yaml))).await
+}
+
+/// Compile a score and hand it to the runner.
+///
+/// Needs a running engine whose track layout matches the score (same names, same inputs - see
+/// `looper_engine::engine::runner::check_tracks`) and every track empty. Tempo, time signature and
+/// the length every layer buffer is allocated at then come from the score.
+///
+/// `count_in` is the number of bars of click before the first section; absent means one bar, which
+/// is the shortest lead that is still a bar of the metre about to be played.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_load(
+    yaml: String,
+    count_in: Option<u32>,
+    engine: State<'_, EngineHandle>,
+) -> Result<ScoreLoaded, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.score_load(yaml, count_in)).await
+}
+
+/// Start the count-in and arm the first section.
+#[tauri::command]
+async fn score_start(engine: State<'_, EngineHandle>) -> Result<String, String> {
+    score_act(engine, ScoreAction::Start).await
+}
+
+/// The release button: arm the change to the next section. Pressing it twice skips nothing - the
+/// second press only reports how far the armed change still is.
+#[tauri::command]
+async fn score_next(engine: State<'_, EngineHandle>) -> Result<String, String> {
+    score_act(engine, ScoreAction::Next).await
+}
+
+/// Jump to a section instead of taking the next one. `section` is zero-based.
+///
+/// Refused while a change is armed, and the answer says so: the armed section's commands are
+/// already in the audio thread's waiting room with their timestamps on them and cannot be recalled.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_goto(section: usize, engine: State<'_, EngineHandle>) -> Result<String, String> {
+    score_act(engine, ScoreAction::Goto(section)).await
+}
+
+/// Stop every track and end the run. An armed change is neutralised where it lands.
+#[tauri::command]
+async fn score_stop_all(engine: State<'_, EngineHandle>) -> Result<String, String> {
+    score_act(engine, ScoreAction::StopAll).await
+}
+
+/// Every score transport press funnels through here.
+async fn score_act(
+    engine: State<'_, EngineHandle>,
+    action: ScoreAction,
+) -> Result<String, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.score_act(action)).await
+}
+
 /// Check the latency compensation against the hardware, through a loopback cable.
 ///
 /// **This makes sound** and takes over the device for the whole measurement, so the engine has to
@@ -444,6 +524,12 @@ fn main() {
             fx_set,
             fx_band_kind,
             fx_delay_note,
+            score_compile,
+            score_load,
+            score_start,
+            score_next,
+            score_goto,
+            score_stop_all,
             calibrate
         ])
         .run(tauri::generate_context!())
