@@ -4,7 +4,10 @@
   "version": "0.1.0",
   "identifier": "de.getmika.henrys-looper",
   "build": {
-    "frontendDist": "../dist"
+    "frontendDist": "../../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm --prefix ../../ui run dev",
+    "beforeBuildCommand": "npm --prefix ../../ui run build"
   },
   "app": {
     "withGlobalTauri": true,
