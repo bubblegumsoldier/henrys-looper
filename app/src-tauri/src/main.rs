@@ -24,8 +24,10 @@ use tauri::{Emitter, Manager, State};
 
 use host::{Action, EngineHandle, READY_EVENT};
 use logfile::log;
+use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
 use proto::{
-    AppInfo, CalibrateConfig, CalibrateOutcome, DeviceReport, EngineInfo, QuantizeName, StartConfig,
+    AppInfo, BandKindName, CalibrateConfig, CalibrateOutcome, DelayNoteName, DeviceReport,
+    EngineInfo, FxParamName, FxPresetName, FxSlotName, QuantizeName, StartConfig,
 };
 
 /// Run blocking work on Tauri's blocking pool and translate a lost worker into German.
@@ -203,6 +205,121 @@ async fn set_tempo(
     .await
 }
 
+// ---------------------------------------------------------------------------------------------
+// Effects. `track` is the zero-based index into the status event's `tracks` array; the state of a
+// chain comes back in that track's `fx` object.
+//
+// Effects act on playback and on monitoring, never on the recording - see
+// `looper_engine::engine::fx`. Nothing below can change what lands in a layer buffer.
+// ---------------------------------------------------------------------------------------------
+
+/// Whole chain of one track in or out of the signal path. Out is a bit-identical pass-through,
+/// which makes it the panic switch.
+#[tauri::command(rename_all = "snake_case")]
+async fn fx_bypass(track: usize, on: bool, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::FxBypass { track, on }).await
+}
+
+/// One effect on or off: `high_pass`, `eq`, `comp`, `delay`, `reverb`.
+#[tauri::command(rename_all = "snake_case")]
+async fn fx_enable(
+    track: usize,
+    effect: FxSlotName,
+    on: bool,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    act(
+        engine,
+        Action::FxEnable {
+            track,
+            slot: effect.into(),
+            on,
+        },
+    )
+    .await
+}
+
+/// Load a ready-made chain: `dry`, `voice` or `piezo_guitar`. The one command that matters on
+/// stage - nobody turns knobs during a song.
+#[tauri::command(rename_all = "snake_case")]
+async fn fx_preset(
+    track: usize,
+    preset: FxPresetName,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    act(
+        engine,
+        Action::FxPreset {
+            track,
+            preset: preset.into(),
+        },
+    )
+    .await
+}
+
+/// One numeric knob, by name - `comp_ratio`, `reverb_mix`, `high_pass_hz` and so on. The three
+/// band-scoped names (`band_hz`, `band_q`, `band_gain_db`) additionally need `band`, zero-based.
+///
+/// Values are clamped by the engine to a range that makes sense, so a slider cannot produce
+/// something unusable; only a missing or out-of-range `band` is refused.
+#[tauri::command(rename_all = "snake_case")]
+async fn fx_set(
+    track: usize,
+    param: FxParamName,
+    value: f64,
+    band: Option<u32>,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    let param = param.to_param(value, band)?;
+    act(engine, Action::FxParam { track, param }).await
+}
+
+/// What one EQ band does: `peak`, `low_shelf` or `high_shelf`. `band` is zero-based.
+#[tauri::command(rename_all = "snake_case")]
+async fn fx_band_kind(
+    track: usize,
+    band: u32,
+    kind: BandKindName,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    if band as usize >= MAX_EQ_BANDS {
+        return Err(format!(
+            "Es gibt die EQ-Baender 0 bis {}, nicht {band}.",
+            MAX_EQ_BANDS - 1
+        ));
+    }
+    act(
+        engine,
+        Action::FxParam {
+            track,
+            param: EngineFxParam::BandKind {
+                band: band as usize,
+                kind: kind.into(),
+            },
+        },
+    )
+    .await
+}
+
+/// Note value of the tempo-synchronous delay: `quarter`, `dotted_eighth`, `eighth` or
+/// `triplet_eighth`. There is no milliseconds setting - the time comes from the engine's timeline
+/// and follows a tempo change on its own.
+#[tauri::command(rename_all = "snake_case")]
+async fn fx_delay_note(
+    track: usize,
+    note: DelayNoteName,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    act(
+        engine,
+        Action::FxParam {
+            track,
+            param: EngineFxParam::DelayNote(note.into()),
+        },
+    )
+    .await
+}
+
 /// Which grid a recording and an overdub snap to: `"loop"` (next loop boundary, so one early press
 /// is enough) or `"bar"` (next bar boundary). Takes that are already armed keep their position.
 #[tauri::command(rename_all = "snake_case")]
@@ -277,6 +394,12 @@ fn main() {
             set_click,
             set_tempo,
             set_quantize,
+            fx_bypass,
+            fx_enable,
+            fx_preset,
+            fx_set,
+            fx_band_kind,
+            fx_delay_note,
             calibrate
         ])
         .run(tauri::generate_context!())

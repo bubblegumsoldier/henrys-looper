@@ -69,6 +69,26 @@
 //! `R` samples. The loop must therefore be longer than `R` - a 17 ms loop cannot work - and the
 //! last `R` samples of a fresh take are still being written while the head of the loop is already
 //! playing. The zeroed layer buffer covers that gap with silence instead of stale memory.
+//!
+//! # Where the effects sit, and where they deliberately do not
+//!
+//! ```text
+//!  Eingang ─┬─────────────────────────────────────────────► Loop-Puffer   (trocken!)
+//!           │
+//!           └─► Mithoeren ─┐
+//!                          ├─► Effektkette des Tracks ─┐
+//!  Ebenen-Summe ───────────┘                           ├─► Ausgang
+//!  Klick ──────────────────────────────────────────────┘
+//! ```
+//!
+//! [`EngineCore::record_input`] reads the raw input slice and writes it into the layer buffer
+//! untouched - the chain is not in that path and cannot get into it, because `record_input` never
+//! sees a `Chain`. What is recorded is dry, always, and that is the decision the plan states:
+//! *"aufgenommen wird trocken"*. An effect baked into a take cannot be undone; one on playback can
+//! be re-dialled between two passes of the same loop.
+//!
+//! The click stays outside every chain. It is a reference, not music, and a compressed metronome
+//! with reverb on it would be a worse reference.
 
 use super::command::{
     BufferEndpoint, Command, CommandReceiver, MAX_TRACKS, Refusal, Status, StatusSender,
@@ -195,10 +215,10 @@ impl EngineCore {
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) {
         self.refill_spares();
         self.collect_commands();
+        self.publish_tempo();
         let frames = input.len() / self.input_channels;
 
-        self.render_with_commands(output);
-        self.mix_monitor(input, frames, output);
+        self.render_with_commands(input, frames, output);
         self.clamp_and_meter(output);
         self.record_input(input, frames);
 
@@ -247,12 +267,30 @@ impl EngineCore {
         }
     }
 
+    /// Tell every chain what a quarter note is worth, so a tempo-synchronous delay knows its time.
+    ///
+    /// Once per block, not per sample, and the chain ignores it unless the number really changed -
+    /// which it only does after a `SetTempo`. A quarter note rather than the engine's "beat":
+    /// with a beat unit of 8 a beat is an eighth, but a musician who asks for a quarter-note
+    /// delay means a quarter note either way.
+    #[inline]
+    fn publish_tempo(&mut self) {
+        let quarter = self.timeline.samples_per_quarter();
+        for track in &mut self.tracks {
+            track.fx_mut().set_quarter_samples(quarter);
+        }
+    }
+
     /// Render the output block, splitting it at every command boundary.
     ///
     /// This is the heart of the sample accuracy: a command timed for the middle of the block takes
     /// effect exactly there, because the block is rendered as two segments with the command
     /// applied in between - not at the start of the block and not at its end.
-    fn render_with_commands(&mut self, output: &mut [f32]) {
+    ///
+    /// `input` and `in_frames` come along because monitoring is now part of the per-track signal:
+    /// a track's live input is summed with its layers *before* its effect chain, so the two cannot
+    /// be mixed in two separate passes any more.
+    fn render_with_commands(&mut self, input: &[f32], in_frames: usize, output: &mut [f32]) {
         let len = output.len();
         let block_end = self.out_pos + len as u64;
         let mut cursor = 0usize;
@@ -266,7 +304,13 @@ impl EngineCore {
             };
             if boundary > cursor {
                 let start = self.out_pos + cursor as u64;
-                self.render(&mut output[cursor..boundary], start);
+                self.render(
+                    &mut output[cursor..boundary],
+                    start,
+                    input,
+                    cursor,
+                    in_frames,
+                );
                 cursor = boundary;
             }
             match due {
@@ -306,57 +350,58 @@ impl EngineCore {
         }
     }
 
-    /// Click plus every playing track for one uninterrupted segment.
+    /// Click plus every track for one uninterrupted segment.
+    ///
+    /// Per track, in this order: the sum of its audible layers, plus its monitored live input,
+    /// through its effect chain. Monitoring is a straight pass-through of that track's input
+    /// channel, switched independently of whether the track is playing, so the musician can play
+    /// live over his own loop. Its delay is the device roundtrip and has nothing to do with loop
+    /// alignment - the loop is aligned by position, not by when a sample travels through the
+    /// engine.
+    ///
+    /// `in_base` is the index, inside this block, of the first output sample of this segment; it
+    /// is what pairs an output sample with the input frame that arrived with it. When the input
+    /// FIFO ran short (`in_frames` below the block length) the monitor contributes silence for the
+    /// rest of the block - exactly what the separate monitor pass used to do.
     #[inline]
-    fn render(&mut self, out: &mut [f32], start: u64) {
-        // Per-track output peaks are collected on the stack and folded into the tracks afterwards:
-        // inside the sample loop the track list is borrowed immutably, and a fixed-size array
-        // costs no allocation. `get_mut` rather than indexing, so a track count beyond the status
-        // ceiling degrades to "no meter" instead of a panic in the audio callback.
-        let mut peaks = [0.0f32; MAX_TRACKS];
+    fn render(
+        &mut self,
+        out: &mut [f32],
+        start: u64,
+        input: &[f32],
+        in_base: usize,
+        in_frames: usize,
+    ) {
+        let channels = self.input_channels;
+        let monitor_gain = self.monitor_gain;
+        let click = self.click;
+        let click_gain = self.click_gain;
+        // Disjoint field borrows: the sample loop needs `metro`/`timeline` read-only and `tracks`
+        // mutably, and those are different fields of `self`.
+        let metro = &self.metro;
+        let timeline = &self.timeline;
+        let tracks = &mut self.tracks;
+
         for (i, slot) in out.iter_mut().enumerate() {
             let pos = start + i as u64;
-            let mut value = 0.0f32;
-            if self.click {
-                value += self.metro.sample_at(&self.timeline, pos) * self.click_gain;
-            }
-            for (t, track) in self.tracks.iter().enumerate() {
-                if track.playing() {
-                    let sample = track.read(pos);
-                    value += sample;
-                    if let Some(peak) = peaks.get_mut(t) {
-                        let magnitude = sample.abs();
-                        if magnitude > *peak {
-                            *peak = magnitude;
-                        }
+            let mut value = if click {
+                metro.sample_at(timeline, pos) * click_gain
+            } else {
+                0.0
+            };
+            let frame = in_base + i;
+            for track in tracks.iter_mut() {
+                let monitor = if track.monitor() && frame < in_frames {
+                    match input.get(frame * channels + track.input_channel()) {
+                        Some(&s) => s * monitor_gain,
+                        None => 0.0,
                     }
-                }
+                } else {
+                    0.0
+                };
+                value += track.render(pos, monitor);
             }
             *slot = value;
-        }
-        for (t, track) in self.tracks.iter_mut().enumerate() {
-            if let Some(&peak) = peaks.get(t) {
-                track.note_output_peak(peak);
-            }
-        }
-    }
-
-    /// Input monitoring per track: a straight pass-through of that track's input channel, switched
-    /// independently of whether the track is playing, so the musician can play live over his own
-    /// loop. Its delay is the device roundtrip and has nothing to do with loop alignment - the loop
-    /// is aligned by position, not by when a sample happens to travel through the engine.
-    #[inline]
-    fn mix_monitor(&mut self, input: &[f32], frames: usize, output: &mut [f32]) {
-        let n = frames.min(output.len());
-        let ch = self.input_channels;
-        for track in &self.tracks {
-            if !track.monitor() {
-                continue;
-            }
-            let c = track.input_channel();
-            for (i, slot) in output.iter_mut().take(n).enumerate() {
-                *slot += input[i * ch + c] * self.monitor_gain;
-            }
         }
     }
 
@@ -556,6 +601,17 @@ impl EngineCore {
                     }
                 }
             }
+            // The effect commands are the cheapest kind there is: they change a few numbers on a
+            // chain that already exists. Nothing is allocated, and the coefficient arithmetic
+            // behind a preset is a few dozen transcendental operations, once.
+            Command::SetFxBypass { track, on } => self.tracks[track].fx_mut().set_bypass(on),
+            Command::SetFxEnabled { track, slot, on } => {
+                self.tracks[track].fx_mut().set_enabled(slot, on)
+            }
+            Command::SetFxParam { track, param } => self.tracks[track].fx_mut().set_param(param),
+            Command::LoadFxPreset { track, preset } => {
+                self.tracks[track].fx_mut().load_preset(preset)
+            }
             Command::Stop => {
                 for track in 0..self.tracks.len() {
                     self.cancel_takes(track);
@@ -656,6 +712,7 @@ impl EngineCore {
                 monitor: track.monitor(),
                 playing: track.playing(),
                 input_channel: track.input_channel() as u8,
+                fx: track.fx_mut().status(),
             };
         }
         let status = Status {

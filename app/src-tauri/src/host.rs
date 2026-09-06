@@ -40,6 +40,7 @@ use looper_engine::engine::command::{
     Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, StatusReceiver, TrackStatus,
     buffer_channel, command_channel, status_channel,
 };
+use looper_engine::engine::fx::{FxParam, FxPreset, FxSlot};
 use looper_engine::engine::process::{
     EngineConfig, EngineCore, loop_capacity, max_memory_bytes,
 };
@@ -97,6 +98,20 @@ pub enum Action {
     /// Switch the grid a take snaps to while the engine runs. Takes that are already armed keep
     /// the position they were given - the engine has those commands already.
     SetQuantize { quantize: Quantize },
+
+    // --- effects. They act on playback and monitoring; the recording stays dry. ---------------
+    /// Whole chain of one track out of the signal path (bit-identical pass-through) or back in.
+    FxBypass { track: usize, on: bool },
+    /// One effect of one track's chain.
+    FxEnable {
+        track: usize,
+        slot: FxSlot,
+        on: bool,
+    },
+    /// One knob. The wire format resolves the name to this before it gets here.
+    FxParam { track: usize, param: FxParam },
+    /// Load a ready-made chain.
+    FxPreset { track: usize, preset: FxPreset },
 }
 
 impl Action {
@@ -111,7 +126,11 @@ impl Action {
             | Action::SetMonitor { track, .. }
             | Action::LayerMute { track, .. }
             | Action::LayerRemove { track, .. }
-            | Action::LayerGain { track, .. } => Some(track),
+            | Action::LayerGain { track, .. }
+            | Action::FxBypass { track, .. }
+            | Action::FxEnable { track, .. }
+            | Action::FxParam { track, .. }
+            | Action::FxPreset { track, .. } => Some(track),
             Action::ClearAll
             | Action::SetClick { .. }
             | Action::SetTempo { .. }
@@ -591,7 +610,7 @@ impl Session {
 
         let tracks: Vec<Track> = defs
             .iter()
-            .map(|d| Track::new(d.channel, config.monitor))
+            .map(|d| Track::new(d.channel, config.monitor, rate))
             .collect();
         let mut core = EngineCore::new(EngineConfig {
             timeline,
@@ -1052,6 +1071,46 @@ impl Session {
                 self.message = Some(self.scheduler.set_quantize(quantize));
                 Ok(())
             }
+            Action::FxBypass { track, on } => {
+                self.cmd.send(Command::SetFxBypass { track, on })?;
+                self.message = Some(format!(
+                    "\"{}\": Effektkette {}.",
+                    self.tracks[track].name,
+                    if on { "umgangen" } else { "aktiv" }
+                ));
+                Ok(())
+            }
+            Action::FxEnable { track, slot, on } => {
+                self.cmd.send(Command::SetFxEnabled { track, slot, on })?;
+                self.message = Some(format!(
+                    "\"{}\": {} {}.",
+                    self.tracks[track].name,
+                    slot.label(),
+                    if on { "an" } else { "aus" }
+                ));
+                Ok(())
+            }
+            Action::FxParam { track, param } => {
+                self.cmd.send(Command::SetFxParam { track, param })?;
+                // No message: a knob being turned is not news, and a sentence per mouse move
+                // would make the status line flicker. The new value comes back in the status.
+                Ok(())
+            }
+            Action::FxPreset { track, preset } => {
+                if preset == FxPreset::Custom {
+                    return Err(
+                        "\"eigen\" ist kein Preset zum Laden - so heisst eine Kette, an der von                          Hand gedreht wurde."
+                            .to_string(),
+                    );
+                }
+                self.cmd.send(Command::LoadFxPreset { track, preset })?;
+                self.message = Some(format!(
+                    "\"{}\": Preset \"{}\" geladen.",
+                    self.tracks[track].name,
+                    preset.label()
+                ));
+                Ok(())
+            }
         }
     }
 
@@ -1123,6 +1182,33 @@ mod tests {
         );
         assert_eq!(Action::ClearAll.track(), None);
         assert_eq!(Action::SetClick { on: true }.track(), None);
+        // The effect actions are all track-scoped: a chain belongs to one channel.
+        assert_eq!(Action::FxBypass { track: 3, on: true }.track(), Some(3));
+        assert_eq!(
+            Action::FxEnable {
+                track: 0,
+                slot: FxSlot::Reverb,
+                on: true
+            }
+            .track(),
+            Some(0)
+        );
+        assert_eq!(
+            Action::FxPreset {
+                track: 1,
+                preset: FxPreset::Voice
+            }
+            .track(),
+            Some(1)
+        );
+        assert_eq!(
+            Action::FxParam {
+                track: 2,
+                param: FxParam::ReverbMix(0.2)
+            }
+            .track(),
+            Some(2)
+        );
         assert_eq!(
             Action::SetTempo {
                 bpm: 120.0,

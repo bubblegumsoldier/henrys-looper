@@ -1238,3 +1238,218 @@ fn an_overdub_planned_on_the_loop_grid_lands_sample_identical_on_the_first_layer
         );
     }
 }
+
+// -------------------------------------------------------------------------------------------
+// 11. Phase 6: effects act on playback and monitoring, never on the recording
+// -------------------------------------------------------------------------------------------
+
+/// **The one test this whole phase stands on.** With every effect switched on, at settings that
+/// change the signal beyond recognition, what lands in the loop buffer is still the input sample,
+/// latency-compensated and otherwise untouched.
+///
+/// If this ever fails, a take is unrecoverable: a compressor or a reverb baked into a recording
+/// cannot be taken out again. The plan says "aufgenommen wird trocken", and this is that sentence
+/// as an assertion.
+///
+/// The track also monitors while it records, because that is the situation the mistake would hide
+/// in: monitoring runs through the chain, so a wrongly wired engine would record what it plays.
+#[test]
+fn the_recording_stays_dry_with_the_whole_chain_turned_up() {
+    use super::fx::{FxParam, FxPreset, FxSlot};
+
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let bars = 2u32;
+    let origin = timeline.bar_start(2);
+    let len = timeline.span_bars(2, bars);
+
+    let spec = SimSpec {
+        bars,
+        // Monitoring on from the start: the live signal goes through the chain and out, while the
+        // recording has to stay clean.
+        tracks: vec![TrackSpec {
+            channel: 0,
+            monitor: true,
+        }],
+        // No cable - the chain plus a loopback would be a feedback loop, and what is under test
+        // is the engine's wiring, not the room.
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, mono(fingerprint));
+
+    // Everything on, and everything as violent as the parameters allow.
+    sim.send(Command::LoadFxPreset {
+        track: 0,
+        preset: FxPreset::Voice,
+    });
+    for slot in FxSlot::all() {
+        sim.send(Command::SetFxEnabled {
+            track: 0,
+            slot,
+            on: true,
+        });
+    }
+    for param in [
+        FxParam::CompThresholdDb(-40.0),
+        FxParam::CompRatio(20.0),
+        FxParam::CompMakeupDb(12.0),
+        FxParam::DelayFeedback(0.8),
+        FxParam::DelayMix(1.0),
+        FxParam::ReverbSize(0.9),
+        FxParam::ReverbMix(1.0),
+        FxParam::BandGainDb { band: 1, db: 18.0 },
+    ] {
+        sim.send(Command::SetFxParam { track: 0, param });
+    }
+    sim.run_blocks(4);
+
+    sim.send(Command::StartRecord { track: 0, at: origin });
+    sim.send(Command::StopRecord {
+        track: 0,
+        at: origin + len,
+    });
+    sim.run_to(origin + len + R + 4 * BLOCK as u64);
+
+    let recorded = layer_content(&sim, 0, 0);
+    assert_eq!(recorded.len(), len as usize);
+    for (i, &got) in recorded.iter().enumerate() {
+        assert_eq!(
+            got,
+            fingerprint(origin + R + i as u64),
+            "Sample {i} der Aufnahme traegt eine Spur der Effektkette"
+        );
+    }
+
+    // And the counter-check, so the test cannot pass because the chain is not connected at all:
+    // what left the output during the take is *not* what went in.
+    let mut different = 0usize;
+    for i in 0..len {
+        let pos = (origin + i) as usize;
+        if sim.out_history[pos] != fingerprint(origin + i) {
+            different += 1;
+        }
+    }
+    assert!(
+        different as u64 > len / 2,
+        "die Kette hat am Ausgang nichts veraendert - dann beweist der Test oben nichts \
+         ({different} von {len} Samples)"
+    );
+}
+
+/// The other half of the arrangement: the chain really is in the playback path, and the bypass
+/// really takes it back out - bit for bit, so it works as a panic switch on stage.
+#[test]
+fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
+    use super::fx::FxPreset;
+
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let bars = 1u32;
+    let origin = timeline.bar_start(2);
+    let len = timeline.span_bars(2, bars);
+
+    let spec = SimSpec {
+        bars,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, mono(fingerprint));
+    sim.send(Command::StartRecord { track: 0, at: origin });
+    sim.send(Command::StopRecord {
+        track: 0,
+        at: origin + len,
+    });
+    sim.send(Command::StartPlay {
+        track: 0,
+        at: origin + len,
+    });
+    sim.run_to(origin + len + R + 4 * BLOCK as u64);
+    let loop_content = layer_content(&sim, 0, 0);
+
+    // Chain on: the played-back loop is coloured.
+    sim.send(Command::LoadFxPreset {
+        track: 0,
+        preset: FxPreset::Voice,
+    });
+    let coloured_from = origin + 2 * len;
+    sim.run_to(coloured_from + len);
+    let mut different = 0usize;
+    for i in 0..len {
+        let pos = coloured_from + i;
+        let dry = loop_content[((pos - origin) % len) as usize];
+        if sim.out_history[pos as usize] != dry {
+            different += 1;
+        }
+    }
+    assert!(
+        different as u64 > len / 2,
+        "das Preset aendert die Wiedergabe nicht ({different} von {len})"
+    );
+
+    // Bypass: back to the bare loop, sample for sample. One second of settling, because the
+    // crossfade only becomes an exact zero once it is under -100 dB.
+    sim.send(Command::SetFxBypass {
+        track: 0,
+        on: true,
+    });
+    let bypassed_from = coloured_from + 2 * len + RATE as u64;
+    sim.run_to(bypassed_from + len);
+    for i in 0..len {
+        let pos = bypassed_from + i;
+        let dry = loop_content[((pos - origin) % len) as usize];
+        assert_eq!(
+            sim.out_history[pos as usize], dry,
+            "Position {pos} ist im Bypass nicht bitgleich mit dem Loop"
+        );
+    }
+
+    // And the status carries the whole thing back to the control thread.
+    let status = sim.latest_status().expect("Status");
+    let fx = status.tracks()[0].fx;
+    assert!(fx.bypass);
+    assert_eq!(fx.preset, FxPreset::Voice);
+    assert_eq!(fx.letters(), "HEK-R");
+}
+
+/// The delay is tempo-synchronous, and the engine is where the tempo actually lives: a quarter
+/// note at 120 BPM has to arrive as exactly 24 000 samples in the status, without anybody
+/// converting milliseconds anywhere.
+#[test]
+fn the_delay_time_comes_from_the_engine_timeline() {
+    use super::fx::{DelayNote, FxParam, FxPreset, FxSlot};
+
+    let spec = SimSpec {
+        bpm: 120.0,
+        bars: 1,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, silence());
+    sim.send(Command::LoadFxPreset {
+        track: 0,
+        preset: FxPreset::Voice,
+    });
+    sim.send(Command::SetFxEnabled {
+        track: 0,
+        slot: FxSlot::Delay,
+        on: true,
+    });
+    sim.send(Command::SetFxParam {
+        track: 0,
+        param: FxParam::DelayNote(DelayNote::Quarter),
+    });
+    sim.run_blocks(8);
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.tracks()[0].fx.delay_samples, 24_000);
+    assert_eq!(status.tracks()[0].fx.letters(), "HEKDR");
+
+    // A tempo change moves it, because the delay asks the timeline rather than a millisecond
+    // value somebody typed in.
+    sim.send(Command::SetTempo {
+        bpm: 90.0,
+        signature: TimeSignature::new(4, 4),
+        layer_capacity: 200_000,
+    });
+    sim.run_blocks(200);
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.tracks()[0].fx.delay_samples, 32_000);
+}

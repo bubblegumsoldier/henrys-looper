@@ -442,7 +442,10 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         // The input callback below feeds the FIFO with channel 1 only, so the engine sees one
         // channel per frame.
         input_channels: 1,
-        tracks: vec![Track::new(0, false)],
+        // The chain stays bypassed for the whole measurement: a calibration compares recorded
+        // samples with the grid they were played against, and an effect on the playback path would
+        // change what the loopback cable brings back.
+        tracks: vec![Track::new(0, false, rate)],
         spares: Vec::with_capacity(2),
         layer_capacity: capacity as u64,
         commands: cmd_rx,

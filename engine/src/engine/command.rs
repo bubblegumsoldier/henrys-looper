@@ -23,6 +23,7 @@
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
+use super::fx::{FxParam, FxPreset, FxSlot, FxStatus};
 use super::timeline::TimeSignature;
 use super::track::TrackState;
 
@@ -78,6 +79,19 @@ pub enum Command {
         /// Length in samples the control thread now allocates layer buffers at.
         layer_capacity: u64,
     },
+    /// Whole effect chain of one track in or out of the signal path. Out means bit-identical
+    /// pass-through - the panic switch.
+    SetFxBypass { track: usize, on: bool },
+    /// One effect of one track's chain on or off.
+    SetFxEnabled {
+        track: usize,
+        slot: FxSlot,
+        on: bool,
+    },
+    /// One knob of one track's chain.
+    SetFxParam { track: usize, param: FxParam },
+    /// Load a ready-made chain. The one command the musician uses on stage.
+    LoadFxPreset { track: usize, preset: FxPreset },
     /// Stop everything (playback and recording) and mark the engine as finished.
     Stop,
 }
@@ -99,6 +113,10 @@ impl Command {
             | Command::RemoveLayer { .. }
             | Command::SetClick { .. }
             | Command::SetTempo { .. }
+            | Command::SetFxBypass { .. }
+            | Command::SetFxEnabled { .. }
+            | Command::SetFxParam { .. }
+            | Command::LoadFxPreset { .. }
             | Command::Stop => None,
         }
     }
@@ -115,7 +133,11 @@ impl Command {
             | Command::SetMonitor { track, .. }
             | Command::SetLayerMute { track, .. }
             | Command::SetLayerGain { track, .. }
-            | Command::RemoveLayer { track, .. } => Some(*track),
+            | Command::RemoveLayer { track, .. }
+            | Command::SetFxBypass { track, .. }
+            | Command::SetFxEnabled { track, .. }
+            | Command::SetFxParam { track, .. }
+            | Command::LoadFxPreset { track, .. } => Some(*track),
             Command::ClearAll { .. }
             | Command::SetClick { .. }
             | Command::SetTempo { .. }
@@ -185,6 +207,9 @@ pub struct TrackStatus {
     pub playing: bool,
     /// Zero-based input channel of the device this track records.
     pub input_channel: u8,
+    /// State of this track's effect chain: what is on, which preset, and the parameters behind
+    /// it. Fixed size and `Copy`, like everything else that crosses the thread boundary.
+    pub fx: FxStatus,
 }
 
 /// Snapshot the audio thread pushes back to the control thread.
@@ -480,6 +505,25 @@ mod tests {
         assert_eq!(rx.pop(), Some(Command::StartRecord { track: 0, at: 10 }));
         assert_eq!(rx.pop(), Some(Command::StopRecord { track: 0, at: 20 }));
         assert_eq!(rx.pop(), None);
+    }
+
+    /// The snapshot is memcpy'd into the queue **inside the audio callback**, so its size is a
+    /// real-time concern and not just a memory one. Phase 6 put the effect state into it: a
+    /// `TrackStatus` is now 168 bytes (120 of them the chain), and the whole `Status` 1416. This
+    /// pins that down, so the next addition has to be a decision rather than an accident.
+    ///
+    /// 1.4 kB at 200 snapshots per second is a copy of well under a microsecond per callback,
+    /// against a budget of 2667 - and the queue of 1024 slots costs 1.4 MB, allocated once in the
+    /// control thread.
+    #[test]
+    fn the_status_snapshot_stays_small_enough_to_memcpy_in_a_callback() {
+        let size = std::mem::size_of::<Status>();
+        assert!(
+            size <= 1_536,
+            "Der Status ist auf {size} Bytes gewachsen - das wandert bei jedem Snapshot durch \
+             den Audio-Callback."
+        );
+        assert!(std::mem::size_of::<Command>() <= 32, "Kommandos bleiben klein");
     }
 
     #[test]

@@ -31,6 +31,17 @@
 //!   compensation), so the running layer contributes silence on its own first pass. It becomes
 //!   audible on the next pass, which is exactly what overdubbing sounds like.
 
+//! # Where the effect chain sits
+//!
+//! Every track owns one [`Chain`] (`engine::fx`), and it is used in exactly one place:
+//! [`Track::render`], which produces what this track contributes to the output. That contribution
+//! is the sum of its audible layers **plus** its monitored live input, and both go through the
+//! same chain instance - so what the musician hears while singing is what the loop will sound
+//! like. Recording never touches the chain: `process::record_input` writes the raw input sample
+//! into the layer buffer, exactly as it did before effects existed.
+
+use super::fx::Chain;
+
 /// Hard ceiling of layers per track. Not a pre-allocation: layers are allocated one at a time in
 /// loop length. It exists so a runaway overdub hits a clear German message instead of the memory
 /// limit of the machine.
@@ -141,13 +152,19 @@ pub struct Track {
     /// Peak of this track's input channel since the last status snapshot.
     input_peak: f32,
     /// Peak this track contributed to the output since the last status snapshot, i.e. the sum of
-    /// its audible layers. Monitoring is not part of it - that path never touches a layer.
+    /// its audible layers, measured **before** the effect chain. Monitoring is not part of it -
+    /// that path never touches a layer. Measuring the dry sum keeps the meter comparable across a
+    /// preset change: it says how loud the recorded material is, not how loud the reverb is.
     output_peak: f32,
+    /// This track's effect chain. Playback and monitoring both run through it; see the module
+    /// comment.
+    fx: Chain,
 }
 
 impl Track {
-    /// Built by the control thread - the layer vector is the only allocation, and it happens here.
-    pub fn new(input_channel: usize, monitor: bool) -> Self {
+    /// Built by the control thread - the layer vector and the chain's buffers (delay line, reverb
+    /// combs) are the only allocations, and they happen here.
+    pub fn new(input_channel: usize, monitor: bool, sample_rate: u32) -> Self {
         Self {
             input_channel,
             layers: Vec::with_capacity(MAX_LAYERS),
@@ -161,7 +178,33 @@ impl Track {
             monitor_default: monitor,
             input_peak: 0.0,
             output_peak: 0.0,
+            fx: Chain::new(sample_rate),
         }
+    }
+
+    #[inline]
+    pub fn fx(&self) -> &Chain {
+        &self.fx
+    }
+
+    #[inline]
+    pub fn fx_mut(&mut self) -> &mut Chain {
+        &mut self.fx
+    }
+
+    /// What this track contributes to the output at musical position `pos`.
+    ///
+    /// `monitor` is this track's live input sample, already scaled by the monitor gain, or 0.0
+    /// when monitoring is off. Layers and monitoring are summed *before* the chain on purpose -
+    /// one chain, one state, so the loop and the live voice over it sound the same.
+    #[inline]
+    pub fn render(&mut self, pos: u64, monitor: f32) -> f32 {
+        let dry = if self.playing { self.read(pos) } else { 0.0 };
+        let magnitude = dry.abs();
+        if magnitude > self.output_peak {
+            self.output_peak = magnitude;
+        }
+        self.fx.process(dry + monitor)
     }
 
     #[inline]
@@ -521,6 +564,12 @@ impl Track {
 
     /// Restore the monitoring state a fresh start would have. Called by "alles loeschen" after the
     /// layers have been returned.
+    ///
+    /// The **effect chain is deliberately left alone**. A preset is a property of the channel -
+    /// the microphone, the pickup, the room - not of the material that happens to be recorded in
+    /// it. Between two songs a musician presses "alles leeren" and would be furious to find his
+    /// voice back to dry. What is left of a reverb tail dies away on its own, because a cleared
+    /// track feeds its chain nothing but zeros.
     pub fn restore_defaults(&mut self) {
         self.monitor = self.monitor_default;
     }
@@ -531,7 +580,7 @@ mod tests {
     use super::*;
 
     fn track_with_layer(capacity: usize) -> Track {
-        let mut t = Track::new(0, false);
+        let mut t = Track::new(0, false, 48_000);
         t.begin_loop_take(1_000, vec![0.0; capacity]);
         t
     }
@@ -593,7 +642,7 @@ mod tests {
     /// address the same musical instant with the same index.
     #[test]
     fn layers_share_one_grid_regardless_of_where_they_started() {
-        let mut t = Track::new(0, false);
+        let mut t = Track::new(0, false, 48_000);
         t.begin_loop_take(1_000, vec![0.0; 64]);
         for i in 0..10u64 {
             t.write(1_000 + i, 1.0);
@@ -619,7 +668,7 @@ mod tests {
 
     #[test]
     fn muting_and_gain_change_the_sum_only() {
-        let mut t = Track::new(0, false);
+        let mut t = Track::new(0, false, 48_000);
         t.begin_loop_take(0, vec![0.0; 16]);
         for i in 0..4u64 {
             t.write(i, 1.0);

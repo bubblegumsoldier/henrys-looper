@@ -17,6 +17,9 @@
 use serde::{Deserialize, Serialize};
 
 use looper_engine::engine::command::TrackStatus;
+use looper_engine::engine::fx::{
+    BandKind, DelayNote, EQ_BANDS, FxParam, FxPreset, FxSlot, FxStatus,
+};
 use looper_engine::engine::schedule::{Lead, PendingKind, Quantize};
 use looper_engine::engine::track::TrackState;
 
@@ -364,6 +367,10 @@ pub struct TrackStatusEvent {
     pub pending_bars: u32,
     /// Beats on top of `pending_bars`. Inside the last bar `pending_bars` is 0 and this counts down.
     pub pending_beats: u32,
+
+    /// This track's effect chain. Effects act on playback and on monitoring; what is recorded is
+    /// always dry, so nothing in here can be baked into a layer.
+    pub fx: FxEvent,
 }
 
 /// Pushed to the frontend as event `looper://status`, about twenty times a second while the engine
@@ -496,6 +503,346 @@ pub fn track_event(
         pending_label: lead.kind.map(|k| k.label().to_string()),
         pending_bars: lead.bars,
         pending_beats: lead.beats,
+        fx: fx_event(&ts.fx, sample_rate),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Effects
+// ---------------------------------------------------------------------------------------------
+//
+// The same arrangement as everywhere else in this file: the engine crate carries no `serde`, so
+// each of its enums gets a wire twin here and a `From` in both directions. What the frontend sees
+// are snake_case strings - `high_pass`, `piezo_guitar`, `dotted_eighth` - and never a number whose
+// meaning it would have to know.
+
+/// One switchable position in a track's chain, mirroring [`FxSlot`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FxSlotName {
+    HighPass,
+    Eq,
+    Comp,
+    Delay,
+    Reverb,
+}
+
+impl From<FxSlot> for FxSlotName {
+    fn from(slot: FxSlot) -> Self {
+        match slot {
+            FxSlot::HighPass => FxSlotName::HighPass,
+            FxSlot::Eq => FxSlotName::Eq,
+            FxSlot::Comp => FxSlotName::Comp,
+            FxSlot::Delay => FxSlotName::Delay,
+            FxSlot::Reverb => FxSlotName::Reverb,
+        }
+    }
+}
+
+impl From<FxSlotName> for FxSlot {
+    fn from(name: FxSlotName) -> Self {
+        match name {
+            FxSlotName::HighPass => FxSlot::HighPass,
+            FxSlotName::Eq => FxSlot::Eq,
+            FxSlotName::Comp => FxSlot::Comp,
+            FxSlotName::Delay => FxSlot::Delay,
+            FxSlotName::Reverb => FxSlot::Reverb,
+        }
+    }
+}
+
+/// A ready-made chain, mirroring [`FxPreset`]. `custom` is reported, never sent - it is what the
+/// engine calls a chain whose knobs have been moved since a preset was loaded.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FxPresetName {
+    #[default]
+    Dry,
+    Voice,
+    PiezoGuitar,
+    Custom,
+}
+
+impl From<FxPreset> for FxPresetName {
+    fn from(preset: FxPreset) -> Self {
+        match preset {
+            FxPreset::Dry => FxPresetName::Dry,
+            FxPreset::Voice => FxPresetName::Voice,
+            FxPreset::PiezoGuitar => FxPresetName::PiezoGuitar,
+            FxPreset::Custom => FxPresetName::Custom,
+        }
+    }
+}
+
+impl From<FxPresetName> for FxPreset {
+    fn from(name: FxPresetName) -> Self {
+        match name {
+            FxPresetName::Dry => FxPreset::Dry,
+            FxPresetName::Voice => FxPreset::Voice,
+            FxPresetName::PiezoGuitar => FxPreset::PiezoGuitar,
+            FxPresetName::Custom => FxPreset::Custom,
+        }
+    }
+}
+
+/// What one EQ band does, mirroring [`BandKind`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BandKindName {
+    #[default]
+    Peak,
+    LowShelf,
+    HighShelf,
+}
+
+impl From<BandKind> for BandKindName {
+    fn from(kind: BandKind) -> Self {
+        match kind {
+            BandKind::Peak => BandKindName::Peak,
+            BandKind::LowShelf => BandKindName::LowShelf,
+            BandKind::HighShelf => BandKindName::HighShelf,
+        }
+    }
+}
+
+impl From<BandKindName> for BandKind {
+    fn from(name: BandKindName) -> Self {
+        match name {
+            BandKindName::Peak => BandKind::Peak,
+            BandKindName::LowShelf => BandKind::LowShelf,
+            BandKindName::HighShelf => BandKind::HighShelf,
+        }
+    }
+}
+
+/// Note value of the tempo-synchronous delay, mirroring [`DelayNote`]. There is deliberately no
+/// milliseconds field anywhere: the delay time comes from the engine's timeline.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DelayNoteName {
+    Quarter,
+    #[default]
+    DottedEighth,
+    Eighth,
+    TripletEighth,
+}
+
+impl From<DelayNote> for DelayNoteName {
+    fn from(note: DelayNote) -> Self {
+        match note {
+            DelayNote::Quarter => DelayNoteName::Quarter,
+            DelayNote::DottedEighth => DelayNoteName::DottedEighth,
+            DelayNote::Eighth => DelayNoteName::Eighth,
+            DelayNote::TripletEighth => DelayNoteName::TripletEighth,
+        }
+    }
+}
+
+impl From<DelayNoteName> for DelayNote {
+    fn from(name: DelayNoteName) -> Self {
+        match name {
+            DelayNoteName::Quarter => DelayNote::Quarter,
+            DelayNoteName::DottedEighth => DelayNote::DottedEighth,
+            DelayNoteName::Eighth => DelayNote::Eighth,
+            DelayNoteName::TripletEighth => DelayNote::TripletEighth,
+        }
+    }
+}
+
+/// Every numeric knob of a chain, by name.
+///
+/// One command with a name and a value rather than seventeen commands: the frontend sends
+/// `fx_set(track, "comp_ratio", 3.0)`, and the band-scoped names additionally take `band`. The
+/// two knobs that are not numbers - the band kind and the delay note - have their own commands,
+/// because squeezing an enum into an `f64` is how wire formats rot.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FxParamName {
+    HighPassHz,
+    BandHz,
+    BandQ,
+    BandGainDb,
+    CompThresholdDb,
+    CompRatio,
+    CompAttackMs,
+    CompReleaseMs,
+    CompKneeDb,
+    CompMakeupDb,
+    DelayFeedback,
+    DelayMix,
+    ReverbSize,
+    ReverbDamping,
+    ReverbMix,
+}
+
+impl FxParamName {
+    /// Whether this knob belongs to one EQ band, i.e. whether `band` has to be supplied.
+    pub fn needs_band(self) -> bool {
+        matches!(
+            self,
+            FxParamName::BandHz | FxParamName::BandQ | FxParamName::BandGainDb
+        )
+    }
+
+    /// Turn a name plus a value into an engine parameter, or say in German what is missing.
+    ///
+    /// The engine clamps every value to a usable range anyway; what is checked here is only the
+    /// shape - a band-scoped knob without a band, or a band that does not exist.
+    pub fn to_param(self, value: f64, band: Option<u32>) -> Result<FxParam, String> {
+        let v = value as f32;
+        if self.needs_band() {
+            let Some(band) = band else {
+                return Err(
+                    "Dieser Parameter gehoert zu einem EQ-Band; es fehlt die Angabe \"band\" \
+                     (0, 1 oder 2)."
+                        .to_string(),
+                );
+            };
+            let band = band as usize;
+            if band >= EQ_BANDS {
+                return Err(format!(
+                    "Es gibt die EQ-Baender 0 bis {}, nicht {band}.",
+                    EQ_BANDS - 1
+                ));
+            }
+            return Ok(match self {
+                FxParamName::BandHz => FxParam::BandHz { band, hz: v },
+                FxParamName::BandQ => FxParam::BandQ { band, q: v },
+                _ => FxParam::BandGainDb { band, db: v },
+            });
+        }
+        Ok(match self {
+            FxParamName::HighPassHz => FxParam::HighPassHz(v),
+            FxParamName::CompThresholdDb => FxParam::CompThresholdDb(v),
+            FxParamName::CompRatio => FxParam::CompRatio(v),
+            FxParamName::CompAttackMs => FxParam::CompAttackMs(v),
+            FxParamName::CompReleaseMs => FxParam::CompReleaseMs(v),
+            FxParamName::CompKneeDb => FxParam::CompKneeDb(v),
+            FxParamName::CompMakeupDb => FxParam::CompMakeupDb(v),
+            FxParamName::DelayFeedback => FxParam::DelayFeedback(v),
+            FxParamName::DelayMix => FxParam::DelayMix(v),
+            FxParamName::ReverbSize => FxParam::ReverbSize(v),
+            FxParamName::ReverbDamping => FxParam::ReverbDamping(v),
+            FxParamName::ReverbMix => FxParam::ReverbMix(v),
+            // The band-scoped names are all handled above.
+            _ => unreachable!("Band-Parameter werden oben behandelt"),
+        })
+    }
+}
+
+#[derive(Serialize, Clone, Copy, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct BandEvent {
+    /// Zero-based; this is what a `fx_set` command expects as `band`.
+    pub index: usize,
+    /// One-based, for display.
+    pub number: u32,
+    pub kind: BandKindName,
+    pub hz: f32,
+    pub q: f32,
+    pub gain_db: f32,
+}
+
+/// State of one track's effect chain.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct FxEvent {
+    /// Whole chain out of the signal path. While this is true the track is passed through
+    /// bit-identically, whatever the rest of these fields say.
+    pub bypass: bool,
+    pub preset: FxPresetName,
+    /// German word for the preset, ready to print.
+    pub preset_label: String,
+    /// `HEK-R`: one letter per effect that is on, a dash for one that is off. Always five
+    /// characters, in signal order.
+    pub letters: String,
+    /// On/off per effect, in signal order, next to the name the commands use.
+    pub effects: Vec<FxEffectEvent>,
+
+    pub high_pass_hz: f32,
+    pub bands: Vec<BandEvent>,
+
+    pub comp_threshold_db: f32,
+    pub comp_ratio: f32,
+    pub comp_attack_ms: f32,
+    pub comp_release_ms: f32,
+    pub comp_knee_db: f32,
+    pub comp_makeup_db: f32,
+    /// Deepest gain reduction since the last status event, in dB and never positive. A meter.
+    pub comp_reduction_db: f32,
+
+    pub delay_note: DelayNoteName,
+    /// The note value as it is written on paper: `1/4`, `1/8.`, `1/8`, `1/8T`.
+    pub delay_note_label: String,
+    /// The delay time the note value works out to at the current tempo, in samples. This is the
+    /// number the engine's timeline dictates - there is no millisecond setting to get wrong.
+    pub delay_samples: u64,
+    pub delay_ms: f64,
+    pub delay_feedback: f32,
+    pub delay_mix: f32,
+
+    pub reverb_size: f32,
+    pub reverb_damping: f32,
+    pub reverb_mix: f32,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct FxEffectEvent {
+    /// Pass this back as `effect` in `fx_enable`.
+    pub name: FxSlotName,
+    /// German word, ready to print.
+    pub label: String,
+    pub on: bool,
+}
+
+/// Build the effect part of a track's status event.
+pub fn fx_event(fx: &FxStatus, sample_rate: u32) -> FxEvent {
+    let s = &fx.settings;
+    let rate = sample_rate.max(1) as f64;
+    FxEvent {
+        bypass: fx.bypass,
+        preset: fx.preset.into(),
+        preset_label: fx.preset.label().to_string(),
+        letters: fx.letters(),
+        effects: FxSlot::all()
+            .iter()
+            .map(|&slot| FxEffectEvent {
+                name: slot.into(),
+                label: slot.label().to_string(),
+                on: s.enabled[slot.index()],
+            })
+            .collect(),
+        high_pass_hz: s.high_pass_hz,
+        bands: s
+            .bands
+            .iter()
+            .enumerate()
+            .map(|(i, b)| BandEvent {
+                index: i,
+                number: i as u32 + 1,
+                kind: b.kind.into(),
+                hz: b.hz,
+                q: b.q,
+                gain_db: b.gain_db,
+            })
+            .collect(),
+        comp_threshold_db: s.comp.threshold_db,
+        comp_ratio: s.comp.ratio,
+        comp_attack_ms: s.comp.attack_ms,
+        comp_release_ms: s.comp.release_ms,
+        comp_knee_db: s.comp.knee_db,
+        comp_makeup_db: s.comp.makeup_db,
+        comp_reduction_db: fx.reduction_db,
+        delay_note: s.delay_note.into(),
+        delay_note_label: s.delay_note.label().to_string(),
+        delay_samples: fx.delay_samples,
+        delay_ms: fx.delay_samples as f64 * 1000.0 / rate,
+        delay_feedback: s.delay_feedback,
+        delay_mix: s.delay_mix,
+        reverb_size: s.reverb_size,
+        reverb_damping: s.reverb_damping,
+        reverb_mix: s.reverb_mix,
     }
 }
 
@@ -592,7 +939,17 @@ mod tests {
             playing: true,
             // Zero-based inside the engine; input 2 as printed on the interface.
             input_channel: 1,
+            // A track nobody has touched: chain bypassed, everything off, "trocken".
+            fx: FxStatus::default(),
         }
+    }
+
+    /// A chain with a preset in it, for the effect part of the wire format.
+    fn voice_status() -> FxStatus {
+        let mut chain = looper_engine::engine::fx::Chain::new(RATE);
+        chain.load_preset(FxPreset::Voice);
+        chain.set_quarter_samples(RATE as f64 * 60.0 / 120.0);
+        chain.status()
     }
 
     /// The one conversion the whole frontend depends on: engine snapshot in, display numbers out.
@@ -782,6 +1139,7 @@ mod tests {
             keys,
             [
                 "filled_samples",
+                "fx",
                 "index",
                 "input_channel",
                 "input_dbfs",
@@ -805,6 +1163,141 @@ mod tests {
         assert_eq!(
             serde_json::to_value(event.layers[0]).unwrap(),
             json!({"index": 0, "number": 1, "muted": false, "gain": 1.0})
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Effects
+    // ------------------------------------------------------------------------------------------
+
+    /// Every effect enum has to survive the round trip through its wire name, in both directions -
+    /// the frontend switches on these strings and sends them straight back.
+    #[test]
+    fn every_effect_enum_travels_as_snake_case_in_both_directions() {
+        for (slot, wire, label) in [
+            (FxSlot::HighPass, "high_pass", "Hochpass"),
+            (FxSlot::Eq, "eq", "EQ"),
+            (FxSlot::Comp, "comp", "Kompressor"),
+            (FxSlot::Delay, "delay", "Delay"),
+            (FxSlot::Reverb, "reverb", "Hall"),
+        ] {
+            let name: FxSlotName = slot.into();
+            assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
+            assert_eq!(FxSlot::from(name), slot);
+            assert_eq!(slot.label(), label);
+        }
+
+        for (preset, wire, label) in [
+            (FxPreset::Dry, "dry", "trocken"),
+            (FxPreset::Voice, "voice", "stimme"),
+            (FxPreset::PiezoGuitar, "piezo_guitar", "gitarre"),
+            (FxPreset::Custom, "custom", "eigen"),
+        ] {
+            let name: FxPresetName = preset.into();
+            assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
+            assert_eq!(FxPreset::from(name), preset);
+            assert_eq!(preset.label(), label);
+        }
+
+        for (note, wire, label) in [
+            (DelayNote::Quarter, "quarter", "1/4"),
+            (DelayNote::DottedEighth, "dotted_eighth", "1/8."),
+            (DelayNote::Eighth, "eighth", "1/8"),
+            (DelayNote::TripletEighth, "triplet_eighth", "1/8T"),
+        ] {
+            let name: DelayNoteName = note.into();
+            assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
+            assert_eq!(DelayNote::from(name), note);
+            assert_eq!(note.label(), label);
+        }
+
+        for (kind, wire) in [
+            (BandKind::Peak, "peak"),
+            (BandKind::LowShelf, "low_shelf"),
+            (BandKind::HighShelf, "high_shelf"),
+        ] {
+            let name: BandKindName = kind.into();
+            assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
+            assert_eq!(BandKind::from(name), kind);
+        }
+    }
+
+    /// The chain state as the window sees it: which preset, what is on, and the tempo-synchronous
+    /// delay time already converted into samples and milliseconds.
+    #[test]
+    fn a_chain_becomes_the_wire_format_with_its_preset_and_its_delay_time() {
+        let event = fx_event(&voice_status(), RATE);
+        assert!(!event.bypass, "das Stimme-Preset schaltet die Kette ein");
+        assert_eq!(event.preset, FxPresetName::Voice);
+        assert_eq!(event.preset_label, "stimme");
+        assert_eq!(event.letters, "HEK-R", "Delay ist in diesem Preset aus");
+        assert_eq!(event.effects.len(), 5);
+        assert_eq!(event.effects[0].name, FxSlotName::HighPass);
+        assert_eq!(event.effects[0].label, "Hochpass");
+        assert!(event.effects[0].on);
+        assert!(!event.effects[3].on, "Delay aus");
+
+        assert_eq!(event.high_pass_hz, 80.0);
+        assert_eq!(event.bands.len(), 3);
+        assert_eq!(event.bands[0].index, 0);
+        assert_eq!(event.bands[0].number, 1);
+        assert_eq!(event.bands[1].hz, 3_000.0, "das Praesenzband");
+        assert_eq!(
+            event.bands[2].kind,
+            BandKindName::HighShelf,
+            "das oberste Band ist ein Kuhschwanz, kein Glockenfilter"
+        );
+        assert_eq!(event.comp_ratio, 3.0);
+        assert_eq!(event.comp_makeup_db, 6.0);
+
+        // Dotted eighth at 120 BPM and 48 kHz: 24000 * 0.75.
+        assert_eq!(event.delay_note, DelayNoteName::DottedEighth);
+        assert_eq!(event.delay_note_label, "1/8.");
+        assert_eq!(event.delay_samples, 18_000);
+        assert!((event.delay_ms - 375.0).abs() < 1e-9);
+
+        // A fresh track reports the dry, bypassed state.
+        let idle = fx_event(&FxStatus::default(), RATE);
+        assert!(idle.bypass);
+        assert_eq!(idle.preset, FxPresetName::Dry);
+        assert_eq!(idle.letters, "-----");
+    }
+
+    /// The generic knob command: a name plus a value, and the three band-scoped names additionally
+    /// need a band. Both mistakes a frontend can make get a German sentence, not a panic.
+    #[test]
+    fn a_named_parameter_becomes_an_engine_parameter_or_a_german_complaint() {
+        assert_eq!(
+            FxParamName::CompRatio.to_param(3.5, None).unwrap(),
+            FxParam::CompRatio(3.5)
+        );
+        assert_eq!(
+            FxParamName::HighPassHz.to_param(90.0, None).unwrap(),
+            FxParam::HighPassHz(90.0)
+        );
+        assert_eq!(
+            FxParamName::BandGainDb.to_param(-4.0, Some(1)).unwrap(),
+            FxParam::BandGainDb {
+                band: 1,
+                db: -4.0
+            }
+        );
+        assert_eq!(
+            FxParamName::BandQ.to_param(2.0, Some(2)).unwrap(),
+            FxParam::BandQ { band: 2, q: 2.0 }
+        );
+
+        let err = FxParamName::BandHz.to_param(1_000.0, None).expect_err("ohne Band");
+        assert!(err.contains("band"), "{err}");
+        let err = FxParamName::BandHz
+            .to_param(1_000.0, Some(7))
+            .expect_err("Band 7 gibt es nicht");
+        assert!(err.contains("0 bis 2"), "{err}");
+        // A knob that is not band-scoped ignores a band rather than refusing it.
+        assert!(FxParamName::ReverbMix.to_param(0.2, Some(9)).is_ok());
+        assert_eq!(
+            serde_json::to_value(FxParamName::CompThresholdDb).unwrap(),
+            json!("comp_threshold_db")
         );
     }
 

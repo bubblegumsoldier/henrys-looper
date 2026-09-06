@@ -60,6 +60,7 @@ use super::command::{
     Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, TrackStatus, buffer_channel,
     command_channel, status_channel,
 };
+use super::fx::{DelayNote, FxParam, FxPreset, FxSlot, FxStatus};
 use super::process::{EngineConfig, EngineCore, check_loop, limits_line, loop_capacity};
 use super::schedule::{Lead, Quantize, Scheduled, Scheduler};
 use super::timeline::{TimeSignature, Timeline};
@@ -77,7 +78,7 @@ const DISPLAY_INTERVAL: Duration = Duration::from_millis(100);
 /// same bar, and one in reserve.
 const SPARE_SLOTS: usize = 3;
 /// Width the status block is padded to, so remains of a longer previous line are erased.
-const LINE_WIDTH: usize = 150;
+const LINE_WIDTH: usize = 186;
 
 #[derive(Args, Debug, Clone)]
 pub struct LiveOpts {
@@ -377,6 +378,10 @@ impl Control {
                 self.send(Command::SetClick { on });
                 self.message = format!("Klick {}.", if on { "an" } else { "aus" });
             }
+            "f" => self.fx_bypass(ts),
+            "x" => self.fx_slot(parts.next(), ts),
+            "v" => self.fx_preset(parts.next()),
+            "d" => self.fx_delay_note(parts.next()),
             "e" => self.layer_mute(parts.next(), ts),
             "w" => self.layer_remove(parts.next(), ts),
             "l" => self.layer_gain(parts.next(), parts.next(), ts),
@@ -388,11 +393,88 @@ impl Control {
             }
             other => {
                 self.message = format!(
-                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m k e w l t q",
+                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m k e w l t f x v d q",
                     self.tracks.len()
                 );
             }
         }
+    }
+
+    // ---- effects -----------------------------------------------------------------------------
+    // Four keys, and no more: on stage the musician switches the chain, switches one effect, or
+    // loads a preset. Everything finer than that belongs in the window, not under a guitar.
+
+    /// `f` - whole chain of this track in or out. The panic switch: out is bit-identical.
+    fn fx_bypass(&mut self, ts: TrackStatus) {
+        let track = self.active;
+        let on = !ts.fx.bypass;
+        self.send(Command::SetFxBypass { track, on });
+        self.message = format!(
+            "\"{}\": Effektkette {}.",
+            self.tracks[track].name,
+            if on { "umgangen" } else { "aktiv" }
+        );
+    }
+
+    /// `x <1-5>` - one effect on or off.
+    fn fx_slot(&mut self, arg: Option<&str>, ts: TrackStatus) {
+        let usage = "x <1-5>  (1 Hochpass, 2 EQ, 3 Kompressor, 4 Delay, 5 Hall)";
+        let Some(slot) = arg
+            .and_then(|a| a.parse::<usize>().ok())
+            .and_then(FxSlot::from_number)
+        else {
+            self.message = format!("Aufruf: {usage}");
+            return;
+        };
+        let track = self.active;
+        let on = !ts.fx.settings.enabled[slot.index()];
+        self.send(Command::SetFxEnabled { track, slot, on });
+        let hint = if ts.fx.bypass {
+            " (die ganze Kette ist noch umgangen - f druecken)"
+        } else {
+            ""
+        };
+        self.message = format!(
+            "\"{}\": {} {}{hint}.",
+            self.tracks[track].name,
+            slot.label(),
+            if on { "an" } else { "aus" }
+        );
+    }
+
+    /// `v <name>` - load a ready-made chain.
+    fn fx_preset(&mut self, arg: Option<&str>) {
+        let names: Vec<&str> = FxPreset::loadable().iter().map(|p| p.label()).collect();
+        let Some(preset) = arg.and_then(FxPreset::parse) else {
+            self.message = format!("Aufruf: v <{}>", names.join("|"));
+            return;
+        };
+        let track = self.active;
+        self.send(Command::LoadFxPreset { track, preset });
+        self.message = format!(
+            "\"{}\": Preset \"{}\" geladen.",
+            self.tracks[track].name,
+            preset.label()
+        );
+    }
+
+    /// `d <notenwert>` - the delay is tempo-synchronous, so what it takes is a note value.
+    fn fx_delay_note(&mut self, arg: Option<&str>) {
+        let names: Vec<&str> = DelayNote::all().iter().map(|n| n.label()).collect();
+        let Some(note) = arg.and_then(DelayNote::parse) else {
+            self.message = format!("Aufruf: d <{}>", names.join("|"));
+            return;
+        };
+        let track = self.active;
+        self.send(Command::SetFxParam {
+            track,
+            param: FxParam::DelayNote(note),
+        });
+        self.message = format!(
+            "\"{}\": Delay auf {} (aus dem Tempo gerechnet).",
+            self.tracks[track].name,
+            note.label()
+        );
     }
 
     /// Parse a 1-based layer number against what the engine says exists.
@@ -604,6 +686,20 @@ fn layer_list(ts: &TrackStatus, gains: &[f32]) -> String {
     format!("[{}]", parts.join(" "))
 }
 
+/// The effect column of a track line: `stimme HEK-R 1/8.` - which preset, which effects are on,
+/// and, when the delay is one of them, the note value it is locked to.
+fn fx_text(fx: &FxStatus) -> String {
+    if fx.bypass {
+        return "aus".to_string();
+    }
+    let mut text = format!("{} {}", fx.preset.label(), fx.letters());
+    if fx.settings.enabled[FxSlot::Delay.index()] {
+        text.push(' ');
+        text.push_str(fx.settings.delay_note.label());
+    }
+    text
+}
+
 /// The global line: bar, beat, loop length, tempo, click, and which grid takes snap to.
 fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
     let tl = &sched.timeline;
@@ -663,7 +759,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
         None => ts.state.label().to_string(),
     };
     format!(
-        "{} {:<10} Ein {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Mithoeren {}",
+        "{} {:<10} Ein {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Mithoeren {} | FX {:<22}",
         if active { '>' } else { ' ' },
         ui.name,
         ui.channel + 1,
@@ -673,6 +769,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
         layer_list(ts, &ui.gains),
         fmt_dbfs(ts.input_peak),
         on_off(ts.monitor),
+        fx_text(&ts.fx),
     )
 }
 
@@ -776,7 +873,7 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
 
     let tracks: Vec<Track> = defs
         .iter()
-        .map(|d| Track::new(d.channel, opts.monitor))
+        .map(|d| Track::new(d.channel, opts.monitor, rate))
         .collect();
     let core = EngineCore::new(EngineConfig {
         timeline,
@@ -903,6 +1000,11 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
          \x20 l <nr> <wert> Lautstaerke einer Ebene (0.0 bis 4.0)\n\
          \x20 k   Klick an/aus\n\
          \x20 t   Tempo aendern, z.B. \"t 120\" oder \"t 120 7 8\" (nur wenn alles leer ist)\n\
+         Effekte - wirken auf Wiedergabe und Mithoeren, die Aufnahme bleibt immer trocken:\n\
+         \x20 v <name>      Preset laden: stimme | gitarre | trocken\n\
+         \x20 f             ganze Effektkette an/aus (aus = bitgleich durchgereicht)\n\
+         \x20 x <1-5>       einzeln: 1 Hochpass, 2 EQ, 3 Kompressor, 4 Delay, 5 Hall\n\
+         \x20 d <wert>      Delay-Notenwert: 1/4 | 1/8. | 1/8 | 1/8T (aus dem Tempo gerechnet)\n\
          \x20 q   Beenden\n",
         defs.len(),
         defs.len(),
@@ -1052,6 +1154,36 @@ mod tests {
 
         let many: Vec<String> = (1..=MAX_TRACKS + 1).map(|i| format!("t{i}:1")).collect();
         assert!(resolve_tracks(&many, 8).is_err(), "Obergrenze greift");
+    }
+
+    /// The one thing the musician reads off the screen while playing: is the chain doing anything,
+    /// which preset is it, and what is on.
+    #[test]
+    fn the_effect_column_says_what_is_switched_on() {
+        let mut chain = super::super::fx::Chain::new(48_000);
+        chain.load_preset(FxPreset::Voice);
+        let ts = TrackStatus {
+            fx: chain.status(),
+            ..Default::default()
+        };
+        assert_eq!(fx_text(&ts.fx), "stimme HEK-R");
+
+        chain.set_enabled(FxSlot::Delay, true);
+        chain.set_param(FxParam::DelayNote(DelayNote::Quarter));
+        let ts = TrackStatus {
+            fx: chain.status(),
+            ..Default::default()
+        };
+        assert_eq!(fx_text(&ts.fx), "eigen HEKDR 1/4");
+
+        chain.set_bypass(true);
+        let ts = TrackStatus {
+            fx: chain.status(),
+            ..Default::default()
+        };
+        assert_eq!(fx_text(&ts.fx), "aus");
+        // A track nobody has touched shows nothing either, because it starts bypassed.
+        assert_eq!(fx_text(&TrackStatus::default().fx), "aus");
     }
 
     #[test]

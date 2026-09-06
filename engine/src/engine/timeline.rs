@@ -107,6 +107,16 @@ impl Timeline {
         self.samples_per_beat
     }
 
+    /// Length of a quarter note in samples.
+    ///
+    /// Not the same as [`Timeline::samples_per_beat`]: with a beat unit of 8 a beat is an eighth,
+    /// while BPM always counts quarters. Anything expressed in note values - the tempo-synchronous
+    /// delay in `engine::fx` - has to reference the quarter, because that is what a musician means
+    /// by "1/4" whatever the time signature is.
+    pub fn samples_per_quarter(&self) -> f64 {
+        self.sample_rate as f64 * 60.0 / self.bpm
+    }
+
     /// First sample of beat number `beat_index` (counted from the start of the session).
     ///
     /// Absolute, never incremental - see the module comment.
@@ -295,6 +305,22 @@ mod tests {
         // Spot check far out on the grid against an independently computed value.
         let expect = (1000.0 * 7.0 * t.samples_per_beat()).round() as u64;
         assert_eq!(t.bar_start(1000), expect);
+    }
+
+    /// A beat is not always a quarter, and the delay depends on knowing the difference.
+    #[test]
+    fn a_quarter_note_is_independent_of_the_beat_unit() {
+        let four_four = tl(120.0, 4, 4);
+        assert_eq!(four_four.samples_per_quarter(), 24_000.0);
+        assert_eq!(four_four.samples_per_beat(), 24_000.0);
+
+        let seven_eight = tl(120.0, 7, 8);
+        assert_eq!(seven_eight.samples_per_beat(), 12_000.0, "ein Schlag ist ein Achtel");
+        assert_eq!(
+            seven_eight.samples_per_quarter(),
+            24_000.0,
+            "eine Viertel bleibt eine Viertel"
+        );
     }
 
     #[test]

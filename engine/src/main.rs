@@ -82,6 +82,19 @@ enum Command {
         live: LiveOpts,
     },
 
+    /// Rechenlast der Effektkette messen: Zeit je Effekt und fuer die ganze Kette, als Anteil am
+    /// Callback-Budget. Oeffnet kein Geraet und macht keinen Ton - aussagekraeftig nur im
+    /// Release-Build.
+    Fxbench {
+        /// Samplerate, fuer die gerechnet wird
+        #[arg(long, default_value_t = 48_000)]
+        rate: u32,
+
+        /// Wie viele Sekunden Audio je Messzeile durchgerechnet werden
+        #[arg(long, default_value_t = 2.0)]
+        seconds: f64,
+    },
+
     /// Latenzkompensation pruefen: die Engine nimmt per Loopback-Kabel ihren eigenen Klick auf
     /// und misst, wie weit er vom Schlagraster abweicht
     Calibrate {
@@ -115,6 +128,7 @@ fn main() -> ExitCode {
         Command::Latency { dev, runs } => latency::cmd_latency(dev, *runs),
         Command::Soak { dev, minutes, gain } => soak::cmd_soak(dev, *minutes, *gain),
         Command::Live { dev, live } => engine::live::cmd_live(dev, live),
+        Command::Fxbench { rate, seconds } => engine::fx::bench::cmd_fxbench(*rate, *seconds),
         Command::Calibrate { dev, calibrate } => engine::calibrate::cmd_calibrate(dev, calibrate),
     };
     match result {

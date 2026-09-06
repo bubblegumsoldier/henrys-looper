@@ -134,7 +134,7 @@ impl Sim {
         let tracks: Vec<Track> = spec
             .tracks
             .iter()
-            .map(|t| Track::new(t.channel, t.monitor))
+            .map(|t| Track::new(t.channel, t.monitor, spec.sample_rate))
             .collect();
         let core = EngineCore::new(EngineConfig {
             timeline,

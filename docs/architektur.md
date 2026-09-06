@@ -53,7 +53,7 @@ andere ist die Eintrittskarte.
 | 3 | Partitur und Runner | offen |
 | 4 | UI | vorgezogen, siehe unten |
 | 5 | Bühnentauglichkeit, MIDI | offen |
-| 6 | Effekte | offen |
+| 6 | Effekte | DSP, Kommandos und CLI gebaut, 199 Tests grün, Abnahme am Instrument offen. UI folgt |
 
 Der Python- und React-Code des Ableton-Prototypen liegt unangetastet im Repo
 (`backend/`, `looper/`, `spike/`, `ui/`). Er wird ersetzt, nicht angebunden.
@@ -301,7 +301,85 @@ darf im Audio-Callback allozieren, sperren und abstürzen. Die Echtzeit-Garantie
 Projekts enden an dieser Grenze, und ohne Prozesstrennung reißt ein Absturz die ganze Engine
 mit — samt laufender Aufnahme.
 
-## 9. Arbeitsweise
+## 9. Effekte (Phase 6)
+
+Der DSP liegt in `engine/src/engine/fx/`, ein Modul je Effekt plus `mod.rs` mit der Kette. Keine
+neue Abhängigkeit: Biquads, Kompressor, Delay und ein Freeverb-artiger Hall sind selbst
+geschrieben, weil wir damit Allokation und Denormals kontrollieren.
+
+### Wo die Kette hängt
+
+```
+Eingang ─┬─────────────────────────────────────────────► Loop-Puffer   (trocken!)
+         └─► Mithören ─┐
+                       ├─► Effektkette des Tracks ─┐
+Ebenen-Summe ──────────┘                           ├─► Ausgang
+Klick ─────────────────────────────────────────────┘
+```
+
+**Aufgenommen wird trocken, ohne Ausnahme.** `EngineCore::record_input` liest das rohe
+Eingangs-Slice und sieht die Kette nicht einmal. Ein Effekt, der in einer Aufnahme steckt, ist
+nicht mehr herauszubekommen; einer auf der Wiedergabe lässt sich zwischen zwei Loop-Durchläufen
+neu einstellen. Der Test `the_recording_stays_dry_with_the_whole_chain_turned_up` hält das fest.
+
+**Mithören läuft durch dieselbe Ketteninstanz wie die Wiedergabe.** Wer mit Hall singt, singt
+anders; und zwei parallele Ketten würden beim ersten Parameterwechsel auseinanderlaufen. Deshalb
+werden Ebenensumme und Mithörsignal *vor* der Kette summiert (`Track::render`). Der Klick bleibt
+außen vor - er ist Referenz, keine Musik.
+
+### Reihenfolge und Presets
+
+Hochpass, drei Bänder parametrischer EQ, Kompressor, Delay, Hall - die Reihenfolge aus dem Plan.
+Das oberste EQ-Band ist als Kuhschwanz ausgelegt: "Luft" ist das ganze obere Ende, nicht eine
+Frequenz. Der Kompressor hat ein weiches Knie (6 bis 8 dB), weil eine Stimme *an* der Schwelle
+lebt und ein hartes Knie mehrmals pro Sekunde umschalten würde.
+
+Drei Presets, jeder Wert im Code begründet: `stimme` (80 Hz Hochpass, Präsenz +2,5 dB bei 3 kHz,
+3:1 ab -18 dBFS mit +6 dB Makeup, 18 % Hall), `gitarre` (100 Hz Hochpass, -4 dB Quäkband bei
+3 kHz, 2,5:1 mit langsamem Attack, 10 % Hall), `trocken` (alles aus, Kette umgangen).
+
+**Ein frischer Track ist umgangen und damit bitgleich durchgereicht** - deshalb hat sich für die
+123 Tests aus Phase 2 nichts geändert.
+
+### Delay: tempo-synchron, nicht in Millisekunden
+
+Die Verzögerung kommt aus `Timeline::samples_per_quarter()`, also aus derselben Achse, die auch
+die Loops ausrichtet - bei 120 BPM ist eine Viertel exakt 24 000 Samples, nicht "etwa 500 ms". Das
+ist der musikalische Ertrag der eigenen Engine. Die Leitung ist auf **2 Sekunden** ausgelegt (eine
+Viertel bei 30 BPM), 384 kB je Track. Ein Tempowechsel blendet den alten auf den neuen Tap über
+(20 ms) statt zu springen.
+
+### Echtzeit
+
+Alle Puffer entstehen in `Chain::new`, also im Steuer-Thread beim Bau des Tracks - rund 440 kB je
+Track (Delay-Leitung plus Hall). Im Callback wird nichts alloziert, gesperrt oder geloggt.
+Parameter kommen als `Copy`-Kommandos durch die vorhandene Queue; die Koeffizientenrechnung
+(`sin`, `cos`, `powf`) läuft einmal je Kommando, nie je Sample.
+
+**Denormals** werden zweifach behandelt: jeder Rückkopplungsspeicher läuft durch `flush` (alles
+unter 1e-30 wird echt null), und die Kette hört nach Ablauf ihres längsten Schwanzes ganz auf zu
+rechnen, solange der Eingang exakt null ist. Ein stiller Hall ist sonst der teuerste Zustand, den
+ein Hall haben kann.
+
+### Gemessene Rechenlast
+
+`looper-engine fxbench`, Release-Build, 48 kHz, Budget 128 Frames = 2,667 ms:
+
+| | ns/Sample | % je Track | % bei 8 Tracks |
+|---|---:|---:|---:|
+| Hochpass | 4,9 | 0,02 | 0,19 |
+| EQ (3 Bänder) | 12,4 | 0,06 | 0,48 |
+| Kompressor | 15,6 | 0,07 | 0,60 |
+| Delay | 4,7 | 0,02 | 0,18 |
+| Hall | 22,7 | 0,11 | 0,87 |
+| **Kette komplett** | **84,1** | **0,40** | **3,23** |
+| Kette still (Leerlauf) | 2,0 | 0,01 | 0,08 |
+| Kette umgangen | 2,3 | 0,01 | 0,09 |
+
+Acht volle Ketten kosten rund **3,2 % des Callback-Budgets**. Ein globaler Hall-Bus würde davon
+0,76 Prozentpunkte sparen und ist damit **nicht nötig** - er wurde bewusst nicht gebaut.
+
+## 10. Arbeitsweise
 
 - Henry bedient Hardware selbst; Audio-Tests laufen nur mit seiner Zustimmung.
 - **Nie gleichzeitig an derselben Sache arbeiten.** Das hat schon Schaden angerichtet.
