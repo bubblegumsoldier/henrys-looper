@@ -51,11 +51,15 @@ use looper_engine::engine::process::{
 use looper_engine::engine::runner::{
     DEFAULT_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks,
 };
-use looper_engine::engine::timeline::Timeline;
+use looper_engine::engine::timeline::{TimeSignature, Timeline};
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
+use looper_engine::midi::{
+    Context, FxKnob, MidiAction, ParamState, Resolution, Target, TrackLayout, TrackRef,
+};
 use looper_engine::score::{ScoreError, compile_score};
 
 use crate::logfile::{self, log};
+use crate::midi::{MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView};
 use crate::proto::{
     AppInfo, CalibrateConfig, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
     DeviceReport, EngineInfo, HostInfo, QuantizeName, ScoreLoaded, StartConfig, StatusEvent,
@@ -67,6 +71,9 @@ use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tr
 pub const STATUS_EVENT: &str = "looper://status";
 /// Event carrying [`AppInfo`], emitted once at startup.
 pub const READY_EVENT: &str = "looper://ready";
+/// Event carrying incoming MIDI and the state of the mapping. Its own event and not part of the
+/// status snapshot - see the module comment of [`crate::midi`] for why.
+pub const MIDI_EVENT: &str = "looper://midi";
 
 /// Input FIFO size in multiples of the audio buffer. Same value as the CLI: a few dozen kB, and
 /// the difference between a hiccup and a permanently misaligned recording.
@@ -209,6 +216,17 @@ enum Request {
     ScoreLoad(String, Option<u32>, Sender<Result<ScoreLoaded, String>>),
     ScoreAct(ScoreAction, Sender<Result<String, String>>),
     Calibrate(Box<CalibrateConfig>, Sender<Result<CalibrateOutcome, String>>),
+
+    // --- MIDI. Handled on this thread because that is where the session is, and because a MIDI
+    // connection belongs to the thread that opened it.
+    MidiPorts(Sender<Result<Vec<MidiPortView>, String>>),
+    MidiOpen(String, Sender<Result<MidiView, String>>),
+    MidiClose(Sender<Result<MidiView, String>>),
+    /// `Some(address)` arms the learn mode for that address, `None` cancels it.
+    MidiLearn(Option<String>, Sender<Result<MidiView, String>>),
+    MidiUnbind(String, Sender<Result<MidiView, String>>),
+    MidiSave(Sender<Result<MidiSaved, String>>),
+    MidiState(Sender<Result<MidiView, String>>),
 }
 
 /// Cloneable, `Send + Sync` handle held in Tauri's managed state. Nothing audio-related crosses
@@ -266,6 +284,36 @@ impl EngineHandle {
     pub fn calibrate(&self, config: CalibrateConfig) -> Result<CalibrateOutcome, String> {
         self.call(|reply| Request::Calibrate(Box::new(config), reply))
     }
+
+    // ---- MIDI ------------------------------------------------------------------------------
+
+    pub fn midi_ports(&self) -> Result<Vec<MidiPortView>, String> {
+        self.call(Request::MidiPorts)
+    }
+
+    pub fn midi_open(&self, device: String) -> Result<MidiView, String> {
+        self.call(|reply| Request::MidiOpen(device, reply))
+    }
+
+    pub fn midi_close(&self) -> Result<MidiView, String> {
+        self.call(Request::MidiClose)
+    }
+
+    pub fn midi_learn(&self, address: Option<String>) -> Result<MidiView, String> {
+        self.call(|reply| Request::MidiLearn(address, reply))
+    }
+
+    pub fn midi_unbind(&self, id: String) -> Result<MidiView, String> {
+        self.call(|reply| Request::MidiUnbind(id, reply))
+    }
+
+    pub fn midi_save(&self) -> Result<MidiSaved, String> {
+        self.call(Request::MidiSave)
+    }
+
+    pub fn midi_state(&self) -> Result<MidiView, String> {
+        self.call(Request::MidiState)
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -275,15 +323,22 @@ impl EngineHandle {
 fn host_thread(rx: Receiver<Request>, app: AppHandle) {
     log!("Audio-Thread bereit (Engine laeuft noch nicht).");
     let mut session: Option<Session> = None;
+    // The MIDI side lives here rather than inside `Session`, because it outlives one: a controller
+    // stays connected across a stop and a restart of the engine, and the learn mode has to work
+    // before anything is started at all.
+    let mut midi = MidiBridge::new();
 
     loop {
-        let tick = if session.is_some() {
+        // An open MIDI port needs the short tick as much as a running engine does: the queue
+        // between the driver callback and here is drained on this loop, and a pad that arrives four
+        // milliseconds late is inaudible while one that arrives two hundred late is not.
+        let tick = if session.is_some() || midi.is_open() {
             RUNNING_TICK
         } else {
             IDLE_TICK
         };
         match rx.recv_timeout(tick) {
-            Ok(request) => handle(request, &mut session, &app),
+            Ok(request) => handle(request, &mut session, &mut midi, &app),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -295,6 +350,8 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
                 stop_session(&mut session, &app);
             }
         }
+
+        pump_midi(&mut midi, &mut session, &app);
     }
 
     // The handle was dropped, so the app is going down. Give the device back properly anyway.
@@ -302,7 +359,12 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
     log!("Audio-Thread beendet.");
 }
 
-fn handle(request: Request, session: &mut Option<Session>, app: &AppHandle) {
+fn handle(
+    request: Request,
+    session: &mut Option<Session>,
+    midi: &mut MidiBridge,
+    app: &AppHandle,
+) {
     match request {
         Request::ListDevices(reply) => {
             let report = survey_devices();
@@ -328,6 +390,10 @@ fn handle(request: Request, session: &mut Option<Session>, app: &AppHandle) {
             }
             match Session::start(*config) {
                 Ok(active) => {
+                    // Every parameter is back at its starting value, so every knob has to catch its
+                    // parameter again. Without this, pickup would protect the first touch after
+                    // startup and nothing afterwards.
+                    midi.rearm();
                     let info = active.info.clone();
                     let stereo = info.tracks.iter().filter(|t| t.channels() == 2).count();
                     log!(
@@ -379,7 +445,30 @@ fn handle(request: Request, session: &mut Option<Session>, app: &AppHandle) {
                 None => Err(NO_ENGINE.to_string()),
             };
             match &result {
-                Ok(loaded) => log!("Partitur geladen: {}", loaded.message),
+                Ok(loaded) => {
+                    log!("Partitur geladen: {}", loaded.message);
+                    // The score's `midi:` block supplements the profile for this one piece - the
+                    // same overlay the CLI does. Every pad the score takes over is said out loud.
+                    match midi.set_score(Some(&loaded.score)) {
+                        Ok(notes) => {
+                            for note in notes {
+                                log!("MIDI: {note}");
+                                midi.say(note);
+                            }
+                        }
+                        Err(issues) => {
+                            let text = format!(
+                                "Die MIDI-Bindungen der Partitur wurden nicht uebernommen: {}",
+                                issues.join(" ")
+                            );
+                            log!("{text}");
+                            midi.say(text);
+                        }
+                    }
+                    // A score sets tempo, grid and every parameter it names; the knobs have to
+                    // catch up with that before they act.
+                    midi.rearm();
+                }
                 Err(e) => log!("Partitur nicht geladen: {e}"),
             }
             let _ = reply.send(result);
@@ -397,6 +486,334 @@ fn handle(request: Request, session: &mut Option<Session>, app: &AppHandle) {
         Request::Calibrate(config, reply) => {
             let _ = reply.send(run_calibration(*config, session.is_some()));
         }
+
+        // --- MIDI -------------------------------------------------------------------------
+        Request::MidiPorts(reply) => {
+            let _ = reply.send(MidiBridge::ports());
+        }
+        Request::MidiOpen(device, reply) => {
+            let result = midi.open(&device);
+            match &result {
+                Ok(view) => log!(
+                    "MIDI-Eingang offen: {} ({} Bindungen).",
+                    view.port.as_deref().unwrap_or("?"),
+                    view.bindings.len()
+                ),
+                Err(e) => log!("MIDI-Eingang nicht geoeffnet: {e}"),
+            }
+            let _ = reply.send(result);
+        }
+        Request::MidiClose(reply) => {
+            let view = midi.close();
+            log!("MIDI-Eingang geschlossen.");
+            let _ = reply.send(Ok(view));
+        }
+        Request::MidiLearn(address, reply) => {
+            let result = match address {
+                Some(address) => midi.arm(&address),
+                None => Ok(midi.cancel_learn()),
+            };
+            if let Some(text) = result.as_ref().ok().and_then(|v| v.message.clone()) {
+                log!("MIDI: {text}");
+            }
+            let _ = reply.send(result);
+        }
+        Request::MidiUnbind(id, reply) => {
+            let _ = reply.send(midi.unbind(&id));
+        }
+        Request::MidiSave(reply) => {
+            let result = midi.save();
+            match &result {
+                Ok(saved) => log!("MIDI: {}", saved.message),
+                Err(e) => log!("MIDI-Profil nicht gespeichert: {e}"),
+            }
+            let _ = reply.send(result);
+        }
+        Request::MidiState(reply) => {
+            let _ = reply.send(Ok(midi.view()));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// MIDI: from the queue into the session
+// ---------------------------------------------------------------------------------------------
+
+/// One resolved MIDI intent, on the way to the same two doors a mouse click uses.
+///
+/// There are two of them because the program has two: everything that changes the mix or the
+/// transport of a track is an [`Action`] and goes through [`Session::apply`]; the score's own
+/// transport is a [`ScoreAction`] and goes to the runner. A pad uses exactly these doors and no
+/// private one, which is what makes "a pad can do what a mouse can do, and no more" true by
+/// construction rather than by inspection.
+#[derive(Debug, Clone, PartialEq)]
+enum MidiIntent {
+    Session(Action),
+    Score(ScoreAction),
+}
+
+/// A resolved MIDI action as the action a click produces.
+///
+/// Two of them need a number this module does not carry, and both are deliberate:
+///
+/// * `Tempo` sets a BPM and leaves the time signature alone - a knob has one dimension, and the
+///   metre is not something one nudges with a fader.
+/// * `LatencyTrim` is the *manual surcharge* only. The measured half belongs to `calibrate` and is
+///   passed straight back in, so turning the trim knob can never wipe out a measurement.
+fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>) -> MidiIntent {
+    match action {
+        MidiAction::ScoreStart => MidiIntent::Score(ScoreAction::Start),
+        MidiAction::ScoreNext => MidiIntent::Score(ScoreAction::Next),
+        MidiAction::ScoreStopAll => MidiIntent::Score(ScoreAction::StopAll),
+        MidiAction::ScoreGoto(section) => MidiIntent::Score(ScoreAction::Goto(section)),
+
+        MidiAction::Click(on) => MidiIntent::Session(Action::SetClick { on }),
+        MidiAction::ClearAll => MidiIntent::Session(Action::ClearAll),
+        MidiAction::Tempo(bpm) => MidiIntent::Session(Action::SetTempo {
+            bpm,
+            beats_per_bar: signature.beats_per_bar,
+            beat_unit: signature.beat_unit,
+        }),
+        MidiAction::SetQuantize(quantize) => {
+            MidiIntent::Session(Action::SetQuantize { quantize })
+        }
+
+        MidiAction::Record { track } => MidiIntent::Session(Action::Record { track }),
+        MidiAction::Overdub { track } => MidiIntent::Session(Action::Overdub { track }),
+        MidiAction::Play { track } => MidiIntent::Session(Action::Play { track }),
+        MidiAction::StopTrack { track } => MidiIntent::Session(Action::StopTrack { track }),
+        MidiAction::ClearTrack { track } => MidiIntent::Session(Action::ClearTrack { track }),
+        MidiAction::Monitor { track, on } => {
+            MidiIntent::Session(Action::SetMonitor { track, on })
+        }
+        MidiAction::Pan { track, pan } => MidiIntent::Session(Action::SetPan { track, pan }),
+        MidiAction::LatencyTrim { track, trim } => {
+            MidiIntent::Session(Action::SetTrackLatency {
+                track,
+                latency: TrackLatency { measured, trim },
+            })
+        }
+
+        MidiAction::LayerMute {
+            track,
+            layer,
+            muted,
+        } => MidiIntent::Session(Action::LayerMute {
+            track,
+            layer,
+            muted,
+        }),
+        MidiAction::LayerRemove { track, layer } => {
+            MidiIntent::Session(Action::LayerRemove { track, layer })
+        }
+        MidiAction::LayerGain { track, layer, gain } => {
+            MidiIntent::Session(Action::LayerGain { track, layer, gain })
+        }
+
+        MidiAction::FxBypass { track, on } => MidiIntent::Session(Action::FxBypass { track, on }),
+        MidiAction::FxEnable { track, slot, on } => {
+            MidiIntent::Session(Action::FxEnable { track, slot, on })
+        }
+        MidiAction::FxPreset { track, preset } => {
+            MidiIntent::Session(Action::FxPreset { track, preset })
+        }
+        MidiAction::FxParam { track, param } => {
+            MidiIntent::Session(Action::FxParam { track, param })
+        }
+    }
+}
+
+/// Drain the MIDI queue, apply what it means, and tell the web view.
+///
+/// Called once per turn of the host loop, which is every four milliseconds while anything is open.
+/// Nothing here allocates unless an event actually arrived.
+fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHandle) {
+    if let Some(gone) = midi.check_alive() {
+        log!("{gone}");
+    }
+
+    let mut events = Vec::new();
+    midi.drain(&mut events);
+
+    for event in events {
+        // The learn mode swallows the stream: while it waits for a control, that control must not
+        // also do its old job on the way in.
+        if midi.is_learning() {
+            if let Some(report) = midi.feed_learn(&event) {
+                log!("MIDI gelernt: {}", report.note.as_deref().unwrap_or(""));
+            }
+            continue;
+        }
+
+        let resolution = match session.as_ref() {
+            Some(active) => {
+                let layout = active.layout();
+                let state = SessionState { session: active };
+                let ctx = Context {
+                    layout: &layout,
+                    state: &state,
+                    score_is_playing: active.score_is_playing(),
+                };
+                midi.resolve(&event, &ctx)
+            }
+            // Without an engine there are no tracks to resolve a binding against. The router says
+            // so per binding, which is a better sentence than one blanket refusal.
+            None => {
+                let layout = TrackLayout::default();
+                let ctx = Context::bare(&layout);
+                midi.resolve(&event, &ctx)
+            }
+        };
+
+        let target = midi.target_of(&event);
+        match resolution {
+            Resolution::Unbound => midi.report(&event, MidiOutcome::Unbound, None, None),
+            Resolution::Absorbed(reason) => {
+                midi.report(&event, MidiOutcome::Absorbed, target.as_ref(), Some(reason));
+            }
+            Resolution::Refused(reason) => {
+                log!("MIDI abgelehnt: {reason}");
+                midi.report(&event, MidiOutcome::Refused, target.as_ref(), Some(reason));
+            }
+            Resolution::Action(action) => {
+                let Some(active) = session.as_mut() else {
+                    midi.report(
+                        &event,
+                        MidiOutcome::Refused,
+                        target.as_ref(),
+                        Some(NO_ENGINE.to_string()),
+                    );
+                    continue;
+                };
+                let signature = active.scheduler.timeline.signature();
+                // The measured half of the compensation is read back out and handed straight in
+                // again: a knob on the surcharge must not wipe out a measurement.
+                let measured = match action {
+                    MidiAction::LatencyTrim { track, .. } => active
+                        .tracks
+                        .get(track)
+                        .and_then(|ui| ui.latency.measured),
+                    _ => None,
+                };
+                let outcome = match intent_of(action, signature, measured) {
+                    MidiIntent::Session(what) => active.apply(what).map(|()| None),
+                    MidiIntent::Score(what) => active.score_act(what).map(Some),
+                };
+                match outcome {
+                    Ok(message) => {
+                        // A preset moves every knob at once; the physical ones have to catch up
+                        // before they act again.
+                        if matches!(action, MidiAction::FxPreset { .. }) {
+                            midi.rearm();
+                        }
+                        midi.report(&event, MidiOutcome::Action, target.as_ref(), message);
+                    }
+                    Err(e) => {
+                        log!("MIDI abgelehnt: {e}");
+                        midi.report(&event, MidiOutcome::Refused, target.as_ref(), Some(e));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(feed) = midi.take_feed() {
+        let _ = app.emit(MIDI_EVENT, feed);
+    }
+}
+
+/// Where the router reads the current value of a parameter from: the newest status snapshot.
+///
+/// Without this, pickup has nothing to pick up against and a toggle flips its own private copy of a
+/// state that the mouse and the score also change. Everything below is read out of the same
+/// snapshot the screen is drawn from, so the knob and the number agree.
+struct SessionState<'a> {
+    session: &'a Session,
+}
+
+impl SessionState<'_> {
+    /// A binding's track reference as an index. A profile says `track.1`, a score `track.stimme`.
+    fn index(&self, reference: &TrackRef) -> Option<usize> {
+        match reference {
+            TrackRef::Index(index) => Some(*index).filter(|i| *i < self.session.tracks.len()),
+            TrackRef::Name(name) => self.session.tracks.iter().position(|ui| ui.name == *name),
+        }
+    }
+
+    fn fx(&self, reference: &TrackRef) -> Option<looper_engine::engine::fx::FxStatus> {
+        let index = self.index(reference)?;
+        let (status, _) = self.session.last?;
+        status.tracks().get(index).map(|track| track.fx)
+    }
+}
+
+impl ParamState for SessionState<'_> {
+    fn value(&self, target: &Target) -> Option<f32> {
+        match target {
+            Target::Tempo => Some(self.session.scheduler.timeline.bpm() as f32),
+            Target::Pan(track) => {
+                let index = self.index(track)?;
+                Some(self.session.status_of(index).pan)
+            }
+            Target::LatencyTrim(track) => {
+                let index = self.index(track)?;
+                Some(self.session.tracks[index].latency.trim as f32)
+            }
+            Target::LayerGain(track, layer) => {
+                let index = self.index(track)?;
+                self.session.tracks[index].gains.get(*layer).copied()
+            }
+            Target::FxKnob(track, knob) => {
+                let fx = self.fx(track)?;
+                Some(knob_value(&fx.settings, *knob))
+            }
+            _ => None,
+        }
+    }
+
+    fn switch(&self, target: &Target) -> Option<bool> {
+        match target {
+            Target::Click => self.session.last.map(|(status, _)| status.click),
+            Target::Monitor(track) => {
+                let index = self.index(track)?;
+                Some(self.session.status_of(index).monitor)
+            }
+            Target::LayerMute(track, layer) => {
+                let index = self.index(track)?;
+                let status = self.session.status_of(index);
+                if *layer >= status.layers as usize {
+                    return None;
+                }
+                Some(status.muted_mask & (1 << layer) != 0)
+            }
+            Target::FxBypass(track) => Some(self.fx(track)?.bypass),
+            Target::FxEnabled(track, slot) => {
+                let fx = self.fx(track)?;
+                Some(fx.settings.enabled[slot.index()])
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Where one effect knob currently stands. The mirror image of [`FxKnob::to_param`].
+fn knob_value(settings: &looper_engine::engine::fx::ChainSettings, knob: FxKnob) -> f32 {
+    match knob {
+        FxKnob::HighPassHz => settings.high_pass_hz,
+        FxKnob::BandHz(band) => settings.bands[band].hz,
+        FxKnob::BandQ(band) => settings.bands[band].q,
+        FxKnob::BandGainDb(band) => settings.bands[band].gain_db,
+        FxKnob::CompThresholdDb => settings.comp.threshold_db,
+        FxKnob::CompRatio => settings.comp.ratio,
+        FxKnob::CompAttackMs => settings.comp.attack_ms,
+        FxKnob::CompReleaseMs => settings.comp.release_ms,
+        FxKnob::CompKneeDb => settings.comp.knee_db,
+        FxKnob::CompMakeupDb => settings.comp.makeup_db,
+        FxKnob::DelayFeedback => settings.delay_feedback,
+        FxKnob::DelayMix => settings.delay_mix,
+        FxKnob::ReverbSize => settings.reverb_size,
+        FxKnob::ReverbDamping => settings.reverb_damping,
+        FxKnob::ReverbMix => settings.reverb_mix,
     }
 }
 
@@ -1204,6 +1621,12 @@ impl Session {
             .map(|i| self.tracks[i].name.clone())
     }
 
+    /// The track list a MIDI binding's address is resolved against. `track.1` is the first entry,
+    /// `track.stimme` the one with that name - the same two spellings the profile and the score use.
+    fn layout(&self) -> TrackLayout {
+        TrackLayout::new(self.tracks.iter().map(|ui| ui.name.clone()))
+    }
+
     fn status_of(&self, track: usize) -> TrackStatus {
         self.last
             .and_then(|(s, _)| s.tracks().get(track).copied())
@@ -1811,6 +2234,186 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **An incoming MIDI event ends up on the session, with the right target and the right value.**
+    ///
+    /// The whole chain minus the device: a mapping, an event, the router - and then the piece this
+    /// file adds, which is turning the resolved intent into the very action a mouse click produces.
+    /// If this drifts, a pad and a button on the same target start doing different things.
+    #[test]
+    fn a_resolved_midi_event_becomes_the_action_a_mouse_click_produces() {
+        use looper_engine::midi::{
+            Binding, Context, MidiEvent, MidiId, MidiMap, Router, TrackLayout,
+        };
+
+        let signature = TimeSignature::new(4, 4);
+        let mut map = MidiMap::new();
+        map.insert(
+            MidiId::note(1, 36),
+            Binding::new(Target::parse("track.2.record").expect("Adresse")),
+        );
+        map.insert(
+            MidiId::cc(1, 3),
+            Binding::new(Target::parse("track.1.fx.reverb.mix").expect("Adresse")),
+        );
+        map.insert(
+            MidiId::note(1, 45),
+            Binding::new(Target::parse("transport.next").expect("Adresse")),
+        );
+        let mut router = Router::new(map);
+        let layout = TrackLayout::new(["stimme", "gitarre"]);
+
+        // A pad on the second track's record button.
+        let ctx = Context::bare(&layout);
+        let action = router
+            .resolve(
+                &MidiEvent::NoteOn {
+                    channel: 1,
+                    note: 36,
+                    velocity: 100,
+                },
+                &ctx,
+            )
+            .action()
+            .expect("das Pad loest aus");
+        assert_eq!(
+            intent_of(action, signature, None),
+            MidiIntent::Session(Action::Record { track: 1 }),
+            "track.2 ist der zweite Track, also Index 1"
+        );
+
+        // A knob at its stop lands exactly on the end of the target's range, not a hair below.
+        let action = router
+            .resolve(
+                &MidiEvent::ControlChange {
+                    channel: 1,
+                    controller: 3,
+                    value: 127,
+                },
+                &ctx,
+            )
+            .action()
+            .expect("der Regler faehrt den Wert");
+        match intent_of(action, signature, None) {
+            MidiIntent::Session(Action::FxParam { track, param }) => {
+                assert_eq!(track, 0);
+                assert_eq!(param, FxParam::ReverbMix(1.0));
+            }
+            other => panic!("ein Regler auf dem Hall-Anteil, nicht {other:?}"),
+        }
+
+        // The score's transport goes to the runner, not through `Session::apply`.
+        let action = router
+            .resolve(
+                &MidiEvent::NoteOn {
+                    channel: 1,
+                    note: 45,
+                    velocity: 127,
+                },
+                &ctx,
+            )
+            .action()
+            .expect("der Release-Knopf");
+        assert_eq!(
+            intent_of(action, signature, None),
+            MidiIntent::Score(ScoreAction::Next)
+        );
+    }
+
+    /// The transport boundary has to survive the translation into an [`Action`].
+    ///
+    /// The pairing test above proves `Target` and `Action` agree about what moves the transport.
+    /// This one proves the step in between does not lose it: every MIDI action that moves the
+    /// transport has to become an action that also does, or the refusal would be worked out on one
+    /// vocabulary and the take put on the timeline by the other.
+    #[test]
+    fn the_transport_boundary_survives_the_translation_from_midi_to_action() {
+        let signature = TimeSignature::new(4, 4);
+        let actions = [
+            MidiAction::Record { track: 0 },
+            MidiAction::Overdub { track: 0 },
+            MidiAction::Play { track: 0 },
+            MidiAction::StopTrack { track: 0 },
+            MidiAction::ClearTrack { track: 0 },
+            MidiAction::ClearAll,
+            MidiAction::Tempo(120.0),
+            MidiAction::SetQuantize(Quantize::Bar),
+            MidiAction::Click(true),
+            MidiAction::Monitor {
+                track: 0,
+                on: true,
+            },
+            MidiAction::Pan { track: 0, pan: 0.5 },
+            MidiAction::LatencyTrim {
+                track: 0,
+                trim: 120,
+            },
+            MidiAction::LayerMute {
+                track: 0,
+                layer: 0,
+                muted: true,
+            },
+            MidiAction::LayerRemove { track: 0, layer: 0 },
+            MidiAction::LayerGain {
+                track: 0,
+                layer: 0,
+                gain: 0.5,
+            },
+            MidiAction::FxBypass { track: 0, on: true },
+            MidiAction::FxEnable {
+                track: 0,
+                slot: FxSlot::Reverb,
+                on: true,
+            },
+            MidiAction::FxPreset {
+                track: 0,
+                preset: FxPreset::Voice,
+            },
+            MidiAction::FxParam {
+                track: 0,
+                param: FxParam::ReverbMix(0.2),
+            },
+        ];
+        for action in actions {
+            match intent_of(action, signature, None) {
+                MidiIntent::Session(what) => assert_eq!(
+                    action.moves_transport(),
+                    what.moves_transport(),
+                    "{action:?} und {what:?} sind sich uneinig darueber, ob das den Transport \
+                     verschiebt"
+                ),
+                // The score's own transport is deliberately outside the rule: it *is* the runner's
+                // release button, and locking it would lock the one thing the pad is held for.
+                MidiIntent::Score(_) => {
+                    panic!("keine dieser Absichten gehoert dem Runner: {action:?}")
+                }
+            }
+        }
+    }
+
+    /// The manual surcharge is the only half a knob may touch. A measurement that a turn of the
+    /// trim knob wiped out would have to be made again with a cable and a click track.
+    #[test]
+    fn the_latency_knob_moves_the_surcharge_and_keeps_the_measurement() {
+        let intent = intent_of(
+            MidiAction::LatencyTrim {
+                track: 1,
+                trim: -240,
+            },
+            TimeSignature::new(4, 4),
+            Some(827),
+        );
+        assert_eq!(
+            intent,
+            MidiIntent::Session(Action::SetTrackLatency {
+                track: 1,
+                latency: TrackLatency {
+                    measured: Some(827),
+                    trim: -240
+                }
+            })
+        );
     }
 
     /// The editor's own command: a score in, either the compiled form or every complaint at once.

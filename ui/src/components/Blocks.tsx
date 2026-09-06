@@ -14,6 +14,7 @@
 //!   the click instead of failing quietly afterwards.
 
 import { useEffect, useRef } from "react";
+import { gotoAddress } from "../midi/addresses";
 import { useStatusSlice } from "../status";
 import { SCORE_STATE_LABEL, type CompiledScore, type CompiledSection, type LooperStatus } from "../types";
 
@@ -181,6 +182,9 @@ function SectionCard({ section, tracks, beatsPerBar, live, onGoto }: CardProps) 
     <article
       className={classes}
       data-section={section.index}
+      // A card is a jump, so it is bindable like every other control: `transport.goto.<n>`. See
+      // `midi/addresses.ts` for how the address gets from here into the learn mode.
+      data-midi={gotoAddress(section.index)}
       onClick={() => onGoto(section.index)}
       title={jumpTitle}
       role="button"

@@ -17,6 +17,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, scoreApi } from "../api";
+import { GLOBAL, quantizeAddress } from "../midi/addresses";
 import { currentStatus, structureSignature, useStatusSlice } from "../status";
 import { Transport } from "../components/Transport";
 import { Position } from "./Position";
@@ -379,8 +380,13 @@ export function LiveView({ info }: { info: AppInfo | null }) {
           <Meter label="Summe L" kind="out" pick={masterLeft} />
           <Meter label="Summe R" kind="out" pick={masterRight} />
         </div>
+        {/* `data-midi` carries the address of the parameter tree each control stands for, and the
+            learn mode reads it off the DOM - see `midi/addresses.ts`. The grid is two separate
+            addresses because each is a state to arrive at, so this button offers the one it would
+            switch to. */}
         <button
           className="btn btn-big btn-quantize"
+          data-midi={quantizeAddress(tempo.quantize === "loop" ? "bar" : "loop")}
           onClick={() => run(() => api.setQuantize(tempo.quantize === "loop" ? "bar" : "loop"))}
           title={
             tempo.quantize === "loop"
@@ -392,12 +398,17 @@ export function LiveView({ info }: { info: AppInfo | null }) {
         </button>
         <button
           className={`btn btn-big${tempo.click ? " btn-on" : ""}`}
+          data-midi={GLOBAL.click}
           onClick={() => run(() => api.setClick(!tempo.click))}
           title="Taste K"
         >
           Klick {tempo.click ? "an" : "aus"} <kbd>K</kbd>
         </button>
-        <button className="btn btn-big btn-danger" onClick={() => run(() => api.clearAll())}>
+        <button
+          className="btn btn-big btn-danger"
+          data-midi={GLOBAL.clearAll}
+          onClick={() => run(() => api.clearAll())}
+        >
           Alles leeren
         </button>
         <button className="btn btn-big btn-stop" onClick={stop} disabled={busy}>

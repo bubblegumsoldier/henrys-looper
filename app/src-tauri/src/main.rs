@@ -17,6 +17,7 @@
 
 mod host;
 mod logfile;
+mod midi;
 mod proto;
 mod schedule;
 
@@ -24,6 +25,7 @@ use tauri::{Emitter, Manager, State};
 
 use host::{Action, EngineHandle, READY_EVENT, ScoreAction};
 use logfile::log;
+use midi::{MidiPortView, MidiSaved, MidiView};
 use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
 use looper_engine::engine::track::TrackLatency as EngineTrackLatency;
 use proto::{
@@ -471,6 +473,80 @@ async fn calibrate(
     offload(move || handle.calibrate(config)).await
 }
 
+// ---------------------------------------------------------------------------------------------
+// MIDI. Phase 5: a pad or a knob operates whatever a mouse could operate.
+//
+// Everything about the mapping itself is in `looper_engine::midi` and needs no device. The commands
+// below are the app's half: which port is open, what the learn mode is waiting for, and where the
+// profile is written.
+//
+// Incoming events do **not** come back through these commands. They arrive on `looper://midi`,
+// which is a queue rather than the twenty-per-second sampling the status event is - see the module
+// comment of `midi.rs`.
+// ---------------------------------------------------------------------------------------------
+
+/// Every MIDI input the system has, with the profile that belongs to it. Opens nothing, so it works
+/// even while another program holds the controller.
+#[tauri::command]
+async fn midi_ports(engine: State<'_, EngineHandle>) -> Result<Vec<MidiPortView>, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_ports()).await
+}
+
+/// Open a port by number or by part of its name, and load its profile.
+///
+/// Windows hands a MIDI device out to one program at a time; if Ableton holds the controller as a
+/// control surface, the refusal says so by name.
+#[tauri::command(rename_all = "snake_case")]
+async fn midi_open(device: String, engine: State<'_, EngineHandle>) -> Result<MidiView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_open(device)).await
+}
+
+/// Give the port back. What was learned and not saved stays in memory.
+#[tauri::command]
+async fn midi_close(engine: State<'_, EngineHandle>) -> Result<MidiView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_close()).await
+}
+
+/// Arm the learn mode for one address, or cancel it with `null`.
+///
+/// `address` is the dotted path of the clicked control - `track.1.record`, `global.click`,
+/// `track.2.fx.reverb.mix`. It is parsed on the Rust side, so a wrong one is a German sentence
+/// rather than a binding on nothing. The next control that arrives becomes that address and the
+/// mode disarms itself; the result travels on `looper://midi`.
+#[tauri::command(rename_all = "snake_case")]
+async fn midi_learn(
+    address: Option<String>,
+    engine: State<'_, EngineHandle>,
+) -> Result<MidiView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_learn(address)).await
+}
+
+/// Take a control's job away. `id` is what the overview shows: `ch1.note36`.
+#[tauri::command(rename_all = "snake_case")]
+async fn midi_unbind(id: String, engine: State<'_, EngineHandle>) -> Result<MidiView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_unbind(id)).await
+}
+
+/// Write the profile to `%APPDATA%\henrys-looper\midi\<geraet>.yaml`. The answer names the file.
+#[tauri::command]
+async fn midi_save(engine: State<'_, EngineHandle>) -> Result<MidiSaved, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_save()).await
+}
+
+/// The connection, the mapping and the learn mode, for a frontend that has just started and missed
+/// the events so far.
+#[tauri::command]
+async fn midi_state(engine: State<'_, EngineHandle>) -> Result<MidiView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_state()).await
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -530,7 +606,14 @@ fn main() {
             score_next,
             score_goto,
             score_stop_all,
-            calibrate
+            calibrate,
+            midi_ports,
+            midi_open,
+            midi_close,
+            midi_learn,
+            midi_unbind,
+            midi_save,
+            midi_state
         ])
         .run(tauri::generate_context!())
         .expect("Tauri-Anwendung liess sich nicht starten");

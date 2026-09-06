@@ -2041,3 +2041,303 @@ body {
 .score-live-layers {
   font-size: 12px;
 }
+
+/* =============================================================================================
+   MIDI - phase 5
+   ============================================================================================= */
+
+/* ---------- the strip under the header ---------- */
+.midi {
+  flex: 0 0 auto;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+.midi-learn-on {
+  /* While the mode is on, every click means something else. That has to be visible from across a
+     room, not just readable on the switch. */
+  box-shadow: inset 0 0 0 2px var(--warn);
+}
+.midi-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 16px;
+  flex-wrap: wrap;
+}
+.midi-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.midi-count {
+  font-size: 12px;
+}
+.midi-dirty {
+  color: var(--warn);
+}
+.midi-learn-switch {
+  font-weight: 700;
+}
+.midi-learn-on .midi-learn-switch {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: #1a1204;
+}
+.midi-hint-inline {
+  font-size: 12px;
+  color: var(--warn);
+}
+.midi-waiting-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(255, 176, 32, 0.16);
+  border: 1px solid var(--warn);
+  animation: midi-pulse 1s ease-in-out infinite;
+}
+@keyframes midi-pulse {
+  50% {
+    background: rgba(255, 176, 32, 0.32);
+  }
+}
+.midi-message {
+  padding: 5px 16px;
+  font-size: 13px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-3);
+}
+.midi-dropped {
+  margin: 8px 16px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  background: rgba(255, 93, 93, 0.14);
+  border: 1px solid var(--err);
+}
+
+/* ---------- the folded-out panel ---------- */
+.midi-panel {
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--border);
+  /* Folded out this is a setup screen, and a setup screen may scroll; the stage below it must not
+     be pushed off the window. */
+  max-height: 46vh;
+  overflow: auto;
+}
+.midi-devices {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.midi-devices select {
+  min-width: 320px;
+}
+.midi-path {
+  font-size: 11px;
+}
+.midi-explain {
+  font-size: 12px;
+  margin: 8px 0 0;
+  max-width: 108ch;
+  line-height: 1.5;
+}
+.midi-notes {
+  margin: 8px 0 0;
+  padding: 6px 10px 6px 26px;
+  border-radius: var(--radius);
+  background: rgba(255, 176, 32, 0.12);
+  border: 1px solid var(--warn);
+  font-size: 12px;
+}
+.midi-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+@media (max-width: 1100px) {
+  .midi-columns {
+    grid-template-columns: 1fr;
+  }
+}
+.midi-monitor-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+}
+.midi-monitor-head h3 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-muted);
+}
+.midi-monitor-head .muted {
+  font-size: 12px;
+}
+
+/* ---------- the monitor ---------- */
+.midi-events,
+.midi-binding-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow: auto;
+}
+.midi-event {
+  display: grid;
+  grid-template-columns: 68px 68px 34px 44px 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(42, 47, 58, 0.5);
+}
+.midi-event-key {
+  font-weight: 700;
+}
+.midi-event-value {
+  text-align: right;
+}
+.midi-event-target {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.midi-event-note {
+  color: var(--fg-muted);
+  margin-left: 8px;
+}
+.midi-event-outcome {
+  font-size: 11px;
+}
+/* The verdict is coloured, the row is not: a monitor where every line is green or red is a monitor
+   nobody reads. The row gets a stripe on its left edge instead, which is enough to find the one
+   refusal in twenty presses. */
+.midi-event {
+  border-left: 3px solid transparent;
+}
+.midi-event.midi-out-action {
+  border-left-color: var(--ok);
+}
+.midi-event.midi-out-refused {
+  border-left-color: var(--err);
+}
+.midi-event.midi-out-learned {
+  border-left-color: var(--warn);
+}
+.midi-event-outcome.midi-out-unbound,
+.midi-event-outcome.midi-out-absorbed {
+  color: var(--fg-muted);
+}
+.midi-event-outcome.midi-out-action {
+  color: var(--ok);
+}
+.midi-event-outcome.midi-out-refused {
+  color: var(--err);
+}
+.midi-event-outcome.midi-out-learned {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+/* ---------- the profile overview ---------- */
+.midi-binding-list li {
+  display: grid;
+  grid-template-columns: 74px 1fr auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(42, 47, 58, 0.5);
+}
+.midi-binding-key {
+  font-weight: 700;
+}
+.midi-binding-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.midi-binding-address {
+  font-size: 11px;
+}
+.midi-binding-source {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(79, 140, 255, 0.18);
+  border: 1px solid var(--accent);
+}
+.midi-binding-score .midi-binding-key {
+  color: var(--accent-2);
+}
+
+/* =============================================================================================
+   The badge on a bound control, and the learn mode's look
+   =============================================================================================
+
+   Drawn from `data-midi-key`, which `LearnLayer.tsx` writes onto every element that carries an
+   address. Doing it in CSS rather than in JSX is what keeps a changed mapping from re-rendering a
+   single track card. */
+[data-midi] {
+  position: relative;
+}
+[data-midi-key]::after {
+  content: attr(data-midi-key);
+  position: absolute;
+  top: -6px;
+  right: -4px;
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 5px;
+  background: var(--bg-3);
+  color: var(--accent-2);
+  border: 1px solid var(--accent);
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 2;
+}
+/* A binding the score brought with it looks different from one the profile owns: it goes away
+   again when the score does. */
+[data-midi-key].midi-from-score::after {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+/* A row rather than a button - the badge sits inside instead of on the corner. */
+.live-track-pan[data-midi-key]::after,
+.live-track-latency [data-midi-key]::after,
+.layer[data-midi-key]::after,
+.live-fx-knob[data-midi-key]::after {
+  position: static;
+  align-self: center;
+  margin-left: 6px;
+}
+/* `midi-learnable` is set by `LearnLayer.tsx` on every addressed element while the mode is on. It
+   is a class and not a descendant selector, because the controls are spread over the whole window
+   and the switch that turns the mode on sits in one strip at the top. */
+[data-midi].midi-learnable {
+  cursor: crosshair;
+  outline: 1px dashed rgba(255, 176, 32, 0.55);
+  outline-offset: 1px;
+}
+[data-midi].midi-learnable:hover {
+  outline: 2px solid var(--warn);
+}
+/* The one control the learn mode is waiting for. */
+[data-midi].midi-waiting {
+  outline: 2px solid var(--warn) !important;
+  animation: midi-pulse 1s ease-in-out infinite;
+}

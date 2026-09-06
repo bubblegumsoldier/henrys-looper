@@ -15,6 +15,8 @@
 import { useState } from "react";
 import { LiveView } from "./live/LiveView";
 import { ScoreView } from "./components/ScoreView";
+import { LearnLayer } from "./midi/LearnLayer";
+import { MidiPanel } from "./midi/MidiPanel";
 import { useLooperEvents } from "./useWebSocket";
 
 type Tab = "live" | "score";
@@ -54,6 +56,13 @@ export default function App() {
           {error}
         </div>
       )}
+
+      {/* MIDI sits above both views rather than inside one: the learn mode has to reach the score
+          transport as well as the track cards, and „hängt der Controller noch?“ is a question one
+          asks in whichever tab is open. `LearnLayer` renders nothing - it is the one listener that
+          turns a click on a control into a binding. */}
+      <LearnLayer />
+      <MidiPanel />
 
       {tab === "live" ? <LiveView info={info} /> : <ScoreView />}
     </div>

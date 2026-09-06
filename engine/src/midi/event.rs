@@ -177,6 +177,20 @@ impl MidiId {
         }
     }
 
+    /// Short name for a badge on a screen: `Pad 36`, `CC 3`, `Bend`.
+    ///
+    /// Not a second spelling of [`Display`](fmt::Display) but a different job. `ch1.note36` is the
+    /// *key of a file* and has to be unambiguous down to the channel; the badge sits in the corner
+    /// of a button a musician glances at while playing, where the channel is noise and "Pad" is
+    /// what he calls the thing he is about to hit. The full id stays one hover away.
+    pub fn short(&self) -> String {
+        match self.kind {
+            MidiIdKind::Note => format!("Pad {}", self.number),
+            MidiIdKind::Cc => format!("CC {}", self.number),
+            MidiIdKind::Bend => "Bend".to_string(),
+        }
+    }
+
     /// Parse `ch1.note36` / `ch1.cc64` / `ch1.bend`. German error, because this is read out of a
     /// file a human wrote.
     pub fn parse(text: &str) -> Result<Self, String> {

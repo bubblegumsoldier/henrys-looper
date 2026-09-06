@@ -13,6 +13,8 @@ import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, insideTauri } from "./api";
 import { pushStatus } from "./status";
+import { pushMidiFeed } from "./midi/store";
+import type { MidiFeed } from "./midi/types";
 import type { AppInfo, LooperStatus } from "./types";
 
 /** Kept for the components written against the old WebSocket indicator. */
@@ -40,12 +42,16 @@ export function useLooperEvents(): Bridge {
       try {
         const offStatus = await listen<LooperStatus>("looper://status", (e) => pushStatus(e.payload));
         const offReady = await listen<AppInfo>("looper://ready", (e) => setInfo(e.payload));
+        // MIDI has its own event and its own hub: a queue of discrete facts next to a sampling of a
+        // continuous state. See `midi/store.ts`.
+        const offMidi = await listen<MidiFeed>("looper://midi", (e) => pushMidiFeed(e.payload));
         if (disposed) {
           offStatus();
           offReady();
+          offMidi();
           return;
         }
-        unlisten.push(offStatus, offReady);
+        unlisten.push(offStatus, offReady, offMidi);
         setStatus("open");
       } catch (e) {
         if (disposed) return;

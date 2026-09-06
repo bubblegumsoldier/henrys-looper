@@ -18,6 +18,13 @@
 //! end is not the engine's end is a slider that lies about what is reachable.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  fxAddress,
+  fxBandAddress,
+  fxDelayNoteAddress,
+  fxPresetAddress,
+  fxSlotAddress,
+} from "../midi/addresses";
 import { useStatusEffect } from "../status";
 import type {
   BandKindName,
@@ -173,6 +180,11 @@ const LOG_STEPS = 1000;
 interface SliderProps {
   label: string;
   value: number;
+  /**
+   * Address of the parameter tree this knob is, for the learn mode. The whole label carries it
+   * rather than the input, because a range input is a replaced element and cannot show the badge.
+   */
+  address: string;
   min: number;
   max: number;
   /** Step in the parameter's own unit. A logarithmic slider ignores it and uses `LOG_STEPS`. */
@@ -192,7 +204,18 @@ interface SliderProps {
  * engine gets at most one command per window, and the value the finger stopped on is sent at once
  * on release - otherwise the next status would push the previous value back into the slider.
  */
-function FxSlider({ label, value, min, max, step, log = false, format, title, onChange }: SliderProps) {
+function FxSlider({
+  label,
+  value,
+  address,
+  min,
+  max,
+  step,
+  log = false,
+  format,
+  title,
+  onChange,
+}: SliderProps) {
   const [local, setLocal] = useState(value);
   const dragging = useRef(false);
   const timer = useRef<number | undefined>(undefined);
@@ -232,7 +255,7 @@ function FxSlider({ label, value, min, max, step, log = false, format, title, on
   const fromPos = (p: number) => (log ? min * Math.pow(max / min, p / LOG_STEPS) : p);
 
   return (
-    <label className="live-fx-knob" title={title}>
+    <label className="live-fx-knob" title={title} data-midi={address}>
       <span className="live-fx-knob-label">{label}</span>
       <input
         className="live-fx-knob-slider"
@@ -296,6 +319,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Grenze"
           value={fx.high_pass_hz}
+          address={fxAddress(track, "high_pass.hz")}
           min={20}
           max={1000}
           step={1}
@@ -332,6 +356,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
             <FxSlider
               label="Frequenz"
               value={b.hz}
+              address={fxBandAddress(track, b.index, "hz")}
               min={20}
               max={20000}
               step={1}
@@ -342,6 +367,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
             <FxSlider
               label="Güte"
               value={b.q}
+              address={fxBandAddress(track, b.index, "q")}
               min={0.1}
               max={12}
               step={0.05}
@@ -352,6 +378,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
             <FxSlider
               label="Pegel"
               value={b.gain_db}
+              address={fxBandAddress(track, b.index, "gain")}
               min={-24}
               max={24}
               step={0.5}
@@ -366,6 +393,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Schwelle"
           value={fx.comp_threshold_db}
+          address={fxAddress(track, "comp.threshold")}
           min={-60}
           max={0}
           step={0.5}
@@ -376,6 +404,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Verhältnis"
           value={fx.comp_ratio}
+          address={fxAddress(track, "comp.ratio")}
           min={1}
           max={20}
           step={0.1}
@@ -386,6 +415,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Attack"
           value={fx.comp_attack_ms}
+          address={fxAddress(track, "comp.attack")}
           min={0.1}
           max={200}
           step={0.1}
@@ -397,6 +427,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Release"
           value={fx.comp_release_ms}
+          address={fxAddress(track, "comp.release")}
           min={5}
           max={2000}
           step={1}
@@ -408,6 +439,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Knie"
           value={fx.comp_knee_db}
+          address={fxAddress(track, "comp.knee")}
           min={0}
           max={24}
           step={0.5}
@@ -418,6 +450,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Ausgleich"
           value={fx.comp_makeup_db}
+          address={fxAddress(track, "comp.makeup")}
           min={-24}
           max={24}
           step={0.5}
@@ -434,6 +467,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
             <button
               key={n.name}
               className={`btn btn-mini live-fx-note${fx.delay_note === n.name ? " btn-on" : ""}`}
+              data-midi={fxDelayNoteAddress(track, n.name)}
               onClick={() => actions.fxDelayNote(track, n.name)}
               title="Die Verzögerung kommt aus der Zeitachse der Engine, nicht aus einer Millisekundenzahl - ein Tempowechsel nimmt sie mit."
             >
@@ -445,6 +479,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Rückkopplung"
           value={fx.delay_feedback}
+          address={fxAddress(track, "delay.feedback")}
           min={0}
           max={0.95}
           step={0.01}
@@ -455,6 +490,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Anteil"
           value={fx.delay_mix}
+          address={fxAddress(track, "delay.mix")}
           min={0}
           max={1}
           step={0.01}
@@ -467,6 +503,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Größe"
           value={fx.reverb_size}
+          address={fxAddress(track, "reverb.size")}
           min={0}
           max={1}
           step={0.01}
@@ -477,6 +514,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Dämpfung"
           value={fx.reverb_damping}
+          address={fxAddress(track, "reverb.damping")}
           min={0}
           max={1}
           step={0.01}
@@ -487,6 +525,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         <FxSlider
           label="Anteil"
           value={fx.reverb_mix}
+          address={fxAddress(track, "reverb.mix")}
           min={0}
           max={1}
           step={0.01}
@@ -516,6 +555,7 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
             <button
               key={p.name}
               className={`btn live-fx-preset${fx.preset === p.name ? " btn-on" : ""}`}
+              data-midi={fxPresetAddress(track, p.name)}
               onClick={() => actions.fxPreset(track, p.name)}
               title={`${p.hint}. Taste V, dann ${n + 1}.`}
             >
@@ -530,6 +570,7 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
         </div>
         <button
           className={`btn live-fx-bypass${fx.bypass ? " live-fx-bypass-out" : " live-fx-bypass-in"}`}
+          data-midi={fxAddress(track, "bypass")}
           onClick={() => actions.fxBypass(track, !fx.bypass)}
           title={
             fx.bypass
@@ -549,6 +590,7 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
             <button
               key={name}
               className={`btn live-fx-slot${e.on ? " live-fx-slot-on" : ""}`}
+              data-midi={fxSlotAddress(track, name)}
               onClick={() => actions.fxEnable(track, name, !e.on)}
               title={`${e.label} ist ${e.on ? "an" : "aus"}. Taste X, dann ${n + 1}.`}
             >

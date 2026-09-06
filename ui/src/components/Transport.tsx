@@ -13,6 +13,7 @@
 //! the same instant.
 
 import { useEffect } from "react";
+import { TRANSPORT } from "../midi/addresses";
 import { useStatusSlice } from "../status";
 import { PHASE_LABEL, type LooperStatus, type Phase } from "../types";
 
@@ -170,8 +171,16 @@ export function Transport({ loaded, onStart, onNext, onStopAll, compact = false 
         {view.armed || (runs ? "kein Wechsel armiert" : "")}
       </div>
 
+      {/* `data-midi` is the address of the parameter tree this control stands for; the learn mode
+          reads it off the DOM. See `midi/addresses.ts`. The score's transport is deliberately
+          bindable while the score runs - it *is* the runner's own release button. */}
       <div className="score-buttons">
-        <button className="btn btn-score btn-score-start" onClick={onStart} disabled={!canStart}>
+        <button
+          className="btn btn-score btn-score-start"
+          onClick={onStart}
+          disabled={!canStart}
+          data-midi={TRANSPORT.start}
+        >
           Start
           <kbd>Leer</kbd>
         </button>
@@ -179,6 +188,7 @@ export function Transport({ loaded, onStart, onNext, onStopAll, compact = false 
           className="btn btn-score btn-score-next"
           onClick={onNext}
           disabled={!runs}
+          data-midi={TRANSPORT.next}
           title="Der Release-Knopf: armiert den Wechsel in die nächste Sektion. Leertaste oder N."
         >
           Release
@@ -188,6 +198,7 @@ export function Transport({ loaded, onStart, onNext, onStopAll, compact = false 
           className="btn btn-score btn-score-stop"
           onClick={onStopAll}
           disabled={!runs}
+          data-midi={TRANSPORT.stopAll}
           title="Alle Tracks stoppen und den Lauf beenden. Umschalt+S."
         >
           Alles stoppen

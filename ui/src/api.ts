@@ -21,6 +21,7 @@ import type {
   ScoreLoaded,
   StartConfig,
 } from "./types";
+import type { MidiPortView, MidiSaved, MidiView } from "./midi/types";
 
 /**
  * `status` is kept for the components written against the old HTTP layer. It is 0 for everything
@@ -135,6 +136,34 @@ export const api = {
 //   not a nicety. The runner does not fail: `goto` while a change is armed reports how far the
 //   armed change still is and sends not one command. A caller that ignores the string has silently
 //   thrown away the only feedback there is.
+
+// ---------------------------------------------------------------------------------------------
+// MIDI - phase 5
+// ---------------------------------------------------------------------------------------------
+//
+// Incoming events are **not** here. They arrive on the `looper://midi` event and go into
+// `midi/store.ts`; what these commands do is change something and hand back the new view, which is
+// the same object that event carries. So a caller may either use the answer or wait for the event -
+// both are the same picture, and the store takes whichever comes first.
+
+export const midiApi = {
+  /** Every MIDI input, with the profile that belongs to it. Opens nothing. */
+  ports: () => call<MidiPortView[]>("midi_ports"),
+  /** Open a port by number or by part of its name, and load its profile. */
+  open: (device: string) => call<MidiView>("midi_open", { device }),
+  close: () => call<MidiView>("midi_close"),
+  /**
+   * Arm the learn mode for one address - the dotted path of the clicked control. `null` cancels.
+   * The address is parsed on the Rust side, so a wrong one comes back as a German sentence.
+   */
+  learn: (address: string | null) => call<MidiView>("midi_learn", { address }),
+  /** Take a control's job away. `id` is what the overview shows: `ch1.note36`. */
+  unbind: (id: string) => call<MidiView>("midi_unbind", { id }),
+  /** Write the profile. The answer names the file. */
+  save: () => call<MidiSaved>("midi_save"),
+  /** For a frontend that just started and missed the events so far. */
+  state: () => call<MidiView>("midi_state"),
+};
 
 export const scoreApi = {
   /**

@@ -6,6 +6,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Meter } from "./Meter";
 import { FxRow, type FxActions } from "./FxRow";
+import { layerAddress, trackAddress } from "../midi/addresses";
 import { SCORE_STATE_LABEL, type LooperStatus, type LooperTrackStatus, type ScoreState } from "../types";
 
 /** The transport, the two settings rows, the layers - and the effect chain, which brings its own. */
@@ -95,7 +96,9 @@ function PanRow({ track, pan, actions }: { track: number; pan: number; actions: 
   );
 
   return (
-    <div className="live-track-pan">
+    // The whole row carries the address, not the slider: a range input is a replaced element and
+    // cannot show the little badge. The „Mitte" button next to it is the same parameter anyway.
+    <div className="live-track-pan" data-midi={trackAddress(track, "pan")}>
       <span className="live-pan-label">Panorama</span>
       <input
         className="live-pan-slider"
@@ -208,7 +211,9 @@ function LatencyRow({
           }}
         />
       </label>
-      <label className="live-latency-field">
+      {/* Only the surcharge is bindable. The measured half belongs to `calibrate` and is not
+          something to nudge with a knob. */}
+      <label className="live-latency-field" data-midi={trackAddress(i, "latency_trim")}>
         <span>Zuschlag</span>
         <input
           type="number"
@@ -328,10 +333,14 @@ function LayerRow({
   );
 
   return (
-    <li className={`layer${muted ? " layer-muted" : ""}`}>
+    // The row itself stands for the gain: the slider is a replaced element and cannot carry a
+    // badge, and `closest()` finds the nearest address - so the mute and the ✕ inside still bind to
+    // their own, and everything else in the row to the gain.
+    <li className={`layer${muted ? " layer-muted" : ""}`} data-midi={layerAddress(track, layer, "gain")}>
       <span className="layer-number mono">{number}</span>
       <button
         className={`btn btn-mini${muted ? " btn-on" : ""}`}
+        data-midi={layerAddress(track, layer, "mute")}
         onClick={() => actions.layerMute(track, layer, !muted)}
         title={muted ? "Ebene wieder hörbar machen" : "Ebene stummschalten"}
       >
@@ -364,6 +373,7 @@ function LayerRow({
       <span className="layer-gain-value mono">{local.toFixed(2)}</span>
       <button
         className="btn btn-mini btn-danger"
+        data-midi={layerAddress(track, layer, "remove")}
         onClick={() => actions.layerRemove(track, layer)}
         title="Diese Ebene entfernen"
       >
@@ -436,32 +446,59 @@ function TrackCardInner({ track, selected, onSelect, actions, defaultLatency, ta
       <PanRow track={i} pan={track.pan} actions={actions} />
       <LatencyRow track={track} actions={actions} defaultLatency={defaultLatency} />
 
+      {/* Every button carries the address of the parameter tree it stands for, and the learn mode
+          reads it off the DOM rather than through a prop - see `midi/addresses.ts`. The index here
+          is zero-based; the address is one-based, because that is how a musician counts and how a
+          controller profile is written. */}
       <div className="live-track-buttons">
-        <button className="btn btn-big btn-record" onClick={() => actions.record(i)} title="Taste R">
+        <button
+          className="btn btn-big btn-record"
+          data-midi={trackAddress(i, "record")}
+          onClick={() => actions.record(i)}
+          title="Taste R"
+        >
           Aufnahme <kbd>R</kbd>
         </button>
         <button
           className="btn btn-big btn-overdub"
+          data-midi={trackAddress(i, "overdub")}
           onClick={() => actions.overdub(i)}
           disabled={empty}
           title={empty ? "Erst eine Aufnahme, dann Overdub" : "Taste O"}
         >
           Overdub <kbd>O</kbd>
         </button>
-        <button className="btn btn-big btn-play" onClick={() => actions.play(i)} disabled={empty} title="Taste P">
+        <button
+          className="btn btn-big btn-play"
+          data-midi={trackAddress(i, "play")}
+          onClick={() => actions.play(i)}
+          disabled={empty}
+          title="Taste P"
+        >
           Wiedergabe <kbd>P</kbd>
         </button>
-        <button className="btn btn-big btn-stopp" onClick={() => actions.stop(i)} title="Taste S">
+        <button
+          className="btn btn-big btn-stopp"
+          data-midi={trackAddress(i, "stop")}
+          onClick={() => actions.stop(i)}
+          title="Taste S"
+        >
           Stopp <kbd>S</kbd>
         </button>
         <button
           className={`btn btn-big btn-monitor${track.monitor ? " btn-on" : ""}`}
+          data-midi={trackAddress(i, "monitor")}
           onClick={() => actions.monitor(i, !track.monitor)}
           title="Taste M"
         >
           Mithören <kbd>M</kbd>
         </button>
-        <button className="btn btn-big btn-danger" onClick={() => actions.clear(i)} disabled={empty}>
+        <button
+          className="btn btn-big btn-danger"
+          data-midi={trackAddress(i, "clear")}
+          onClick={() => actions.clear(i)}
+          disabled={empty}
+        >
           Leeren
         </button>
       </div>

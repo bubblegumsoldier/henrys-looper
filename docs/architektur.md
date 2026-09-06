@@ -52,7 +52,7 @@ andere ist die Eintrittskarte.
 | 2 | Mehrere Tracks, unbegrenzte Layer | gebaut, 52 Tests grün, Abnahme am Instrument offen |
 | 3 | Partitur und Runner | **gebaut**, 273 Tests grün, Abnahme am Instrument offen. Compiler und Runner stehen, `score`-Subcommand bedient beides. Siehe Abschnitt 10 |
 | 4 | UI | vorgezogen, siehe unten |
-| 5 | Bühnentauglichkeit, MIDI | **Fundament gebaut**, 334 Tests grün, ohne Gerät geprüft. MIDI-Eingang (`midir`), Parameterbaum, zweistufiges Mapping (Controller-Profil + Partitur), Wertesprung-Schutz, Learn-Mechanik, `midi`-Subkommando. Learn-Modus im UI und die Anbindung an die laufende Sitzung sind offen. Siehe Abschnitt 11 |
+| 5 | Bühnentauglichkeit, MIDI | **gebaut**, 344 Tests grün, ohne Gerät geprüft. MIDI-Eingang (`midir`), Parameterbaum, zweistufiges Mapping (Controller-Profil + Partitur), Wertesprung-Schutz, `midi`-Subkommando — und in der App: Gerät verbinden, eingehende Ereignisse auf die laufende Sitzung, Learn durch Anklicken des Bedienelements, Monitor, Belegungsübersicht. Abnahme mit Controller offen. Siehe Abschnitt 11 |
 | 6 | Effekte | DSP, Kommandos und CLI gebaut, Abnahme am Instrument offen. UI folgt |
 | 7 | Stereo | **gebaut**, Abnahme am Instrument offen. Aufnahme mono oder stereo je Quelle, Kette und Mixbus stereo, Panorama je Track |
 | 8 | Latenzkompensation je Track | **gebaut**, 252 Tests grün, Abnahme am Instrument offen. Globaler Wert als Vorgabe, eigener Wert je Track aus Messwert plus Zuschlag, `calibrate --for-track`. Siehe Abschnitt 4 |
@@ -929,14 +929,123 @@ Gerät.
 | `engine/src/midi/cli.rs` | ja, außer `targets` | das `midi`-Subkommando |
 | `engine/src/midi/tests.rs` | nein | 51 Offline-Tests |
 | `examples/midi-mpd218.yaml` | — | Vorlage für Henrys Controller |
+| `app/src-tauri/src/midi.rs` | ja zum Öffnen | offener Port, Profil, Learn-Modus, Drahtformat |
+| `app/src-tauri/src/host.rs` | — | `pump_midi`, `intent_of`, `SessionState` (die `ParamState`) |
+| `ui/src/midi/addresses.ts` | — | die Adressen, wie das UI sie schreibt |
+| `ui/src/midi/LearnLayer.tsx` | — | der eine Listener, und die Kennzeichen |
+| `ui/src/midi/MidiPanel.tsx`, `MidiMonitor.tsx` | — | Leiste, Monitor, Belegungsübersicht |
+| `ui/src/midi/store.ts` | — | der MIDI-Hub, Geschwister von `status.ts` |
 
-### Was noch fehlt
+---
 
-Der **Learn-Modus in der Oberfläche** (Strg-Klick auf ein Bedienelement, das nächste Pad gehört
-dazu) und die **Anbindung an die laufende Sitzung**: ein MIDI-Thread neben dem Audio-Thread, dessen
-Ereignisse durch `Session::apply` laufen, und `ParamState` aus dem Status-Snapshot, damit Pickup
-und Umschalter den wirklichen Zustand sehen statt ihr eigenes Gedächtnis. Beides ist ein eigener
-Auftrag; das Fundament dafür steht.
+### In der App: vom Pad in die laufende Sitzung
+
+Alles bisher Beschriebene braucht kein laufendes Programm. Was die App dazutut, sind drei Dinge:
+der offene Port, die Übersetzung in eine Bedienhandlung, und der Weg zurück auf den Bildschirm.
+
+```text
+ Controller ─► midi/input.rs ─► Queue ─► app/midi.rs ─► app/host.rs ─────────► Session::apply
+ (Treiber-     dekodiert im     lock-    Router +       MidiAction ─►           (derselbe Weg
+  Thread)      Callback         frei     Profil+Partitur  Action / ScoreAction   wie ein Klick)
+                                                │
+                                                └─► looper://midi ─► ui/midi/store.ts
+```
+
+**Der Bridge sitzt auf dem Host-Thread, nicht in `Session`.** Ein Controller bleibt über einen Stopp
+und einen Neustart der Engine hinweg verbunden, und der Learn-Modus muss funktionieren, bevor
+überhaupt etwas läuft. Die Queue wird in derselben Schleife geleert, die auch den Puffervorrat
+bedient — mit dem kurzen Takt (4 ms), sobald ein Port offen ist: ein Pad, das vier Millisekunden zu
+spät ankommt, ist unhörbar, eines mit zweihundert nicht.
+
+**Eine aufgelöste Absicht geht durch dieselbe Tür wie ein Mausklick**, `Session::apply` für alles
+Mischen und Aufnehmen, `Session::score_act` für den Transport der Partitur. Damit gelten die
+Prüfungen der Maus unverändert: die Trackliste, die Ebenenliste, und die Grenze aus Abschnitt 10.
+Zwei Zahlen legt die App dabei dazu, weil eine MIDI-Absicht sie nicht tragen kann: die Taktart beim
+Tempo (ein Regler hat eine Dimension), und die **gemessene** Hälfte der Latenzkompensation beim
+Zuschlag — ein Regler auf dem Zuschlag darf keine Messung auslöschen.
+
+**`ParamState` kommt aus dem Status-Snapshot**, demselben, aus dem der Bildschirm gezeichnet wird.
+Ohne ihn hat Pickup nichts, woran es fangen könnte, und ein Umschalter kippt seine private Kopie
+eines Zustands, den auch die Maus und die Partitur ändern. Nach einem Preset, einem Partiturwechsel
+und einem Engine-Start wird `Router::rearm` gerufen: dort haben sich Werte bewegt, ohne dass sich
+Regler bewegt haben.
+
+**Verbindungsverlust** meldet Windows nicht. Also wird die Portliste im Zwei-Sekunden-Takt gefragt,
+solange etwas offen ist; verschwindet der Port, wird sauber geschlossen und ein deutscher Satz
+gezeigt. Die Bindungen bleiben — nach dem Anstecken wieder verbinden, nichts ist verloren.
+
+**Die Partitur-Bindungen greifen beim Laden**, genau wie in der CLI: `score_map` über das Profil
+gelegt, und jede übernommene Taste kommt als deutscher Satz heraus.
+
+### Warum MIDI ein eigenes Ereignis ist und nicht im Status mitfährt
+
+Der Status ist eine **Abtastung eines stetigen Zustands**, zwanzig Mal je Sekunde, und ältere
+Schnappschüsse werden absichtlich weggeworfen (`Status::latest`) — eine Position von vor 50 ms ist
+wertlos. MIDI ist das Gegenteil: ein seltener, stoßweiser Strom **einzelner Tatsachen**, bei dem
+jede zählt. Ein Pad-Druck, der zwischen zwei Schnappschüsse fällt, wäre ein Pad-Druck, den der
+Monitor nie zeigt — und der Monitor ist genau dafür da, die Frage „sendet dieses Pad überhaupt
+etwas" zu beantworten. Also läuft MIDI über `looper://midi`, als Warteschlange.
+
+Was es sich vom Status leiht, ist die **Ratendisziplin**: ein gedrehter Regler erzeugt rund hundert
+Ereignisse je Sekunde. Aufeinanderfolgende Werte derselben Taste werden zusammengefasst und
+höchstens alle 40 ms verschickt; alles Diskrete — ein Pad, eine Ablehnung, eine gelernte Bindung —
+geht sofort raus, denn darauf wartet das Auge.
+
+### Learn durch Anklicken
+
+> „Dass ich einen Button z. B. mit Strg anklicke und dann der nächste gedrückte MIDI-Button ist der
+> gemappte Button."
+
+Ein Schalter **„MIDI lernen"** in der Leiste unter dem Kopf schaltet den Modus global ein. Solange
+er an ist, wählt ein Klick auf ein Bedienelement dieses Element als Lernziel, statt es zu bedienen;
+das nächste Pad, das ankommt, wird darauf gelegt. **Strg-Klick tut dasselbe ohne den Schalter**,
+aber der Schalter ist der angebotene Weg: mit Strg klickt man leicht daneben, und neben „Aufnahme"
+ist „Aufnahme" — eine verrutschte Modifiertaste würde eine Aufnahme starten statt ein Pad zu
+belegen. Das ist auf der Bühne ein schlechter Tausch.
+
+**Wie die Adresse ins UI kommt.** Jedes belegbare Element trägt seine Adresse in einem
+`data-midi`-Attribut (`ui/src/midi/addresses.ts` baut die Strings, `LearnLayer.tsx` liest sie).
+Ein einziger Listener in der Capture-Phase sucht den nächsten Vorfahren mit diesem Attribut. Die
+Alternativen waren, die Adresse als Prop durch vier Komponenten zu reichen, oder einen Katalog vom
+Rust-Teil zu holen und Elemente unscharf dagegen zu matchen. Ein Attribut neben dem `onClick`, das
+ohnehin dasteht, ist beides nicht: keine neue Prop, keine neue Komponente, und ein Element, das
+später dazukommt, wird durch dieselbe eine Zeile belegbar.
+
+Geprüft wird die Adresse **nicht** im UI, sondern von `Target::parse` auf der Rust-Seite, wenn der
+Modus scharf gestellt wird. Ein Tippfehler ist damit der deutsche Satz, der auf `midi targets`
+zeigt, und keine Bindung auf nichts.
+
+**Belegte Elemente sind erkennbar**, auch außerhalb des Lernmodus: ein kleines `Pad 36` oder `CC 3`
+in der Ecke, gezeichnet von CSS aus `data-midi-key`. Deshalb kostet eine geänderte Belegung kein
+einziges Rendern. Orange statt blau heißt: diese Bindung kommt aus der Partitur und geht mit ihr
+wieder weg. Der volle Schlüssel (`ch10.note36`) steht in der Belegungsübersicht — die Ecke einer
+Taste ist kein Ort für eine Kanalnummer.
+
+Escape nimmt zuerst das schwebende Ziel zurück und beim zweiten Druck den Modus: „ich habe den
+falschen Knopf erwischt" ist ein anderer Gedanke als „ich bin fertig".
+
+### Wo das im Bild sitzt
+
+Eine schmale Leiste unter dem Kopf, in **beiden** Reitern. Ein dritter Reiter wäre eine dritte
+Entscheidung auf der Bühne (Abschnitt 7) für etwas, das man **vor** dem Stück einrichtet und während
+des Stücks fast nie ansieht. Zugeklappt zeigt die Leiste die zwei Dinge, die mitten im Lauf zählen:
+hängt der Controller noch, und ist der Lernmodus an. Aufgeklappt wird sie zum Einrichtungsfeld:
+
+* **Geräteliste** mit dem Profil, das dazu passt, Verbinden und Trennen, Profil speichern samt Pfad;
+* **Monitor** — was kommt herein, und was macht das Mapping daraus. Vier Spalten in der Reihenfolge,
+  in der man fragt: welche Taste, welche Art, welcher Wert, was kam heraus. Die letzte Spalte ist
+  der Grund, warum das kein Byte-Log ist: „nicht belegt" und „abgelehnt: der Runner hat den
+  Transport" sehen an einem toten Pad gleich aus und brauchen völlig verschiedene Reparaturen;
+* **Belegung** — welche Taste auf welchem Ziel, mit deutschen Namen aus `Target::label`, Herkunft
+  (Profil oder Partitur) und einem ✕ zum Lösen. Eine Bindung der Partitur lässt sich hier nicht
+  lösen, und der Satz sagt warum.
+
+### Was nicht belegbar ist, und warum
+
+`global.tempo` und die EQ-Bandart haben zwar eine Adresse (eine Partitur kann sie belegen), aber im
+UI kein Element, an dem ein Klick eindeutig wäre: das Tempo wird vor dem Start gesetzt und ist
+ohnehin nur bei leerer Sitzung erlaubt, und die Bandart ist ein Auswahlfeld mit drei Zielen an einer
+Stelle. Beide sind über die Partitur oder von Hand im Profil erreichbar.
 
 ## 12. Arbeitsweise
 
