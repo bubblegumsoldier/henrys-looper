@@ -1,6 +1,7 @@
-//! Reverb, Freeverb style - eight parallel comb filters into four allpass filters in series.
+//! Reverb, Freeverb style - eight parallel comb filters into four allpass filters in series, per
+//! channel.
 //!
-//! The plan calls for "ein einfaches Modell nach Freeverb-Art"; this is that model, mono, with its
+//! The plan calls for "ein einfaches Modell nach Freeverb-Art"; this is that model with its
 //! original tunings. Two things are worth knowing about it:
 //!
 //! * The comb delays (1116, 1188, ... samples) are mutually prime at 44.1 kHz. That is the whole
@@ -10,13 +11,27 @@
 //! * The allpass filters do not change the magnitude spectrum at all; they smear the phase, which
 //!   is what turns eight distinct echoes into a wash.
 //!
-//! Mono, because the whole engine is mono (`docs/architektur.md` section 6). Freeverb's stereo
-//! spread is simply not built.
+//! # Stereo, the way Freeverb does it: `stereospread`
+//!
+//! The right-hand bank of combs and allpasses is the same set of filters with every tuning
+//! lengthened by [`STEREO_SPREAD`] = 23 samples - Freeverb's own constant. That single offset is
+//! what makes the reverb stereo:
+//!
+//! * The two channels then have **different** comb periods, so their echo patterns are
+//!   uncorrelated. Uncorrelated noise on the two ears is what the brain reads as "a room around
+//!   me"; identical noise on both ears is read as "a point source in the middle of my head".
+//! * The offset is small enough (half a millisecond) that a transient still arrives on both sides
+//!   at effectively the same instant, so nothing in the *dry* image is pulled sideways.
+//!
+//! Both banks are fed the same signal, `(l + r) * 0.5` - the reverb is a room, and a room does not
+//! keep the left and the right half of what is played in it apart. The 0.5 is what makes a mono
+//! track, which arrives with `l == r`, excite the room exactly as loudly as it did before this
+//! module knew about stereo; without it switching to stereo would have raised every reverb by 6 dB.
 //!
 //! # Memory
 //!
-//! Comb and allpass buffers together are about 14 000 samples at 48 kHz, i.e. **56 kB per track**,
-//! 450 kB for the eight tracks the engine allows. All of it is allocated in the control thread
+//! Comb and allpass buffers together are about 28 000 samples at 48 kHz, i.e. **112 kB per track**,
+//! 900 kB for the eight tracks the engine allows. All of it is allocated in the control thread
 //! when the track is built, and never resized.
 //!
 //! # Denormals - this is the module the whole denormal discussion is about
@@ -29,6 +44,7 @@
 //! the time. Every feedback store therefore goes through `flush` (see `fx::biquad`), and the chain
 //! on top of that stops calling the reverb at all once the tail has run out.
 
+use super::super::frame::Frame;
 use super::biquad::flush;
 use super::smooth::Smoothed;
 
@@ -37,6 +53,9 @@ const COMB_TUNING: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
 /// Freeverb's allpass tunings, in samples at 44.1 kHz.
 const ALLPASS_TUNING: [usize; 4] = [556, 441, 341, 225];
 const TUNING_RATE: f64 = 44_100.0;
+/// How much longer every delay of the right-hand bank is, in samples at 44.1 kHz. Freeverb's own
+/// `stereospread`; see the module comment for what it buys.
+const STEREO_SPREAD: usize = 23;
 
 /// Input attenuation. Eight combs with a feedback near 0.85 have a lot of gain between them; this
 /// is the factor that brings the sum back to something like unity. Freeverb's own value.
@@ -143,9 +162,58 @@ impl Allpass {
     }
 }
 
-pub struct Reverb {
+/// One channel's worth of the model: eight combs in parallel into four allpasses in series.
+struct Bank {
     combs: Vec<Comb>,
     allpasses: Vec<Allpass>,
+}
+
+impl Bank {
+    /// `spread` lengthens every delay of this bank, which is what makes the right-hand bank
+    /// different from the left-hand one.
+    fn new(sample_rate: u32, spread: usize) -> Self {
+        let scale = sample_rate as f64 / TUNING_RATE;
+        let len = |n: usize| (((n + spread) as f64) * scale).round() as usize;
+        Self {
+            combs: COMB_TUNING.iter().map(|&n| Comb::new(len(n))).collect(),
+            allpasses: ALLPASS_TUNING.iter().map(|&n| Allpass::new(len(n))).collect(),
+        }
+    }
+
+    fn buffered_samples(&self) -> usize {
+        self.combs.iter().map(|c| c.buffer.len()).sum::<usize>()
+            + self.allpasses.iter().map(|a| a.buffer.len()).sum::<usize>()
+    }
+
+    fn longest_comb(&self) -> usize {
+        self.combs.iter().map(|c| c.buffer.len()).max().unwrap_or(1)
+    }
+
+    fn clear(&mut self) {
+        for comb in &mut self.combs {
+            comb.clear();
+        }
+        for ap in &mut self.allpasses {
+            ap.clear();
+        }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, input: f32) -> f32 {
+        let mut wet = 0.0f32;
+        for comb in &mut self.combs {
+            wet += comb.process(input);
+        }
+        for ap in &mut self.allpasses {
+            wet = ap.process(wet);
+        }
+        wet
+    }
+}
+
+pub struct Reverb {
+    /// Left and right, the right one detuned by [`STEREO_SPREAD`].
+    banks: [Bank; 2],
     size: f32,
     damping: f32,
     mix: Smoothed,
@@ -156,18 +224,13 @@ pub struct Reverb {
 }
 
 impl Reverb {
-    /// Allocates every comb and allpass buffer. Control thread only.
+    /// Allocates every comb and allpass buffer of both banks. Control thread only.
     pub fn new(sample_rate: u32, size: f32, damping: f32, mix: f32) -> Self {
-        let scale = sample_rate as f64 / TUNING_RATE;
         let mut r = Self {
-            combs: COMB_TUNING
-                .iter()
-                .map(|&n| Comb::new((n as f64 * scale).round() as usize))
-                .collect(),
-            allpasses: ALLPASS_TUNING
-                .iter()
-                .map(|&n| Allpass::new((n as f64 * scale).round() as usize))
-                .collect(),
+            banks: [
+                Bank::new(sample_rate, 0),
+                Bank::new(sample_rate, STEREO_SPREAD),
+            ],
             size: 0.0,
             damping: 0.0,
             mix: Smoothed::new(mix.clamp(0.0, 1.0), 60.0, sample_rate),
@@ -179,10 +242,10 @@ impl Reverb {
         r
     }
 
-    /// Total number of samples the buffers occupy - the number the module comment quotes.
+    /// Total number of samples the buffers occupy, both banks together - the number the module
+    /// comment quotes.
     pub fn buffered_samples(&self) -> usize {
-        self.combs.iter().map(|c| c.buffer.len()).sum::<usize>()
-            + self.allpasses.iter().map(|a| a.buffer.len()).sum::<usize>()
+        self.banks.iter().map(Bank::buffered_samples).sum()
     }
 
     pub fn size(&self) -> f32 {
@@ -200,8 +263,10 @@ impl Reverb {
     pub fn set_size(&mut self, size: f32) {
         self.size = size.clamp(0.0, 1.0);
         let feedback = ROOM_OFFSET + self.size * ROOM_SCALE;
-        for comb in &mut self.combs {
-            comb.feedback = feedback;
+        for bank in &mut self.banks {
+            for comb in &mut bank.combs {
+                comb.feedback = feedback;
+            }
         }
         self.recompute_tail();
     }
@@ -209,8 +274,10 @@ impl Reverb {
     pub fn set_damping(&mut self, damping: f32) {
         self.damping = damping.clamp(0.0, 1.0);
         let damp = self.damping * DAMP_SCALE;
-        for comb in &mut self.combs {
-            comb.set_damp(damp);
+        for bank in &mut self.banks {
+            for comb in &mut bank.combs {
+                comb.set_damp(damp);
+            }
         }
         self.recompute_tail();
     }
@@ -228,10 +295,11 @@ impl Reverb {
     /// upwards and used purely as a "when may this be skipped" bound.
     fn recompute_tail(&mut self) {
         let feedback = (ROOM_OFFSET + self.size * ROOM_SCALE).clamp(0.01, 0.999) as f64;
+        // The right-hand bank has the longer combs, so its tail is the one that bounds both.
         let longest = self
-            .combs
+            .banks
             .iter()
-            .map(|c| c.buffer.len())
+            .map(Bank::longest_comb)
             .max()
             .unwrap_or(1) as f64;
         // passes * 20*log10(feedback) = -60 dB
@@ -247,27 +315,27 @@ impl Reverb {
 
     /// Empty every buffer. Control thread only - this is a memset of the whole reverb.
     pub fn clear(&mut self) {
-        for comb in &mut self.combs {
-            comb.clear();
-        }
-        for ap in &mut self.allpasses {
-            ap.clear();
+        for bank in &mut self.banks {
+            bank.clear();
         }
     }
 
-    /// One sample. Wired as an aux send, like the delay: the dry signal comes out untouched and
-    /// the tail is added on top, so raising the reverb never makes the source quieter.
+    /// One frame. Wired as an aux send, like the delay: the dry signal comes out untouched and the
+    /// tail is added on top, so raising the reverb never makes the source quieter.
+    ///
+    /// Both banks are excited by the same `(l + r) * 0.5` - see the module comment - and each
+    /// returns its own tail, so the wet signal is genuinely two different rooms' worth of noise
+    /// while the dry signal keeps its own image untouched.
     #[inline(always)]
-    pub fn process(&mut self, x: f32) -> f32 {
-        let input = x * FIXED_GAIN;
-        let mut wet = 0.0f32;
-        for comb in &mut self.combs {
-            wet += comb.process(input);
+    pub fn process(&mut self, x: Frame) -> Frame {
+        let input = (x.l + x.r) * 0.5 * FIXED_GAIN;
+        let left = self.banks[0].process(input);
+        let right = self.banks[1].process(input);
+        let gain = WET_SCALE * self.mix.next();
+        Frame {
+            l: x.l + left * gain,
+            r: x.r + right * gain,
         }
-        for ap in &mut self.allpasses {
-            wet = ap.process(wet);
-        }
-        x + wet * WET_SCALE * self.mix.next()
     }
 }
 
@@ -290,15 +358,15 @@ mod tests {
         // The biggest room the model offers with no damping at all, i.e. the worst case for
         // stability. Anything unstable in this model shows up here or nowhere.
         let mut r = reverb(1.0, 0.0, 1.0);
-        r.process(1.0);
+        r.process(Frame::mono(1.0));
         let window = RATE as usize;
         let mut energies = Vec::new();
         for _ in 0..20 {
             let mut sum = 0.0f64;
             for _ in 0..window {
-                let y = r.process(0.0);
-                assert!(y.is_finite(), "Ausgabe ist NaN oder unendlich");
-                sum += (y as f64) * (y as f64);
+                let y = r.process(Frame::SILENT);
+                assert!(y.l.is_finite() && y.r.is_finite(), "Ausgabe ist NaN oder unendlich");
+                sum += (y.l as f64) * (y.l as f64) + (y.r as f64) * (y.r as f64);
             }
             energies.push((sum / window as f64).sqrt());
         }
@@ -326,18 +394,24 @@ mod tests {
     fn a_silent_reverb_reaches_exact_zero_instead_of_denormals() {
         let mut r = reverb(0.5, 0.5, 1.0);
         for _ in 0..1_000 {
-            r.process(0.5);
+            r.process(Frame::mono(0.5));
         }
         for _ in 0..RATE * 20 {
-            r.process(0.0);
+            r.process(Frame::SILENT);
         }
-        assert_eq!(r.process(0.0), 0.0, "Ausgabe muss echt null werden");
-        for comb in &r.combs {
-            assert!(comb.buffer.iter().all(|&v| v == 0.0), "Comb nicht leer");
-            assert_eq!(comb.store, 0.0);
-        }
-        for ap in &r.allpasses {
-            assert!(ap.buffer.iter().all(|&v| v == 0.0), "Allpass nicht leer");
+        assert_eq!(
+            r.process(Frame::SILENT),
+            Frame::SILENT,
+            "Ausgabe muss echt null werden"
+        );
+        for bank in &r.banks {
+            for comb in &bank.combs {
+                assert!(comb.buffer.iter().all(|&v| v == 0.0), "Comb nicht leer");
+                assert_eq!(comb.store, 0.0);
+            }
+            for ap in &bank.allpasses {
+                assert!(ap.buffer.iter().all(|&v| v == 0.0), "Allpass nicht leer");
+            }
         }
     }
 
@@ -346,7 +420,7 @@ mod tests {
     fn a_wet_share_of_zero_passes_the_signal_through_unchanged() {
         let mut r = reverb(0.7, 0.4, 0.0);
         for i in 0..10_000 {
-            let x = ((i % 131) as f32 / 131.0) - 0.5;
+            let x = Frame::new(((i % 131) as f32 / 131.0) - 0.5, ((i % 97) as f32 / 97.0) - 0.5);
             assert_eq!(r.process(x), x, "Sample {i}");
         }
     }
@@ -358,14 +432,14 @@ mod tests {
         fn tail_energy(size: f32, damping: f32) -> f64 {
             let mut r = reverb(size, damping, 1.0);
             for _ in 0..64 {
-                r.process(1.0);
+                r.process(Frame::mono(1.0));
             }
             let mut energy = 0.0f64;
             for i in 0..RATE * 3 {
-                let y = r.process(0.0) as f64;
+                let y = r.process(Frame::SILENT);
                 // Only what is left after the first second counts as "tail".
                 if i > RATE {
-                    energy += y * y;
+                    energy += (y.l as f64) * (y.l as f64) + (y.r as f64) * (y.r as f64);
                 }
             }
             energy
@@ -379,13 +453,49 @@ mod tests {
         assert!(dark < bright, "gedaempft {dark}, offen {bright}");
     }
 
+    /// The point of the whole stereo rebuild of this module: the two channels have to carry
+    /// *different* noise. Identical tails on both ears are a point source in the middle of the
+    /// head, which is exactly what a mono reverb sounds like.
+    #[test]
+    fn the_two_channels_carry_different_tails() {
+        let mut r = reverb(0.7, 0.3, 1.0);
+        // A mono impulse - the hard case: the two banks see the identical excitation and only
+        // their own tunings can tell them apart.
+        r.process(Frame::mono(1.0));
+        let mut identical = 0usize;
+        let mut different = 0usize;
+        let mut energy_l = 0.0f64;
+        let mut energy_r = 0.0f64;
+        for _ in 0..RATE {
+            let y = r.process(Frame::SILENT);
+            if y.l == y.r {
+                identical += 1;
+            } else {
+                different += 1;
+            }
+            energy_l += (y.l as f64) * (y.l as f64);
+            energy_r += (y.r as f64) * (y.r as f64);
+        }
+        assert!(
+            different > identical * 10,
+            "die beiden Kanaele sind zu oft gleich ({identical} gleich, {different} verschieden)"
+        );
+        // Different, but not lopsided: both sides have to carry about the same amount of reverb.
+        let ratio = energy_l / energy_r;
+        assert!(
+            (0.5..2.0).contains(&ratio),
+            "die Seiten sind ungleich laut, Verhaeltnis {ratio}"
+        );
+    }
+
     #[test]
     fn the_buffers_are_the_size_the_comment_promises() {
         let r = reverb(0.5, 0.5, 0.2);
         let samples = r.buffered_samples();
-        // 12 587 samples at 44.1 kHz, scaled to 48 kHz.
+        // 12 587 samples at 44.1 kHz per bank, plus 12 * 23 samples of stereo spread on the right
+        // one, scaled to 48 kHz - and then twice, because there are two banks.
         assert!(
-            (13_000..15_000).contains(&samples),
+            (26_000..30_000).contains(&samples),
             "{samples} Samples in den Puffern"
         );
         assert!(r.tail_samples() > RATE / 2);

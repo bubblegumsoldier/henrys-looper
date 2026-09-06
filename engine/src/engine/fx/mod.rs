@@ -2,11 +2,27 @@
 //!
 //! ```text
 //!   Ebenen-Summe  ─┐
-//!                  ├─► Hochpass ─► EQ ─► Kompressor ─► Delay ─► Hall ─► Ausgang
-//!   Mithoer-Signal ┘
-//!
-//!   Eingangssignal ────────────────────────────────────────────► Loop-Puffer  (trocken)
+//!                  ├─► auf stereo ─► Hochpass ─► EQ ─► Kompressor ─► Delay ─► Hall ─► Panorama
+//!   Mithoer-Signal ┘   (nur mono)                                                       │
+//!                                                                                       ▼
+//!   Eingangssignal ────────────────────────────────────────────► Loop-Puffer  (trocken)  Mixbus
 //! ```
+//!
+//! # The chain is stereo, whatever the track is
+//!
+//! A loop buffer is mono or stereo depending on its source (see [`super::frame`]), but everything
+//! from here on is stereo without exception. A mono track is fanned out to two channels before it
+//! reaches the chain, and the reason is the reverb: a hall on a mono guitar has to be a stereo
+//! hall, or the guitar stays a point in the middle of the head no matter how big the room is set
+//! to. The same holds for the delay, whose repeats keep the side they came from.
+//!
+//! What that costs is one extra multiply-add per sample in the filters, two delay lines instead of
+//! one, and two comb banks instead of one - measured in [`bench`], and small enough that eight
+//! tracks still fit into a fraction of the callback budget.
+//!
+//! The two effects that would be *wrong* to run twice do not: the compressor has one detector and
+//! one gain for both channels (`dynamics`), and the reverb excites both of its banks with the same
+//! signal (`reverb`). Both decisions are argued where the code is.
 //!
 //! # The one rule that decides everything else: recording stays dry
 //!
@@ -32,8 +48,8 @@
 //!
 //! # Real-time behaviour
 //!
-//! * **Nothing here allocates after construction.** The delay line and the twelve reverb buffers
-//!   are `Vec`s created in [`Chain::new`], which the control thread calls while building a
+//! * **Nothing here allocates after construction.** The two delay lines and the twenty-four reverb
+//!   buffers are `Vec`s created in [`Chain::new`], which the control thread calls while building a
 //!   `Track`, exactly the way layer buffers are made. Inside the callback nothing grows, shrinks
 //!   or is dropped.
 //! * **Nothing here locks or logs.** Parameter changes arrive as `Copy` commands through the
@@ -72,6 +88,7 @@ pub use biquad::BandKind;
 pub use delay::DelayNote;
 pub use dynamics::CompSettings;
 
+use super::frame::Frame;
 use biquad::{Biquad, Coeffs};
 use delay::Delay;
 use dynamics::Compressor;
@@ -519,8 +536,11 @@ pub struct Chain {
     bypass_mix: Smoothed,
     /// Wet share of each slot; 0.0 means the slot is skipped entirely.
     slot_mix: [Smoothed; FX_SLOTS],
-    hp: Biquad,
-    bands: [Biquad; EQ_BANDS],
+    /// One filter instance per channel. A biquad's state is four *signal* samples, so sharing one
+    /// between two channels would feed each channel the other's history - which is not a filter of
+    /// anything, it is a ring modulator with extra steps.
+    hp: [Biquad; 2],
+    bands: [[Biquad; 2]; EQ_BANDS],
     comp: Compressor,
     delay: Delay,
     reverb: Reverb,
@@ -543,12 +563,12 @@ impl Chain {
             bypass: true,
             bypass_mix: Smoothed::new(0.0, BYPASS_MS, sample_rate),
             slot_mix: [Smoothed::new(0.0, SWITCH_MS, sample_rate); FX_SLOTS],
-            hp: Biquad::new(Coeffs::high_pass(
+            hp: [Biquad::new(Coeffs::high_pass(
                 sample_rate,
                 set.high_pass_hz,
                 std::f32::consts::FRAC_1_SQRT_2,
-            )),
-            bands: [Biquad::default(); EQ_BANDS],
+            )); 2],
+            bands: [[Biquad::default(); 2]; EQ_BANDS],
             comp: Compressor::new(sample_rate, set.comp),
             delay: Delay::new(
                 sample_rate,
@@ -643,9 +663,13 @@ impl Chain {
             // A slot that was skipped has stale state; start it from silence instead of from
             // whatever it happened to hold when it was switched off.
             match slot {
-                FxSlot::HighPass => self.hp.reset(),
+                FxSlot::HighPass => {
+                    for filter in &mut self.hp {
+                        filter.reset();
+                    }
+                }
                 FxSlot::Eq => {
-                    for band in &mut self.bands {
+                    for band in self.bands.iter_mut().flatten() {
                         band.reset();
                     }
                 }
@@ -730,9 +754,11 @@ impl Chain {
                     let was_flat = b.is_flat();
                     b.gain_db = db.clamp(-24.0, 24.0);
                     let is_flat = b.gain_db == 0.0;
-                    if was_flat && !is_flat && let Some(f) = self.bands.get_mut(band) {
+                    if was_flat && !is_flat && let Some(pair) = self.bands.get_mut(band) {
                         // The band was being skipped; it must not ring with old samples.
-                        f.reset();
+                        for f in pair.iter_mut() {
+                            f.reset();
+                        }
                     }
                     self.rebuild_band(band);
                 }
@@ -784,19 +810,25 @@ impl Chain {
 
     fn rebuild_high_pass(&mut self) {
         // Butterworth Q: maximally flat pass band, exactly -3 dB at the corner.
-        self.hp.set(Coeffs::high_pass(
+        let coeffs = Coeffs::high_pass(
             self.sample_rate,
             self.set.high_pass_hz,
             std::f32::consts::FRAC_1_SQRT_2,
-        ));
+        );
+        for filter in &mut self.hp {
+            filter.set(coeffs);
+        }
     }
 
     fn rebuild_band(&mut self, index: usize) {
         let Some(&s) = self.set.bands.get(index) else {
             return;
         };
-        if let Some(f) = self.bands.get_mut(index) {
-            f.set(Coeffs::band(self.sample_rate, s.kind, s.hz, s.q, s.gain_db));
+        let coeffs = Coeffs::band(self.sample_rate, s.kind, s.hz, s.q, s.gain_db);
+        if let Some(pair) = self.bands.get_mut(index) {
+            for f in pair.iter_mut() {
+                f.set(coeffs);
+            }
         }
     }
 
@@ -807,8 +839,10 @@ impl Chain {
     }
 
     fn reset_states(&mut self) {
-        self.hp.reset();
-        for band in &mut self.bands {
+        for filter in &mut self.hp {
+            filter.reset();
+        }
+        for band in self.bands.iter_mut().flatten() {
             band.reset();
         }
         self.comp.reset();
@@ -834,13 +868,17 @@ impl Chain {
 
     // ---- the audio path ----------------------------------------------------------------------
 
-    /// One sample through the whole chain.
+    /// One stereo frame through the whole chain.
+    ///
+    /// A mono track hands in `Frame::mono(x)`, i.e. the same sample on both channels; from here on
+    /// there is no difference between a mono and a stereo track, which is what keeps this function
+    /// free of special cases.
     ///
     /// The three early exits are what makes eight of these affordable: a bypassed chain returns
     /// its input untouched, an idle chain returns silence, and a switched-off slot is skipped
     /// rather than multiplied by zero.
     #[inline]
-    pub fn process(&mut self, x: f32) -> f32 {
+    pub fn process(&mut self, x: Frame) -> Frame {
         // Bit-exact bypass. Only once the crossfade has really arrived at zero - before that the
         // chain is still fading out and has to keep running.
         if self.bypass && self.bypass_mix.settled() && self.bypass_mix.value() == 0.0 {
@@ -849,9 +887,10 @@ impl Chain {
         }
 
         // Idle: nothing has gone in for longer than the longest tail, so nothing can come out.
-        if x == 0.0 {
+        // Both channels have to be silent - one side still ringing keeps the whole chain awake.
+        if x.is_silent() {
             if self.silence_run >= self.tail_samples {
-                return 0.0;
+                return Frame::SILENT;
             }
             self.silence_run += 1;
         } else {
@@ -860,10 +899,13 @@ impl Chain {
 
         let mut y = x;
 
-        // 1. High-pass.
+        // 1. High-pass, one filter instance per channel.
         let m = self.slot_mix[0].next();
         if m > 0.0 {
-            let w = self.hp.process(y);
+            let w = Frame {
+                l: self.hp[0].process(y.l),
+                r: self.hp[1].process(y.r),
+            };
             y = blend(y, w, m);
         }
 
@@ -873,13 +915,16 @@ impl Chain {
             let mut w = y;
             for i in 0..EQ_BANDS {
                 if !self.set.bands[i].is_flat() {
-                    w = self.bands[i].process(w);
+                    w = Frame {
+                        l: self.bands[i][0].process(w.l),
+                        r: self.bands[i][1].process(w.r),
+                    };
                 }
             }
             y = blend(y, w, m);
         }
 
-        // 3. Compressor.
+        // 3. Compressor - one detector, one gain, both channels. See `dynamics`.
         let m = self.slot_mix[2].next();
         if m > 0.0 {
             let w = self.comp.process(y);
@@ -907,14 +952,17 @@ impl Chain {
     }
 }
 
-/// Crossfade that is exact at both ends: at 1.0 it returns the wet sample itself rather than
+/// Crossfade that is exact at both ends: at 1.0 it returns the wet frame itself rather than
 /// `dry + (wet - dry)`, which in floating point is not always the same number.
 #[inline(always)]
-fn blend(dry: f32, wet: f32, mix: f32) -> f32 {
+fn blend(dry: Frame, wet: Frame, mix: f32) -> Frame {
     if mix >= 1.0 {
         wet
     } else {
-        dry + (wet - dry) * mix
+        Frame {
+            l: dry.l + (wet.l - dry.l) * mix,
+            r: dry.r + (wet.r - dry.r) * mix,
+        }
     }
 }
 

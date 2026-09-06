@@ -42,6 +42,12 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
             index,
             input: spec.input,
             input_channel: spec.input - 1,
+            input_right: spec.input_right,
+            input_channel_right: spec.input_right.map(|c| c - 1),
+            // The channel count of the loop buffer follows from the number of inputs and from
+            // nothing else - that is the rule the whole stereo design rests on.
+            channels: if spec.input_right.is_some() { 2 } else { 1 },
+            pan: spec.pan,
             monitor: spec.monitor,
         })
         .collect();

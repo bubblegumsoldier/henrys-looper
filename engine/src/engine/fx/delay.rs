@@ -26,10 +26,23 @@
 //!   tempo anyone plays a song at and a third of the slowest the engine's timeline accepts;
 //! * so the longest tap is `60 / 30 = 2.0` seconds, [`MAX_DELAY_SECONDS`].
 //!
-//! At 48 kHz that is 96 000 samples, **384 kB per track**, or 3 MB for the eight tracks the engine
-//! allows. Below 30 BPM the note value is clamped to the line length and the delay simply stops
-//! getting longer; the alternative would be a 60-second line for the 1 BPM the timeline formally
-//! permits, which is 11 MB per track for a tempo nobody will ever play.
+//! At 48 kHz that is 96 000 samples per channel. Below 30 BPM the note value is clamped to the line
+//! length and the delay simply stops getting longer; the alternative would be a 60-second line for
+//! the 1 BPM the timeline formally permits, which is 11 MB per track for a tempo nobody will ever
+//! play.
+//!
+//! # Stereo: two lines, one tap
+//!
+//! There is one delay line per channel, both read at the same distance. Two lines rather than one
+//! because a single line fed with the sum would collapse the stereo image of every repeat: a piano
+//! chord that sits on the left would come back from the middle. The tap is shared because the
+//! repeats have to stay on the musical grid - a delay whose two sides drift apart is a chorus, not
+//! a delay, and the whole point of this one is that it is locked to the timeline.
+//!
+//! The price is memory: **768 kB per track** at 48 kHz, 6 MB for the eight tracks the engine
+//! allows. On a mono track both lines carry the same content, which is the honest cost of keeping
+//! one code path instead of two - and it is paid in a `Vec` allocated once in the control thread,
+//! never in CPU time inside the callback.
 //!
 //! # What happens on a tempo change
 //!
@@ -46,6 +59,7 @@
 //! exponentially after the input stops, and without the flush it would spend minutes in the
 //! denormal range, where a multiply can cost a hundred times what it should.
 
+use super::super::frame::Frame;
 use super::biquad::flush;
 use super::smooth::Smoothed;
 
@@ -113,8 +127,9 @@ impl DelayNote {
 }
 
 pub struct Delay {
-    /// Allocated in the control thread, never resized. See the module comment for its length.
-    line: Vec<f32>,
+    /// One line per channel. Allocated in the control thread, never resized. See the module
+    /// comment for their length and for why there are two of them.
+    line: [Vec<f32>; 2],
     write: usize,
     /// Tap distance in samples, currently in effect.
     taps: usize,
@@ -139,7 +154,7 @@ impl Delay {
         let len = (MAX_DELAY_SECONDS * sample_rate as f64).ceil() as usize + 2;
         let fade_samples = (TAP_FADE_MS * 0.001 * sample_rate as f32).max(1.0);
         Self {
-            line: vec![0.0; len],
+            line: [vec![0.0; len], vec![0.0; len]],
             write: 0,
             taps: 1,
             fading_to: 0,
@@ -153,9 +168,10 @@ impl Delay {
         }
     }
 
-    /// Length of the allocated line in samples - the number the module comment derives.
+    /// Length of one allocated line in samples - the number the module comment derives. There are
+    /// two of them, one per channel.
     pub fn line_len(&self) -> usize {
-        self.line.len()
+        self.line[0].len()
     }
 
     /// Tap distance in samples that is currently sounding.
@@ -225,7 +241,7 @@ impl Delay {
             return;
         }
         let wanted = (self.quarter_samples * self.note.factor()).round() as usize;
-        let wanted = wanted.clamp(1, self.line.len() - 1);
+        let wanted = wanted.clamp(1, self.line_len() - 1);
         if !self.tuned {
             self.tuned = true;
             self.taps = wanted;
@@ -248,53 +264,71 @@ impl Delay {
         self.fade = f32::MIN_POSITIVE; // strictly greater than zero: a fade is running
     }
 
-    /// Silence the line. Control thread only - this is a memset of the whole buffer.
+    /// Silence both lines. Control thread only - this is a memset of the whole buffer.
     pub fn clear(&mut self) {
-        self.line.fill(0.0);
+        for line in self.line.iter_mut() {
+            line.fill(0.0);
+        }
         self.write = 0;
         self.fade = 0.0;
     }
 
     #[inline(always)]
-    fn read_at(&self, distance: usize) -> f32 {
-        let len = self.line.len();
+    fn read_at(&self, channel: usize, distance: usize) -> f32 {
+        let len = self.line[channel].len();
         let idx = (self.write + len - distance.min(len - 1)) % len;
         // `get` rather than indexing: a panic inside an audio callback would take the process
         // down, and the arithmetic above already guarantees the index is in range.
-        match self.line.get(idx) {
+        match self.line[channel].get(idx) {
             Some(&v) => v,
             None => 0.0,
         }
     }
 
-    /// One sample. Returns dry plus the echoes - the delay is wired like an aux send, so turning
-    /// the repeats up never makes the dry signal quieter.
+    /// One frame. Returns dry plus the echoes - the delay is wired like an aux send, so turning the
+    /// repeats up never makes the dry signal quieter.
+    ///
+    /// The two channels share the tap and the crossfade, which is advanced exactly once per frame;
+    /// two counters could drift apart by a sample and that is audible as a comb filter.
     #[inline(always)]
-    pub fn process(&mut self, x: f32) -> f32 {
-        let wet = if self.fade > 0.0 {
-            let old = self.read_at(self.taps);
-            let new = self.read_at(self.fading_to);
-            let f = self.fade;
+    pub fn process(&mut self, x: Frame) -> Frame {
+        let fade = self.fade;
+        let mut wet = Frame::SILENT;
+        for c in 0..2 {
+            let value = if fade > 0.0 {
+                let old = self.read_at(c, self.taps);
+                let new = self.read_at(c, self.fading_to);
+                old + (new - old) * fade
+            } else {
+                self.read_at(c, self.taps)
+            };
+            wet.set_channel(c, value);
+        }
+        if fade > 0.0 {
             self.fade += self.fade_step;
             if self.fade >= 1.0 {
                 self.taps = self.fading_to;
                 self.fade = 0.0;
             }
-            old + (new - old) * f
-        } else {
-            self.read_at(self.taps)
-        };
+        }
 
         let feedback = self.feedback.next();
-        let len = self.line.len();
-        if let Some(slot) = self.line.get_mut(self.write) {
-            *slot = flush(x + wet * feedback);
+        let len = self.line_len();
+        for c in 0..2 {
+            let written = flush(x.channel(c) + wet.channel(c) * feedback);
+            if let Some(slot) = self.line[c].get_mut(self.write) {
+                *slot = written;
+            }
         }
         self.write += 1;
         if self.write >= len {
             self.write = 0;
         }
-        x + wet * self.mix.next()
+        let mix = self.mix.next();
+        Frame {
+            l: x.l + wet.l * mix,
+            r: x.r + wet.r * mix,
+        }
     }
 }
 
@@ -322,7 +356,7 @@ mod tests {
         let mut echo_at = None;
         for i in 0..60_000u64 {
             let x = if i == 0 { 1.0 } else { 0.0 };
-            let y = d.process(x);
+            let y = d.process(Frame::mono(x)).l;
             // The dry impulse itself is not an echo.
             if i > 0 && y.abs() > 1e-6 {
                 echo_at = Some(i);
@@ -355,12 +389,15 @@ mod tests {
         let mut d = delay_at(240.0, DelayNote::Eighth, 0.5, 1.0);
         let tap = d.tap_samples() as usize;
         assert_eq!(tap, 6_000);
-        d.process(1.0);
+        d.process(Frame::mono(1.0));
         for _ in 0..tap * 120 {
-            d.process(0.0);
+            d.process(Frame::mono(0.0));
         }
-        assert!(d.line.iter().all(|&v| v == 0.0), "Leitung nicht ausgeraeumt");
-        assert_eq!(d.process(0.0), 0.0);
+        assert!(
+            d.line.iter().all(|line| line.iter().all(|&v| v == 0.0)),
+            "Leitung nicht ausgeraeumt"
+        );
+        assert_eq!(d.process(Frame::SILENT), Frame::SILENT);
     }
 
     /// The most feedback the delay allows must still decay rather than run away. That is what the
@@ -370,12 +407,12 @@ mod tests {
         let mut d = delay_at(240.0, DelayNote::Eighth, 1.5, 1.0);
         assert_eq!(d.feedback(), 0.95, "Feedback wird gedeckelt");
         let tap = d.tap_samples() as usize;
-        d.process(1.0);
+        d.process(Frame::mono(1.0));
         let mut previous = f32::INFINITY;
         for pass in 1..=40 {
             let mut peak: f32 = 0.0;
             for _ in 0..tap {
-                peak = peak.max(d.process(0.0).abs());
+                peak = peak.max(d.process(Frame::SILENT).max_abs());
             }
             assert!(peak.is_finite(), "Durchlauf {pass} ist NaN oder unendlich");
             assert!(peak < previous, "Durchlauf {pass} wird nicht leiser: {peak}");
@@ -396,7 +433,7 @@ mod tests {
         // after the crossfade, so the line is run for longer than the fade takes.
         d.set_quarter_samples(RATE as f64 * 60.0 / 5.0);
         for _ in 0..2_000 {
-            d.process(0.0);
+            d.process(Frame::mono(0.0));
         }
         assert_eq!(d.tap_samples(), (d.line_len() - 1) as u64);
     }
@@ -410,15 +447,15 @@ mod tests {
         // Fill the line with a slow, smooth sweep: two taps 8000 samples apart then read clearly
         // different values, while the material itself has no step the test could mistake for one.
         for i in 0..90_000u64 {
-            d.process((i as f32 * 0.000_1).sin() * 0.5);
+            d.process(Frame::mono((i as f32 * 0.000_1).sin() * 0.5));
         }
-        let before = d.process(0.5);
+        let before = d.process(Frame::mono(0.5)).l;
         d.set_quarter_samples(RATE as f64 * 60.0 / 90.0);
         assert_ne!(d.tap_samples(), 32_000, "der neue Tap ist noch nicht aktiv");
         let mut previous = before;
         let mut worst_step: f32 = 0.0;
         for _ in 0..2_000 {
-            let y = d.process(0.5);
+            let y = d.process(Frame::mono(0.5)).l;
             worst_step = worst_step.max((y - previous).abs());
             previous = y;
         }
@@ -436,8 +473,29 @@ mod tests {
         let mut d = delay_at(120.0, DelayNote::Eighth, 0.5, 0.0);
         for i in 0..5_000 {
             let x = ((i % 97) as f32 / 97.0) - 0.5;
-            assert_eq!(d.process(x), x, "Sample {i}");
+            assert_eq!(d.process(Frame::mono(x)), Frame::mono(x), "Sample {i}");
         }
+    }
+
+    /// Two lines, not one: an impulse that went in on the left has to come back on the left alone.
+    /// A single shared line would put every repeat in the middle.
+    #[test]
+    fn the_repeats_come_back_on_the_side_they_went_in_on() {
+        let mut d = delay_at(120.0, DelayNote::Quarter, 0.0, 1.0);
+        let tap = d.tap_samples() as usize;
+        d.process(Frame::new(1.0, 0.0));
+        let mut echo = None;
+        for i in 1..tap + 16 {
+            let y = d.process(Frame::SILENT);
+            if y.max_abs() > 1e-6 {
+                echo = Some((i, y));
+                break;
+            }
+        }
+        let (at, y) = echo.expect("die Wiederholung muss kommen");
+        assert_eq!(at, tap, "Wiederholung exakt eine Viertel spaeter");
+        assert!(y.l > 0.9, "links kommt der Impuls zurueck: {}", y.l);
+        assert_eq!(y.r, 0.0, "rechts muss still bleiben");
     }
 
     #[test]

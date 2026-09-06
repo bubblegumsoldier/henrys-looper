@@ -20,15 +20,28 @@
 //! ```
 //!
 //! No `Vec` is ever created or dropped on the right-hand side of that picture.
+//!
+//! # Two kinds of buffer
+//!
+//! Since loop buffers are mono *or* stereo (see [`super::frame`]), the pool keeps two stocks: one
+//! of `layer_frames` samples and one of `2 * layer_frames`. Everything below that is indexed by
+//! kind is indexed by `Channels::index` - mono is 0, stereo is 1 - so the accounting is the same
+//! arithmetic twice rather than two code paths. A track only ever asks for its own kind, and a
+//! buffer of the wrong length is handed straight back instead of being used.
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
+#[cfg(test)]
+use super::frame::Channels;
 use super::fx::{FxParam, FxPreset, FxSlot, FxStatus};
 use super::timeline::TimeSignature;
 use super::track::TrackState;
 
 /// Hard ceiling of tracks. Bounds the fixed-size status snapshot, which has to stay `Copy`.
 pub const MAX_TRACKS: usize = 8;
+
+/// How many kinds of layer buffer there are: mono and stereo.
+pub const BUFFER_KINDS: usize = 2;
 
 /// One scheduled engine action.
 ///
@@ -57,6 +70,10 @@ pub enum Command {
     /// Input monitoring (hearing yourself through the engine) for one track, independent of whether
     /// that track is playing.
     SetMonitor { track: usize, on: bool },
+    /// Where this track sits in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
+    /// Untimed - a pan is a mix decision, not a musical event, and it is set before a take rather
+    /// than during one.
+    SetPan { track: usize, pan: f32 },
     SetLayerMute {
         track: usize,
         layer: usize,
@@ -76,8 +93,9 @@ pub enum Command {
     SetTempo {
         bpm: f64,
         signature: TimeSignature,
-        /// Length in samples the control thread now allocates layer buffers at.
-        layer_capacity: u64,
+        /// Length in **frames** the control thread now allocates layer buffers at. A mono buffer
+        /// is that many samples long, a stereo one twice as many.
+        layer_frames: u64,
     },
     /// Whole effect chain of one track in or out of the signal path. Out means bit-identical
     /// pass-through - the panic switch.
@@ -108,6 +126,7 @@ impl Command {
             | Command::ClearTrack { at, .. }
             | Command::ClearAll { at } => Some(*at),
             Command::SetMonitor { .. }
+            | Command::SetPan { .. }
             | Command::SetLayerMute { .. }
             | Command::SetLayerGain { .. }
             | Command::RemoveLayer { .. }
@@ -131,6 +150,7 @@ impl Command {
             | Command::StopPlay { track, .. }
             | Command::ClearTrack { track, .. }
             | Command::SetMonitor { track, .. }
+            | Command::SetPan { track, .. }
             | Command::SetLayerMute { track, .. }
             | Command::SetLayerGain { track, .. }
             | Command::RemoveLayer { track, .. }
@@ -185,31 +205,79 @@ impl Refusal {
 }
 
 /// Per-track part of the status snapshot.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TrackStatus {
     pub state: TrackState,
     pub layers: u8,
     /// Bit `i` set means layer `i` is muted.
     pub muted_mask: u32,
-    /// Loop length in samples, 0 while nothing is recorded.
+    /// Loop length in **frames**, 0 while nothing is recorded. A frame is one instant of audio -
+    /// one sample on a mono track, two on a stereo one.
     pub loop_len: u64,
     /// Musical position loop index 0 sits at, 0 while nothing is recorded. Together with `loop_len`
     /// this is the track's own grid, which is what a further layer has to be quantised to.
     pub origin: u64,
-    /// Samples already written during a running loop-defining take.
+    /// Frames already written during a running loop-defining take.
     pub filled: u64,
-    /// Peak of this track's input channel, absolute value.
-    pub input_peak: f32,
-    /// Peak this track contributed to the output, absolute value. Its audible layers only -
-    /// monitoring goes straight to the output and is not counted here.
-    pub output_peak: f32,
+    /// Peak of each recorded input channel, absolute value. On a mono track only index 0 moves.
+    pub input_peak: [f32; 2],
+    /// Peak this track contributed to the bus, left and right, absolute values. Its audible layers
+    /// only, panned but before the effect chain - see `Track::output_peak` for why exactly there.
+    pub output_peak: [f32; 2],
     pub monitor: bool,
     pub playing: bool,
-    /// Zero-based input channel of the device this track records.
-    pub input_channel: u8,
+    /// Zero-based device input channels this track records. Only the first `channels` of them mean
+    /// anything; on a mono track the second entry repeats the first.
+    pub input_channels: [u8; 2],
+    /// 1 for a mono loop buffer, 2 for a stereo one.
+    pub channels: u8,
+    /// Position in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
+    pub pan: f32,
     /// State of this track's effect chain: what is on, which preset, and the parameters behind
     /// it. Fixed size and `Copy`, like everything else that crosses the thread boundary.
     pub fx: FxStatus,
+}
+
+impl Default for TrackStatus {
+    /// The state of a track that does not exist, and the filler for the unused tail of the
+    /// fixed-size array. Written out rather than derived because of `channels`: a derived zero
+    /// would say "a buffer with no channels", which is not a state a track can be in.
+    fn default() -> Self {
+        Self {
+            state: TrackState::default(),
+            layers: 0,
+            muted_mask: 0,
+            loop_len: 0,
+            origin: 0,
+            filled: 0,
+            input_peak: [0.0; 2],
+            output_peak: [0.0; 2],
+            monitor: false,
+            playing: false,
+            input_channels: [0; 2],
+            channels: 1,
+            pan: 0.0,
+            fx: FxStatus::default(),
+        }
+    }
+}
+
+impl TrackStatus {
+    /// Loudest recorded input channel - what a single-bar meter shows.
+    pub fn input_peak_max(&self) -> f32 {
+        self.input_peak[0].max(self.input_peak[1])
+    }
+
+    /// Louder side of this track's contribution to the bus.
+    pub fn output_peak_max(&self) -> f32 {
+        self.output_peak[0].max(self.output_peak[1])
+    }
+
+    /// The input channels that actually mean something: one entry on a mono track, two on a
+    /// stereo one.
+    pub fn used_input_channels(&self) -> &[u8] {
+        &self.input_channels[..(self.channels as usize).clamp(1, 2)]
+    }
 }
 
 /// Snapshot the audio thread pushes back to the control thread.
@@ -230,19 +298,20 @@ pub struct Status {
     pub samples_per_beat: f64,
     pub tracks: [TrackStatus; MAX_TRACKS],
     pub track_count: u8,
-    /// Peak of the produced output block, absolute value.
-    pub output_peak: f32,
+    /// Peak of the produced output block, left and right, absolute values.
+    pub output_peak: [f32; 2],
     pub click: bool,
     pub bpm: f64,
     /// Commands the engine refused, in total.
     pub ignored_commands: u64,
     /// Why the last refusal happened.
     pub refusal: Refusal,
-    /// Prepared buffers the engine currently holds ready for the next layer.
-    pub spares: u32,
-    /// Buffers the engine has taken out of the install queue since it started. Together with what
-    /// the control thread pushed, this says exactly how many are still in flight.
-    pub buffers_taken: u64,
+    /// Prepared buffers the engine currently holds ready for the next layer, per kind - see
+    /// `Channels::index`.
+    pub spares: [u32; BUFFER_KINDS],
+    /// Buffers the engine has taken out of the install queue since it started, per kind. Together
+    /// with what the control thread pushed, this says exactly how many are still in flight.
+    pub buffers_taken: [u64; BUFFER_KINDS],
     /// Set once a `Stop` command has been executed.
     pub stopped: bool,
 }
@@ -251,6 +320,16 @@ impl Status {
     /// The tracks that actually exist, without the unused tail of the fixed-size array.
     pub fn tracks(&self) -> &[TrackStatus] {
         &self.tracks[..(self.track_count as usize).min(MAX_TRACKS)]
+    }
+
+    /// Louder side of the produced output block.
+    pub fn output_peak_max(&self) -> f32 {
+        self.output_peak[0].max(self.output_peak[1])
+    }
+
+    /// Prepared buffers of both kinds together, for a display that only wants one number.
+    pub fn spares_total(&self) -> u32 {
+        self.spares.iter().sum()
     }
 }
 
@@ -383,95 +462,157 @@ pub fn buffer_channel(install_capacity: usize, retire_capacity: usize) -> (Buffe
     )
 }
 
-/// The control thread's stock of empty layer buffers.
+/// The control thread's stock of empty layer buffers, one stock per channel count.
 ///
 /// Its whole job is that an overdub never has to wait for `malloc`: the engine is kept supplied
-/// with `slots` prepared buffers, and everything that comes back is zeroed here and reused. All
-/// allocating, zeroing and dropping happens in [`LayerPool::service`], which only ever runs in the
-/// control thread.
+/// with `slots[kind]` prepared buffers of each kind, and everything that comes back is zeroed here
+/// and reused. All allocating, zeroing and dropping happens in [`LayerPool::service`], which only
+/// ever runs in the control thread.
+///
+/// A session with only mono tracks asks for `slots[1] == 0` and never allocates a stereo buffer,
+/// which is the whole point of keeping the two kinds apart rather than making every buffer stereo.
 pub struct LayerPool {
     channel: BufferChannel,
-    layer_len: usize,
-    slots: usize,
-    reserve: Vec<Vec<f32>>,
-    /// Buffers pushed into the install queue since the start.
-    pushed: u64,
-    /// Buffers taken back out of the retire queue since the start.
-    reclaimed: u64,
+    /// Frames one layer holds. A buffer of kind `k` is `layer_frames * (k + 1)` samples long.
+    layer_frames: usize,
+    slots: [usize; BUFFER_KINDS],
+    reserve: [Vec<Vec<f32>>; BUFFER_KINDS],
+    /// Buffers pushed into the install queue since the start, per kind.
+    pushed: [u64; BUFFER_KINDS],
+    /// Buffers taken back out of the retire queue since the start, per kind.
+    reclaimed: [u64; BUFFER_KINDS],
+    /// Buffers that came back at a length belonging to no current kind - left over from a tempo
+    /// change. Dropped rather than kept; counted so the accounting stays honest.
+    discarded: u64,
 }
 
 impl LayerPool {
-    pub fn new(channel: BufferChannel, layer_len: usize, slots: usize) -> Self {
+    pub fn new(channel: BufferChannel, layer_frames: usize, slots: [usize; BUFFER_KINDS]) -> Self {
         Self {
             channel,
-            layer_len,
+            layer_frames,
             slots,
-            reserve: Vec::with_capacity(slots),
-            pushed: 0,
-            reclaimed: 0,
+            reserve: [
+                Vec::with_capacity(slots[0]),
+                Vec::with_capacity(slots[1]),
+            ],
+            pushed: [0; BUFFER_KINDS],
+            reclaimed: [0; BUFFER_KINDS],
+            discarded: 0,
         }
     }
 
-    /// Reclaim what came back, then top the engine up to `slots` prepared buffers.
+    /// One mono stock only - the shorthand for a mono-only session and for tests.
+    pub fn mono(channel: BufferChannel, layer_frames: usize, slots: usize) -> Self {
+        Self::new(channel, layer_frames, [slots, 0])
+    }
+
+    /// Length in samples of a buffer of kind `kind`.
+    fn buffer_len(&self, kind: usize) -> usize {
+        self.layer_frames * (kind + 1)
+    }
+
+    /// Which kind a returned buffer belongs to, or `None` if it fits neither - which happens after
+    /// a tempo change, when the engine sends its old stock back.
+    fn kind_of(&self, buffer: &[f32]) -> Option<usize> {
+        (0..BUFFER_KINDS).find(|&k| self.slots[k] > 0 && buffer.len() == self.buffer_len(k))
+    }
+
+    /// Reclaim what came back, then top the engine up to `slots[kind]` prepared buffers of each
+    /// kind.
     ///
     /// `status` is the newest snapshot, or `None` before the first one arrives. `spares` and
-    /// `buffers_taken` in it are what makes the accounting exact: buffers still sitting in the
-    /// install queue are `pushed - buffers_taken`, and the engine holds `spares` more. Layers in
-    /// use are deliberately *not* counted, so using a layer immediately triggers a refill.
+    /// `buffers_taken` in it are what makes the accounting exact: buffers of kind `k` still sitting
+    /// in the install queue are `pushed[k] - buffers_taken[k]`, and the engine holds `spares[k]`
+    /// more. Layers in use are deliberately *not* counted, so using a layer immediately triggers a
+    /// refill.
     pub fn service(&mut self, status: Option<&Status>) {
         while let Ok(mut buffer) = self.channel.retire_rx.pop() {
-            self.reclaimed += 1;
-            if buffer.len() == self.layer_len && self.reserve.len() < self.slots {
-                // Zeroing belongs here: a layer buffer must arrive empty, and a memset of several
-                // megabytes has no business in an audio callback.
-                buffer.fill(0.0);
-                self.reserve.push(buffer);
+            match self.kind_of(&buffer) {
+                Some(kind) => {
+                    self.reclaimed[kind] += 1;
+                    if self.reserve[kind].len() < self.slots[kind] {
+                        // Zeroing belongs here: a layer buffer must arrive empty, and a memset of
+                        // several megabytes has no business in an audio callback.
+                        buffer.fill(0.0);
+                        self.reserve[kind].push(buffer);
+                    }
+                    // Everything else is simply dropped - in the control thread, where that is
+                    // allowed.
+                }
+                None => self.discarded += 1,
             }
-            // Everything else is simply dropped - in the control thread, where that is allowed.
         }
 
-        let taken = status.map(|s| s.buffers_taken).unwrap_or(0);
-        let queued = self.pushed.saturating_sub(taken) as usize;
-        let mut available = status.map(|s| s.spares as usize).unwrap_or(0) + queued;
-        while available < self.slots {
-            let buffer = self
-                .reserve
-                .pop()
-                .unwrap_or_else(|| vec![0.0f32; self.layer_len]);
-            match self.channel.install_tx.push(buffer) {
-                Ok(()) => {
-                    self.pushed += 1;
-                    available += 1;
-                }
-                Err(PushError::Full(buffer)) => {
-                    self.reserve.push(buffer);
-                    break;
+        for kind in 0..BUFFER_KINDS {
+            let taken = status.map(|s| s.buffers_taken[kind]).unwrap_or(0);
+            let queued = self.pushed[kind].saturating_sub(taken) as usize;
+            let mut available = status.map(|s| s.spares[kind] as usize).unwrap_or(0) + queued;
+            let len = self.buffer_len(kind);
+            while available < self.slots[kind] {
+                let buffer = self.reserve[kind].pop().unwrap_or_else(|| vec![0.0f32; len]);
+                match self.channel.install_tx.push(buffer) {
+                    Ok(()) => {
+                        self.pushed[kind] += 1;
+                        available += 1;
+                    }
+                    Err(PushError::Full(buffer)) => {
+                        self.reserve[kind].push(buffer);
+                        break;
+                    }
                 }
             }
         }
     }
 
     /// New layer length after a tempo change: the stock is worthless at the wrong length.
-    pub fn set_layer_len(&mut self, layer_len: usize) {
-        self.layer_len = layer_len;
-        self.reserve.clear();
+    ///
+    /// The in-flight accounting starts over here, and `EngineCore` resets its half of it in the
+    /// same breath (see the `SetTempo` arm of `process::apply`). Anything still in the install
+    /// queue is of the old length and will be handed straight back; counting it against the new
+    /// length would be arithmetic about buffers that no longer exist.
+    pub fn set_layer_frames(&mut self, layer_frames: usize) {
+        // Only a changed length invalidates anything, and `EngineCore` makes exactly the same
+        // comparison before it throws its stocks away - the two counters have to be reset in the
+        // same breath or the accounting drifts apart.
+        if layer_frames == self.layer_frames {
+            return;
+        }
+        self.layer_frames = layer_frames;
+        for reserve in self.reserve.iter_mut() {
+            reserve.clear();
+        }
+        self.pushed = [0; BUFFER_KINDS];
     }
 
-    /// Buffers that came back from the audio thread. Used by the tests to prove nothing leaks.
+    /// Buffers that came back from the audio thread and were recognised. Used by the tests to
+    /// prove nothing leaks.
     #[cfg(test)]
     pub fn reclaimed(&self) -> u64 {
-        self.reclaimed
+        self.reclaimed.iter().sum()
+    }
+
+    #[cfg(test)]
+    pub fn reclaimed_of(&self, channels: Channels) -> u64 {
+        self.reclaimed[channels.index()]
     }
 
     #[cfg(test)]
     pub fn pushed(&self) -> u64 {
-        self.pushed
+        self.pushed.iter().sum()
+    }
+
+    #[cfg(test)]
+    pub fn pushed_of(&self, channels: Channels) -> u64 {
+        self.pushed[channels.index()]
     }
 
     /// Give everything back at the end of a session.
     pub fn drain(&mut self) {
         self.channel.drain_retired();
-        self.reserve.clear();
+        for reserve in self.reserve.iter_mut() {
+            reserve.clear();
+        }
     }
 }
 
@@ -492,6 +633,8 @@ mod tests {
             .at(),
             None
         );
+        assert_eq!(Command::SetPan { track: 2, pan: -0.5 }.at(), None);
+        assert_eq!(Command::SetPan { track: 2, pan: -0.5 }.track(), Some(2));
         assert_eq!(Command::Stop.at(), None);
         assert_eq!(Command::StartOverdub { track: 3, at: 1 }.track(), Some(3));
         assert_eq!(Command::ClearAll { at: 1 }.track(), None);
@@ -508,18 +651,19 @@ mod tests {
     }
 
     /// The snapshot is memcpy'd into the queue **inside the audio callback**, so its size is a
-    /// real-time concern and not just a memory one. Phase 6 put the effect state into it: a
-    /// `TrackStatus` is now 168 bytes (120 of them the chain), and the whole `Status` 1416. This
-    /// pins that down, so the next addition has to be a decision rather than an accident.
+    /// real-time concern and not just a memory one. Phase 6 put the effect state into it; the
+    /// stereo rebuild added a second peak per meter, the channel count, the second input channel
+    /// and the pan - fourteen bytes per track, which the padding rounds to sixteen.
     ///
-    /// 1.4 kB at 200 snapshots per second is a copy of well under a microsecond per callback,
-    /// against a budget of 2667 - and the queue of 1024 slots costs 1.4 MB, allocated once in the
-    /// control thread.
+    /// 1.6 kB at 200 snapshots per second is a copy of well under a microsecond per callback,
+    /// against a budget of 2667 - and the queue of 1024 slots costs 1.6 MB, allocated once in the
+    /// control thread. The limit is pinned so the next addition has to be a decision rather than
+    /// an accident.
     #[test]
     fn the_status_snapshot_stays_small_enough_to_memcpy_in_a_callback() {
         let size = std::mem::size_of::<Status>();
         assert!(
-            size <= 1_536,
+            size <= 1_664,
             "Der Status ist auf {size} Bytes gewachsen - das wandert bei jedem Snapshot durch \
              den Audio-Callback."
         );
@@ -539,6 +683,29 @@ mod tests {
         assert!(rx.latest().is_none());
     }
 
+    /// A track that does not exist reports one channel, not zero - a buffer with no channels is
+    /// not a state anything downstream could render.
+    #[test]
+    fn an_empty_track_status_is_a_mono_track_in_the_middle() {
+        let ts = TrackStatus::default();
+        assert_eq!(ts.channels, 1);
+        assert_eq!(ts.pan, 0.0);
+        assert_eq!(ts.used_input_channels(), &[0]);
+        assert_eq!(ts.input_peak_max(), 0.0);
+        assert_eq!(ts.output_peak_max(), 0.0);
+
+        let stereo = TrackStatus {
+            channels: 2,
+            input_channels: [2, 3],
+            input_peak: [0.1, 0.4],
+            output_peak: [0.8, 0.2],
+            ..Default::default()
+        };
+        assert_eq!(stereo.used_input_channels(), &[2, 3]);
+        assert_eq!(stereo.input_peak_max(), 0.4);
+        assert_eq!(stereo.output_peak_max(), 0.8);
+    }
+
     #[test]
     fn buffers_travel_both_ways() {
         let (mut control, mut audio) = buffer_channel(2, 2);
@@ -555,7 +722,7 @@ mod tests {
     #[test]
     fn the_pool_keeps_the_engine_supplied_and_recycles_what_comes_back() {
         let (control, mut audio) = buffer_channel(8, 8);
-        let mut pool = LayerPool::new(control, 32, 3);
+        let mut pool = LayerPool::mono(control, 32, 3);
         pool.service(None);
         assert_eq!(pool.pushed(), 3, "Vorrat wird sofort angelegt");
 
@@ -566,8 +733,8 @@ mod tests {
         }
         assert_eq!(taken.len(), 3);
         let status = Status {
-            spares: 0,
-            buffers_taken: 3,
+            spares: [0, 0],
+            buffers_taken: [3, 0],
             ..Default::default()
         };
 
@@ -588,5 +755,87 @@ mod tests {
             a.iter().chain(b.iter()).all(|&s| s == 0.0),
             "wiederverwendete Puffer muessen leer beim Audio-Thread ankommen"
         );
+    }
+
+    /// The stereo half of the pool: two stocks of different lengths, each topped up on its own,
+    /// each recognising its own buffers on the way back. A mono buffer handed to a stereo track
+    /// would be half a loop long, so getting this wrong is not subtle.
+    #[test]
+    fn the_pool_keeps_mono_and_stereo_buffers_apart() {
+        let (control, mut audio) = buffer_channel(16, 16);
+        // 64 frames: mono buffers are 64 samples, stereo ones 128.
+        let mut pool = LayerPool::new(control, 64, [2, 3]);
+        pool.service(None);
+        assert_eq!(pool.pushed_of(Channels::Mono), 2);
+        assert_eq!(pool.pushed_of(Channels::Stereo), 3);
+
+        let mut mono = Vec::new();
+        let mut stereo = Vec::new();
+        while let Some(b) = audio.take_new() {
+            match b.len() {
+                64 => mono.push(b),
+                128 => stereo.push(b),
+                other => panic!("Puffer mit unerwarteter Laenge {other}"),
+            }
+        }
+        assert_eq!(mono.len(), 2, "zwei Mono-Puffer");
+        assert_eq!(stereo.len(), 3, "drei Stereo-Puffer");
+
+        // One of each comes back used; both stocks have to be refilled, each with its own length.
+        let mut used = stereo.pop().expect("Puffer");
+        used.fill(0.9);
+        audio.retire(used);
+        let mut used = mono.pop().expect("Puffer");
+        used.fill(0.9);
+        audio.retire(used);
+        pool.service(Some(&Status {
+            spares: [0, 0],
+            buffers_taken: [2, 3],
+            ..Default::default()
+        }));
+        assert_eq!(pool.reclaimed_of(Channels::Mono), 1);
+        assert_eq!(pool.reclaimed_of(Channels::Stereo), 1);
+        assert_eq!(pool.pushed_of(Channels::Mono), 4);
+        assert_eq!(pool.pushed_of(Channels::Stereo), 6);
+
+        let mut refilled_mono = 0usize;
+        let mut refilled_stereo = 0usize;
+        while let Some(b) = audio.take_new() {
+            assert!(b.iter().all(|&s| s == 0.0), "recycelte Puffer kommen leer an");
+            match b.len() {
+                64 => refilled_mono += 1,
+                128 => refilled_stereo += 1,
+                other => panic!("Puffer mit unerwarteter Laenge {other}"),
+            }
+        }
+        assert_eq!(refilled_mono, 2);
+        assert_eq!(refilled_stereo, 3);
+    }
+
+    /// After a tempo change every buffer of the old length comes back. It belongs to no kind any
+    /// more, so it is dropped rather than handed out again at the wrong length.
+    #[test]
+    fn buffers_of_a_stale_length_are_dropped_instead_of_reused() {
+        let (control, mut audio) = buffer_channel(8, 8);
+        let mut pool = LayerPool::new(control, 32, [1, 1]);
+        pool.service(None);
+        while audio.take_new().is_some() {}
+
+        pool.set_layer_frames(50);
+        // The engine hands its old stock back: 32 and 64 samples, neither of which fits now.
+        audio.retire(vec![0.0; 32]);
+        audio.retire(vec![0.0; 64]);
+        pool.service(Some(&Status {
+            spares: [0, 0],
+            buffers_taken: [1, 1],
+            ..Default::default()
+        }));
+        assert_eq!(pool.reclaimed(), 0, "nichts davon zaehlt als wiedergewonnen");
+        let mut lengths: Vec<usize> = Vec::new();
+        while let Some(b) = audio.take_new() {
+            lengths.push(b.len());
+        }
+        lengths.sort_unstable();
+        assert_eq!(lengths, vec![50, 100], "die neuen Laengen, nicht die alten");
     }
 }

@@ -15,10 +15,16 @@
 //! child tracks - it needs to know **which input it listens on**. Hence [`TrackSource::input`],
 //! 1-based, the way the channel is labelled on the front of the interface. The engine counts from
 //! zero, so the compiled track carries both numbers.
+//!
+//! Since the engine became stereo, `input` may also be a *pair* - `input: [3, 4]` - and a track may
+//! carry a `pan`. Both are written out and never inferred: which two inputs form a stereo return is
+//! a fact about the cabling, and where an instrument sits between the speakers is a fact about the
+//! arrangement.
 
 use serde::{Deserialize, Serialize};
 
 use super::map::OrderedMap;
+use crate::engine::frame::TrackInput;
 use crate::engine::schedule::Quantize;
 use crate::engine::timeline::TimeSignature;
 
@@ -88,11 +94,22 @@ impl TrackState {
 /// tracks:
 ///   voice:   {input: 1}
 ///   gitarre: {input: 2, monitor: false}
+///   klavier: {input: [3, 4], pan: 0.2}
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `input` is either one channel (the track records mono) or a pair (it records stereo). Which two
+/// inputs belong together is a wiring decision, so it is always written out and never guessed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TrackSource {
-    /// Input channel of the audio interface, **1-based**, as printed on the device.
+    /// Input channel of the audio interface, **1-based**, as printed on the device. On a stereo
+    /// track this is the left one of the pair.
     pub input: u32,
+    /// Right-hand input of a stereo track, likewise 1-based. `None` means the track is mono.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_right: Option<u32>,
+    /// Position in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right. Default centre.
+    #[serde(default)]
+    pub pan: f32,
     /// Whether this track may be monitored (hearing the live input through the engine) at all.
     /// `hear_through` and the takes switch monitoring on for a track; `monitor: false` keeps it off
     /// throughout, which is what a track fed from a line source that is already audible wants.
@@ -179,16 +196,40 @@ pub struct ScoreSource {
 /// A track after compilation. Carries both numberings so nothing has to convert twice: `input` is
 /// what the musician wrote, `input_channel` is what [`crate::engine::command::Command`] and the
 /// status snapshot use.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompiledTrack {
     pub name: String,
     /// Position in `tracks`, which is the index the engine addresses this track by.
     pub index: usize,
-    /// 1-based input channel as written in the score.
+    /// 1-based input channel as written in the score; the left one of a stereo pair.
     pub input: u32,
     /// The same channel 0-based, ready for the engine.
     pub input_channel: u32,
+    /// Right-hand input of a stereo track, 1-based; `None` on a mono track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_right: Option<u32>,
+    /// The same channel 0-based.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_channel_right: Option<u32>,
+    /// 1 for a mono loop buffer, 2 for a stereo one. Redundant with `input_right` and written out
+    /// anyway, because it is the number every reader actually wants.
+    pub channels: u32,
+    /// Position in the stereo field, -1.0 to +1.0.
+    pub pan: f32,
     pub monitor: bool,
+}
+
+impl CompiledTrack {
+    /// The input in the form the engine wants it.
+    pub fn track_input(&self) -> TrackInput {
+        match self.input_channel_right {
+            Some(right) => TrackInput::Stereo {
+                left: self.input_channel as usize,
+                right: right as usize,
+            },
+            None => TrackInput::Mono(self.input_channel as usize),
+        }
+    }
 }
 
 /// A fully resolved section: `repeat:` unrolled, defaults filled in, **every** track named.

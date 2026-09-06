@@ -62,7 +62,9 @@ function sameTempo(a: Tempo, b: Tempo): boolean {
   );
 }
 
-const masterPeak = (s: LooperStatus) => s.output_peak;
+// The master, per side: a mix that clips only on the right has to say so on the right.
+const masterLeft = (s: LooperStatus) => s.output_peaks?.[0] ?? 0;
+const masterRight = (s: LooperStatus) => s.output_peaks?.[1] ?? 0;
 
 interface Note {
   text: string;
@@ -146,6 +148,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
       play: (t) => run(() => api.trackPlay(t)),
       clear: (t) => run(() => api.trackClear(t)),
       monitor: (t, on) => run(() => api.trackMonitor(t, on)),
+      pan: (t, pan) => run(() => api.trackPan(t, pan)),
       layerMute: (t, l, muted) => run(() => api.layerMute(t, l, muted)),
       layerRemove: (t, l) => run(() => api.layerRemove(t, l)),
       layerGain: (t, l, gain) => run(() => api.layerGain(t, l, gain)),
@@ -246,7 +249,10 @@ export function LiveView({ info }: { info: AppInfo | null }) {
           </span>
         </div>
         <div className="spacer" />
-        <Meter label="Summe" kind="out" pick={masterPeak} />
+        <div className="live-master-meters">
+          <Meter label="Summe L" kind="out" pick={masterLeft} />
+          <Meter label="Summe R" kind="out" pick={masterRight} />
+        </div>
         <button
           className="btn btn-big btn-quantize"
           onClick={() => run(() => api.setQuantize(tempo.quantize === "loop" ? "bar" : "loop"))}

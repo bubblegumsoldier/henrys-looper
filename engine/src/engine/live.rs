@@ -60,8 +60,12 @@ use super::command::{
     Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, TrackStatus, buffer_channel,
     command_channel, status_channel,
 };
+use super::frame::{Channels, TrackInput};
 use super::fx::{DelayNote, FxParam, FxPreset, FxSlot, FxStatus};
-use super::process::{EngineConfig, EngineCore, check_loop, limits_line, loop_capacity};
+use super::process::{
+    EngineConfig, EngineCore, OUT_CHANNELS, check_loop, limits_line, loop_capacity,
+    spare_channels, spare_slots_for, spread_frame, total_channels,
+};
 use super::schedule::{Lead, Quantize, Scheduled, Scheduler};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{MAX_LAYERS, Track, TrackState};
@@ -82,9 +86,11 @@ const LINE_WIDTH: usize = 186;
 
 #[derive(Args, Debug, Clone)]
 pub struct LiveOpts {
-    /// Track als NAME:KANAL, mehrfach angebbar. KANAL ist die Eingangsnummer wie am Geraet
-    /// beschriftet (1-basiert), z.B. --track stimme:1 --track gitarre:2
-    #[arg(long = "track", value_name = "NAME:KANAL")]
+    /// Track als NAME:KANAL (mono) oder NAME:KANAL-KANAL (stereo), mehrfach angebbar. KANAL ist
+    /// die Eingangsnummer wie am Geraet beschriftet (1-basiert), z.B.
+    /// --track stimme:1 --track gitarre:2 --track klavier:3-4.
+    /// Optional dahinter das Panorama, -1 links bis 1 rechts: --track stimme:1@-0.3
+    #[arg(long = "track", value_name = "NAME:KANAL[-KANAL][@PANORAMA]")]
     pub tracks: Vec<String>,
 
     /// Tempo in Schlaegen pro Minute (bezogen auf Viertel)
@@ -108,7 +114,9 @@ pub struct LiveOpts {
     #[arg(long, value_enum, default_value_t = Quantize::Loop)]
     pub quantize: Quantize,
 
-    /// Roundtrip-Latenz in Samples, die beim Aufnehmen herausgerechnet wird.
+    /// Roundtrip-Latenz in Frames, die beim Aufnehmen herausgerechnet wird. Ein Frame ist ein
+    /// Zeitpunkt: ein Sample bei einer Mono-Quelle, zwei bei einer Stereo-Quelle. Bei Mono ist
+    /// das dieselbe Zahl wie frueher.
     /// Standard ist der Messwert aus Phase 0 (128 Frames, 48 kHz, Scarlett 2i2 an ASIO).
     #[arg(long, default_value_t = 827)]
     pub latency_samples: u64,
@@ -136,47 +144,113 @@ pub struct LiveOpts {
 }
 
 /// One track as the user asked for it on the command line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TrackDef {
     pub name: String,
-    /// Zero-based channel index inside an input frame.
-    pub channel: usize,
+    /// Which device input channel or channel pair this track records, zero-based.
+    pub input: TrackInput,
+    /// Position in the stereo field, -1.0 to +1.0. Centre unless the argument said otherwise.
+    pub pan: f32,
 }
 
-/// Parse one `--track name:channel` argument. The channel is 1-based here, as printed on the
-/// interface, and zero-based everywhere inside the engine.
+impl TrackDef {
+    pub fn channels(&self) -> Channels {
+        self.input.channels()
+    }
+}
+
+/// Parse one `--track` argument.
+///
+/// The shapes, all with 1-based channel numbers as they are printed on the interface:
+///
+/// ```text
+/// stimme:1            mono auf Eingang 1
+/// klavier:3-4         stereo auf den Eingaengen 3 und 4
+/// gitarre:2@-0.4      mono, etwas nach links
+/// ```
+///
+/// The pair is written with a dash because that is how an interface labels a stereo return
+/// ("3-4"), and it is the one separator that cannot be confused with the colon in front of it.
 pub fn parse_track_arg(spec: &str) -> Result<TrackDef, String> {
     let spec = spec.trim();
-    let Some((name, channel)) = spec.rsplit_once(':') else {
+    // The pan is split off first, so a name may not contain '@' but a channel spec cannot be
+    // confused with one either.
+    let (head, pan) = match spec.rsplit_once('@') {
+        Some((head, pan)) => {
+            let value: f32 = pan.trim().parse().map_err(|_| {
+                format!(
+                    "--track \"{spec}\": \"{}\" ist keine Panorama-Zahl. Erwartet wird -1 (ganz \
+                     links) bis 1 (ganz rechts), z.B. --track stimme:1@-0.5",
+                    pan.trim()
+                )
+            })?;
+            if !(-1.0..=1.0).contains(&value) {
+                return Err(format!(
+                    "--track \"{spec}\": das Panorama muss zwischen -1 (ganz links) und 1 (ganz \
+                     rechts) liegen, gefunden {value}."
+                ));
+            }
+            (head, value)
+        }
+        None => (spec, 0.0),
+    };
+
+    let Some((name, channels)) = head.rsplit_once(':') else {
         return Err(format!(
-            "--track \"{spec}\" ist unvollstaendig. Erwartet wird NAME:KANAL, z.B. --track stimme:1"
+            "--track \"{spec}\" ist unvollstaendig. Erwartet wird NAME:KANAL fuer mono oder \
+             NAME:KANAL-KANAL fuer stereo, z.B. --track stimme:1 oder --track klavier:3-4"
         ));
     };
     let name = name.trim();
     if name.is_empty() {
         return Err(format!("--track \"{spec}\": vor dem Doppelpunkt fehlt der Name."));
     }
-    let channel: usize = channel.trim().parse().map_err(|_| {
-        format!(
-            "--track \"{spec}\": \"{}\" ist keine Kanalnummer. Erwartet wird eine ganze Zahl ab 1.",
-            channel.trim()
-        )
-    })?;
-    if channel == 0 {
-        return Err(format!(
-            "--track \"{spec}\": Kanaele werden ab 1 gezaehlt, wie am Geraet beschriftet."
-        ));
-    }
+
+    let number = |text: &str| -> Result<usize, String> {
+        let text = text.trim();
+        let value: usize = text.parse().map_err(|_| {
+            format!(
+                "--track \"{spec}\": \"{text}\" ist keine Kanalnummer. Erwartet wird eine ganze \
+                 Zahl ab 1."
+            )
+        })?;
+        if value == 0 {
+            return Err(format!(
+                "--track \"{spec}\": Kanaele werden ab 1 gezaehlt, wie am Geraet beschriftet."
+            ));
+        }
+        Ok(value - 1)
+    };
+
+    let input = match channels.trim().split_once('-') {
+        Some((left, right)) => {
+            let left = number(left)?;
+            let right = number(right)?;
+            if left == right {
+                return Err(format!(
+                    "--track \"{spec}\": ein Stereo-Track braucht zwei verschiedene Eingaenge. \
+                     Fuer einen Mono-Track reicht --track {name}:{}",
+                    left + 1
+                ));
+            }
+            TrackInput::Stereo { left, right }
+        }
+        None => TrackInput::Mono(number(channels)?),
+    };
+
     Ok(TrackDef {
         name: name.to_string(),
-        channel: channel - 1,
+        input,
+        pan,
     })
 }
 
 /// Turn the `--track` arguments into track definitions, or produce a German error.
 ///
 /// Without any argument the setup this looper was built for is assumed: voice on input 1, guitar on
-/// input 2 - reduced to what the device can actually deliver.
+/// input 2, both mono and both centred - reduced to what the device can actually deliver. A stereo
+/// track is never guessed: which two inputs belong together is a wiring decision nobody can read
+/// off the device.
 pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackDef>, String> {
     if in_channels == 0 {
         return Err("Das Geraet meldet keinen einzigen Eingangskanal.".to_string());
@@ -188,7 +262,8 @@ pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackD
             .enumerate()
             .map(|(i, name)| TrackDef {
                 name: name.to_string(),
-                channel: i,
+                input: TrackInput::Mono(i),
+                pan: 0.0,
             })
             .collect()
     } else {
@@ -205,18 +280,19 @@ pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackD
         ));
     }
     for def in &defs {
-        if def.channel >= in_channels {
+        let highest = def.input.highest();
+        if highest >= in_channels {
             return Err(format!(
                 "Track \"{}\" soll auf Eingang {} hoeren, das Geraet liefert aber nur {} Eingangskanaele \
                  (also Eingang 1 bis {}).\n\
                  \x20 - anderen Kanal waehlen: --track {}:1\n\
                  \x20 - oder mehr Kanaele oeffnen: --in-channels {}",
                 def.name,
-                def.channel + 1,
+                highest + 1,
                 in_channels,
                 in_channels,
                 def.name,
-                def.channel + 1
+                highest + 1
             ));
         }
     }
@@ -264,7 +340,7 @@ impl LiveStats {
 /// are the one piece of layer state the status snapshot does not carry.
 struct TrackUi {
     name: String,
-    channel: usize,
+    input: TrackInput,
     gains: Vec<f32>,
 }
 
@@ -378,6 +454,7 @@ impl Control {
                 self.send(Command::SetClick { on });
                 self.message = format!("Klick {}.", if on { "an" } else { "aus" });
             }
+            "n" => self.set_pan(parts.next()),
             "f" => self.fx_bypass(ts),
             "x" => self.fx_slot(parts.next(), ts),
             "v" => self.fx_preset(parts.next()),
@@ -393,11 +470,31 @@ impl Control {
             }
             other => {
                 self.message = format!(
-                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m k e w l t f x v d q",
+                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m n k e w l t f x v d q",
                     self.tracks.len()
                 );
             }
         }
+    }
+
+    /// `n <wert>` - where this track sits between the speakers, -1 to 1.
+    fn set_pan(&mut self, arg: Option<&str>) {
+        let usage = "n <wert>  (Panorama, -1 ganz links bis 1 ganz rechts, 0 Mitte)";
+        let Some(Ok(pan)) = arg.map(str::parse::<f32>) else {
+            self.message = format!("Aufruf: {usage}");
+            return;
+        };
+        if !(-1.0..=1.0).contains(&pan) {
+            self.message = "Das Panorama muss zwischen -1 (links) und 1 (rechts) liegen.".to_string();
+            return;
+        }
+        let track = self.active;
+        self.send(Command::SetPan { track, pan });
+        self.message = format!(
+            "\"{}\": Panorama {}.",
+            self.tracks[track].name,
+            pan_label(pan)
+        );
     }
 
     // ---- effects -----------------------------------------------------------------------------
@@ -616,15 +713,15 @@ impl Control {
             self.message = e;
             return;
         }
-        let layer_capacity = loop_capacity(&timeline, self.sched.bars);
+        let layer_frames = loop_capacity(&timeline, self.sched.bars);
         self.send(Command::SetTempo {
             bpm,
             signature,
-            layer_capacity,
+            layer_frames,
         });
         // Every allocation of a new layer length happens here, in the control thread; the old stock
         // is dropped and the engine hands back what it still holds.
-        self.pool.set_layer_len(layer_capacity as usize);
+        self.pool.set_layer_frames(layer_frames as usize);
         self.sched.timeline = timeline;
         self.message = format!("Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}.");
     }
@@ -663,6 +760,24 @@ fn spawn_keyboard() -> Receiver<String> {
 
 fn on_off(v: bool) -> &'static str {
     if v { "an " } else { "aus" }
+}
+
+/// `Mitte`, `L50`, `R100` - short enough for a track line, unambiguous enough to read at a glance.
+fn pan_label(pan: f32) -> String {
+    let percent = (pan.abs() * 100.0).round() as i32;
+    if percent == 0 {
+        "Mitte".to_string()
+    } else if pan < 0.0 {
+        format!("L{percent}")
+    } else {
+        format!("R{percent}")
+    }
+}
+
+/// `Ein 1 mono` for a microphone, `Ein 3+4 stereo` for a pair. Which inputs and how many channels
+/// end up in the loop buffer is the one setup fact worth repeating on every line.
+fn input_text(input: TrackInput) -> String {
+    format!("Ein {:<4} {:<6}", input.label(), input.channels().label())
 }
 
 /// `[1 2* 3]`, with `*` for muted and the gain appended where it is not 1.
@@ -716,7 +831,7 @@ fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
     let loop_len = tl.span_bars(0, bars);
 
     let mut line = format!(
-        "Takt {:>4} Schlag {}/{} [{}] | Loop {} Takte = {} Samples = {:.2} s | {:.1} BPM | Raster {} | Klick {} | Aus {}",
+        "Takt {:>4} Schlag {}/{} [{}] | Loop {} Takte = {} Frames = {:.2} s | {:.1} BPM | Raster {} | Klick {} | Aus {}",
         s.bar + 1,
         s.beat + 1,
         beats_per_bar,
@@ -727,7 +842,12 @@ fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
         s.bpm,
         sched.quantize.label(),
         on_off(s.click),
-        fmt_dbfs(s.output_peak),
+        // Both bus channels, because a mix that clips only on one side has to say which.
+        format!(
+            "L {} R {}",
+            fmt_dbfs(s.output_peak[0]),
+            fmt_dbfs(s.output_peak[1])
+        ),
     );
     let xruns = stats.xruns.load(Ordering::Relaxed);
     let underruns = stats.underruns.load(Ordering::Relaxed);
@@ -758,16 +878,27 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
         Some(text) => format!("{} - {text}", ts.state.label()),
         None => ts.state.label().to_string(),
     };
+    // One meter per recorded channel: a stereo source with a dead cable on one side is otherwise
+    // invisible until the take is played back.
+    let level = match ts.channels {
+        2 => format!(
+            "L {} R {}",
+            fmt_dbfs(ts.input_peak[0]),
+            fmt_dbfs(ts.input_peak[1])
+        ),
+        _ => format!("{}      ", fmt_dbfs(ts.input_peak[0])),
+    };
     format!(
-        "{} {:<10} Ein {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Mithoeren {} | FX {:<22}",
+        "{} {:<10} {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Pan {:<5} | Mithoeren {} | FX {:<22}",
         if active { '>' } else { ' ' },
         ui.name,
-        ui.channel + 1,
+        input_text(ui.input),
         state_text,
         loop_text,
         ts.layers,
         layer_list(ts, &ui.gains),
-        fmt_dbfs(ts.input_peak),
+        level,
+        pan_label(ts.pan),
         on_off(ts.monitor),
         fx_text(&ts.fx),
     )
@@ -810,14 +941,14 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     audio::print_setup(&setup);
     let loop_len = timeline.span_bars(0, opts.bars);
     println!(
-        "Takt:     {:.1} BPM, {}/{}, {:.3} Samples pro Schlag",
+        "Takt:     {:.1} BPM, {}/{}, {:.3} Frames pro Schlag",
         opts.bpm,
         opts.beats_per_bar,
         opts.beat_unit,
         timeline.samples_per_beat()
     );
     println!(
-        "Loop:     {} Takte = {} Samples = {:.2} s",
+        "Loop:     {} Takte = {} Frames = {:.2} s",
         opts.bars,
         loop_len,
         timeline.samples_to_secs(loop_len)
@@ -828,20 +959,31 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         opts.quantize.explanation()
     );
     let capacity = loop_capacity(&timeline, opts.bars);
-    println!("{}", limits_line(capacity, defs.len(), SPARE_SLOTS));
+    let kinds: Vec<Channels> = defs.iter().map(TrackDef::channels).collect();
+    let slots = spare_slots_for(&kinds, SPARE_SLOTS);
+    println!(
+        "{}",
+        limits_line(
+            capacity,
+            defs.len(),
+            total_channels(&kinds),
+            spare_channels(slots)
+        )
+    );
     println!("Tracks:");
     for (i, def) in defs.iter().enumerate() {
         println!(
-            "  {} {:<10} Eingang {} (Kanal {} von {})",
+            "  {} {:<10} Eingang {} ({}, von {} Kanaelen), Panorama {}",
             i + 1,
             def.name,
-            def.channel + 1,
-            def.channel + 1,
-            in_channels
+            def.input.label(),
+            def.input.channels().label(),
+            in_channels,
+            pan_label(def.pan)
         );
     }
     println!(
-        "Latenz:   {} Samples ({:.2} ms) werden beim Aufnehmen herausgerechnet",
+        "Latenz:   {} Frames ({:.2} ms) werden beim Aufnehmen herausgerechnet",
         opts.latency_samples,
         opts.latency_samples as f64 * 1000.0 / rate as f64
     );
@@ -863,25 +1005,25 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     // The return queue has room for every buffer that can be inside the engine at once, so the
     // audio thread can always hand one back instead of leaking it.
     let (channel, buffer_endpoint) = buffer_channel(
-        SPARE_SLOTS + 4,
-        defs.len() * MAX_LAYERS + SPARE_SLOTS + 8,
+        slots[0] + slots[1] + 8,
+        defs.len() * MAX_LAYERS + slots[0] + slots[1] + 8,
     );
-    let mut pool = LayerPool::new(channel, capacity as usize, SPARE_SLOTS);
+    let mut pool = LayerPool::new(channel, capacity as usize, slots);
     // Every layer buffer of the session is born here, in the control thread, before any stream
     // exists; from now on the pool only recycles.
     pool.service(None);
 
     let tracks: Vec<Track> = defs
         .iter()
-        .map(|d| Track::new(d.channel, opts.monitor, rate))
+        .map(|d| Track::new(d.input, opts.monitor, d.pan, rate))
         .collect();
     let core = EngineCore::new(EngineConfig {
         timeline,
         latency_samples: opts.latency_samples,
         input_channels: in_channels,
         tracks,
-        spares: Vec::with_capacity(SPARE_SLOTS),
-        layer_capacity: capacity,
+        spares: [Vec::with_capacity(slots[0]), Vec::with_capacity(slots[1])],
+        layer_frames: capacity,
         commands: cmd_rx,
         status: status_tx,
         buffers: buffer_endpoint,
@@ -924,7 +1066,7 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     let stats_out_err = Arc::clone(&stats);
     let mut core = core;
     let mut in_scratch = vec![0.0f32; scratch_frames * in_channels];
-    let mut out_scratch = vec![0.0f32; scratch_frames];
+    let mut out_scratch = vec![0.0f32; scratch_frames * OUT_CHANNELS];
     let output = audio::build_output(
         &setup.output,
         &setup.out_plan,
@@ -946,16 +1088,17 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
                 if got < n {
                     stats_out.underruns.fetch_add(1, Ordering::Relaxed);
                 }
-                core.process(&in_scratch[..got * in_channels], &mut out_scratch[..n]);
+                core.process(
+                    &in_scratch[..got * in_channels],
+                    &mut out_scratch[..n * OUT_CHANNELS],
+                );
                 let base = done * out_channels;
                 for (i, frame) in data[base..base + n * out_channels]
                     .chunks_exact_mut(out_channels)
                     .enumerate()
                 {
-                    let v = out_scratch[i];
-                    for sample in frame.iter_mut() {
-                        *sample = v;
-                    }
+                    let bus = &out_scratch[i * OUT_CHANNELS..(i + 1) * OUT_CHANNELS];
+                    spread_frame(bus, frame);
                 }
                 done += n;
             }
@@ -998,6 +1141,7 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
          \x20 e <nr>        Ebene stumm/laut\n\
          \x20 w <nr>        Ebene weg\n\
          \x20 l <nr> <wert> Lautstaerke einer Ebene (0.0 bis 4.0)\n\
+         \x20 n <wert>      Panorama: -1 ganz links, 0 Mitte, 1 ganz rechts\n\
          \x20 k   Klick an/aus\n\
          \x20 t   Tempo aendern, z.B. \"t 120\" oder \"t 120 7 8\" (nur wenn alles leer ist)\n\
          Effekte - wirken auf Wiedergabe und Mithoeren, die Aufnahme bleibt immer trocken:\n\
@@ -1023,7 +1167,7 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
             .iter()
             .map(|d| TrackUi {
                 name: d.name.clone(),
-                channel: d.channel,
+                input: d.input,
                 gains: Vec::new(),
             })
             .collect(),
@@ -1119,13 +1263,49 @@ mod tests {
             parse_track_arg("stimme:1").unwrap(),
             TrackDef {
                 name: "stimme".to_string(),
-                channel: 0
+                input: TrackInput::Mono(0),
+                pan: 0.0,
             }
         );
-        assert_eq!(parse_track_arg(" gitarre : 2 ").unwrap().channel, 1);
+        assert_eq!(
+            parse_track_arg(" gitarre : 2 ").unwrap().input,
+            TrackInput::Mono(1)
+        );
         for bad in ["stimme", "stimme:", ":1", "stimme:0", "stimme:x"] {
             let err = parse_track_arg(bad).expect_err(bad);
             assert!(err.contains("--track"), "deutsche Meldung fehlt: {err}");
+        }
+    }
+
+    /// The new half of the argument: a channel pair makes a stereo track, and an optional pan
+    /// places it. Both spellings have to survive whitespace, because a shell often adds some.
+    #[test]
+    fn a_channel_pair_makes_a_stereo_track_and_at_sets_the_pan() {
+        let klavier = parse_track_arg("klavier:3-4").unwrap();
+        assert_eq!(klavier.input, TrackInput::Stereo { left: 2, right: 3 });
+        assert_eq!(klavier.channels(), Channels::Stereo);
+        assert_eq!(klavier.pan, 0.0);
+        assert_eq!(klavier.input.label(), "3+4");
+
+        let panned = parse_track_arg("stimme:1@-0.5").unwrap();
+        assert_eq!(panned.input, TrackInput::Mono(0));
+        assert_eq!(panned.pan, -0.5);
+        assert_eq!(panned.channels(), Channels::Mono);
+
+        let both = parse_track_arg(" flaeche : 5 - 6 @ 0.25 ").unwrap();
+        assert_eq!(both.input, TrackInput::Stereo { left: 4, right: 5 });
+        assert_eq!(both.pan, 0.25);
+
+        // Every mistake gets its own German sentence rather than a silently wrong track.
+        for (bad, needle) in [
+            ("klavier:3-0", "ab 1"),
+            ("klavier:3-x", "Kanalnummer"),
+            ("klavier:3-3", "zwei verschiedene"),
+            ("stimme:1@links", "Panorama-Zahl"),
+            ("stimme:1@2", "zwischen -1"),
+        ] {
+            let err = parse_track_arg(bad).expect_err(bad);
+            assert!(err.contains(needle), "\"{bad}\" meldet: {err}");
         }
     }
 
@@ -1134,9 +1314,12 @@ mod tests {
         let two = resolve_tracks(&[], 2).unwrap();
         assert_eq!(two.len(), 2);
         assert_eq!(two[0].name, "stimme");
-        assert_eq!(two[0].channel, 0);
+        assert_eq!(two[0].input, TrackInput::Mono(0));
         assert_eq!(two[1].name, "gitarre");
-        assert_eq!(two[1].channel, 1);
+        assert_eq!(two[1].input, TrackInput::Mono(1));
+        // Never guessed: a stereo pairing is a wiring decision, so the default stays mono even on
+        // a two-input device.
+        assert!(two.iter().all(|t| t.channels() == Channels::Mono));
         // A mono device gets one track instead of an error.
         assert_eq!(resolve_tracks(&[], 1).unwrap().len(), 1);
         assert!(resolve_tracks(&[], 0).is_err());
@@ -1149,11 +1332,33 @@ mod tests {
         assert!(err.contains("Eingang 4"), "{err}");
         assert!(err.contains("--in-channels"), "Hinweis fehlt: {err}");
 
+        // The same for the second half of a stereo pair, which is the one a device runs out of.
+        let err = resolve_tracks(&specs(&["klavier:2-3"]), 2).expect_err("Kanal 3 gibt es nicht");
+        assert!(err.contains("Eingang 3"), "{err}");
+
         let err = resolve_tracks(&specs(&["a:1", "a:2"]), 4).expect_err("doppelter Name");
         assert!(err.contains("eindeutig"), "{err}");
 
         let many: Vec<String> = (1..=MAX_TRACKS + 1).map(|i| format!("t{i}:1")).collect();
         assert!(resolve_tracks(&many, 8).is_err(), "Obergrenze greift");
+    }
+
+    #[test]
+    fn the_pan_is_written_as_a_side_and_a_percentage() {
+        assert_eq!(pan_label(0.0), "Mitte");
+        assert_eq!(pan_label(-1.0), "L100");
+        assert_eq!(pan_label(1.0), "R100");
+        assert_eq!(pan_label(-0.5), "L50");
+        assert_eq!(pan_label(0.25), "R25");
+    }
+
+    #[test]
+    fn the_input_column_names_the_channels_and_the_channel_count() {
+        assert_eq!(input_text(TrackInput::Mono(0)).trim(), "Ein 1    mono");
+        assert_eq!(
+            input_text(TrackInput::Stereo { left: 2, right: 3 }).trim(),
+            "Ein 3+4  stereo"
+        );
     }
 
     /// The one thing the musician reads off the screen while playing: is the chain doing anything,

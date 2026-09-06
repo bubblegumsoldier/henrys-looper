@@ -8,6 +8,7 @@
 //! carries [`TrackConfig`]s, which the engine knows nothing about.
 
 use looper_engine::engine::command::MAX_TRACKS;
+use looper_engine::engine::frame::TrackInput;
 use looper_engine::engine::live::TrackDef;
 use looper_engine::engine::process::check_loop;
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
@@ -37,8 +38,9 @@ pub fn build_timeline(
 
 /// Turn the track list of a start configuration into engine track definitions.
 ///
-/// The same four rules the CLI applies, in the wording a window needs: at least one track, an
-/// input the device actually has, unique names, and the track ceiling of the status snapshot.
+/// The same rules the CLI applies, in the wording a window needs: at least one track, inputs the
+/// device actually has, two *different* inputs for a stereo track, a pan inside the range the
+/// panner has, unique names, and the track ceiling of the status snapshot.
 pub fn resolve_tracks(
     configs: &[TrackConfig],
     input_channels: usize,
@@ -61,16 +63,40 @@ pub fn resolve_tracks(
         if name.is_empty() {
             return Err("Ein Track ohne Namen geht nicht.".to_string());
         }
-        if config.input_channel == 0 {
+        let channel = |number: u32| -> Result<usize, String> {
+            if number == 0 {
+                return Err(format!(
+                    "Track \"{name}\": Eingaenge werden ab 1 gezaehlt, wie am Geraet beschriftet."
+                ));
+            }
+            if number as usize > input_channels {
+                return Err(format!(
+                    "Track \"{name}\" soll auf Eingang {number} hoeren, das Geraet liefert aber nur \
+                     {input_channels} Eingangskanaele (also Eingang 1 bis {input_channels})."
+                ));
+            }
+            Ok(number as usize - 1)
+        };
+        let left = channel(config.input_channel)?;
+        let input = match config.input_channel_right {
+            Some(right) => {
+                let right = channel(right)?;
+                if right == left {
+                    return Err(format!(
+                        "Track \"{name}\" ist als stereo angelegt, nennt aber zweimal Eingang {}. \
+                         Ein Stereo-Track braucht zwei verschiedene Eingaenge.",
+                        left + 1
+                    ));
+                }
+                TrackInput::Stereo { left, right }
+            }
+            None => TrackInput::Mono(left),
+        };
+        if !(-1.0..=1.0).contains(&config.pan) {
             return Err(format!(
-                "Track \"{name}\": Eingaenge werden ab 1 gezaehlt, wie am Geraet beschriftet."
-            ));
-        }
-        if config.input_channel as usize > input_channels {
-            return Err(format!(
-                "Track \"{name}\" soll auf Eingang {} hoeren, das Geraet liefert aber nur {input_channels} \
-                 Eingangskanaele (also Eingang 1 bis {input_channels}).",
-                config.input_channel
+                "Track \"{name}\": das Panorama muss zwischen -1 (ganz links) und 1 (ganz rechts) \
+                 liegen, angegeben wurde {}.",
+                config.pan
             ));
         }
         if defs.iter().any(|d: &TrackDef| d.name == name) {
@@ -80,7 +106,8 @@ pub fn resolve_tracks(
         }
         defs.push(TrackDef {
             name: name.to_string(),
-            channel: config.input_channel as usize - 1,
+            input,
+            pan: config.pan,
         });
     }
     Ok(defs)
@@ -90,13 +117,18 @@ pub fn resolve_tracks(
 mod tests {
     use super::*;
     use looper_engine::engine::command::Command;
+    use looper_engine::engine::frame::Channels;
 
     const RATE: u32 = 48_000;
 
     fn config(name: &str, channel: u32) -> TrackConfig {
+        TrackConfig::mono(name, channel)
+    }
+
+    fn stereo(name: &str, left: u32, right: u32) -> TrackConfig {
         TrackConfig {
-            name: name.to_string(),
-            input_channel: channel,
+            input_channel_right: Some(right),
+            ..TrackConfig::mono(name, left)
         }
     }
 
@@ -117,8 +149,13 @@ mod tests {
     fn track_definitions_are_checked_against_the_device() {
         let ok = resolve_tracks(&[config("stimme", 1), config("gitarre", 2)], 2).unwrap();
         assert_eq!(ok.len(), 2);
-        assert_eq!(ok[0].channel, 0, "Kanal 1 am Geraet ist Index 0");
-        assert_eq!(ok[1].channel, 1);
+        assert_eq!(
+            ok[0].input,
+            TrackInput::Mono(0),
+            "Kanal 1 am Geraet ist Index 0"
+        );
+        assert_eq!(ok[1].input, TrackInput::Mono(1));
+        assert_eq!(ok[0].pan, 0.0, "ohne Angabe sitzt ein Track in der Mitte");
 
         for (configs, needle) in [
             (vec![config("stimme", 3)], "Eingang 3"),
@@ -136,6 +173,30 @@ mod tests {
             .map(|i| config(&format!("t{i}"), 1))
             .collect();
         assert!(resolve_tracks(&many, 8).is_err(), "Obergrenze greift");
+    }
+
+    /// A second input channel makes a stereo track, and every way of getting the pair wrong has
+    /// its own German sentence before a single buffer is allocated.
+    #[test]
+    fn a_second_input_channel_makes_a_stereo_track() {
+        let ok = resolve_tracks(&[config("stimme", 1), stereo("klavier", 3, 4)], 4).unwrap();
+        assert_eq!(ok[0].input.channels(), Channels::Mono);
+        assert_eq!(ok[1].input, TrackInput::Stereo { left: 2, right: 3 });
+        assert_eq!(ok[1].input.channels(), Channels::Stereo);
+
+        // The right-hand channel is checked against the device exactly like the left one.
+        let err = resolve_tracks(&[stereo("klavier", 2, 3)], 2).expect_err("Kanal 3 fehlt");
+        assert!(err.contains("Eingang 3"), "{err}");
+
+        let err = resolve_tracks(&[stereo("klavier", 2, 2)], 4).expect_err("zweimal derselbe");
+        assert!(err.contains("zwei verschiedene"), "{err}");
+
+        let far = TrackConfig {
+            pan: 1.5,
+            ..TrackConfig::mono("stimme", 1)
+        };
+        let err = resolve_tracks(&[far], 2).expect_err("Panorama zu weit");
+        assert!(err.contains("Panorama"), "{err}");
     }
 
     /// The scheduler itself is proven in the engine library, where it now lives. This checks the

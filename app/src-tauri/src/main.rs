@@ -127,6 +127,16 @@ async fn track_monitor(
     act(engine, Action::SetMonitor { track, on }).await
 }
 
+/// Where this track sits between the speakers: -1.0 hard left, 0.0 centre, +1.0 hard right.
+///
+/// On a mono track this places the source in the stereo field; on a stereo one it is a balance
+/// between the two recorded channels. Either way the centre passes both sides at unity - see
+/// `looper_engine::engine::frame` for the pan law and why it is that one.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_pan(track: usize, pan: f32, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::SetPan { track, pan }).await
+}
+
 // ---------------------------------------------------------------------------------------------
 // Per layer. `layer` is the zero-based index into that track's `layers` array.
 // ---------------------------------------------------------------------------------------------
@@ -387,6 +397,7 @@ fn main() {
             track_play,
             track_clear,
             track_monitor,
+            track_pan,
             layer_mute,
             layer_remove,
             layer_gain,

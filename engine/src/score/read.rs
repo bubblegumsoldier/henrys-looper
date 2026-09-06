@@ -29,7 +29,7 @@ const ROOT_FIELDS: [&str; 7] = [
     "midi",
     "sections",
 ];
-const TRACK_FIELDS: [&str; 2] = ["input", "monitor"];
+const TRACK_FIELDS: [&str; 3] = ["input", "pan", "monitor"];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
 const MIDI_FIELDS: [&str; 2] = ["next_section", "stop_all"];
 const MIDI_BINDING_FIELDS: [&str; 3] = ["note", "cc", "channel"];
@@ -443,28 +443,91 @@ impl Reader {
         let had_field_issue = self.issues.len() > before;
 
         let input = match fields.get("input") {
-            Some(node) => self.as_int(node, &format!("'input' von Track '{name}'"), 1, MAX_INPUT_CHANNEL),
+            Some(node) => self.read_track_input(name, node),
             None => {
                 if !had_field_issue {
                     self.error_with(
                         Some(node.pos),
                         format!("Track '{name}' hat kein 'input'."),
-                        "Ein Track nennt seinen Eingangskanal am Interface, 1-basiert: 'input: 1'.",
+                        "Ein Track nennt seinen Eingangskanal am Interface, 1-basiert: 'input: 1' \
+                         fuer mono, 'input: [3, 4]' fuer stereo.",
                     );
                 }
                 None
             }
         };
-        // Both fields are checked before either is given up on, so a track with two mistakes
-        // reports two messages rather than one at a time.
+        // Every field is checked before any of them is given up on, so a track with three mistakes
+        // reports three messages rather than one at a time.
+        let pan = match fields.get("pan") {
+            Some(node) => self.read_pan(name, node),
+            None => Some(0.0),
+        };
         let monitor = match fields.get("monitor") {
             Some(node) => self.as_bool(node, &format!("'monitor' von Track '{name}'")),
             None => Some(true),
         };
+        let (input, input_right) = input?;
         Some(TrackSource {
-            input: input?,
+            input,
+            input_right,
+            pan: pan?,
             monitor: monitor?,
         })
+    }
+
+    /// `input: 1` for a mono track, `input: [3, 4]` for a stereo one.
+    ///
+    /// A list of exactly two entries and nothing else: one entry is a mono track written oddly, and
+    /// three would be a surround format the engine does not have. Both get their own sentence
+    /// rather than being quietly truncated.
+    fn read_track_input(&mut self, name: &str, node: &Node<'_>) -> Option<(u32, Option<u32>)> {
+        let what = format!("'input' von Track '{name}'");
+        match &node.kind {
+            NodeKind::Seq(items) => {
+                if items.len() != 2 {
+                    self.error_with(
+                        Some(node.pos),
+                        format!(
+                            "{what} ist eine Liste mit {} Eintraegen; ein Stereo-Track nennt genau zwei Eingaenge.",
+                            items.len()
+                        ),
+                        "z. B. 'input: [3, 4]' fuer stereo oder 'input: 3' fuer mono.",
+                    );
+                    return None;
+                }
+                let left = self.as_int(&items[0], &format!("der linke Eingang in {what}"), 1, MAX_INPUT_CHANNEL);
+                let right = self.as_int(&items[1], &format!("der rechte Eingang in {what}"), 1, MAX_INPUT_CHANNEL);
+                let (left, right) = (left?, right?);
+                if left == right {
+                    self.error_with(
+                        Some(node.pos),
+                        format!("{what} nennt zweimal Eingang {left}."),
+                        format!(
+                            "Ein Stereo-Track braucht zwei verschiedene Eingaenge; fuer einen \
+                             Mono-Track reicht 'input: {left}'."
+                        ),
+                    );
+                    return None;
+                }
+                Some((left, Some(right)))
+            }
+            _ => Some((self.as_int(node, &what, 1, MAX_INPUT_CHANNEL)?, None)),
+        }
+    }
+
+    /// `pan: -0.4`. A number, and inside the range the engine's panner actually has.
+    fn read_pan(&mut self, name: &str, node: &Node<'_>) -> Option<f32> {
+        let what = format!("'pan' von Track '{name}'");
+        let value = self.as_number(node, &what)?;
+        if !(-1.0..=1.0).contains(&value) {
+            self.error_with(
+                Some(node.pos),
+                format!("{what} muss zwischen -1 und 1 liegen, gefunden: {value}."),
+                "-1 ist ganz links, 0 die Mitte, 1 ganz rechts.",
+            );
+            return None;
+        }
+        Some(value as f32)
     }
 
     fn read_midi(&mut self, node: &Node<'_>) -> Option<OrderedMap<MidiBindingSource>> {

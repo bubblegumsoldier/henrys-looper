@@ -103,14 +103,17 @@ export function useStatusEffect(effect: Listener): void {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Everything about the tracks that changes the layout: names, channels, states, layer count and
- * every layer's mute and gain. Peaks and positions are deliberately absent - they move constantly
- * and are drawn imperatively.
+ * Everything about the tracks that changes the layout: names, input channels, channel count, pan,
+ * states, layer count and every layer's mute and gain. Peaks and positions are deliberately absent
+ * - they move constantly and are drawn imperatively.
+ *
+ * The pan is in here rather than in the meter path because it is a knob, not a level: it moves when
+ * somebody drags it and never on its own, so it costs a render per drag step and nothing after.
  */
 export function structureSignature(status: LooperStatus): string {
   let sig = status.running ? "1" : "0";
   for (const t of status.tracks) {
-    sig += `|${t.index}${t.name}${t.input_channel}${t.state}${t.monitor}${t.playing}${t.loop_samples}`;
+    sig += `|${t.index}${t.name}${t.input_channels.join("-")}${t.channels}${t.pan}${t.state}${t.monitor}${t.playing}${t.loop_samples}`;
     // The count-in belongs in the signature: it only changes on a beat line, so it costs a handful
     // of renders per bar rather than twenty a second - and a countdown that does not count is
     // useless.

@@ -31,8 +31,8 @@ export const DEFAULT_SETUP: StartConfig = {
   output_channels: null,
   force_buffer: false,
   tracks: [
-    { name: "stimme", input_channel: 1 },
-    { name: "gitarre", input_channel: 2 },
+    { name: "stimme", input_channel: 1, input_channel_right: null, pan: 0 },
+    { name: "gitarre", input_channel: 2, input_channel_right: null, pan: 0 },
   ],
   bpm: 100,
   beats_per_bar: 4,
@@ -51,8 +51,21 @@ function loadStored(): StartConfig {
     const raw = localStorage.getItem(STORE_KEY);
     if (!raw) return DEFAULT_SETUP;
     const parsed = JSON.parse(raw) as Partial<StartConfig>;
-    // Merge, so a field added later still has its default.
-    return { ...DEFAULT_SETUP, ...parsed, tracks: parsed.tracks?.length ? parsed.tracks : DEFAULT_SETUP.tracks };
+    // Merge, so a field added later still has its default - including per track, which is what
+    // keeps a setup stored before the stereo rebuild loadable.
+    const tracks: StartTrack[] = parsed.tracks?.length
+      ? parsed.tracks.map((entry) => {
+          // A setup stored before the stereo rebuild has neither of the last two fields.
+          const stored = entry as Partial<StartTrack>;
+          return {
+            name: stored.name ?? "track",
+            input_channel: stored.input_channel ?? 1,
+            input_channel_right: stored.input_channel_right ?? null,
+            pan: stored.pan ?? 0,
+          };
+        })
+      : DEFAULT_SETUP.tracks;
+    return { ...DEFAULT_SETUP, ...parsed, tracks };
   } catch {
     return DEFAULT_SETUP;
   }
@@ -216,9 +229,25 @@ export function Setup({ info, busy, onStart, onError }: Props) {
       ? "Mindestens ein Track."
       : config.tracks.some((t) => t.name.trim() === "")
         ? "Jeder Track braucht einen Namen."
-        : config.tracks.some((t) => t.input_channel < 1)
+        : config.tracks.some((t) => t.input_channel < 1 || (t.input_channel_right ?? 1) < 1)
           ? "Eingangskanäle sind eins-basiert."
-          : null;
+          : config.tracks.some((t) => t.input_channel_right === t.input_channel)
+            ? "Ein Stereo-Track braucht zwei verschiedene Eingänge."
+            : null;
+
+  /**
+   * Switch one track between mono and stereo. Going stereo proposes the next input up, which is
+   * how a stereo return is wired nine times out of ten; going mono simply drops the second one.
+   */
+  const setChannels = (index: number, count: number) => {
+    const track = config.tracks[index];
+    if (count < 2) {
+      setTrack(index, { input_channel_right: null });
+      return;
+    }
+    const proposal = track.input_channel < channels ? track.input_channel + 1 : 1;
+    setTrack(index, { input_channel_right: track.input_channel_right ?? proposal });
+  };
 
   return (
     <div className="setup">
@@ -360,7 +389,12 @@ export function Setup({ info, busy, onStart, onError }: Props) {
                 patch({
                   tracks: [
                     ...config.tracks,
-                    { name: `track ${config.tracks.length + 1}`, input_channel: Math.min(config.tracks.length + 1, channels) },
+                    {
+                      name: `track ${config.tracks.length + 1}`,
+                      input_channel: Math.min(config.tracks.length + 1, channels),
+                      input_channel_right: null,
+                      pan: 0,
+                    },
                   ],
                 })
               }
@@ -379,8 +413,19 @@ export function Setup({ info, busy, onStart, onError }: Props) {
                     placeholder="Name"
                     onChange={(e) => setTrack(i, { name: e.target.value })}
                   />
+                  <label className="setup-track-kind">
+                    <span>Quelle</span>
+                    <select
+                      value={t.input_channel_right === null ? 1 : 2}
+                      onChange={(e) => setChannels(i, Number(e.target.value))}
+                      title="Ein Eingang nimmt mono auf, ein Paar stereo"
+                    >
+                      <option value={1}>mono</option>
+                      <option value={2}>stereo</option>
+                    </select>
+                  </label>
                   <label className="setup-track-in">
-                    <span>Eingang</span>
+                    <span>{t.input_channel_right === null ? "Eingang" : "links"}</span>
                     <input
                       type="number"
                       min={1}
@@ -389,6 +434,22 @@ export function Setup({ info, busy, onStart, onError }: Props) {
                       onChange={(e) => setTrack(i, { input_channel: Math.max(1, Math.round(Number(e.target.value) || 1)) })}
                     />
                   </label>
+                  {t.input_channel_right !== null && (
+                    <label className="setup-track-in">
+                      <span>rechts</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={channels}
+                        value={t.input_channel_right}
+                        onChange={(e) =>
+                          setTrack(i, {
+                            input_channel_right: Math.max(1, Math.round(Number(e.target.value) || 1)),
+                          })
+                        }
+                      />
+                    </label>
+                  )}
                   <button
                     className="btn btn-mini btn-danger"
                     onClick={() => patch({ tracks: config.tracks.filter((_, j) => j !== i) })}
@@ -400,7 +461,11 @@ export function Setup({ info, busy, onStart, onError }: Props) {
               ))}
             </ul>
             <p className="field-hint">
-              Höchstens {maxTracks} Tracks. Das Gerät bietet {channels} Eingangskanäle.
+              Höchstens {maxTracks} Tracks. Das Gerät bietet {channels} Eingangskanäle. Ein Mikrofon
+              oder eine Gitarre nimmt mono auf — das halbiert den Speicher und klingt keinen Deut
+              anders. Ein Klavier oder eine Fläche aus einer Sample-Bibliothek gehört auf ein
+              Eingangspaar; die beiden müssen nicht nebeneinander liegen. Panorama und Lautstärke
+              werden später auf der Track-Karte gesetzt.
             </p>
           </div>
         </section>

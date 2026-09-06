@@ -22,8 +22,9 @@
 //! because one Ableton track plays exactly one clip, so stacking overdubs meant pre-allocating a
 //! pool of child tracks. Our engine stacks layers itself (`engine/src/engine/track.rs`), so a
 //! track only needs to know **which input it listens on**: `input: 2`, 1-based, as printed on the
-//! interface. Everything else - `title`, `bpm`, `time_signature`, `midi`, `sections` with `bars`,
-//! `autorelease`, `quantize`, `repeat` and the five track states - is unchanged.
+//! interface - or `input: [3, 4]` for a stereo source, plus an optional `pan`. Everything else -
+//! `title`, `bpm`, `time_signature`, `midi`, `sections` with `bars`, `autorelease`, `quantize`,
+//! `repeat` and the five track states - is unchanged.
 //!
 //! A score in the old format does not silently misbehave: the retired fields produce a German
 //! message saying what replaced them.

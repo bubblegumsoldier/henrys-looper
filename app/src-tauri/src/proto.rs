@@ -7,12 +7,26 @@
 //! * **Indices are zero-based.** `track` and `layer` in a command are positions in the `tracks`
 //!   and `layers` arrays of [`StatusEvent`]. Nothing has to be counted twice.
 //! * **Hardware numbers are one-based**, because that is how they are printed on the interface.
-//!   That affects exactly one field, `input_channel`, and every layer additionally carries a
+//!   That affects `input_channel` and `input_channels`, and every layer additionally carries a
 //!   `number` for display next to its zero-based `index`.
 //!
 //! Levels are reported twice: `*_peak` as a linear absolute value in `0.0..=1.0` for a meter bar,
 //! and `*_dbfs` for a number to print. `*_dbfs` is `null` at digital silence, because minus
 //! infinity has no JSON representation.
+//!
+//! # Stereo on the wire
+//!
+//! Since the engine became stereo, every level exists in two forms, and both are sent:
+//!
+//! * `*_peak` / `*_dbfs` - the **louder of the two channels**, so a frontend that draws one bar per
+//!   meter needs no arithmetic and no case distinction between a mono and a stereo track;
+//! * `*_peaks` - one entry per channel, so a frontend that wants a real stereo meter has the
+//!   numbers. A track's `input_peaks` has one entry when it records mono and two when it records
+//!   stereo; the output and the master are always two, because the bus is.
+//!
+//! Sending both rather than only the array is deliberate: the maximum is what a level is *read* as
+//! ("am I clipping"), and computing it in three places in the frontend is how the three places
+//! start to disagree.
 
 use serde::{Deserialize, Serialize};
 
@@ -87,13 +101,41 @@ pub struct ConfigInfo {
 // Starting the engine
 // ---------------------------------------------------------------------------------------------
 
-/// One track as the user set it up: a name and the input it listens on.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+/// One track as the user set it up: a name, the input or input pair it listens on, and where it
+/// sits between the speakers.
+///
+/// Naming one input makes a **mono** track, naming two makes a **stereo** one - which two inputs
+/// belong together is a wiring fact and is never guessed. `pan` and `input_channel_right` both
+/// default, so a mono track in the middle is still `{"name": "stimme", "input_channel": 1}`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct TrackConfig {
     pub name: String,
-    /// One-based, as printed on the interface.
+    /// One-based, as printed on the interface. The left one of a stereo pair.
     pub input_channel: u32,
+    /// Right-hand input of a stereo track, one-based. `null` or absent means the track is mono.
+    #[serde(default)]
+    pub input_channel_right: Option<u32>,
+    /// -1.0 hard left, 0.0 centre, +1.0 hard right. Absent means centre.
+    #[serde(default)]
+    pub pan: f32,
+}
+
+impl TrackConfig {
+    /// A mono track in the centre - what the default setup and most tracks are.
+    pub fn mono(name: &str, input_channel: u32) -> Self {
+        Self {
+            name: name.to_string(),
+            input_channel,
+            input_channel_right: None,
+            pan: 0.0,
+        }
+    }
+
+    /// 1 for a mono track, 2 for a stereo one.
+    pub fn channels(&self) -> u32 {
+        if self.input_channel_right.is_some() { 2 } else { 1 }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -337,23 +379,39 @@ pub struct TrackStatusEvent {
     /// Zero-based; this is what a `track_*` command expects.
     pub index: usize,
     pub name: String,
-    /// One-based, as printed on the interface.
+    /// One-based, as printed on the interface. The left one of a stereo pair.
     pub input_channel: u32,
+    /// Every input this track records, one-based: one entry when it is mono, two when it is
+    /// stereo. `input_channel` is always the first of them.
+    pub input_channels: Vec<u32>,
+    /// 1 when this track's loop buffers are mono, 2 when they are stereo.
+    pub channels: u32,
+    /// German word for that, ready to print: `mono` or `stereo`.
+    pub channels_label: String,
+    /// Position in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
+    pub pan: f32,
     pub state: TrackStateName,
     /// German word for the state, ready to print.
     pub state_label: String,
     pub monitor: bool,
     pub playing: bool,
-    /// Loop length of this track in samples; 0 while nothing is recorded.
+    /// Loop length of this track in frames; 0 while nothing is recorded. A frame is one instant of
+    /// audio - one sample on a mono track, two on a stereo one.
     pub loop_samples: u64,
     pub loop_seconds: f64,
-    /// Samples already written during a running loop-defining take.
+    /// Frames already written during a running loop-defining take.
     pub filled_samples: u64,
+    /// Loudest recorded input channel.
     pub input_peak: f32,
     pub input_dbfs: Option<f64>,
-    /// Peak this track's audible layers contributed to the output. Monitoring is not part of it.
+    /// One entry per recorded input channel, so a stereo source can be metered per side.
+    pub input_peaks: Vec<f32>,
+    /// Louder side of what this track's audible layers contributed to the bus. Monitoring is not
+    /// part of it.
     pub output_peak: f32,
     pub output_dbfs: Option<f64>,
+    /// Left and right, always two entries - the bus is stereo whatever the track records.
+    pub output_peaks: Vec<f32>,
     pub layers: Vec<LayerStatus>,
 
     // --- the count-in ------------------------------------------------------------------------
@@ -403,8 +461,11 @@ pub struct StatusEvent {
     pub sample_rate: u32,
     pub latency_samples: u64,
     pub click: bool,
+    /// Louder side of the produced output block.
     pub output_peak: f32,
     pub output_dbfs: Option<f64>,
+    /// Left and right of the master bus, always two entries.
+    pub output_peaks: Vec<f32>,
     pub tracks: Vec<TrackStatusEvent>,
 
     /// Buffer underruns reported by cpal. Anything but 0 means the audio was interrupted.
@@ -451,6 +512,7 @@ impl StatusEvent {
             click: false,
             output_peak: 0.0,
             output_dbfs: None,
+            output_peaks: vec![0.0, 0.0],
             tracks: Vec::new(),
             xruns: 0,
             fifo_underruns: 0,
@@ -483,10 +545,20 @@ pub fn track_event(
         })
         .collect();
     let rate = sample_rate.max(1) as f64;
+    let input_peak = ts.input_peak_max();
+    let output_peak = ts.output_peak_max();
     TrackStatusEvent {
         index,
         name: name.to_string(),
-        input_channel: ts.input_channel as u32 + 1,
+        input_channel: ts.input_channels[0] as u32 + 1,
+        input_channels: ts
+            .used_input_channels()
+            .iter()
+            .map(|&c| c as u32 + 1)
+            .collect(),
+        channels: ts.channels as u32,
+        channels_label: if ts.channels >= 2 { "stereo" } else { "mono" }.to_string(),
+        pan: ts.pan,
         state: ts.state.into(),
         state_label: ts.state.label().to_string(),
         monitor: ts.monitor,
@@ -494,10 +566,12 @@ pub fn track_event(
         loop_samples: ts.loop_len,
         loop_seconds: ts.loop_len as f64 / rate,
         filled_samples: ts.filled,
-        input_peak: ts.input_peak,
-        input_dbfs: dbfs(ts.input_peak),
-        output_peak: ts.output_peak,
-        output_dbfs: dbfs(ts.output_peak),
+        input_peak,
+        input_dbfs: dbfs(input_peak),
+        input_peaks: ts.input_peak[..(ts.channels as usize).clamp(1, 2)].to_vec(),
+        output_peak,
+        output_dbfs: dbfs(output_peak),
+        output_peaks: ts.output_peak.to_vec(),
         layers,
         pending_kind: lead.kind.map(PendingKindName::from),
         pending_label: lead.kind.map(|k| k.label().to_string()),
@@ -933,14 +1007,28 @@ mod tests {
             loop_len: 96_000,
             origin: 0,
             filled: 0,
-            input_peak: 0.5,
-            output_peak: 1.0,
+            input_peak: [0.5, 0.0],
+            output_peak: [1.0, 1.0],
             monitor: true,
             playing: true,
             // Zero-based inside the engine; input 2 as printed on the interface.
-            input_channel: 1,
+            input_channels: [1, 0],
+            channels: 1,
+            pan: 0.0,
             // A track nobody has touched: chain bypassed, everything off, "trocken".
             fx: FxStatus::default(),
+        }
+    }
+
+    /// A stereo track on inputs 3 and 4, placed a little to the left.
+    fn stereo_status() -> TrackStatus {
+        TrackStatus {
+            channels: 2,
+            input_channels: [2, 3],
+            input_peak: [0.5, 0.25],
+            output_peak: [0.8, 0.2],
+            pan: -0.25,
+            ..sample_status()
         }
     }
 
@@ -965,6 +1053,12 @@ mod tests {
         );
         assert_eq!(event.index, 0);
         assert_eq!(event.input_channel, 2, "Kanal wird eins-basiert gemeldet");
+        assert_eq!(event.input_channels, vec![2], "mono: genau ein Eingang");
+        assert_eq!(event.channels, 1);
+        assert_eq!(event.channels_label, "mono");
+        assert_eq!(event.pan, 0.0);
+        assert_eq!(event.input_peaks, vec![0.5], "mono: ein Pegel");
+        assert_eq!(event.output_peaks, vec![1.0, 1.0], "der Bus ist immer stereo");
         assert_eq!(event.state, TrackStateName::Playing);
         assert_eq!(event.state_label, "Wiedergabe");
         assert_eq!(event.loop_samples, 96_000);
@@ -982,6 +1076,51 @@ mod tests {
         assert_eq!(event.pending_label, None);
         assert_eq!(event.pending_bars, 0);
         assert_eq!(event.pending_beats, 0);
+    }
+
+    /// A stereo track reports both of its inputs, both of its input meters and a channel count the
+    /// frontend can switch on - and the single-number levels stay the louder of the two, so a
+    /// frontend that draws one bar per meter needs no case distinction.
+    #[test]
+    fn a_stereo_track_reports_both_inputs_and_both_meters() {
+        let event = track_event(0, "klavier", &stereo_status(), &[], RATE, Lead::default());
+        assert_eq!(event.channels, 2);
+        assert_eq!(event.channels_label, "stereo");
+        assert_eq!(event.input_channel, 3, "der linke Eingang, eins-basiert");
+        assert_eq!(event.input_channels, vec![3, 4]);
+        assert_eq!(event.input_peaks, vec![0.5, 0.25]);
+        assert_eq!(event.input_peak, 0.5, "die Einzahl ist der lautere Kanal");
+        assert_eq!(event.output_peaks, vec![0.8, 0.2]);
+        assert_eq!(event.output_peak, 0.8);
+        assert_eq!(event.pan, -0.25);
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["channels"], json!(2));
+        assert_eq!(value["input_channels"], json!([3, 4]));
+        assert_eq!(value["channels_label"], json!("stereo"));
+    }
+
+    /// A stereo track is set up by naming a second input; a pan travels with it. Both default, so
+    /// the minimal configuration above stays what it was.
+    #[test]
+    fn a_start_configuration_can_name_a_stereo_pair_and_a_pan() {
+        let config: StartConfig = serde_json::from_value(json!({
+            "tracks": [
+                {"name": "stimme", "input_channel": 1, "pan": -0.3},
+                {"name": "klavier", "input_channel": 3, "input_channel_right": 4}
+            ]
+        }))
+        .expect("Stereo-Konfiguration");
+        assert_eq!(config.tracks[0].channels(), 1);
+        assert_eq!(config.tracks[0].pan, -0.3);
+        assert_eq!(config.tracks[1].channels(), 2);
+        assert_eq!(config.tracks[1].input_channel_right, Some(4));
+        assert_eq!(config.tracks[1].pan, 0.0);
+
+        // And back out again as the engine reports it.
+        let value = serde_json::to_value(&config.tracks[1]).unwrap();
+        assert_eq!(value["input_channel"], json!(3));
+        assert_eq!(value["input_channel_right"], json!(4));
     }
 
     /// The count-in is what the stage screen prints in big letters, so both halves of it - the
@@ -1101,6 +1240,7 @@ mod tests {
                 "other_errors",
                 "output_dbfs",
                 "output_peak",
+                "output_peaks",
                 "pos",
                 "quantize",
                 "running",
@@ -1138,12 +1278,16 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "channels",
+                "channels_label",
                 "filled_samples",
                 "fx",
                 "index",
                 "input_channel",
+                "input_channels",
                 "input_dbfs",
                 "input_peak",
+                "input_peaks",
                 "layers",
                 "loop_samples",
                 "loop_seconds",
@@ -1151,6 +1295,8 @@ mod tests {
                 "name",
                 "output_dbfs",
                 "output_peak",
+                "output_peaks",
+                "pan",
                 "pending_bars",
                 "pending_beats",
                 "pending_kind",
@@ -1330,10 +1476,8 @@ mod tests {
         assert!(!config.force_buffer);
         assert_eq!(
             config.tracks,
-            vec![TrackConfig {
-                name: "stimme".to_string(),
-                input_channel: 1
-            }]
+            vec![TrackConfig::mono("stimme", 1)],
+            "ohne zweiten Kanal und ohne Panorama: ein Mono-Track in der Mitte"
         );
     }
 
@@ -1349,7 +1493,7 @@ mod tests {
             "force_buffer": true,
             "tracks": [
                 {"name": "stimme", "input_channel": 1},
-                {"name": "gitarre", "input_channel": 2}
+                {"name": "gitarre", "input_channel": 2, "pan": 0.4}
             ],
             "bpm": 137.0,
             "beats_per_bar": 7,

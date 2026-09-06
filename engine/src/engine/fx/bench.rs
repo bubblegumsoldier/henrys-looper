@@ -12,8 +12,11 @@
 //! ```
 //!
 //! Everything the callback does - click, layer mixing, recording, and now the chains - has to fit
-//! inside that. The measurement below reports nanoseconds per sample per effect and turns them
-//! into a share of that budget, once for one track and once for the eight the engine allows.
+//! inside that. The measurement below reports nanoseconds per **frame** per effect and turns them
+//! into a share of that budget, once for one track and once for the eight the engine allows. A
+//! frame is two samples since the chain became stereo, so these numbers are directly comparable
+//! with the mono ones they replace: they say what one instant of audio costs, which is what the
+//! callback is billed for.
 //!
 //! Run it from a **release** build, where the numbers mean something:
 //!
@@ -29,6 +32,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use super::super::frame::Frame;
 use super::biquad::{Biquad, Coeffs};
 use super::delay::{Delay, DelayNote};
 use super::dynamics::{CompSettings, Compressor};
@@ -42,6 +46,9 @@ pub const BUDGET_FRAMES: usize = 128;
 #[derive(Clone, Debug)]
 pub struct Row {
     pub name: &'static str,
+    /// Nanoseconds per **frame**, i.e. per instant of audio. Since the chain is stereo throughout,
+    /// a frame is two samples everywhere below - which is what makes this number comparable with
+    /// the callback budget, since a callback has to produce frames rather than samples.
     pub ns_per_sample: f64,
 }
 
@@ -87,15 +94,20 @@ fn test_signal(samples: usize, sample_rate: u32) -> Vec<f32> {
         .collect()
 }
 
-fn time<F: FnMut(f32) -> f32>(signal: &[f32], mut f: F) -> f64 {
+/// Time one effect over the whole signal, in nanoseconds per **frame**.
+///
+/// A frame is what a callback has to produce, and since the stereo rebuild it carries two samples
+/// everywhere in the chain - so the numbers below are directly comparable with the callback budget
+/// and with the mono measurement they replace, which is the comparison that matters.
+fn time<F: FnMut(Frame) -> Frame>(signal: &[f32], mut f: F) -> f64 {
     // One warm-up pass, so the measurement does not include filling the caches with the delay
-    // line and the reverb buffers.
+    // lines and the reverb buffers.
     for &x in signal.iter().take(signal.len() / 8) {
-        black_box(f(x));
+        black_box(f(Frame::mono(x)));
     }
     let started = Instant::now();
     for &x in signal {
-        black_box(f(black_box(x)));
+        black_box(f(black_box(Frame::mono(x))));
     }
     started.elapsed().as_nanos() as f64 / signal.len() as f64
 }
@@ -106,28 +118,31 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
     let signal = test_signal(samples, sample_rate);
     let mut rows = Vec::new();
 
-    let mut hp = Biquad::new(Coeffs::high_pass(
+    // One filter instance per channel, exactly as the chain holds them.
+    let mut hp = [Biquad::new(Coeffs::high_pass(
         sample_rate,
         80.0,
         std::f32::consts::FRAC_1_SQRT_2,
-    ));
+    )); 2];
     rows.push(Row {
         name: "Hochpass",
-        ns_per_sample: time(&signal, |x| hp.process(x)),
+        ns_per_sample: time(&signal, |x| {
+            Frame::new(hp[0].process(x.l), hp[1].process(x.r))
+        }),
     });
 
     let voice = FxPreset::Voice.settings();
-    let mut bands: Vec<Biquad> = voice
+    let mut bands: Vec<[Biquad; 2]> = voice
         .bands
         .iter()
-        .map(|b| Biquad::new(Coeffs::band(sample_rate, b.kind, b.hz, b.q, b.gain_db)))
+        .map(|b| [Biquad::new(Coeffs::band(sample_rate, b.kind, b.hz, b.q, b.gain_db)); 2])
         .collect();
     rows.push(Row {
         name: "EQ (3 Baender)",
         ns_per_sample: time(&signal, |x| {
             let mut y = x;
             for b in bands.iter_mut() {
-                y = b.process(y);
+                y = Frame::new(b[0].process(y.l), b[1].process(y.r));
             }
             y
         }),
@@ -178,11 +193,11 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
     idle.load_preset(FxPreset::Voice);
     idle.set_quarter_samples(sample_rate as f64 * 60.0 / 100.0);
     for _ in 0..(idle.tail_samples() as usize + 16) {
-        idle.process(0.0);
+        idle.process(Frame::SILENT);
     }
     let started = Instant::now();
     for _ in 0..samples {
-        black_box(idle.process(black_box(0.0f32)));
+        black_box(idle.process(black_box(Frame::SILENT)));
     }
     rows.push(Row {
         name: "Kette still (Leerlauf)",
@@ -193,7 +208,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
     bypassed.load_preset(FxPreset::Voice);
     bypassed.set_bypass(true);
     for _ in 0..sample_rate as usize {
-        bypassed.process(0.0);
+        bypassed.process(Frame::SILENT);
     }
     rows.push(Row {
         name: "Kette umgangen",
@@ -221,7 +236,7 @@ pub fn print(report: &Report) {
     );
     println!(
         "{:<26} {:>12} {:>14} {:>16}",
-        "", "ns/Sample", "% je Track", "% bei 8 Tracks"
+        "", "ns/Frame", "% je Track", "% bei 8 Tracks"
     );
     for row in &report.rows {
         let per_track = row.percent_of_budget(report.sample_rate);

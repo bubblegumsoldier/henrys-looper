@@ -40,9 +40,11 @@ use looper_engine::engine::command::{
     Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, StatusReceiver, TrackStatus,
     buffer_channel, command_channel, status_channel,
 };
+use looper_engine::engine::frame::{Channels, TrackInput};
 use looper_engine::engine::fx::{FxParam, FxPreset, FxSlot};
 use looper_engine::engine::process::{
-    EngineConfig, EngineCore, loop_capacity, max_memory_bytes,
+    EngineConfig, EngineCore, OUT_CHANNELS, loop_capacity, max_memory_bytes, spare_channels,
+    spare_slots_for, spread_frame, total_channels,
 };
 use looper_engine::engine::timeline::Timeline;
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackState};
@@ -89,6 +91,8 @@ pub enum Action {
     Play { track: usize },
     ClearTrack { track: usize },
     SetMonitor { track: usize, on: bool },
+    /// Where a track sits between the speakers: -1.0 hard left, 0.0 centre, +1.0 hard right.
+    SetPan { track: usize, pan: f32 },
     LayerMute { track: usize, layer: usize, muted: bool },
     LayerRemove { track: usize, layer: usize },
     LayerGain { track: usize, layer: usize, gain: f32 },
@@ -124,6 +128,7 @@ impl Action {
             | Action::Play { track }
             | Action::ClearTrack { track }
             | Action::SetMonitor { track, .. }
+            | Action::SetPan { track, .. }
             | Action::LayerMute { track, .. }
             | Action::LayerRemove { track, .. }
             | Action::LayerGain { track, .. }
@@ -257,13 +262,16 @@ fn handle(request: Request, session: &mut Option<Session>, app: &AppHandle) {
             match Session::start(*config) {
                 Ok(active) => {
                     let info = active.info.clone();
+                    let stereo = info.tracks.iter().filter(|t| t.channels() == 2).count();
                     log!(
-                        "Engine gestartet: {} / {} @ {} Hz, {} Frames, {} Tracks, Latenz {} Samples.",
+                        "Engine gestartet: {} / {} @ {} Hz, {} Frames, {} Tracks ({} davon stereo), \
+                         Latenz {} Samples.",
                         info.host,
                         info.output_device,
                         info.sample_rate,
                         info.buffer_frames,
                         info.tracks.len(),
+                        stereo,
                         info.latency_samples
                     );
                     *session = Some(active);
@@ -532,6 +540,9 @@ impl HostStats {
 /// snapshot does not carry, and they only ever change by command, so the mirror cannot go stale.
 struct TrackUi {
     name: String,
+    /// How many channels this track's loop buffers have. Fixed when the engine is started, and
+    /// needed here to work out the memory ceiling after a tempo change.
+    channels: Channels,
     gains: Vec<f32>,
 }
 
@@ -601,24 +612,28 @@ impl Session {
         let (status_tx, status_rx) = status_channel(1024);
         // The return queue has room for every buffer that can be inside the engine at once, so the
         // audio thread can always hand one back instead of leaking it.
-        let (channel, buffer_endpoint) =
-            buffer_channel(SPARE_SLOTS + 4, defs.len() * MAX_LAYERS + SPARE_SLOTS + 8);
-        let mut pool = LayerPool::new(channel, capacity as usize, SPARE_SLOTS);
+        let kinds: Vec<Channels> = defs.iter().map(|d| d.input.channels()).collect();
+        let slots = spare_slots_for(&kinds, SPARE_SLOTS);
+        let (channel, buffer_endpoint) = buffer_channel(
+            slots[0] + slots[1] + 8,
+            defs.len() * MAX_LAYERS + slots[0] + slots[1] + 8,
+        );
+        let mut pool = LayerPool::new(channel, capacity as usize, slots);
         // Every layer buffer of this session is born here, before any stream exists; from now on
         // the pool only recycles.
         pool.service(None);
 
         let tracks: Vec<Track> = defs
             .iter()
-            .map(|d| Track::new(d.channel, config.monitor, rate))
+            .map(|d| Track::new(d.input, config.monitor, d.pan, rate))
             .collect();
         let mut core = EngineCore::new(EngineConfig {
             timeline,
             latency_samples: config.latency_samples,
             input_channels: in_channels,
             tracks,
-            spares: Vec::with_capacity(SPARE_SLOTS),
-            layer_capacity: capacity,
+            spares: [Vec::with_capacity(slots[0]), Vec::with_capacity(slots[1])],
+            layer_frames: capacity,
             commands: cmd_rx,
             status: status_tx,
             buffers: buffer_endpoint,
@@ -660,7 +675,7 @@ impl Session {
         let stats_out = Arc::clone(&stats);
         let stats_out_err = Arc::clone(&stats);
         let mut in_scratch = vec![0.0f32; scratch_frames * in_channels];
-        let mut out_scratch = vec![0.0f32; scratch_frames];
+        let mut out_scratch = vec![0.0f32; scratch_frames * OUT_CHANNELS];
         let output = audio::build_output(
             &setup.output,
             &setup.out_plan,
@@ -682,16 +697,17 @@ impl Session {
                     if got < n {
                         stats_out.underruns.fetch_add(1, Ordering::Relaxed);
                     }
-                    core.process(&in_scratch[..got * in_channels], &mut out_scratch[..n]);
+                    core.process(
+                        &in_scratch[..got * in_channels],
+                        &mut out_scratch[..n * OUT_CHANNELS],
+                    );
                     let base = done * out_channels;
                     for (i, frame) in data[base..base + n * out_channels]
                         .chunks_exact_mut(out_channels)
                         .enumerate()
                     {
-                        let v = out_scratch[i];
-                        for sample in frame.iter_mut() {
-                            *sample = v;
-                        }
+                        let bus = &out_scratch[i * OUT_CHANNELS..(i + 1) * OUT_CHANNELS];
+                        spread_frame(bus, frame);
                     }
                     done += n;
                 }
@@ -738,12 +754,21 @@ impl Session {
             layer_capacity: capacity,
             max_layers: MAX_LAYERS as u32,
             max_tracks: MAX_TRACKS as u32,
-            memory_mb: max_memory_bytes(capacity, defs.len(), SPARE_SLOTS) as f64 / 1_048_576.0,
+            memory_mb: max_memory_bytes(
+                capacity,
+                total_channels(&kinds),
+                spare_channels(slots),
+            ) as f64
+                / 1_048_576.0,
             tracks: defs
                 .iter()
                 .map(|d| TrackConfig {
-                    name: d.name.clone(),
-                    input_channel: d.channel as u32 + 1,
+                    input_channel_right: match d.input {
+                        TrackInput::Stereo { right, .. } => Some(right as u32 + 1),
+                        TrackInput::Mono(_) => None,
+                    },
+                    pan: d.pan,
+                    ..TrackConfig::mono(&d.name, d.input.first() as u32 + 1)
                 })
                 .collect(),
         };
@@ -765,6 +790,7 @@ impl Session {
                 .iter()
                 .map(|d| TrackUi {
                     name: d.name.clone(),
+                    channels: d.input.channels(),
                     gains: Vec::new(),
                 })
                 .collect(),
@@ -859,8 +885,9 @@ impl Session {
             sample_rate: rate,
             latency_samples: self.info.latency_samples,
             click: status.click,
-            output_peak: status.output_peak,
-            output_dbfs: dbfs(status.output_peak),
+            output_peak: status.output_peak_max(),
+            output_dbfs: dbfs(status.output_peak_max()),
+            output_peaks: status.output_peak.to_vec(),
             tracks: self
                 .tracks
                 .iter()
@@ -879,7 +906,7 @@ impl Session {
             other_errors: stats.other_errors.load(Ordering::Relaxed),
             max_callback_ms: stats.cb_nanos_max.load(Ordering::Relaxed) as f64 / 1e6,
             ignored_commands: status.ignored_commands,
-            spares: status.spares,
+            spares: status.spares_total(),
             message: self.message.clone(),
         }
     }
@@ -1005,6 +1032,18 @@ impl Session {
                     self.tracks[track].name,
                     if on { "an" } else { "aus" }
                 ));
+                Ok(())
+            }
+            Action::SetPan { track, pan } => {
+                if !(-1.0..=1.0).contains(&pan) {
+                    return Err(
+                        "Das Panorama muss zwischen -1 (ganz links) und 1 (ganz rechts) liegen."
+                            .to_string(),
+                    );
+                }
+                self.cmd.send(Command::SetPan { track, pan })?;
+                // No message: a knob being turned is not news, and a sentence per mouse move would
+                // make the status line flicker. The new value comes back in the status.
                 Ok(())
             }
             Action::SetClick { on } => {
@@ -1135,22 +1174,22 @@ impl Session {
             self.scheduler.bars,
             self.info.latency_samples,
         )?;
-        let layer_capacity = loop_capacity(&timeline, self.scheduler.bars);
+        let layer_frames = loop_capacity(&timeline, self.scheduler.bars);
         self.cmd.send(Command::SetTempo {
             bpm,
             signature: timeline.signature(),
-            layer_capacity,
+            layer_frames,
         })?;
         // Every allocation at the new layer length happens on this thread; the old stock is
         // dropped here and the engine hands back what it still holds.
-        self.pool.set_layer_len(layer_capacity as usize);
+        self.pool.set_layer_frames(layer_frames as usize);
         self.scheduler.timeline = timeline;
-        self.update_timeline_info(&timeline, layer_capacity);
+        self.update_timeline_info(&timeline, layer_frames);
         self.message = Some(format!("Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}."));
         Ok(())
     }
 
-    fn update_timeline_info(&mut self, timeline: &Timeline, layer_capacity: u64) {
+    fn update_timeline_info(&mut self, timeline: &Timeline, layer_frames: u64) {
         let loop_samples = timeline.span_bars(0, self.scheduler.bars);
         self.info.bpm = timeline.bpm();
         self.info.beats_per_bar = timeline.signature().beats_per_bar;
@@ -1158,9 +1197,15 @@ impl Session {
         self.info.samples_per_beat = timeline.samples_per_beat();
         self.info.loop_samples = loop_samples;
         self.info.loop_seconds = timeline.samples_to_secs(loop_samples);
-        self.info.layer_capacity = layer_capacity;
-        self.info.memory_mb =
-            max_memory_bytes(layer_capacity, self.tracks.len(), SPARE_SLOTS) as f64 / 1_048_576.0;
+        self.info.layer_capacity = layer_frames;
+        // A stereo track costs twice a mono one, so the ceiling counts channels, not tracks.
+        let kinds: Vec<Channels> = self.tracks.iter().map(|t| t.channels).collect();
+        self.info.memory_mb = max_memory_bytes(
+            layer_frames,
+            total_channels(&kinds),
+            spare_channels(spare_slots_for(&kinds, SPARE_SLOTS)),
+        ) as f64
+            / 1_048_576.0;
     }
 }
 

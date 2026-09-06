@@ -69,6 +69,8 @@ export const api = {
   trackPlay: (track: number) => call<void>("track_play", { track }),
   trackClear: (track: number) => call<void>("track_clear", { track }),
   trackMonitor: (track: number, on: boolean) => call<void>("track_monitor", { track, on }),
+  /** Where the track sits between the speakers: -1 hard left, 0 centre, +1 hard right. */
+  trackPan: (track: number, pan: number) => call<void>("track_pan", { track, pan }),
 
   // --- per layer -----------------------------------------------------------
   layerMute: (track: number, layer: number, muted: boolean) =>

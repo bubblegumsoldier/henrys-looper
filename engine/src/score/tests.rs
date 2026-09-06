@@ -12,6 +12,7 @@
 
 use super::model::TrackState;
 use super::{ScoreError, compile_score, read};
+use crate::engine::frame::TrackInput;
 use crate::engine::schedule::Quantize;
 
 // ---------------------------------------------------------------------------------------------
@@ -687,6 +688,88 @@ fn a_yaml_syntax_error_reports_a_line_and_a_hint() {
 fn a_score_that_is_not_a_mapping_says_so() {
     let err = errors("- eine\n- Liste\n");
     assert!(err.issues[0].message.contains("muss ein Mapping"), "{}", err);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stereo tracks and the pan
+// ---------------------------------------------------------------------------------------------
+
+/// The two shapes `input` may have, side by side in one score: a number is a mono track, a pair of
+/// numbers is a stereo one. The channel count follows from that and from nothing else.
+#[test]
+fn a_pair_of_inputs_makes_a_stereo_track() {
+    let score = compiled(
+        "bpm: 120\n\
+         tracks:\n\
+        \x20 stimme:  {input: 1}\n\
+        \x20 klavier: {input: [3, 4]}\n\
+        \x20 flaeche: {input: [7, 2], pan: -0.5}\n\
+         sections: [{id: a, bars: 1}]\n",
+    );
+    let stimme = score.track("stimme").unwrap();
+    assert_eq!((stimme.input, stimme.input_channel), (1, 0));
+    assert_eq!(stimme.input_right, None);
+    assert_eq!(stimme.channels, 1);
+    assert_eq!(stimme.pan, 0.0, "ohne Angabe sitzt ein Track in der Mitte");
+    assert_eq!(stimme.track_input(), TrackInput::Mono(0));
+
+    let klavier = score.track("klavier").unwrap();
+    assert_eq!((klavier.input, klavier.input_channel), (3, 2));
+    assert_eq!((klavier.input_right, klavier.input_channel_right), (Some(4), Some(3)));
+    assert_eq!(klavier.channels, 2);
+    assert_eq!(
+        klavier.track_input(),
+        TrackInput::Stereo { left: 2, right: 3 }
+    );
+
+    // The two halves need not be adjacent, and they need not be in order - a router puts them
+    // where it likes.
+    let flaeche = score.track("flaeche").unwrap();
+    assert_eq!(
+        flaeche.track_input(),
+        TrackInput::Stereo { left: 6, right: 1 }
+    );
+    assert_eq!(flaeche.pan, -0.5);
+}
+
+/// Every way of writing the input wrong gets its own German sentence with a position, and none of
+/// them silently produces half a stereo track.
+#[test]
+fn a_malformed_input_or_pan_is_refused_in_german() {
+    for (yaml, needle) in [
+        ("tracks: {a: {input: [3]}}", "genau zwei Eingaenge"),
+        ("tracks: {a: {input: [3, 4, 5]}}", "genau zwei Eingaenge"),
+        ("tracks: {a: {input: [3, 3]}}", "zweimal Eingang 3"),
+        ("tracks: {a: {input: [3, links]}}", "ganze Zahl"),
+        ("tracks: {a: {input: [0, 4]}}", "zwischen 1 und"),
+        ("tracks: {a: {input: 1, pan: 2}}", "zwischen -1 und 1"),
+        ("tracks: {a: {input: 1, pan: links}}", "muss eine Zahl sein"),
+    ] {
+        let yaml = format!("bpm: 120\n{yaml}\nsections: [{{id: x, bars: 1}}]\n");
+        let err = compile_score(&yaml).expect_err(&yaml);
+        assert!(
+            err.to_string().contains(needle),
+            "\"{needle}\" fehlt in: {err}"
+        );
+        assert!(err.issues[0].line.is_some(), "ohne Zeilennummer: {err}");
+    }
+}
+
+/// A track with two mistakes reports both, which is the rule the whole reader is built on.
+#[test]
+fn a_track_with_a_bad_input_and_a_bad_pan_reports_both() {
+    let err = compile_score("bpm: 120\ntracks: {a: {input: [1], pan: 9}}\nsections: [{id: x, bars: 1}]\n")
+        .expect_err("beides falsch");
+    assert_eq!(err.issues.len(), 2, "{err}");
+}
+
+/// `pan` is a known field now, so a typo next to it suggests it rather than listing the world.
+#[test]
+fn a_misspelt_pan_suggests_the_real_field() {
+    let err = compile_score("bpm: 120\ntracks: {a: {input: 1, pann: 0.5}}\nsections: [{id: x, bars: 1}]\n")
+        .expect_err("Tippfehler");
+    let suggestion = err.issues[0].suggestion.as_deref().unwrap_or("");
+    assert!(suggestion.contains("pan"), "{suggestion}");
 }
 
 // ---------------------------------------------------------------------------------------------

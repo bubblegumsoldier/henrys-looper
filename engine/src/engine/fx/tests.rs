@@ -10,6 +10,13 @@ fn sine(hz: f32, i: usize, amplitude: f32) -> f32 {
     amplitude * (std::f32::consts::TAU * hz * i as f32 / RATE as f32).sin()
 }
 
+/// A mono test tone as the chain sees one: the same sample on both channels, which is exactly what
+/// a mono track hands in. Everything below therefore measures the stereo chain on the signal the
+/// mono engine used to measure, so the numbers stay comparable.
+fn tone(hz: f32, i: usize, amplitude: f32) -> Frame {
+    Frame::mono(sine(hz, i, amplitude))
+}
+
 /// Peak of the chain's output for a steady sine, in dB relative to the input.
 ///
 /// Half a second of settling first: every switch in the chain is a crossfade, and a filter needs
@@ -17,11 +24,11 @@ fn sine(hz: f32, i: usize, amplitude: f32) -> f32 {
 fn response_db(chain: &mut Chain, hz: f32) -> f32 {
     let settle = RATE as usize / 2;
     for i in 0..settle {
-        chain.process(sine(hz, i, 0.5));
+        chain.process(tone(hz, i, 0.5));
     }
     let mut peak: f32 = 0.0;
     for i in settle..settle + RATE as usize / 4 {
-        peak = peak.max(chain.process(sine(hz, i, 0.5)).abs());
+        peak = peak.max(chain.process(tone(hz, i, 0.5)).max_abs());
     }
     20.0 * (peak / 0.5).log10()
 }
@@ -49,7 +56,8 @@ fn a_fresh_chain_is_bit_identical_with_its_input() {
     assert!(chain.bypassed());
     assert_eq!(chain.preset(), FxPreset::Dry);
     for i in 0..10_000 {
-        let x = sine(440.0, i, 0.9) + sine(37.0, i, 0.1);
+        // Two different signals on the two channels: a chain that mixed them would show up here.
+        let x = Frame::new(sine(440.0, i, 0.9), sine(37.0, i, 0.6));
         assert_eq!(chain.process(x), x, "Sample {i}");
     }
 }
@@ -61,17 +69,17 @@ fn bypass_becomes_bit_identical_once_the_crossfade_has_arrived() {
     let mut chain = Chain::new(RATE);
     chain.load_preset(FxPreset::Voice);
     for i in 0..RATE as usize {
-        chain.process(sine(220.0, i, 0.6));
+        chain.process(tone(220.0, i, 0.6));
     }
     chain.set_bypass(true);
     // The crossfade has a 25 ms time constant, so it is inaudible after some 80 ms - but it only
     // *snaps* to an exact zero once it is under -100 dB, which takes about a dozen time constants.
     // One second is far more than enough and is what a panic switch gets in practice.
     for i in 0..RATE as usize {
-        chain.process(sine(220.0, i, 0.6));
+        chain.process(tone(220.0, i, 0.6));
     }
     for i in 0..10_000 {
-        let x = sine(311.0, i, 0.7);
+        let x = Frame::new(sine(311.0, i, 0.7), sine(523.0, i, 0.5));
         assert_eq!(chain.process(x), x, "Sample {i} nach dem Bypass");
     }
 }
@@ -85,10 +93,10 @@ fn the_dry_preset_switches_everything_off() {
     assert!(chain.bypassed());
     assert!(chain.settings().enabled.iter().all(|&on| !on));
     for i in 0..RATE as usize / 2 {
-        chain.process(sine(220.0, i, 0.6));
+        chain.process(tone(220.0, i, 0.6));
     }
     for i in 0..5_000 {
-        let x = sine(880.0, i, 0.5);
+        let x = Frame::new(sine(880.0, i, 0.5), sine(440.0, i, 0.3));
         assert_eq!(chain.process(x), x, "Sample {i}");
     }
 }
@@ -100,10 +108,10 @@ fn an_empty_chain_that_is_not_bypassed_is_still_a_wire() {
     let mut chain = Chain::new(RATE);
     chain.set_bypass(false);
     for i in 0..2_000 {
-        chain.process(sine(220.0, i, 0.5));
+        chain.process(tone(220.0, i, 0.5));
     }
     for i in 0..5_000 {
-        let x = sine(1_000.0, i, 0.4);
+        let x = Frame::new(sine(1_000.0, i, 0.4), sine(97.0, i, 0.2));
         assert_eq!(chain.process(x), x, "Sample {i}");
     }
 }
@@ -139,16 +147,18 @@ fn switching_an_effect_on_does_not_step() {
         let mut chain = Chain::new(RATE);
         chain.set_bypass(false);
         let mut i = 0usize;
-        let mut previous = 0.0f32;
+        let mut previous = Frame::SILENT;
         for _ in 0..RATE as usize / 4 {
-            previous = chain.process(sine(220.0, i, 0.5));
+            previous = chain.process(tone(220.0, i, 0.5));
             i += 1;
         }
         chain.set_enabled(slot, true);
         let mut worst: f32 = 0.0;
         for _ in 0..RATE as usize / 2 {
-            let y = chain.process(sine(220.0, i, 0.5));
-            worst = worst.max((y - previous).abs());
+            let y = chain.process(tone(220.0, i, 0.5));
+            worst = worst
+                .max((y.l - previous.l).abs())
+                .max((y.r - previous.r).abs());
             previous = y;
             i += 1;
         }
@@ -230,9 +240,9 @@ fn the_voice_preset_evens_out_loud_and_quiet() {
         chain.set_enabled(FxSlot::Reverb, false);
         let mut peak: f32 = 0.0;
         for i in 0..RATE as usize {
-            let y = chain.process(sine(220.0, i, amplitude));
+            let y = chain.process(tone(220.0, i, amplitude));
             if i > RATE as usize / 2 {
-                peak = peak.max(y.abs());
+                peak = peak.max(y.max_abs());
             }
         }
         20.0 * peak.log10()
@@ -352,7 +362,7 @@ fn the_delay_follows_the_tempo_through_the_chain() {
 
     chain.set_quarter_samples(RATE as f64 * 60.0 / 90.0);
     for i in 0..RATE as usize / 4 {
-        chain.process(sine(220.0, i, 0.3));
+        chain.process(tone(220.0, i, 0.3));
     }
     assert_eq!(chain.status().delay_samples, 32_000);
 }
@@ -384,16 +394,20 @@ fn nothing_in_the_chain_can_produce_a_value_that_is_not_a_number() {
     for i in 0..RATE as usize * 4 {
         // Full scale, square-ish, with a DC offset: everything a converter could ever hand over.
         let x = if (i / 37) % 2 == 0 { 1.0 } else { -1.0 } * 0.999 + 0.001;
-        let y = chain.process(x);
-        assert!(y.is_finite(), "Sample {i} ist {y}");
+        let y = chain.process(Frame::new(x, -x));
+        assert!(y.l.is_finite() && y.r.is_finite(), "Sample {i} ist {y:?}");
     }
     // And then silence, where a reverb is at its most dangerous. Long enough for the chain's own
     // idea of its tail to run out - at these settings that is close to a minute of audio.
     for i in 0..(chain.tail_samples() as usize + 1_000) {
-        let y = chain.process(0.0);
-        assert!(y.is_finite(), "Stille-Sample {i} ist {y}");
+        let y = chain.process(Frame::SILENT);
+        assert!(y.l.is_finite() && y.r.is_finite(), "Stille-Sample {i} ist {y:?}");
     }
-    assert_eq!(chain.process(0.0), 0.0, "die Kette muss ausklingen");
+    assert_eq!(
+        chain.process(Frame::SILENT),
+        Frame::SILENT,
+        "die Kette muss ausklingen"
+    );
 }
 
 /// The idle detection: after the tail has run out a silent chain costs nothing and outputs
@@ -406,15 +420,15 @@ fn a_silent_chain_goes_idle_and_wakes_up_again() {
     assert!(chain.tail_samples() > RATE / 2, "der Schwanz ist zu kurz angesetzt");
 
     for i in 0..RATE as usize {
-        chain.process(sine(220.0, i, 0.5));
+        chain.process(tone(220.0, i, 0.5));
     }
     for _ in 0..(chain.tail_samples() as usize + 1_000) {
-        chain.process(0.0);
+        chain.process(Frame::SILENT);
     }
-    assert_eq!(chain.process(0.0), 0.0);
+    assert_eq!(chain.process(Frame::SILENT), Frame::SILENT);
     // A single loud sample has to bring the chain back.
-    let woken = chain.process(0.5);
-    assert!(woken.abs() > 0.0, "die Kette bleibt stumm");
+    let woken = chain.process(Frame::mono(0.5));
+    assert!(woken.max_abs() > 0.0, "die Kette bleibt stumm");
 }
 
 #[test]

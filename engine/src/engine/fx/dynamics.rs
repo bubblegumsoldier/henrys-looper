@@ -50,7 +50,22 @@
 //! so the zero crossings of a sine no longer reach the gain at all. Stage 2 is the attack. The two
 //! numbers on the front panel therefore mean what they always meant: after one attack time 63 % of
 //! the reduction has happened, after one release time 63 % of it has come back.
+//!
+//! # Stereo: one detector, one gain, both channels
+//!
+//! The detector sees the **louder of the two channels** and the resulting gain is applied to both.
+//! Two independent compressors, one per channel, would be the obvious translation and it is the
+//! wrong one: whenever the material is louder on one side - a piano chord in the left hand, a pad
+//! whose movement is not symmetric - that side would be turned down and the other would not, and
+//! the stereo image would slide towards the quieter speaker on every level peak. What the ear hears
+//! is not "compression", it is the instrument wandering across the stage.
+//!
+//! Taking the maximum rather than the sum or the mean is the conservative choice for a *peak*
+//! detector: whatever would clip the output is caught, whichever side it is on. On a mono track
+//! fanned out to two identical channels the maximum equals the single channel, so a mono track
+//! compresses exactly as it did before this module knew about stereo.
 
+use super::super::frame::Frame;
 use super::biquad::flush;
 use super::smooth::Smoothed;
 
@@ -174,9 +189,22 @@ impl Compressor {
         self.peak_reduction_db = 0.0;
     }
 
+    /// One stereo frame. The detector runs once on the louder channel and the gain it produces is
+    /// applied to both - see the module comment.
     #[inline(always)]
-    pub fn process(&mut self, x: f32) -> f32 {
-        let level = x.abs().max(LEVEL_FLOOR);
+    pub fn process(&mut self, x: Frame) -> Frame {
+        let gain = self.gain_for(x.max_abs());
+        Frame {
+            l: x.l * gain,
+            r: x.r * gain,
+        }
+    }
+
+    /// Total gain (reduction times makeup) for a detector level, advancing the detector by one
+    /// sample. Split out so the stereo path calls it exactly once per frame.
+    #[inline(always)]
+    fn gain_for(&mut self, magnitude: f32) -> f32 {
+        let level = magnitude.max(LEVEL_FLOOR);
         let level_db = level.log2() * DB_PER_LOG2;
         let over = level_db - self.set.threshold_db;
 
@@ -216,7 +244,7 @@ impl Compressor {
             self.peak_reduction_db = self.gain_db;
         }
 
-        x * db_to_linear(self.gain_db) * self.makeup.next()
+        db_to_linear(self.gain_db) * self.makeup.next()
     }
 }
 
@@ -242,7 +270,7 @@ mod tests {
         let mut peak: f32 = 0.0;
         for i in 0..n {
             let x = amplitude * (std::f32::consts::TAU * 440.0 * i as f32 / RATE as f32).sin();
-            let y = comp.process(x);
+            let y = comp.process(Frame::mono(x)).l;
             // Only the last tenth counts, by which time attack and release have settled.
             if i > n * 9 / 10 {
                 peak = peak.max(y.abs());
@@ -329,7 +357,7 @@ mod tests {
         );
         let attack_samples = (attack_ms * 0.001 * RATE as f32) as u64;
         for _ in 0..attack_samples {
-            comp.process(1.0);
+            comp.process(Frame::mono(1.0));
         }
         let after_attack = comp.gain_db;
         assert!(
@@ -338,7 +366,7 @@ mod tests {
             expected_full * 0.632
         );
         for _ in 0..(attack_samples * 8) {
-            comp.process(1.0);
+            comp.process(Frame::mono(1.0));
         }
         assert!((comp.gain_db - expected_full).abs() < 0.2, "{}", comp.gain_db);
 
@@ -356,13 +384,13 @@ mod tests {
             },
         );
         for _ in 0..RATE / 2 {
-            comp.process(1.0);
+            comp.process(Frame::mono(1.0));
         }
         let start = comp.gain_db;
         assert!((start - expected_full).abs() < 0.1, "Ausgangspunkt {start}");
         let release_samples = (release_ms * 0.001 * RATE as f32) as u64;
         for _ in 0..release_samples {
-            comp.process(0.0);
+            comp.process(Frame::mono(0.0));
         }
         let after_release = comp.gain_db;
         assert!(
@@ -415,7 +443,54 @@ mod tests {
         );
         for i in 0..1_000 {
             let x = (i as f32 / 500.0) - 1.0;
-            assert!((comp.process(x) - x).abs() < 1e-6, "Sample {i}");
+            assert!((comp.process(Frame::mono(x)).l - x).abs() < 1e-6, "Sample {i}");
+        }
+    }
+
+    /// The reason there is one detector and not two: the ratio between left and right has to
+    /// survive the compressor unchanged, however hard it works. Two independent compressors would
+    /// pull the loud side down and leave the quiet one, i.e. move the instrument across the stage.
+    #[test]
+    fn a_stereo_signal_keeps_its_image_however_hard_the_compressor_works() {
+        let set = CompSettings {
+            threshold_db: -30.0,
+            ratio: 10.0,
+            knee_db: 0.0,
+            makeup_db: 0.0,
+            ..steady_times()
+        };
+        let mut comp = Compressor::new(RATE, set);
+        // The right channel is a quarter of the left one throughout - 12 dB of image.
+        for i in 0..RATE {
+            let x = (std::f32::consts::TAU * 220.0 * i as f32 / RATE as f32).sin();
+            let out = comp.process(Frame::new(0.9 * x, 0.225 * x));
+            if i > RATE / 2 && out.l.abs() > 1e-4 {
+                let ratio = out.r / out.l;
+                assert!(
+                    (ratio - 0.25).abs() < 1e-5,
+                    "Sample {i}: das Stereobild ist auf {ratio} gewandert"
+                );
+            }
+        }
+        assert!(comp.gain_db < -6.0, "der Kompressor muss hier wirklich arbeiten");
+    }
+
+    /// A mono track is fanned out to two identical channels before the chain, so the detector's
+    /// maximum is that one channel and the compressor behaves exactly as it did in the mono engine.
+    #[test]
+    fn a_fanned_out_mono_signal_compresses_exactly_as_one_channel_would() {
+        let set = CompSettings {
+            threshold_db: -24.0,
+            ratio: 4.0,
+            knee_db: 8.0,
+            makeup_db: 3.0,
+            ..steady_times()
+        };
+        let mut comp = Compressor::new(RATE, set);
+        for i in 0..RATE {
+            let x = (std::f32::consts::TAU * 330.0 * i as f32 / RATE as f32).sin() * 0.6;
+            let out = comp.process(Frame::mono(x));
+            assert_eq!(out.l, out.r, "Sample {i}: die beiden Kanaele muessen gleich bleiben");
         }
     }
 
@@ -423,13 +498,13 @@ mod tests {
     fn silence_drives_the_state_to_exact_zero() {
         let mut comp = Compressor::new(RATE, CompSettings::default());
         for _ in 0..1_000 {
-            comp.process(1.0);
+            comp.process(Frame::mono(1.0));
         }
         for _ in 0..RATE * 4 {
-            comp.process(0.0);
+            comp.process(Frame::mono(0.0));
         }
         assert_eq!(comp.gain_db, 0.0, "kein Denormal im Detektor");
-        assert_eq!(comp.process(0.0), 0.0);
+        assert_eq!(comp.process(Frame::mono(0.0)), Frame::SILENT);
     }
 
     #[test]

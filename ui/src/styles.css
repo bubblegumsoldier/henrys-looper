@@ -1238,6 +1238,55 @@ body {
   flex-direction: column;
   gap: 5px;
 }
+/* The master meter is two bars now; they stack in the header without pushing the buttons around. */
+.live-master-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 190px;
+}
+
+/* mono / stereo, next to the input channels. Stereo is highlighted because it is the exception. */
+.live-track-channels {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-radius: 6px;
+  padding: 2px 7px;
+  background: var(--bg-3);
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+}
+.live-track-channels.channels-stereo {
+  color: var(--accent-2);
+  border-color: var(--accent-2);
+}
+
+/* The panner, laid out like a layer row so the card keeps one rhythm. */
+.live-track-pan {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.live-pan-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg-muted);
+  min-width: 68px;
+}
+.live-pan-slider {
+  flex: 1;
+  min-width: 80px;
+  accent-color: var(--accent);
+  height: 22px;
+}
+.live-pan-value {
+  font-size: 12px;
+  color: var(--fg-muted);
+  min-width: 46px;
+  text-align: right;
+}
 
 .live-track-buttons {
   display: grid;
@@ -1465,6 +1514,17 @@ body {
 }
 .setup-track-in input {
   width: 70px;
+}
+/* mono / stereo per track. Same shape as the channel fields next to it. */
+.setup-track-kind {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.setup-track-kind select {
+  width: 90px;
 }
 .setup-start {
   display: flex;

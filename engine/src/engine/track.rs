@@ -1,16 +1,31 @@
 //! Tracks, layers, and the loop geometry every layer of a track shares.
 //!
-//! Mono `Vec<f32>` per layer (the plan settles this: guitar and voice are mono, which halves memory
-//! and CPU). Every buffer is allocated *and zeroed* by the control thread and handed over; the audio
-//! thread only writes into it, reads from it, and hands it back. It never grows, never shrinks and
-//! is never zero-filled inside the callback.
+//! A layer is one interleaved `Vec<f32>`, mono or stereo depending on what the track records: one
+//! input channel means a mono buffer, a pair means a stereo one. The reasoning behind that split is
+//! in [`super::frame`]. Every buffer is allocated *and zeroed* by the control thread and handed
+//! over; the audio thread only writes into it, reads from it, and hands it back. It never grows,
+//! never shrinks and is never zero-filled inside the callback.
+//!
+//! # Frames, not samples - the one unit rule of this file
+//!
+//! `origin`, `loop_len`, `filled`, every take boundary and every musical position count **frames**.
+//! The channel count enters in exactly two places, [`Track::read`] and [`Track::write`], where a
+//! frame index is turned into an offset into the interleaved buffer:
+//!
+//! ```text
+//! offset = frame_index * channels + channel
+//! ```
+//!
+//! Nothing else multiplies by the channel count. That is what makes the whole geometry below
+//! identical for a mono and a stereo track, and it is the single mistake a stereo rebuild makes if
+//! it makes one.
 //!
 //! # Why all layers of a track are aligned by construction
 //!
 //! A track owns exactly two numbers that define its grid:
 //!
 //! * `origin` - the musical position that loop index 0 corresponds to, set by the first take.
-//! * `loop_len` - the loop length in samples, likewise set by the first take.
+//! * `loop_len` - the loop length in frames, likewise set by the first take.
 //!
 //! Every layer, no matter which bar it was recorded in, is addressed as
 //!
@@ -20,26 +35,36 @@
 //!
 //! so loop index `n` means the same musical instant in every layer. There is no per-layer offset
 //! that could drift, and mixing is a plain sum over the same index. A layer recorded in bar 41 is
-//! therefore aligned with the first one to the sample - not approximately, but by arithmetic.
+//! therefore aligned with the first one to the sample - not approximately, but by arithmetic. This
+//! arithmetic is unchanged by stereo, because it never left the frame domain.
 //!
 //! Two consequences of the zeroed buffer are worth spelling out:
 //!
 //! * Positions an overdub never reached stay 0.0 and add nothing to the sum. No "written" bitmap is
 //!   needed, and nothing has to be cleared inside the callback.
 //! * While an overdub is being recorded, the sample it is about to write at index `i` is read `R`
-//!   samples *before* it is written (the write pointer trails the play pointer by the latency
+//!   frames *before* it is written (the write pointer trails the play pointer by the latency
 //!   compensation), so the running layer contributes silence on its own first pass. It becomes
 //!   audible on the next pass, which is exactly what overdubbing sounds like.
-
-//! # Where the effect chain sits
+//!
+//! # Where the effect chain and the panner sit
 //!
 //! Every track owns one [`Chain`] (`engine::fx`), and it is used in exactly one place:
-//! [`Track::render`], which produces what this track contributes to the output. That contribution
-//! is the sum of its audible layers **plus** its monitored live input, and both go through the
-//! same chain instance - so what the musician hears while singing is what the loop will sound
-//! like. Recording never touches the chain: `process::record_input` writes the raw input sample
-//! into the layer buffer, exactly as it did before effects existed.
+//! [`Track::render`], which produces the **stereo** frame this track contributes to the mix bus:
+//!
+//! ```text
+//! Ebenen-Summe + Mithoeren  ─►  (mono: auf beide Kanaele)  ─►  Kette  ─►  Panorama  ─►  Mixbus
+//! ```
+//!
+//! Layers and monitoring go through the same chain instance, so what the musician hears while
+//! singing is what the loop will sound like. The panner sits *after* the chain, the way a DAW
+//! channel strip is built: the reverb is generated in the middle of the field and then placed,
+//! rather than being fed a signal that is already lopsided.
+//!
+//! Recording never touches either of them: `process::record_input` writes the raw input samples
+//! into the layer buffer, exactly as it did before effects and before stereo existed.
 
+use super::frame::{Channels, Frame, TrackInput, pan_gains};
 use super::fx::Chain;
 
 /// Hard ceiling of layers per track. Not a pre-allocation: layers are allocated one at a time in
@@ -81,25 +106,49 @@ impl TrackState {
 
 /// One recorded layer: a buffer somebody else allocated, plus how it is mixed.
 pub struct Layer {
-    /// Pre-allocated and zeroed by the control thread. Its length is the maximum loop length.
+    /// Pre-allocated and zeroed by the control thread, interleaved. Its length is the maximum loop
+    /// length in frames times [`Layer::channels`].
     buffer: Vec<f32>,
+    /// Channel count of this buffer. A copy of the track's - every layer of a track has the same
+    /// one - kept here so a layer can answer "how many frames am I" on its own.
+    channels: Channels,
     gain: f32,
     muted: bool,
 }
 
 impl Layer {
-    fn new(buffer: Vec<f32>) -> Self {
+    fn new(buffer: Vec<f32>, channels: Channels) -> Self {
         Self {
             buffer,
+            channels,
             gain: 1.0,
             muted: false,
         }
     }
 
-    /// Layer content, for tests and later WAV export.
+    /// How many frames fit into this buffer.
+    #[inline]
+    fn frames(&self) -> u64 {
+        (self.buffer.len() / self.channels.count()) as u64
+    }
+
+    /// Layer content as interleaved samples, `frames` frames long. For tests and later WAV export.
     #[cfg(test)]
-    pub fn content(&self, len: u64) -> &[f32] {
-        &self.buffer[..len as usize]
+    pub fn content(&self, frames: u64) -> &[f32] {
+        &self.buffer[..frames as usize * self.channels.count()]
+    }
+
+    /// One channel of the content, de-interleaved. For tests that check the two sides separately.
+    #[cfg(test)]
+    pub fn channel(&self, channel: usize, frames: u64) -> Vec<f32> {
+        let n = self.channels.count();
+        let c = channel.min(n - 1);
+        (0..frames as usize).map(|i| self.buffer[i * n + c]).collect()
+    }
+
+    #[cfg(test)]
+    pub fn channels(&self) -> Channels {
+        self.channels
     }
 }
 
@@ -132,15 +181,22 @@ pub struct Take {
 }
 
 pub struct Track {
-    /// Zero-based channel index of the interleaved input frame this track records.
-    input_channel: usize,
+    /// Which device input channel or channel pair this track records. Its channel count is the
+    /// channel count of every layer buffer this track will ever get.
+    input: TrackInput,
+    channels: Channels,
+    /// Position in the stereo field, -1.0 hard left to +1.0 hard right. See [`pan_gains`] for the
+    /// law and for why its centre is unity rather than -3 dB.
+    pan: f32,
+    /// Pan a fresh start would have, restored by "alles loeschen".
+    pan_default: f32,
     /// Room for `MAX_LAYERS` from the start, so pushing a layer never reallocates.
     layers: Vec<Layer>,
     /// Musical position that loop index 0 corresponds to.
     origin: u64,
-    /// Loop length in samples; 0 means "no loop yet".
+    /// Loop length in **frames**; 0 means "no loop yet".
     loop_len: u64,
-    /// Samples written contiguously during a loop-defining take. Only that take needs it: it is
+    /// Frames written contiguously during a loop-defining take. Only that take needs it: it is
     /// what bounds the loop length when the take is closed.
     filled: u64,
     take: Option<Take>,
@@ -149,24 +205,33 @@ pub struct Track {
     monitor: bool,
     /// Monitoring state a fresh start would have, restored by "alles loeschen".
     monitor_default: bool,
-    /// Peak of this track's input channel since the last status snapshot.
-    input_peak: f32,
-    /// Peak this track contributed to the output since the last status snapshot, i.e. the sum of
-    /// its audible layers, measured **before** the effect chain. Monitoring is not part of it -
-    /// that path never touches a layer. Measuring the dry sum keeps the meter comparable across a
-    /// preset change: it says how loud the recorded material is, not how loud the reverb is.
-    output_peak: f32,
+    /// Peak of each recorded input channel since the last status snapshot. On a mono track only
+    /// index 0 is ever written.
+    input_peak: [f32; 2],
+    /// Peak this track contributed to the mix bus since the last status snapshot, per side: the
+    /// sum of its audible layers, panned, measured **before** the effect chain.
+    ///
+    /// Two deliberate choices in that sentence. The chain is outside, so the meter keeps saying how
+    /// loud the *take* is rather than how much makeup gain the preset adds - a level that changes
+    /// when a preset is loaded is useless for setting a level. The panner is inside, because a
+    /// hard-panned track that showed the same level on both meters would simply be lying about
+    /// where it sits. Monitoring is not part of it either; that path never touches a layer.
+    output_peak: [f32; 2],
     /// This track's effect chain. Playback and monitoring both run through it; see the module
     /// comment.
     fx: Chain,
 }
 
 impl Track {
-    /// Built by the control thread - the layer vector and the chain's buffers (delay line, reverb
+    /// Built by the control thread - the layer vector and the chain's buffers (delay lines, reverb
     /// combs) are the only allocations, and they happen here.
-    pub fn new(input_channel: usize, monitor: bool, sample_rate: u32) -> Self {
+    pub fn new(input: TrackInput, monitor: bool, pan: f32, sample_rate: u32) -> Self {
+        let pan = pan.clamp(-1.0, 1.0);
         Self {
-            input_channel,
+            input,
+            channels: input.channels(),
+            pan,
+            pan_default: pan,
             layers: Vec::with_capacity(MAX_LAYERS),
             origin: 0,
             loop_len: 0,
@@ -176,10 +241,17 @@ impl Track {
             playing: false,
             monitor,
             monitor_default: monitor,
-            input_peak: 0.0,
-            output_peak: 0.0,
+            input_peak: [0.0; 2],
+            output_peak: [0.0; 2],
             fx: Chain::new(sample_rate),
         }
+    }
+
+    /// A mono track on one input channel, centred. The shorthand the tests and the mono default
+    /// setup use.
+    #[cfg(test)]
+    pub fn mono(input_channel: usize, monitor: bool, sample_rate: u32) -> Self {
+        Self::new(TrackInput::Mono(input_channel), monitor, 0.0, sample_rate)
     }
 
     #[inline]
@@ -192,24 +264,44 @@ impl Track {
         &mut self.fx
     }
 
-    /// What this track contributes to the output at musical position `pos`.
+    /// What this track contributes to the stereo mix bus at musical position `pos`.
     ///
-    /// `monitor` is this track's live input sample, already scaled by the monitor gain, or 0.0
-    /// when monitoring is off. Layers and monitoring are summed *before* the chain on purpose -
-    /// one chain, one state, so the loop and the live voice over it sound the same.
+    /// `monitor` is this track's live input, already fanned out to stereo and scaled by the monitor
+    /// gain, or silence when monitoring is off. Layers and monitoring are summed *before* the chain
+    /// on purpose - one chain, one state, so the loop and the live voice over it sound the same -
+    /// and the panner comes last, as in a DAW channel strip.
     #[inline]
-    pub fn render(&mut self, pos: u64, monitor: f32) -> f32 {
-        let dry = if self.playing { self.read(pos) } else { 0.0 };
-        let magnitude = dry.abs();
-        if magnitude > self.output_peak {
-            self.output_peak = magnitude;
-        }
-        self.fx.process(dry + monitor)
+    pub fn render(&mut self, pos: u64, monitor: Frame) -> Frame {
+        let dry = if self.playing {
+            self.read(pos)
+        } else {
+            Frame::SILENT
+        };
+        let (gain_l, gain_r) = pan_gains(self.pan);
+        self.note_output_peak(Frame::new(dry.l * gain_l, dry.r * gain_r));
+        let wet = self.fx.process(dry.added(monitor));
+        Frame::new(wet.l * gain_l, wet.r * gain_r)
     }
 
     #[inline]
-    pub fn input_channel(&self) -> usize {
-        self.input_channel
+    pub fn input(&self) -> TrackInput {
+        self.input
+    }
+
+    /// Channel count of this track's loop buffers: 1 for a microphone, 2 for a stereo source.
+    #[inline]
+    pub fn channels(&self) -> Channels {
+        self.channels
+    }
+
+    #[inline]
+    pub fn pan(&self) -> f32 {
+        self.pan
+    }
+
+    #[inline]
+    pub fn set_pan(&mut self, pan: f32) {
+        self.pan = pan.clamp(-1.0, 1.0);
     }
 
     #[inline]
@@ -288,108 +380,147 @@ impl Track {
         }
     }
 
+    /// Note the peak of one recorded input channel. `channel` is the buffer channel, not the
+    /// device channel.
     #[inline]
-    pub fn note_input_peak(&mut self, magnitude: f32) {
-        if magnitude > self.input_peak {
-            self.input_peak = magnitude;
+    pub fn note_input_peak(&mut self, channel: usize, magnitude: f32) {
+        let slot = &mut self.input_peak[channel.min(1)];
+        if magnitude > *slot {
+            *slot = magnitude;
         }
     }
 
     #[inline]
-    pub fn take_input_peak(&mut self) -> f32 {
-        std::mem::replace(&mut self.input_peak, 0.0)
+    pub fn take_input_peak(&mut self) -> [f32; 2] {
+        std::mem::replace(&mut self.input_peak, [0.0; 2])
     }
 
     #[inline]
-    pub fn note_output_peak(&mut self, magnitude: f32) {
-        if magnitude > self.output_peak {
-            self.output_peak = magnitude;
+    pub fn note_output_peak(&mut self, frame: Frame) {
+        for c in 0..2 {
+            let magnitude = frame.channel(c).abs();
+            if magnitude > self.output_peak[c] {
+                self.output_peak[c] = magnitude;
+            }
         }
     }
 
     #[inline]
-    pub fn take_output_peak(&mut self) -> f32 {
-        std::mem::replace(&mut self.output_peak, 0.0)
+    pub fn take_output_peak(&mut self) -> [f32; 2] {
+        std::mem::replace(&mut self.output_peak, [0.0; 2])
     }
 
-    /// Sum of all audible layers at musical position `pos`.
+    /// Sum of all audible layers at musical position `pos`, as a stereo frame.
+    ///
+    /// A mono track's sum is fanned out to both channels here, so everything downstream - chain,
+    /// panner, bus - sees a stereo frame and needs no case distinction. See [`super::frame`] for
+    /// why that fan-out is at unity rather than at -3 dB.
     ///
     /// Positions that were never written return silence rather than stale memory, because every
     /// buffer arrives zeroed from the control thread.
     #[inline]
-    pub fn read(&self, pos: u64) -> f32 {
+    pub fn read(&self, pos: u64) -> Frame {
         if self.loop_len == 0 || pos < self.origin {
-            return 0.0;
+            return Frame::SILENT;
         }
-        let idx = ((pos - self.origin) % self.loop_len) as usize;
-        let mut sum = 0.0f32;
+        let frame_index = ((pos - self.origin) % self.loop_len) as usize;
+        let n = self.channels.count();
+        // The one place a frame index becomes a buffer offset. See the module comment.
+        let base = frame_index * n;
+        let mut left = 0.0f32;
+        let mut right = 0.0f32;
         for layer in &self.layers {
             if layer.muted {
                 continue;
             }
-            // `loop_len` never exceeds a buffer length, so this always hits; `get` keeps a
+            // `loop_len` never exceeds a buffer's frame count, so this always hits; `get` keeps a
             // hypothetical mismatch from panicking inside the audio callback.
-            if let Some(&v) = layer.buffer.get(idx) {
-                sum += v * layer.gain;
+            if let Some(&v) = layer.buffer.get(base) {
+                left += v * layer.gain;
+            }
+            if n == 2 {
+                if let Some(&v) = layer.buffer.get(base + 1) {
+                    right += v * layer.gain;
+                }
             }
         }
-        sum
+        if n == 2 {
+            Frame::new(left, right)
+        } else {
+            Frame::mono(left)
+        }
     }
 
-    /// Write one sample of the running take. `pos` is the *musical* position of the sample, i.e.
-    /// latency compensation has already been applied by the caller.
+    /// Write one frame of the running take. `pos` is the *musical* position of the frame, i.e.
+    /// latency compensation has already been applied by the caller. On a mono track only the left
+    /// channel of `frame` is stored.
     #[inline]
-    pub fn write(&mut self, pos: u64, sample: f32) {
+    pub fn write(&mut self, pos: u64, frame: Frame) {
         let Some(take) = self.take else {
             return;
         };
+        let channels = self.channels;
         let Some(layer) = self.layers.get_mut(take.layer) else {
             return;
         };
-        let idx = if take.defines_loop {
-            let idx = pos.wrapping_sub(self.origin);
-            if idx >= layer.buffer.len() as u64 {
+        let capacity = layer.frames();
+        let index = if take.defines_loop {
+            let index = pos.wrapping_sub(self.origin);
+            if index >= capacity {
                 return;
             }
             // A loop-defining take is written strictly sequentially, so this is the only value
-            // `idx` can have.
-            debug_assert_eq!(idx, self.filled, "Luecke im Loop-Puffer");
-            self.filled = idx + 1;
-            idx
+            // `index` can have.
+            debug_assert_eq!(index, self.filled, "Luecke im Loop-Puffer");
+            self.filled = index + 1;
+            index
         } else {
             if self.loop_len == 0 {
                 return;
             }
             (pos - self.origin) % self.loop_len
         };
-        if let Some(slot) = layer.buffer.get_mut(idx as usize) {
-            *slot = sample;
+        let n = channels.count();
+        // The second and last place a frame index becomes a buffer offset.
+        let base = index as usize * n;
+        for c in 0..n {
+            if let Some(slot) = layer.buffer.get_mut(base + c) {
+                *slot = frame.channel(c);
+            }
         }
     }
 
     /// Musical position at which the running take has to end at the latest, if any.
     ///
     /// A loop-defining take is bounded by the buffer; an overdub is bounded by one pass through the
-    /// loop, so it can never overwrite what it has just recorded.
+    /// loop, so it can never overwrite what it has just recorded. Both in frames.
     #[inline]
     pub fn take_limit(&self) -> Option<u64> {
         let take = self.take?;
         let layer = self.layers.get(take.layer)?;
         if take.defines_loop {
-            Some(take.start + layer.buffer.len() as u64)
+            Some(take.start + layer.frames())
         } else {
             Some(take.start + self.loop_len)
         }
     }
 
     /// Start the first take of a new loop. The caller has already returned the old layers.
+    ///
+    /// The buffer has to be long enough for `frames * channels` samples; the caller
+    /// (`process::take_spare`) picks it from the pool of the right channel count.
     pub fn begin_loop_take(&mut self, start: u64, buffer: Vec<f32>) {
         debug_assert!(self.layers.len() < MAX_LAYERS);
+        debug_assert_eq!(
+            buffer.len() % self.channels.count(),
+            0,
+            "Puffer passt nicht zur Kanalzahl des Tracks"
+        );
         self.origin = start;
         self.loop_len = 0;
         self.filled = 0;
         self.playing = false;
-        self.layers.push(Layer::new(buffer));
+        self.layers.push(Layer::new(buffer, self.channels));
         self.take = Some(Take {
             start,
             end: None,
@@ -401,7 +532,12 @@ impl Track {
     /// Start a further layer on the existing grid.
     pub fn begin_overdub_take(&mut self, start: u64, buffer: Vec<f32>) {
         debug_assert!(self.layers.len() < MAX_LAYERS);
-        self.layers.push(Layer::new(buffer));
+        debug_assert_eq!(
+            buffer.len() % self.channels.count(),
+            0,
+            "Puffer passt nicht zur Kanalzahl des Tracks"
+        );
+        self.layers.push(Layer::new(buffer, self.channels));
         self.take = Some(Take {
             start,
             end: None,
@@ -494,10 +630,11 @@ impl Track {
         }
     }
 
+    /// Frames the running take's buffer can hold.
     fn take_capacity(&self) -> u64 {
         self.take
             .and_then(|t| self.layers.get(t.layer))
-            .map(|l| l.buffer.len() as u64)
+            .map(Layer::frames)
             .unwrap_or(0)
     }
 
@@ -572,6 +709,11 @@ impl Track {
     /// track feeds its chain nothing but zeros.
     pub fn restore_defaults(&mut self) {
         self.monitor = self.monitor_default;
+        // The pan is part of the arrangement, not of the channel: two mono tracks placed left and
+        // right are a setup decision, and emptying the loops must not drag both back to the middle.
+        // It is restored to what the track was *started* with, which is what "wie frisch gestartet"
+        // means everywhere else in this function.
+        self.pan = self.pan_default;
     }
 }
 
@@ -579,9 +721,16 @@ impl Track {
 mod tests {
     use super::*;
 
-    fn track_with_layer(capacity: usize) -> Track {
-        let mut t = Track::new(0, false, 48_000);
-        t.begin_loop_take(1_000, vec![0.0; capacity]);
+    fn track_with_layer(frames: usize) -> Track {
+        let mut t = Track::mono(0, false, 48_000);
+        t.begin_loop_take(1_000, vec![0.0; frames]);
+        t
+    }
+
+    /// A stereo track with a buffer of `frames` frames, i.e. `2 * frames` samples.
+    fn stereo_track_with_layer(frames: usize) -> Track {
+        let mut t = Track::new(TrackInput::Stereo { left: 2, right: 3 }, false, 0.0, 48_000);
+        t.begin_loop_take(1_000, vec![0.0; frames * 2]);
         t
     }
 
@@ -589,63 +738,105 @@ mod tests {
     fn writes_are_sequential_and_readable() {
         let mut t = track_with_layer(100);
         for i in 0..40u64 {
-            t.write(1_000 + i, i as f32);
+            t.write(1_000 + i, Frame::mono(i as f32));
         }
         t.finish_take(1_040);
         assert_eq!(t.loop_len(), 40);
-        assert_eq!(t.read(1_000), 0.0);
-        assert_eq!(t.read(1_039), 39.0);
-        // Wrap-around: sample 40 of the loop is sample 0 again.
-        assert_eq!(t.read(1_040), 0.0);
-        assert_eq!(t.read(1_041), 1.0);
-        assert_eq!(t.read(1_000 + 40 * 7 + 13), 13.0);
+        assert_eq!(t.read(1_000), Frame::mono(0.0));
+        assert_eq!(t.read(1_039), Frame::mono(39.0));
+        // Wrap-around: frame 40 of the loop is frame 0 again.
+        assert_eq!(t.read(1_040), Frame::mono(0.0));
+        assert_eq!(t.read(1_041), Frame::mono(1.0));
+        assert_eq!(t.read(1_000 + 40 * 7 + 13), Frame::mono(13.0));
+    }
+
+    /// The same thing on a stereo track, and the point of the whole exercise: the two channels
+    /// carry different material and never swap places, however far into the loop one reads.
+    #[test]
+    fn a_stereo_track_keeps_its_two_channels_apart() {
+        let mut t = stereo_track_with_layer(100);
+        assert_eq!(t.channels(), Channels::Stereo);
+        for i in 0..40u64 {
+            t.write(1_000 + i, Frame::new(i as f32, 100.0 + i as f32));
+        }
+        t.finish_take(1_040);
+        assert_eq!(t.loop_len(), 40, "die Loop-Laenge zaehlt Frames, nicht Samples");
+        assert_eq!(t.read(1_000), Frame::new(0.0, 100.0));
+        assert_eq!(t.read(1_039), Frame::new(39.0, 139.0));
+        assert_eq!(t.read(1_040), Frame::new(0.0, 100.0), "Naht");
+        assert_eq!(t.read(1_000 + 40 * 7 + 13), Frame::new(13.0, 113.0));
+        let layer = t.layer(0).expect("Ebene");
+        assert_eq!(layer.channels(), Channels::Stereo);
+        assert_eq!(
+            layer.content(40).len(),
+            80,
+            "interleaved: 40 Frames sind 80 Samples"
+        );
+        assert_eq!(layer.channel(0, 40)[13], 13.0);
+        assert_eq!(layer.channel(1, 40)[13], 113.0);
     }
 
     #[test]
     fn unwritten_positions_are_silent() {
         let mut t = track_with_layer(100);
         for i in 0..10u64 {
-            t.write(1_000 + i, 1.0);
+            t.write(1_000 + i, Frame::mono(1.0));
         }
-        // Pretend the take was closed at +50 although only 10 samples arrived: the loop can only
+        // Pretend the take was closed at +50 although only 10 frames arrived: the loop can only
         // be as long as what was actually written.
         t.finish_take(1_050);
         assert_eq!(t.loop_len(), 10);
-        assert_eq!(t.read(1_009), 1.0);
-        assert_eq!(t.read(1_010), 1.0); // wrapped, not stale memory
+        assert_eq!(t.read(1_009), Frame::mono(1.0));
+        assert_eq!(t.read(1_010), Frame::mono(1.0)); // wrapped, not stale memory
     }
 
     #[test]
     fn writes_beyond_capacity_are_dropped() {
         let mut t = track_with_layer(8);
         for i in 0..20u64 {
-            t.write(1_000 + i, i as f32);
+            t.write(1_000 + i, Frame::mono(i as f32));
         }
         assert_eq!(t.filled(), 8);
+
+        // And the same bound in frames on a stereo track, whose buffer is twice as long in
+        // samples: eight frames, not sixteen.
+        let mut t = stereo_track_with_layer(8);
+        for i in 0..20u64 {
+            t.write(1_000 + i, Frame::new(i as f32, i as f32));
+        }
+        assert_eq!(t.filled(), 8, "die Grenze zaehlt Frames");
     }
 
     #[test]
     fn clearing_the_last_layer_resets_the_geometry() {
         let mut t = track_with_layer(64);
-        t.write(1_000, 0.5);
+        t.write(1_000, Frame::mono(0.5));
         t.finish_take(1_001);
         assert!(t.has_content());
         let buffer = t.pop_layer().expect("Puffer kommt zurueck");
         assert_eq!(buffer.len(), 64);
         assert!(!t.has_content());
         assert_eq!(t.loop_len(), 0);
-        assert_eq!(t.read(1_000), 0.0);
+        assert_eq!(t.read(1_000), Frame::SILENT);
         assert_eq!(t.layer_count(), 0);
+
+        // A stereo track hands back a buffer of twice the length - the pool has to get its own
+        // kind back, or the next stereo take would be handed a mono buffer.
+        let mut t = stereo_track_with_layer(64);
+        t.write(1_000, Frame::new(0.5, 0.25));
+        t.finish_take(1_001);
+        let buffer = t.pop_layer().expect("Puffer kommt zurueck");
+        assert_eq!(buffer.len(), 128);
     }
 
     /// Three layers, the later ones started in the middle of the loop: every one of them has to
     /// address the same musical instant with the same index.
     #[test]
     fn layers_share_one_grid_regardless_of_where_they_started() {
-        let mut t = Track::new(0, false, 48_000);
+        let mut t = Track::mono(0, false, 48_000);
         t.begin_loop_take(1_000, vec![0.0; 64]);
         for i in 0..10u64 {
-            t.write(1_000 + i, 1.0);
+            t.write(1_000 + i, Frame::mono(1.0));
         }
         t.set_take_end(1_010);
         t.finish_take(1_010);
@@ -655,39 +846,159 @@ mod tests {
         let start = 1_000 + 3 * 10 + 4;
         t.begin_overdub_take(start, vec![0.0; 64]);
         for i in 0..10u64 {
-            t.write(start + i, 10.0);
+            t.write(start + i, Frame::mono(10.0));
         }
         t.finish_take(start + 10);
 
         // Every loop position now carries 1.0 + 10.0, wherever the overdub happened to begin.
         for i in 0..10u64 {
-            assert_eq!(t.read(1_000 + i), 11.0, "Loop-Index {i}");
-            assert_eq!(t.read(1_000 + 77 * 10 + i), 11.0, "Loop-Index {i}, spaeter");
+            assert_eq!(t.read(1_000 + i), Frame::mono(11.0), "Loop-Index {i}");
+            assert_eq!(
+                t.read(1_000 + 77 * 10 + i),
+                Frame::mono(11.0),
+                "Loop-Index {i}, spaeter"
+            );
+        }
+    }
+
+    /// The same grid property on a stereo track, with the two channels carrying different
+    /// material: an offset of one *sample* instead of one frame would swap the sides.
+    #[test]
+    fn stereo_layers_share_one_grid_without_swapping_the_sides() {
+        let mut t = stereo_track_with_layer(64);
+        for i in 0..10u64 {
+            t.write(1_000 + i, Frame::new(1.0, 2.0));
+        }
+        t.set_take_end(1_010);
+        t.finish_take(1_010);
+
+        let start = 1_000 + 3 * 10 + 4;
+        t.begin_overdub_take(start, vec![0.0; 128]);
+        for i in 0..10u64 {
+            t.write(start + i, Frame::new(10.0, 20.0));
+        }
+        t.finish_take(start + 10);
+
+        for i in 0..10u64 {
+            assert_eq!(t.read(1_000 + i), Frame::new(11.0, 22.0), "Loop-Index {i}");
+            assert_eq!(
+                t.read(1_000 + 77 * 10 + i),
+                Frame::new(11.0, 22.0),
+                "Loop-Index {i}, spaeter"
+            );
         }
     }
 
     #[test]
     fn muting_and_gain_change_the_sum_only() {
-        let mut t = Track::new(0, false, 48_000);
+        let mut t = Track::mono(0, false, 48_000);
         t.begin_loop_take(0, vec![0.0; 16]);
         for i in 0..4u64 {
-            t.write(i, 1.0);
+            t.write(i, Frame::mono(1.0));
         }
         t.set_take_end(4);
         t.finish_take(4);
         t.begin_overdub_take(0, vec![0.0; 16]);
         for i in 0..4u64 {
-            t.write(i, 2.0);
+            t.write(i, Frame::mono(2.0));
         }
         t.finish_take(4);
 
-        assert_eq!(t.read(0), 3.0);
+        assert_eq!(t.read(0), Frame::mono(3.0));
         assert!(t.set_layer_muted(1, true));
-        assert_eq!(t.read(0), 1.0, "stummer Layer faellt aus der Summe");
+        assert_eq!(
+            t.read(0),
+            Frame::mono(1.0),
+            "stummer Layer faellt aus der Summe"
+        );
         assert_eq!(t.muted_mask(), 0b10);
         assert!(t.set_layer_muted(1, false));
         assert!(t.set_layer_gain(1, 0.5));
-        assert_eq!(t.read(0), 2.0);
+        assert_eq!(t.read(0), Frame::mono(2.0));
         assert!(!t.set_layer_gain(7, 0.5), "Layer 7 gibt es nicht");
+    }
+
+    /// The panner, at the positions a musician actually uses. A mono track in the centre is
+    /// equally loud on both sides; hard left leaves the right side digitally silent.
+    #[test]
+    fn a_mono_track_sits_in_the_middle_until_it_is_panned() {
+        let mut t = track_with_layer(16);
+        for i in 0..4u64 {
+            t.write(1_000 + i, Frame::mono(0.5));
+        }
+        t.set_take_end(1_004);
+        t.finish_take(1_004);
+        t.set_playing(true);
+
+        assert_eq!(t.pan(), 0.0, "ein Track startet in der Mitte");
+        assert_eq!(
+            t.render(1_000, Frame::SILENT),
+            Frame::new(0.5, 0.5),
+            "Mitte: gleich laut auf beiden Seiten"
+        );
+
+        t.set_pan(-1.0);
+        assert_eq!(
+            t.render(1_001, Frame::SILENT),
+            Frame::new(0.5, 0.0),
+            "ganz links laesst rechts still"
+        );
+
+        t.set_pan(1.0);
+        assert_eq!(
+            t.render(1_002, Frame::SILENT),
+            Frame::new(0.0, 0.5),
+            "ganz rechts laesst links still"
+        );
+
+        t.set_pan(-0.5);
+        assert_eq!(t.render(1_003, Frame::SILENT), Frame::new(0.5, 0.25));
+
+        // Out of range is clamped, not wrapped.
+        t.set_pan(-9.0);
+        assert_eq!(t.pan(), -1.0);
+    }
+
+    /// A stereo track's pan is a balance: at the centre both sides pass at unity, so a stereo
+    /// source is not 3 dB quieter than a mono one just for being stereo.
+    #[test]
+    fn a_stereo_track_keeps_both_sides_at_unity_in_the_centre() {
+        let mut t = stereo_track_with_layer(16);
+        t.write(1_000, Frame::new(0.4, 0.8));
+        t.set_take_end(1_001);
+        t.finish_take(1_001);
+        t.set_playing(true);
+        assert_eq!(t.render(1_000, Frame::SILENT), Frame::new(0.4, 0.8));
+        t.set_pan(-1.0);
+        assert_eq!(t.render(1_000, Frame::SILENT), Frame::new(0.4, 0.0));
+    }
+
+    /// The output meter is measured after the panner: a hard-panned track that showed level on
+    /// both sides would be lying about where it is.
+    #[test]
+    fn the_output_meter_follows_the_panner() {
+        let mut t = track_with_layer(16);
+        t.write(1_000, Frame::mono(0.5));
+        t.set_take_end(1_001);
+        t.finish_take(1_001);
+        t.set_playing(true);
+        t.set_pan(-1.0);
+        t.render(1_000, Frame::SILENT);
+        assert_eq!(t.take_output_peak(), [0.5, 0.0]);
+        assert_eq!(
+            t.take_output_peak(),
+            [0.0, 0.0],
+            "der Peak wird beim Lesen geleert"
+        );
+    }
+
+    #[test]
+    fn the_input_meter_has_one_value_per_recorded_channel() {
+        let mut t = stereo_track_with_layer(16);
+        t.note_input_peak(0, 0.25);
+        t.note_input_peak(1, 0.75);
+        t.note_input_peak(0, 0.1);
+        assert_eq!(t.take_input_peak(), [0.25, 0.75]);
+        assert_eq!(t.take_input_peak(), [0.0, 0.0]);
     }
 }

@@ -14,6 +14,8 @@
 //!
 //! Module map:
 //!
+//! * [`frame`] - the stereo sample pair, the channel count of a loop buffer, the input channels of
+//!   a track, and the pan law. The vocabulary the whole stereo path is written in.
 //! * [`timeline`] - sample position <-> bar/beat, rounding-error free. Pure arithmetic.
 //! * [`command`] - timestamped commands, the status snapshot, the lock-free channels in both
 //!   directions and the control thread's stock of empty layer buffers.
@@ -31,6 +33,7 @@
 
 pub mod calibrate;
 pub mod command;
+pub mod frame;
 pub mod fx;
 pub mod live;
 pub mod metro;

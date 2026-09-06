@@ -3,8 +3,12 @@
 // authority, this is only its TypeScript shadow.
 //
 // Two conventions run through all of it: indices are zero-based and are what a command expects,
-// while `input_channel` and every layer's `number` are one-based, because that is what is printed
-// on the interface. `*_dbfs` is null at digital silence, minus infinity has no JSON form.
+// while `input_channel`, `input_channels` and every layer's `number` are one-based, because that is
+// what is printed on the interface. `*_dbfs` is null at digital silence, minus infinity has no JSON
+// form.
+//
+// Levels come in two forms since the engine became stereo: `*_peak` is the louder of the two
+// channels (draw one bar and be done), `*_peaks` is one entry per channel (draw a stereo meter).
 // ---------------------------------------------------------------------------------------------
 
 /** Track state as the engine reports it; `state_label` carries the German word to print. */
@@ -36,21 +40,36 @@ export interface LooperTrackStatus {
   /** Zero-based; this is what a track command expects. */
   index: number;
   name: string;
-  /** One-based, as printed on the interface. */
+  /** One-based, as printed on the interface. The left one of a stereo pair. */
   input_channel: number;
+  /** Every input this track records, one-based: one entry for mono, two for stereo. */
+  input_channels: number[];
+  /** 1 when the loop buffers are mono, 2 when they are stereo. */
+  channels: number;
+  /** German word for that: `mono` or `stereo`. */
+  channels_label: string;
+  /** Position between the speakers: -1 hard left, 0 centre, +1 hard right. */
+  pan: number;
   state: LooperTrackState;
   /** German word for the state, ready to print. */
   state_label: string;
   monitor: boolean;
   playing: boolean;
+  /** Loop length in frames - one sample per frame on a mono track, two on a stereo one. */
   loop_samples: number;
   loop_seconds: number;
-  /** Samples already written during a running loop-defining take. */
+  /** Frames already written during a running loop-defining take. */
   filled_samples: number;
+  /** Loudest recorded input channel. */
   input_peak: number;
   input_dbfs: number | null;
+  /** One entry per recorded input channel. */
+  input_peaks: number[];
+  /** Louder side of this track's contribution to the bus. */
   output_peak: number;
   output_dbfs: number | null;
+  /** Left and right, always two entries - the bus is stereo whatever the track records. */
+  output_peaks: number[];
   layers: LayerStatus[];
   /** What this track is waiting for, or null when nothing is scheduled. */
   pending_kind: PendingKind | null;
@@ -84,8 +103,11 @@ export interface LooperStatus {
   sample_rate: number;
   latency_samples: number;
   click: boolean;
+  /** Louder side of the master bus. */
   output_peak: number;
   output_dbfs: number | null;
+  /** Left and right of the master bus, always two entries. */
+  output_peaks: number[];
   tracks: LooperTrackStatus[];
   xruns: number;
   fifo_underruns: number;
@@ -119,6 +141,7 @@ export const IDLE_STATUS: LooperStatus = {
   click: false,
   output_peak: 0,
   output_dbfs: null,
+  output_peaks: [0, 0],
   tracks: [],
   xruns: 0,
   fifo_underruns: 0,
@@ -169,8 +192,15 @@ export interface DeviceReport {
 
 export interface StartTrack {
   name: string;
-  /** One-based, as printed on the interface. */
+  /** One-based, as printed on the interface. The left one of a stereo pair. */
   input_channel: number;
+  /**
+   * Second input, one-based. Set it and the track records **stereo**; leave it null and the track
+   * records mono. Which two inputs belong together is a wiring fact, so it is never guessed.
+   */
+  input_channel_right: number | null;
+  /** Position between the speakers: -1 hard left, 0 centre, +1 hard right. */
+  pan: number;
 }
 
 export interface StartConfig {

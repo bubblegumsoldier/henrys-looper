@@ -67,8 +67,11 @@ use crate::meter::{Stats, dbfs, fmt_dbfs, print_stats};
 use super::command::{
     BufferChannel, Command, Status, StatusReceiver, buffer_channel, command_channel, status_channel,
 };
+use super::frame::TrackInput;
 use super::metro::Metronome;
-use super::process::{EngineConfig, EngineCore, check_loop, loop_capacity};
+use super::process::{
+    EngineConfig, EngineCore, OUT_CHANNELS, check_loop, loop_capacity, spread_frame,
+};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{Track, TrackState};
 
@@ -444,10 +447,11 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         input_channels: 1,
         // The chain stays bypassed for the whole measurement: a calibration compares recorded
         // samples with the grid they were played against, and an effect on the playback path would
-        // change what the loopback cable brings back.
-        tracks: vec![Track::new(0, false, rate)],
-        spares: Vec::with_capacity(2),
-        layer_capacity: capacity as u64,
+        // change what the loopback cable brings back. The track is mono and centred, because the
+        // cable carries one channel and the click is in the middle anyway.
+        tracks: vec![Track::new(TrackInput::Mono(0), false, 0.0, rate)],
+        spares: [Vec::with_capacity(2), Vec::new()],
+        layer_frames: capacity as u64,
         commands: cmd_rx,
         status: status_tx,
         buffers: buffer_endpoint,
@@ -502,7 +506,7 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     let sh_out_err = Arc::clone(&shared);
     let mut core = core;
     let mut in_scratch = vec![0.0f32; scratch_frames];
-    let mut out_scratch = vec![0.0f32; scratch_frames];
+    let mut out_scratch = vec![0.0f32; scratch_frames * OUT_CHANNELS];
     let output = audio::build_output(
         &setup.output,
         &setup.out_plan,
@@ -524,16 +528,13 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
                 if got < n {
                     sh_out.underruns.fetch_add(1, Ordering::Relaxed);
                 }
-                core.process(&in_scratch[..got], &mut out_scratch[..n]);
+                core.process(&in_scratch[..got], &mut out_scratch[..n * OUT_CHANNELS]);
                 let base = done * out_channels;
                 for (i, frame) in data[base..base + n * out_channels]
                     .chunks_exact_mut(out_channels)
                     .enumerate()
                 {
-                    let v = out_scratch[i];
-                    for sample in frame.iter_mut() {
-                        *sample = v;
-                    }
+                    spread_frame(&out_scratch[i * OUT_CHANNELS..i * OUT_CHANNELS + OUT_CHANNELS], frame);
                 }
                 done += n;
             }

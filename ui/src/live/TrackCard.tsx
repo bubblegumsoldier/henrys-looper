@@ -14,6 +14,7 @@ export interface TrackActions {
   play: (track: number) => void;
   clear: (track: number) => void;
   monitor: (track: number, on: boolean) => void;
+  pan: (track: number, pan: number) => void;
   layerMute: (track: number, layer: number, muted: boolean) => void;
   layerRemove: (track: number, layer: number) => void;
   layerGain: (track: number, layer: number, gain: number) => void;
@@ -29,6 +30,97 @@ interface Props {
 
 /** A dragged slider would otherwise send a command per pixel. */
 const GAIN_THROTTLE_MS = 60;
+
+/** `Mitte`, `L 50`, `R 100` - the same wording the CLI prints. */
+function panLabel(pan: number): string {
+  const percent = Math.round(Math.abs(pan) * 100);
+  if (percent === 0) return "Mitte";
+  return `${pan < 0 ? "L" : "R"} ${percent}`;
+}
+
+/**
+ * The panner. Mono tracks are placed with it, stereo tracks balanced; either way the centre passes
+ * both sides at unity, which is why the label says "Mitte" and not "-3 dB".
+ *
+ * Throttled exactly like the layer gain: a drag would otherwise be one command per pixel.
+ */
+function PanRow({ track, pan, actions }: { track: number; pan: number; actions: TrackActions }) {
+  const [local, setLocal] = useState(pan);
+  const dragging = useRef(false);
+  const timer = useRef<number | undefined>(undefined);
+  const pending = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!dragging.current) setLocal(pan);
+  }, [pan]);
+
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  const flush = useCallback(() => {
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+    if (pending.current !== null) {
+      actions.pan(track, pending.current);
+      pending.current = null;
+    }
+  }, [actions, track]);
+
+  const send = useCallback(
+    (value: number) => {
+      pending.current = value;
+      if (timer.current !== undefined) return;
+      timer.current = window.setTimeout(() => {
+        timer.current = undefined;
+        if (pending.current !== null) {
+          actions.pan(track, pending.current);
+          pending.current = null;
+        }
+      }, GAIN_THROTTLE_MS);
+    },
+    [actions, track],
+  );
+
+  return (
+    <div className="live-track-pan">
+      <span className="live-pan-label">Panorama</span>
+      <input
+        className="live-pan-slider"
+        type="range"
+        min={-1}
+        max={1}
+        step={0.05}
+        value={local}
+        onPointerDown={() => {
+          dragging.current = true;
+        }}
+        onPointerUp={() => {
+          flush();
+          dragging.current = false;
+        }}
+        onBlur={flush}
+        onChange={(e) => {
+          const value = Number(e.target.value);
+          setLocal(value);
+          send(value);
+        }}
+        title="Wo dieser Track zwischen den Lautsprechern sitzt"
+      />
+      <button
+        className="btn btn-mini"
+        onClick={() => {
+          setLocal(0);
+          flush();
+          actions.pan(track, 0);
+        }}
+        disabled={local === 0}
+        title="Zurück in die Mitte"
+      >
+        Mitte
+      </button>
+      <span className="live-pan-value mono">{panLabel(local)}</span>
+    </div>
+  );
+}
 
 /**
  * The count-in, big enough to read with a guitar in your hands and a few metres of stage in
@@ -156,8 +248,14 @@ function LayerRow({
 
 function TrackCardInner({ track, selected, onSelect, actions }: Props) {
   const i = track.index;
-  const inputPeak = useCallback((s: LooperStatus) => s.tracks[i]?.input_peak ?? 0, [i]);
-  const outputPeak = useCallback((s: LooperStatus) => s.tracks[i]?.output_peak ?? 0, [i]);
+  const stereo = track.channels >= 2;
+  // One picker per bar. A stereo track shows its two input channels separately - a dead cable on
+  // one side is otherwise invisible until the take is played back - and every track shows its two
+  // bus channels, because the bus is stereo whatever the track records.
+  const inLeft = useCallback((s: LooperStatus) => s.tracks[i]?.input_peaks?.[0] ?? 0, [i]);
+  const inRight = useCallback((s: LooperStatus) => s.tracks[i]?.input_peaks?.[1] ?? 0, [i]);
+  const outLeft = useCallback((s: LooperStatus) => s.tracks[i]?.output_peaks?.[0] ?? 0, [i]);
+  const outRight = useCallback((s: LooperStatus) => s.tracks[i]?.output_peaks?.[1] ?? 0, [i]);
   const empty = track.state === "empty";
 
   return (
@@ -170,8 +268,18 @@ function TrackCardInner({ track, selected, onSelect, actions }: Props) {
           {i + 1}
         </span>
         <h2 className="live-track-name">{track.name}</h2>
-        <span className="live-track-input mono" title="Eingangskanal am Interface">
-          In {track.input_channel}
+        <span
+          className="live-track-input mono"
+          title={
+            stereo
+              ? "Eingangskanäle am Interface; dieser Track nimmt stereo auf"
+              : "Eingangskanal am Interface; dieser Track nimmt mono auf"
+          }
+        >
+          In {track.input_channels.join("+")}
+        </span>
+        <span className={`live-track-channels channels-${track.channels_label}`}>
+          {track.channels_label}
         </span>
         <span className={`live-state state-badge-${track.state}`}>{track.state_label}</span>
       </header>
@@ -179,9 +287,19 @@ function TrackCardInner({ track, selected, onSelect, actions }: Props) {
       <Countdown track={track} />
 
       <div className="live-track-meters">
-        <Meter label="Ein" kind="in" pick={inputPeak} />
-        <Meter label="Aus" kind="out" pick={outputPeak} />
+        {stereo ? (
+          <>
+            <Meter label="Ein L" kind="in" pick={inLeft} />
+            <Meter label="Ein R" kind="in" pick={inRight} />
+          </>
+        ) : (
+          <Meter label="Ein" kind="in" pick={inLeft} />
+        )}
+        <Meter label="Aus L" kind="out" pick={outLeft} />
+        <Meter label="Aus R" kind="out" pick={outRight} />
       </div>
+
+      <PanRow track={i} pan={track.pan} actions={actions} />
 
       <div className="live-track-buttons">
         <button className="btn btn-big btn-record" onClick={() => actions.record(i)} title="Taste R">

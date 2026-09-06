@@ -1,15 +1,16 @@
 //! Offline proof of sample accuracy. Nothing here opens an audio device.
 
 use super::command::Command;
+use super::frame::{Channels, Frame};
 use super::metro::Metronome;
 use super::process::is_fresh;
-use super::sim::{Sim, SimSpec, TrackSpec, mono, silence};
+use super::sim::{Played, Sim, SimSpec, TrackSpec, mono, silence};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::TrackState;
 
 const RATE: u32 = 48_000;
 const BLOCK: usize = 128;
-/// Roundtrip measured in phase 0: 827 samples at 128 frames / 48 kHz, stddev 0 over 60 runs.
+/// Roundtrip measured in phase 0: 827 frames at 128 frames / 48 kHz, stddev 0 over 60 runs.
 const R: u64 = 827;
 
 /// A signal whose value identifies the sample it came from, bounded well inside the headroom so
@@ -96,7 +97,7 @@ fn start_play_acts_exactly_at_its_sample() {
     sim.run_to(play_at + 4 * BLOCK as u64);
 
     assert_eq!(
-        sim.out_history[(play_at - 1) as usize],
+        sim.out_l[(play_at - 1) as usize],
         0.0,
         "vor dem Startsample muss Stille sein"
     );
@@ -105,7 +106,7 @@ fn start_play_acts_exactly_at_its_sample() {
     let expected = content[((play_at - start) % loop_len) as usize];
     assert_ne!(expected, 0.0, "Testaufbau: erwartetes Sample ist nicht still");
     assert_eq!(
-        sim.out_history[play_at as usize], expected,
+        sim.out_l[play_at as usize], expected,
         "Wiedergabe startet exakt am geforderten Sample"
     );
 }
@@ -313,7 +314,7 @@ fn loop_seam_loses_and_repeats_nothing() {
     let content = layer_content(&sim, 0, 0);
     assert_eq!(content.len() as u64, len);
 
-    let history = &sim.out_history;
+    let history = &sim.out_l;
     for j in 0..3 * len {
         let got = history[(end + j) as usize];
         let want = content[(j % len) as usize];
@@ -382,7 +383,7 @@ fn status_reports_bar_beat_and_track_state() {
         (s.bar, s.beat, s.beat_offset),
         (here.bar, here.beat, here.offset)
     );
-    assert!(s.tracks()[0].input_peak > 0.0);
+    assert!(s.tracks()[0].input_peak_max() > 0.0);
 }
 
 #[test]
@@ -392,23 +393,20 @@ fn clear_stop_and_monitor_do_what_they_say() {
     let end = timeline.bar_start(3);
 
     let spec = SimSpec {
-        tracks: vec![TrackSpec {
-            channel: 0,
-            monitor: true,
-        }],
+        tracks: vec![TrackSpec::on(0).monitoring()],
         ..spec_4_4()
     };
     let mut sim = Sim::new(spec, mono(fingerprint));
     sim.run_to(4 * BLOCK as u64);
     // Monitoring passes the consumed input straight through.
-    assert_eq!(sim.out_history[BLOCK], fingerprint(BLOCK as u64));
+    assert_eq!(sim.out_l[BLOCK], fingerprint(BLOCK as u64));
 
     sim.send(Command::SetMonitor {
         track: 0,
         on: false,
     });
     sim.run_to(8 * BLOCK as u64);
-    assert_eq!(sim.out_history[7 * BLOCK], 0.0);
+    assert_eq!(sim.out_l[7 * BLOCK], 0.0);
 
     sim.send(Command::StartRecord { track: 0, at: start });
     sim.send(Command::StopRecord { track: 0, at: end });
@@ -444,7 +442,7 @@ fn tempo_change_is_refused_while_the_track_is_busy() {
     sim.send(Command::SetTempo {
         bpm: 120.0,
         signature: TimeSignature::new(3, 4),
-        layer_capacity: 921_664,
+        layer_frames: 921_664,
     });
     sim.run_to(4 * BLOCK as u64);
     let s = sim.latest_status().expect("Status");
@@ -457,7 +455,7 @@ fn tempo_change_is_refused_while_the_track_is_busy() {
     sim.send(Command::SetTempo {
         bpm: 90.0,
         signature: TimeSignature::new(4, 4),
-        layer_capacity: 921_664,
+        layer_frames: 921_664,
     });
     sim.run_to(sim.pos() + 4 * BLOCK as u64);
     let s = sim.latest_status().expect("Status");
@@ -469,7 +467,7 @@ fn tempo_change_is_refused_while_the_track_is_busy() {
 #[test]
 fn the_layer_length_bounds_a_take_that_is_never_stopped() {
     let spec = SimSpec {
-        layer_capacity: Some(4_096),
+        layer_frames: Some(4_096),
         ..spec_4_4()
     };
     let mut sim = Sim::new(spec, mono(fingerprint));
@@ -693,7 +691,7 @@ fn three_layers_play_back_as_their_exact_sum() {
         let idx = ((from + i - origin) % len) as usize;
         let want = layers[0][idx] + layers[1][idx] + layers[2][idx];
         assert_eq!(
-            sim.out_history[(from + i) as usize],
+            sim.out_l[(from + i) as usize],
             want,
             "Summe der drei Ebenen bei Loop-Index {idx}"
         );
@@ -719,7 +717,7 @@ fn a_muted_layer_drops_out_of_the_sum_exactly() {
         let idx = ((from + i - origin) % len) as usize;
         let want = layers[0][idx] + layers[2][idx];
         assert_eq!(
-            sim.out_history[(from + i) as usize],
+            sim.out_l[(from + i) as usize],
             want,
             "stumme Ebene 2 darf bei Loop-Index {idx} nicht klingen"
         );
@@ -739,7 +737,7 @@ fn a_muted_layer_drops_out_of_the_sum_exactly() {
     sim.run_to(from + BLOCK as u64);
     let idx = ((from - origin) % len) as usize;
     assert_eq!(
-        sim.out_history[from as usize],
+        sim.out_l[from as usize],
         layers[0][idx] + layers[1][idx] + layers[2][idx]
     );
 }
@@ -772,7 +770,7 @@ fn a_removed_layer_returns_its_buffer_and_leaves_the_others_alone() {
     for i in 0..len {
         let idx = ((from + i - origin) % len) as usize;
         assert_eq!(
-            sim.out_history[(from + i) as usize],
+            sim.out_l[(from + i) as usize],
             before[0][idx] + before[2][idx],
             "Rest-Ebenen bei Loop-Index {idx}"
         );
@@ -881,7 +879,7 @@ fn layers_recorded_in_different_bars_stay_sample_aligned() {
         let on_beat = timeline.beat_start(timeline.beat_index_at(musical)) == musical;
         let want = if on_beat { total } else { 0.0 };
         assert_eq!(
-            sim.out_history[(from + i) as usize],
+            sim.out_l[(from + i) as usize],
             want,
             "Ausgabe bei Loop-Index {idx}"
         );
@@ -984,7 +982,7 @@ fn monitoring_and_playback_coexist_without_touching_the_recording() {
         let pos = over_start + i;
         let idx = ((pos - origin) % len) as usize;
         assert_eq!(
-            sim.out_history[pos as usize],
+            sim.out_l[pos as usize],
             first[idx] + fingerprint(pos),
             "Loop plus Mithoeren bei Position {pos}"
         );
@@ -1098,7 +1096,8 @@ fn clear_all_restores_a_fresh_start_and_returns_every_buffer() {
             (f.state, f.layers, f.loop_len, f.filled, f.muted_mask, f.monitor, f.playing),
             "Track {i} unterscheidet sich vom frischen Zustand"
         );
-        assert_eq!(a.input_channel, f.input_channel);
+        assert_eq!(a.input_channels, f.input_channels);
+        assert_eq!(a.channels, f.channels);
     }
     assert_eq!(sim.core.track_count(), 2);
     assert_eq!(
@@ -1266,10 +1265,7 @@ fn the_recording_stays_dry_with_the_whole_chain_turned_up() {
         bars,
         // Monitoring on from the start: the live signal goes through the chain and out, while the
         // recording has to stay clean.
-        tracks: vec![TrackSpec {
-            channel: 0,
-            monitor: true,
-        }],
+        tracks: vec![TrackSpec::on(0).monitoring()],
         // No cable - the chain plus a loopback would be a feedback loop, and what is under test
         // is the engine's wiring, not the room.
         loopback_channel: None,
@@ -1325,7 +1321,7 @@ fn the_recording_stays_dry_with_the_whole_chain_turned_up() {
     let mut different = 0usize;
     for i in 0..len {
         let pos = (origin + i) as usize;
-        if sim.out_history[pos] != fingerprint(origin + i) {
+        if sim.out_l[pos] != fingerprint(origin + i) {
             different += 1;
         }
     }
@@ -1376,7 +1372,7 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
     for i in 0..len {
         let pos = coloured_from + i;
         let dry = loop_content[((pos - origin) % len) as usize];
-        if sim.out_history[pos as usize] != dry {
+        if sim.out_l[pos as usize] != dry {
             different += 1;
         }
     }
@@ -1397,7 +1393,7 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
         let pos = bypassed_from + i;
         let dry = loop_content[((pos - origin) % len) as usize];
         assert_eq!(
-            sim.out_history[pos as usize], dry,
+            sim.out_l[pos as usize], dry,
             "Position {pos} ist im Bypass nicht bitgleich mit dem Loop"
         );
     }
@@ -1447,9 +1443,648 @@ fn the_delay_time_comes_from_the_engine_timeline() {
     sim.send(Command::SetTempo {
         bpm: 90.0,
         signature: TimeSignature::new(4, 4),
-        layer_capacity: 200_000,
+        layer_frames: 200_000,
     });
     sim.run_blocks(200);
     let status = sim.latest_status().expect("Status");
     assert_eq!(status.tracks()[0].fx.delay_samples, 32_000);
+}
+
+// -------------------------------------------------------------------------------------------
+// 13. Stereo: two channels in, two channels out, and nothing swapped on the way
+// -------------------------------------------------------------------------------------------
+
+/// A second fingerprint, unmistakably different from the first. Their only common value is zero,
+/// so a channel mix-up cannot pass a comparison by accident.
+fn other_fingerprint(k: u64) -> f32 {
+    -0.5 * fingerprint(k)
+}
+
+/// The content of one channel of one layer, de-interleaved.
+fn layer_channel(sim: &Sim, track: usize, layer: usize, channel: usize) -> Vec<f32> {
+    let t = sim.core.track(track);
+    t.layer(layer)
+        .expect("Ebene existiert")
+        .channel(channel, t.loop_len())
+}
+
+/// Two input channels in, two channels out, and they stay apart the whole way.
+///
+/// The pair is deliberately **not** adjacent - inputs 1 and 3 - because an ASIO router puts the two
+/// halves of a stereo return wherever it likes, and the decoy on the channel in between must never
+/// appear in the recording.
+#[test]
+fn a_stereo_track_records_two_inputs_and_plays_them_back_on_their_own_side() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let bars = 2u32;
+    let origin = timeline.bar_start(2);
+    let len = timeline.span_bars(2, bars);
+
+    let played: Played = Box::new(|k: u64, ch: usize| match ch {
+        0 => fingerprint(k),
+        2 => other_fingerprint(k),
+        // The channel between the two: full scale, and it may never turn up anywhere.
+        _ => 0.99,
+    });
+
+    let spec = SimSpec {
+        bars,
+        tracks: vec![TrackSpec::stereo(0, 2)],
+        input_channels: 3,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, played);
+    sim.send(Command::StartRecord {
+        track: 0,
+        at: origin,
+    });
+    sim.send(Command::StopRecord {
+        track: 0,
+        at: origin + len,
+    });
+    sim.send(Command::StartPlay {
+        track: 0,
+        at: origin + len,
+    });
+    sim.run_to(origin + len + R + 4 * BLOCK as u64);
+
+    assert_eq!(sim.core.track(0).channels(), Channels::Stereo);
+    assert_eq!(sim.core.track(0).loop_len(), len, "Loop-Laenge zaehlt Frames");
+    let left = layer_channel(&sim, 0, 0, 0);
+    let right = layer_channel(&sim, 0, 0, 1);
+    assert_eq!(left.len() as u64, len);
+    assert_eq!(right.len() as u64, len);
+
+    let mut differences = 0usize;
+    for i in 0..len as usize {
+        let k = origin + R + i as u64;
+        assert_eq!(left[i], fingerprint(k), "linker Kanal, Frame {i}");
+        assert_eq!(right[i], other_fingerprint(k), "rechter Kanal, Frame {i}");
+        assert_ne!(left[i], 0.99, "der Koeder von Eingang 2 ist im Loop gelandet");
+        if left[i] != right[i] {
+            differences += 1;
+        }
+    }
+    assert!(
+        differences as u64 > len - 8,
+        "die beiden Kanaele muessen nachweislich Verschiedenes enthalten, verschieden sind aber \
+         nur {differences} von {len} Frames"
+    );
+
+    // ... and the playback puts each of them on its own bus channel, sample for sample. The track
+    // is centred, so both pan gains are exactly 1.0 and this is a bit-exact comparison.
+    let from = origin + 2 * len;
+    sim.run_to(from + len + BLOCK as u64);
+    for i in 0..len {
+        let idx = ((from + i - origin) % len) as usize;
+        assert_eq!(
+            sim.out(from + i),
+            Frame::new(left[idx], right[idx]),
+            "Ausgabe bei Loop-Index {idx}"
+        );
+    }
+}
+
+/// The central alignment test of phase 2, on stereo: three layers recorded in completely different
+/// bars, each carrying an impulse on every beat, and the two channels carrying *different*
+/// amplitudes. Every layer has to put its impulses on exactly the same loop indices, on both
+/// channels, with no tolerance.
+///
+/// An offset of one *sample* instead of one frame - the classic stereo mistake - shows up here as
+/// the two channels having swapped, and a per-layer offset shows up as a missing impulse.
+#[test]
+fn stereo_layers_recorded_in_different_bars_stay_sample_aligned() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let bars = 4u32;
+    let origin = timeline.bar_start(4);
+    let len = timeline.span_bars(4, bars);
+
+    // The same three takes as in the mono test: bar 5, bar 14, and bar 23 plus half a bar, so the
+    // later two wrap around the loop end while they are being recorded.
+    let starts = [
+        origin,
+        timeline.bar_start(13),
+        timeline.bar_start(22) + timeline.samples_per_beat() as u64 * 2,
+    ];
+    let amps = [0.5f32, 0.25, 0.125];
+    // The right channel is a quarter of the left one on every take, so a swap is unmistakable.
+    let right_factor = 0.25f32;
+
+    let played: Played = Box::new(move |k: u64, ch: usize| {
+        if k < R {
+            return 0.0;
+        }
+        let musical = k - R;
+        let beat = timeline.beat_index_at(musical);
+        if timeline.beat_start(beat) != musical {
+            return 0.0;
+        }
+        for (i, &s) in starts.iter().enumerate() {
+            if musical >= s && musical < s + len {
+                return if ch == 1 {
+                    amps[i] * right_factor
+                } else {
+                    amps[i]
+                };
+            }
+        }
+        0.0
+    });
+
+    let spec = SimSpec {
+        bars,
+        tracks: vec![TrackSpec::stereo(0, 1)],
+        input_channels: 2,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, played);
+    for (i, &start) in starts.iter().enumerate() {
+        let cmd = if i == 0 {
+            Command::StartRecord { track: 0, at: start }
+        } else {
+            Command::StartOverdub { track: 0, at: start }
+        };
+        sim.send(cmd);
+        sim.send(Command::StopRecord {
+            track: 0,
+            at: start + len,
+        });
+        if i == 0 {
+            sim.send(Command::StartPlay {
+                track: 0,
+                at: start + len,
+            });
+        }
+        sim.run_to(start + len + R + 4 * BLOCK as u64);
+    }
+
+    assert_eq!(sim.core.track(0).layer_count(), 3);
+    assert_eq!(sim.core.track(0).loop_len(), len);
+    let layers: Vec<(Vec<f32>, Vec<f32>)> = (0..3)
+        .map(|i| (layer_channel(&sim, 0, i, 0), layer_channel(&sim, 0, i, 1)))
+        .collect();
+
+    let mut impulses = 0usize;
+    for i in 0..len as usize {
+        let musical = origin + i as u64;
+        let on_beat = timeline.beat_start(timeline.beat_index_at(musical)) == musical;
+        if on_beat {
+            impulses += 1;
+        }
+        for (n, (left, right)) in layers.iter().enumerate() {
+            let want = if on_beat { amps[n] } else { 0.0 };
+            assert_eq!(
+                left[i],
+                want,
+                "Ebene {} links bei Loop-Index {i} nicht ausgerichtet (Takt {})",
+                n + 1,
+                timeline.bar_index_at(musical) + 1
+            );
+            assert_eq!(
+                right[i],
+                want * right_factor,
+                "Ebene {} rechts bei Loop-Index {i} nicht ausgerichtet",
+                n + 1
+            );
+        }
+    }
+    assert_eq!(impulses, bars as usize * 4);
+
+    // And the sum on the bus carries all three at the same instant, on both sides.
+    let from = origin + (sim.pos() - origin).div_ceil(len) * len;
+    sim.run_to(from + len + BLOCK as u64);
+    let total: f32 = amps.iter().sum();
+    for i in 0..len {
+        let idx = ((from + i - origin) % len) as usize;
+        let musical = origin + idx as u64;
+        let on_beat = timeline.beat_start(timeline.beat_index_at(musical)) == musical;
+        let want = if on_beat { total } else { 0.0 };
+        assert_eq!(
+            sim.out(from + i),
+            Frame::new(want, want * right_factor),
+            "Ausgabe bei Loop-Index {idx}"
+        );
+    }
+}
+
+/// The latency compensation on a stereo track, proven exactly as in the mono case and with the
+/// same tolerance: zero.
+///
+/// The musician plays an impulse on every beat *as he hears it*, so it reaches the input `R` frames
+/// after the beat it belongs to - on both channels at the same instant, which is what a stereo
+/// source does. Both channels must land on the beat grid, and both must land on the *same* frame.
+#[test]
+fn latency_compensation_puts_a_stereo_take_exactly_on_the_beat() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let start = timeline.bar_start(4);
+    let end = timeline.bar_start(12);
+
+    let played: Played = Box::new(move |k: u64, ch: usize| {
+        if k < R {
+            return 0.0;
+        }
+        let musical = k - R;
+        let beat = timeline.beat_index_at(musical);
+        if timeline.beat_start(beat) != musical {
+            return 0.0;
+        }
+        // Different levels per side: an offset by one sample would exchange the two.
+        if ch == 1 { 0.5 } else { 1.0 }
+    });
+
+    let spec = SimSpec {
+        tracks: vec![TrackSpec::stereo(0, 1)],
+        input_channels: 2,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, played);
+    sim.send(Command::StartRecord { track: 0, at: start });
+    sim.send(Command::StopRecord { track: 0, at: end });
+    sim.run_to(end + R + 4 * BLOCK as u64);
+
+    let left = layer_channel(&sim, 0, 0, 0);
+    let right = layer_channel(&sim, 0, 0, 1);
+    assert_eq!(left.len() as u64, end - start);
+    assert_eq!(right.len() as u64, end - start);
+
+    let mut impulses = 0usize;
+    for i in 0..left.len() {
+        let musical = start + i as u64;
+        let on_beat = timeline.beat_start(timeline.beat_index_at(musical)) == musical;
+        let (want_l, want_r) = if on_beat { (1.0, 0.5) } else { (0.0, 0.0) };
+        if on_beat {
+            impulses += 1;
+        }
+        assert_eq!(left[i], want_l, "links bei Loop-Index {i}");
+        assert_eq!(right[i], want_r, "rechts bei Loop-Index {i}");
+    }
+    assert_eq!(impulses, 8 * 4, "acht Takte zu vier Schlaegen");
+
+    // The counter-example that makes the test above mean something: with the compensation set to
+    // zero the same performance lands `R` frames late, on both channels alike.
+    let spec = SimSpec {
+        latency: 0,
+        roundtrip: R,
+        tracks: vec![TrackSpec::stereo(0, 1)],
+        input_channels: 2,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let played: Played = Box::new(move |k: u64, ch: usize| {
+        if k < R {
+            return 0.0;
+        }
+        let musical = k - R;
+        let beat = timeline.beat_index_at(musical);
+        if timeline.beat_start(beat) != musical {
+            return 0.0;
+        }
+        if ch == 1 { 0.5 } else { 1.0 }
+    });
+    let mut wrong = Sim::new(spec, played);
+    wrong.send(Command::StartRecord { track: 0, at: start });
+    wrong.send(Command::StopRecord { track: 0, at: end });
+    wrong.run_to(end + 2 * R + 4 * BLOCK as u64);
+    let left = layer_channel(&wrong, 0, 0, 0);
+    let on_grid = left
+        .iter()
+        .enumerate()
+        .filter(|(i, v)| {
+            let musical = start + *i as u64;
+            **v != 0.0 && timeline.beat_start(timeline.beat_index_at(musical)) == musical
+        })
+        .count();
+    assert_eq!(
+        on_grid, 0,
+        "ohne Kompensation darf kein Impuls auf einer Schlaggrenze liegen"
+    );
+}
+
+/// A mono and a stereo track side by side on the same device, recorded at the same time. Each has
+/// to end up with its own material, in its own channel count, and the buffer pool has to have
+/// handed out the right kind to each.
+#[test]
+fn a_mono_and_a_stereo_track_run_side_by_side() {
+    let start = 4_000u64;
+    let end = start + 6_000;
+    // Channel 0 for the microphone, channels 1 and 2 for the stereo instrument.
+    let played: Played = Box::new(|k: u64, ch: usize| match ch {
+        0 => fingerprint(k),
+        1 => other_fingerprint(k),
+        _ => 0.4 - other_fingerprint(k),
+    });
+
+    let spec = SimSpec {
+        tracks: vec![TrackSpec::on(0), TrackSpec::stereo(1, 2)],
+        input_channels: 3,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, played);
+    for track in 0..2 {
+        sim.send(Command::StartRecord { track, at: start });
+        sim.send(Command::StopRecord { track, at: end });
+    }
+    sim.run_to(end + R + 4 * BLOCK as u64);
+
+    assert_eq!(sim.core.track(0).channels(), Channels::Mono);
+    assert_eq!(sim.core.track(1).channels(), Channels::Stereo);
+    let voice = layer_content(&sim, 0, 0);
+    assert_eq!(voice.len(), 6_000, "ein Mono-Puffer haelt ein Sample je Frame");
+    let piano_l = layer_channel(&sim, 1, 0, 0);
+    let piano_r = layer_channel(&sim, 1, 0, 1);
+    assert_eq!(piano_l.len(), 6_000);
+    for i in 0..6_000usize {
+        let k = start + R + i as u64;
+        assert_eq!(voice[i], fingerprint(k), "Stimme, Frame {i}");
+        assert_eq!(piano_l[i], other_fingerprint(k), "Klavier links, Frame {i}");
+        assert_eq!(
+            piano_r[i],
+            0.4 - other_fingerprint(k),
+            "Klavier rechts, Frame {i}"
+        );
+    }
+
+    // One buffer of each kind is in use, and the pool has handed out exactly those kinds.
+    assert!(sim.pushed_of(Channels::Mono) >= 1);
+    assert!(sim.pushed_of(Channels::Stereo) >= 1);
+
+    // Wiping everything gives every buffer back, each to its own stock, and refills both.
+    let clear_at = sim.pos() + BLOCK as u64;
+    sim.send(Command::ClearAll { at: clear_at });
+    sim.run_to(clear_at + 8 * BLOCK as u64);
+    assert_eq!(
+        sim.reclaimed_of(Channels::Mono),
+        1,
+        "der Mono-Puffer muss zurueckkommen"
+    );
+    assert_eq!(
+        sim.reclaimed_of(Channels::Stereo),
+        1,
+        "der Stereo-Puffer muss zurueckkommen"
+    );
+    assert!(sim.core.spare_count_of(Channels::Mono) > 0);
+    assert!(sim.core.spare_count_of(Channels::Stereo) > 0);
+    let status = sim.latest_status().expect("Status");
+    assert!(is_fresh(&status), "nach dem Loeschen wie frisch gestartet");
+    assert_eq!(status.tracks()[0].channels, 1);
+    assert_eq!(status.tracks()[1].channels, 2);
+    assert_eq!(status.tracks()[1].input_channels, [1, 2]);
+}
+
+/// The panner, through the whole engine: a mono track in the centre is equally loud on both bus
+/// channels; panned hard left the right one is digitally silent.
+#[test]
+fn a_centred_mono_track_is_equally_loud_on_both_sides_and_hard_left_silences_the_right() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let bars = 1u32;
+    let origin = timeline.bar_start(2);
+    let len = timeline.span_bars(2, bars);
+
+    let spec = SimSpec {
+        bars,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, mono(fingerprint));
+    sim.send(Command::StartRecord { track: 0, at: origin });
+    sim.send(Command::StopRecord {
+        track: 0,
+        at: origin + len,
+    });
+    sim.send(Command::StartPlay {
+        track: 0,
+        at: origin + len,
+    });
+    sim.run_to(origin + len + R + 4 * BLOCK as u64);
+    let content = layer_content(&sim, 0, 0);
+
+    // Centre: both sides carry the loop, bit for bit.
+    let centre_from = origin + 2 * len;
+    sim.run_to(centre_from + len + BLOCK as u64);
+    let mut loud = 0usize;
+    for i in 0..len {
+        let want = content[((centre_from + i - origin) % len) as usize];
+        let got = sim.out(centre_from + i);
+        assert_eq!(got.l, want, "links bei Position {}", centre_from + i);
+        assert_eq!(got.r, want, "rechts bei Position {}", centre_from + i);
+        if want != 0.0 {
+            loud += 1;
+        }
+    }
+    assert!(
+        loud as u64 > len / 2,
+        "Testaufbau: der Loop muss ueberhaupt klingen"
+    );
+
+    // Hard left: the left side is unchanged, the right one is exactly zero.
+    sim.send(Command::SetPan {
+        track: 0,
+        pan: -1.0,
+    });
+    sim.run_blocks(2);
+    let left_from = origin + (sim.pos() - origin).div_ceil(len) * len;
+    sim.run_to(left_from + len + BLOCK as u64);
+    for i in 0..len {
+        let want = content[((left_from + i - origin) % len) as usize];
+        let got = sim.out(left_from + i);
+        assert_eq!(got.l, want, "links bei Position {}", left_from + i);
+        assert_eq!(got.r, 0.0, "rechts muss still sein, Position {}", left_from + i);
+    }
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.tracks()[0].pan, -1.0);
+    assert_eq!(status.output_peak[1], 0.0, "die rechte Summe bleibt stumm");
+    assert!(status.output_peak[0] > 0.0, "die linke Summe klingt");
+}
+
+/// **The dryness test, in stereo.** With every effect switched on at settings that change the
+/// signal beyond recognition, and monitoring on so the chain really is in the signal path, what
+/// lands in a stereo loop buffer is still the two raw input channels, latency-compensated and
+/// otherwise untouched.
+#[test]
+fn a_stereo_recording_stays_dry_with_the_whole_chain_turned_up() {
+    use super::fx::{FxParam, FxPreset, FxSlot};
+
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let bars = 2u32;
+    let origin = timeline.bar_start(2);
+    let len = timeline.span_bars(2, bars);
+
+    let played: Played = Box::new(|k: u64, ch: usize| {
+        if ch == 1 {
+            other_fingerprint(k)
+        } else {
+            fingerprint(k)
+        }
+    });
+
+    let spec = SimSpec {
+        bars,
+        tracks: vec![TrackSpec::stereo(0, 1).monitoring().panned(-0.4)],
+        input_channels: 2,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, played);
+
+    sim.send(Command::LoadFxPreset {
+        track: 0,
+        preset: FxPreset::Voice,
+    });
+    for slot in FxSlot::all() {
+        sim.send(Command::SetFxEnabled {
+            track: 0,
+            slot,
+            on: true,
+        });
+    }
+    for param in [
+        FxParam::CompThresholdDb(-40.0),
+        FxParam::CompRatio(20.0),
+        FxParam::CompMakeupDb(12.0),
+        FxParam::DelayFeedback(0.8),
+        FxParam::DelayMix(1.0),
+        FxParam::ReverbSize(0.9),
+        FxParam::ReverbMix(1.0),
+        FxParam::BandGainDb { band: 1, db: 18.0 },
+    ] {
+        sim.send(Command::SetFxParam { track: 0, param });
+    }
+    sim.run_blocks(4);
+
+    sim.send(Command::StartRecord { track: 0, at: origin });
+    sim.send(Command::StopRecord {
+        track: 0,
+        at: origin + len,
+    });
+    sim.run_to(origin + len + R + 4 * BLOCK as u64);
+
+    let left = layer_channel(&sim, 0, 0, 0);
+    let right = layer_channel(&sim, 0, 0, 1);
+    assert_eq!(left.len() as u64, len);
+    for i in 0..len as usize {
+        let k = origin + R + i as u64;
+        assert_eq!(left[i], fingerprint(k), "links, Frame {i}: Spur der Effektkette");
+        assert_eq!(
+            right[i],
+            other_fingerprint(k),
+            "rechts, Frame {i}: Spur der Effektkette"
+        );
+    }
+
+    // And the counter-check, so the test cannot pass because the chain is not connected: what left
+    // the bus during the take is *not* what went in, on either side.
+    let mut different = 0usize;
+    for i in 0..len {
+        let got = sim.out(origin + i);
+        if got.l != fingerprint(origin + i) || got.r != other_fingerprint(origin + i) {
+            different += 1;
+        }
+    }
+    assert!(
+        different as u64 > len / 2,
+        "die Kette hat am Ausgang nichts veraendert - dann beweist der Test oben nichts \
+         ({different} von {len} Frames)"
+    );
+}
+
+/// A tempo change invalidates every prepared buffer, of both lengths at once. Afterwards both
+/// stocks have to be refilled at the new length, and a stereo take has to find a stereo buffer -
+/// the case where an accounting slip between the two threads would show up as "kein vorbereiteter
+/// Puffer frei" on the first overdub after a tempo change and nowhere else.
+#[test]
+fn both_buffer_stocks_survive_a_tempo_change() {
+    use super::command::Refusal;
+
+    let spec = SimSpec {
+        bars: 1,
+        tracks: vec![TrackSpec::on(0), TrackSpec::stereo(0, 1)],
+        input_channels: 2,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, mono(fingerprint));
+    sim.run_blocks(4);
+
+    let signature = TimeSignature::new(4, 4);
+    let after = Timeline::new(RATE, 137.0, signature);
+    let layer_frames = super::process::loop_capacity(&after, 1);
+    sim.send(Command::SetTempo {
+        bpm: 137.0,
+        signature,
+        layer_frames,
+    });
+    // The control thread learns the new length the same way `live.rs` and `host.rs` do.
+    sim.set_layer_frames(layer_frames as usize);
+    sim.run_blocks(20);
+
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.bpm, 137.0, "leere Tracks: der Tempowechsel greift");
+    assert!(
+        sim.core.spare_count_of(Channels::Mono) > 0,
+        "der Mono-Vorrat muss wieder gefuellt sein"
+    );
+    assert!(
+        sim.core.spare_count_of(Channels::Stereo) > 0,
+        "der Stereo-Vorrat muss wieder gefuellt sein"
+    );
+
+    // And both really are usable: a take on each track finds a buffer of its own length.
+    let len = after.span_bars(0, 1);
+    let start = after.bar_start_at_or_after(sim.pos() + BLOCK as u64);
+    for track in 0..2 {
+        sim.send(Command::StartRecord { track, at: start });
+        sim.send(Command::StopRecord {
+            track,
+            at: start + len,
+        });
+    }
+    sim.run_to(start + len + R + 8 * BLOCK as u64);
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.refusal, Refusal::None, "kein Kommando wurde abgelehnt");
+    assert_eq!(sim.core.track(0).loop_len(), len, "mono nimmt auf");
+    assert_eq!(sim.core.track(1).loop_len(), len, "stereo nimmt auch auf");
+    assert_eq!(
+        sim.core.track(1).layer(0).expect("Ebene").content(len).len() as u64,
+        len * 2,
+        "und zwar in einen Puffer der doppelten Laenge"
+    );
+}
+
+/// A stereo track really does cost twice the memory of a mono one, and the pool hands out the
+/// right length for each - a mono buffer given to a stereo track would be half a loop long.
+#[test]
+fn a_stereo_track_gets_buffers_of_twice_the_length() {
+    let spec = SimSpec {
+        bars: 1,
+        layer_frames: Some(4_096),
+        tracks: vec![TrackSpec::on(0), TrackSpec::stereo(0, 1)],
+        input_channels: 2,
+        loopback_channel: None,
+        ..spec_4_4()
+    };
+    let mut sim = Sim::new(spec, mono(fingerprint));
+    sim.run_blocks(4);
+
+    let start = sim.pos() + BLOCK as u64;
+    for track in 0..2 {
+        sim.send(Command::StartRecord { track, at: start });
+    }
+    // No stop: both takes run into the end of their buffer, which is the frame count in both cases.
+    sim.run_to(start + R + 12_000);
+    assert_eq!(sim.core.track(0).loop_len(), 4_096, "mono: 4096 Frames");
+    assert_eq!(sim.core.track(1).loop_len(), 4_096, "stereo: auch 4096 Frames");
+    assert_eq!(
+        sim.core.track(0).layer(0).expect("Ebene").content(4_096).len(),
+        4_096,
+        "mono: 4096 Samples"
+    );
+    assert_eq!(
+        sim.core.track(1).layer(0).expect("Ebene").content(4_096).len(),
+        8_192,
+        "stereo: dieselben 4096 Frames sind 8192 Samples"
+    );
 }
