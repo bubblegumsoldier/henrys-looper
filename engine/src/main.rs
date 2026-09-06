@@ -1,27 +1,17 @@
-//! looper-engine - measuring tool answering whether Windows audio in Rust is good enough for a
-//! live looper. Throwaway instrument, not production code: it measures, prints and exits.
+//! `looper-engine` - the command line measuring tool.
 //!
-//! Real-time rule for everything below: no allocation, no locking, no logging, no formatting and
-//! no file access inside an audio callback. Callbacks only touch atomics, pre-allocated buffers
-//! and a lock-free ring buffer.
-
-mod audio;
-mod click;
-mod duplex;
-mod engine;
-mod latency;
-mod meter;
-mod soak;
+//! Everything of substance lives in the library (`src/lib.rs`); this file is only the argument
+//! parser in front of it, so the CLI and the desktop app share one loop core.
 
 use std::process::ExitCode;
-use std::sync::mpsc::{Receiver, channel};
 
 use clap::{Parser, Subcommand};
 
-use audio::DeviceOpts;
-use click::ClickOpts;
-use engine::calibrate::CalibrateOpts;
-use engine::live::LiveOpts;
+use looper_engine::audio::{self, DeviceOpts};
+use looper_engine::click::ClickOpts;
+use looper_engine::engine::calibrate::CalibrateOpts;
+use looper_engine::engine::live::LiveOpts;
+use looper_engine::{click, duplex, engine, latency, soak};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -103,18 +93,6 @@ enum Command {
     },
 }
 
-/// Non-blocking "press Enter to stop": a helper thread owns stdin, the main loop polls the
-/// channel. Never touched from an audio callback.
-pub fn wait_for_enter() -> Receiver<()> {
-    let (tx, rx) = channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let _ = std::io::stdin().read_line(&mut line);
-        let _ = tx.send(());
-    });
-    rx
-}
-
 #[cfg(test)]
 mod cli_tests {
     use super::Cli;
@@ -137,9 +115,7 @@ fn main() -> ExitCode {
         Command::Latency { dev, runs } => latency::cmd_latency(dev, *runs),
         Command::Soak { dev, minutes, gain } => soak::cmd_soak(dev, *minutes, *gain),
         Command::Live { dev, live } => engine::live::cmd_live(dev, live),
-        Command::Calibrate { dev, calibrate } => {
-            engine::calibrate::cmd_calibrate(dev, calibrate)
-        }
+        Command::Calibrate { dev, calibrate } => engine::calibrate::cmd_calibrate(dev, calibrate),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

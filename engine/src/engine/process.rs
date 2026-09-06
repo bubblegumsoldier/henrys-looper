@@ -309,18 +309,35 @@ impl EngineCore {
     /// Click plus every playing track for one uninterrupted segment.
     #[inline]
     fn render(&mut self, out: &mut [f32], start: u64) {
+        // Per-track output peaks are collected on the stack and folded into the tracks afterwards:
+        // inside the sample loop the track list is borrowed immutably, and a fixed-size array
+        // costs no allocation. `get_mut` rather than indexing, so a track count beyond the status
+        // ceiling degrades to "no meter" instead of a panic in the audio callback.
+        let mut peaks = [0.0f32; MAX_TRACKS];
         for (i, slot) in out.iter_mut().enumerate() {
             let pos = start + i as u64;
             let mut value = 0.0f32;
             if self.click {
                 value += self.metro.sample_at(&self.timeline, pos) * self.click_gain;
             }
-            for track in &self.tracks {
+            for (t, track) in self.tracks.iter().enumerate() {
                 if track.playing() {
-                    value += track.read(pos);
+                    let sample = track.read(pos);
+                    value += sample;
+                    if let Some(peak) = peaks.get_mut(t) {
+                        let magnitude = sample.abs();
+                        if magnitude > *peak {
+                            *peak = magnitude;
+                        }
+                    }
                 }
             }
             *slot = value;
+        }
+        for (t, track) in self.tracks.iter_mut().enumerate() {
+            if let Some(&peak) = peaks.get(t) {
+                track.note_output_peak(peak);
+            }
         }
     }
 
@@ -634,6 +651,7 @@ impl EngineCore {
                 loop_len: track.loop_len(),
                 filled: track.filled(),
                 input_peak: track.take_input_peak(),
+                output_peak: track.take_output_peak(),
                 monitor: track.monitor(),
                 playing: track.playing(),
                 input_channel: track.input_channel() as u8,

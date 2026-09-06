@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["engine", "app/src-tauri"]
+
+# One profile for the whole workspace. Cargo only honours profile settings in the workspace root,
+# so these used to live in engine/Cargo.toml and moved here unchanged.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = true
+
+# The desktop app is normally run through `cargo tauri dev`, i.e. in the dev profile, and an
+# unoptimised audio callback misses its deadline. One optimisation level costs a little compile
+# time and buys a callback that fits into 2.7 ms.
+[profile.dev]
+opt-level = 1

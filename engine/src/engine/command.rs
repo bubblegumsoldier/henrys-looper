@@ -175,6 +175,9 @@ pub struct TrackStatus {
     pub filled: u64,
     /// Peak of this track's input channel, absolute value.
     pub input_peak: f32,
+    /// Peak this track contributed to the output, absolute value. Its audible layers only -
+    /// monitoring goes straight to the output and is not counted here.
+    pub output_peak: f32,
     pub monitor: bool,
     pub playing: bool,
     /// Zero-based input channel of the device this track records.

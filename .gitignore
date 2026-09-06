@@ -15,5 +15,7 @@ ui/dist/
 Thumbs.db
 ui/*.tsbuildinfo
 
-# Rust
-engine/target/
+# Rust: seit dem Cargo-Workspace liegen alle Artefakte im Wurzel-target/
+target/
+# Von tauri-build erzeugt (Berechtigungs-Schemas), gehoert nicht ins Repo
+app/src-tauri/gen/

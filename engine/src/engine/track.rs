@@ -140,6 +140,9 @@ pub struct Track {
     monitor_default: bool,
     /// Peak of this track's input channel since the last status snapshot.
     input_peak: f32,
+    /// Peak this track contributed to the output since the last status snapshot, i.e. the sum of
+    /// its audible layers. Monitoring is not part of it - that path never touches a layer.
+    output_peak: f32,
 }
 
 impl Track {
@@ -157,6 +160,7 @@ impl Track {
             monitor,
             monitor_default: monitor,
             input_peak: 0.0,
+            output_peak: 0.0,
         }
     }
 
@@ -242,6 +246,18 @@ impl Track {
     #[inline]
     pub fn take_input_peak(&mut self) -> f32 {
         std::mem::replace(&mut self.input_peak, 0.0)
+    }
+
+    #[inline]
+    pub fn note_output_peak(&mut self, magnitude: f32) {
+        if magnitude > self.output_peak {
+            self.output_peak = magnitude;
+        }
+    }
+
+    #[inline]
+    pub fn take_output_peak(&mut self) -> f32 {
+        std::mem::replace(&mut self.output_peak, 0.0)
     }
 
     /// Sum of all audible layers at musical position `pos`.

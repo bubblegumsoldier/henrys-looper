@@ -1,0 +1,27 @@
+[package]
+name = "henrys-looper-app"
+version = "0.1.0"
+edition = "2024"
+description = "Live-Looper - Desktop-Oberflaeche fuer die Rust-Engine"
+
+[[bin]]
+name = "henrys-looper"
+path = "src/main.rs"
+
+[features]
+# ASIO backend, passed straight through to the engine and to cpal. Both have to agree, otherwise
+# the two crates would end up with different cpal builds.
+asio = ["looper-engine/asio", "cpal/asio"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+looper-engine = { path = "../../engine" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Not a new dependency of the project: the engine already builds on cpal and rtrb, and the app
+# needs to name `cpal::Stream` (it owns two of them) and the input FIFO type.
+cpal = "0.18"
+rtrb = "0.4.0"
