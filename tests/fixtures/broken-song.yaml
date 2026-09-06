@@ -1,0 +1,20 @@
+title: Kaputter Song
+bpm: 100
+tracks:
+  gitarre: {ableton_track: 0}
+  bass:    {ableton_track: 1}
+sections:
+  - id: intro
+    bars: 4
+    autorelase: false
+    tracks:
+      gitarre: recrod
+  - id: bridge
+    bars: 2
+    tracks:
+      bss: play
+  - id: outro
+    repeat: brigde
+  - id: coda
+    tracks:
+      bass: play

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://henrys-looper/score-v0.schema.json",
+  "title": "Looper score v0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bpm", "tracks", "sections"],
+  "properties": {
+    "title": {"type": "string"},
+    "bpm": {"type": "number", "minimum": 20, "maximum": 999},
+    "time_signature": {"type": "string", "pattern": "^[0-9]{1,2}/[0-9]{1,2}$"},
+    "beats_per_bar": {"type": "integer", "minimum": 1, "maximum": 16},
+    "tracks": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ableton_track"],
+        "properties": {
+          "ableton_track": {"type": "integer", "minimum": 0},
+          "type": {"type": "string", "enum": ["single", "group"]}
+        }
+      }
+    },
+    "midi": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "next_section": {"$ref": "#/$defs/midiBinding"},
+        "stop_all": {"$ref": "#/$defs/midiBinding"}
+      }
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"},
+          "repeat": {"type": "string"},
+          "bars": {"type": "integer", "minimum": 1},
+          "autorelease": {"type": "boolean"},
+          "quantize": {"type": "string", "enum": ["bar", "loop"]},
+          "tracks": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "enum": ["record", "overdub", "play", "stop", "hear_through"]
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "midiBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cc": {"type": "integer", "minimum": 0, "maximum": 127},
+        "note": {"type": "integer", "minimum": 0, "maximum": 127},
+        "channel": {"type": "integer", "minimum": 1, "maximum": 16}
+      },
+      "oneOf": [
+        {"required": ["cc"], "not": {"required": ["note"]}},
+        {"required": ["note"], "not": {"required": ["cc"]}}
+      ]
+    }
+  }
+}

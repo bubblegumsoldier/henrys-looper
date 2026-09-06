@@ -1,0 +1,55 @@
+# Henrys 3/4-Song: Gitarre 8 Takte, zwei Voice-Layer, alles spielt, Ende per Release.
+# Ableton-Set: 0 gitarre (Ext. In 2) · 1 voice (Ext. In 1) · 2 voice2 (Ext. In 1) · 3 voice_live (Ext. In 1, nimmt nie auf)
+title: Henry 3/4
+bpm: 141
+time_signature: 3/4
+
+tracks:
+  gitarre:    {ableton_track: 0}
+  voice:      {ableton_track: 1}
+  voice2:     {ableton_track: 2}
+  voice_live: {ableton_track: 3}   # nur Monitoring — damit du dich in jeder Sektion hörst
+
+sections:
+  - id: gitarre_rec           # 8 Takte Gitarre aufnehmen, dann automatisch weiter
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: record
+      voice_live: hear_through
+
+  - id: voice_rec             # Gitarre loopt, Voice-Layer 1 aufnehmen (8 Takte)
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: play
+      voice: record
+      voice_live: hear_through
+
+  - id: voice_overdub         # Layer 1 läuft weiter, Layer 2 auf voice2 aufnehmen
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: play
+      voice: play
+      voice2: record
+      voice_live: hear_through
+
+  - id: alles                 # alles loopt, live singen; N = im nächsten Takt beenden
+    bars: 8
+    autorelease: false
+    quantize: bar
+    tracks:
+      gitarre: play
+      voice: play
+      voice2: play
+      voice_live: hear_through
+
+  - id: ende                  # alle Clips stoppen
+    bars: 1
+    autorelease: false
+    tracks:
+      gitarre: stop
+      voice: stop
+      voice2: stop
+      voice_live: hear_through

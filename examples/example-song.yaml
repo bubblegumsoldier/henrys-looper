@@ -1,0 +1,36 @@
+# Beispiel-Partitur v0 (M2.4) — Ableton-Set: Track 1 "gitarre", Track 2 "voice", Metronom an.
+title: Beispiel-Song
+bpm: 100
+# time_signature: 3/4                  # optional, Default 4/4 (beats_per_bar ist ein Alias für den Zähler)
+beats_per_bar: 4
+
+tracks:
+  gitarre: {ableton_track: 0}          # type: single (Default) | group
+  voice:   {ableton_track: 1}
+
+midi:                                   # optional; IDs erscheinen im MIDI-Monitor als ch1.cc64 / ch1.note37
+  next_section: {cc: 64}                # z. B. Sustain-Pedal; channel optional (Default 1)
+  stop_all:     {note: 37}
+
+sections:
+  - id: intro                           # (1) Gitarre aufnehmen, bis Henry "Release" drückt (n / Enter / MIDI)
+    bars: 4
+    autorelease: false
+    quantize: loop                      # Wechsel am Ende des laufenden 4-Takt-Zyklus
+    tracks:
+      gitarre: record
+      voice: hear_through               # Voice hörbar (Monitoring In), aber nicht aufgenommen
+
+  - id: verse                           # (2) Voice 4 Takte aufnehmen, Gitarre loopt
+    bars: 4
+    autorelease: true                   # nach 4 Takten automatisch weiter
+    tracks:
+      gitarre: play
+      voice: record
+
+  - id: outro                           # (3) alles spielt, Gitarre bekommt einen weiteren Layer (Overdub)
+    repeat: verse
+    autorelease: false
+    tracks:
+      gitarre: overdub
+      voice: play
