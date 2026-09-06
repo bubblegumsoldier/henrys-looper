@@ -24,7 +24,11 @@
 //!   synchronous delay, reverb, plus the ready-made presets. Sits in the playback and monitoring
 //!   path only; what is recorded stays dry.
 //! * [`schedule`] - a user action becomes timed commands: which grid a take snaps to, how much
-//!   head start it gets, and how far away it still is. Shared by the CLI and the desktop app.
+//!   head start it gets, and how far away it still is. Shared by the CLI, the desktop app and the
+//!   score runner.
+//! * [`runner`] - plays a compiled score: count-in, target states against actual states, armed
+//!   changes, autorelease. Pure control-thread logic on top of [`schedule`], no audio.
+//! * [`score_cli`] - the `score` subcommand: engine built from the score, keyboard and display.
 //! * [`metro`] - the click, as a pure function of position.
 //! * [`process`] - the audio-thread brain, including the latency-compensation derivation.
 //! * [`live`] - cpal wiring, keyboard and terminal display.
@@ -38,7 +42,9 @@ pub mod fx;
 pub mod live;
 pub mod metro;
 pub mod process;
+pub mod runner;
 pub mod schedule;
+pub mod score_cli;
 pub mod timeline;
 pub mod track;
 

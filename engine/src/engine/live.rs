@@ -61,8 +61,8 @@ use crate::audio::{self, DeviceOpts};
 use crate::meter::fmt_dbfs;
 
 use super::command::{
-    Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, TrackStatus, buffer_channel,
-    command_channel, status_channel,
+    Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, StatusReceiver, TrackStatus,
+    buffer_channel, command_channel, status_channel,
 };
 use super::frame::{Channels, TrackInput};
 use super::fx::{DelayNote, FxParam, FxPreset, FxSlot, FxStatus};
@@ -80,11 +80,11 @@ const INPUT_FIFO_BUFFERS: u32 = 64;
 /// Status snapshots per second the audio thread produces. The display consumes 10 of them.
 const STATUS_HZ: u32 = 200;
 /// Terminal refresh rate, as required: no more than ten updates per second.
-const DISPLAY_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const DISPLAY_INTERVAL: Duration = Duration::from_millis(100);
 /// Prepared layer buffers the control thread keeps in the engine, so an overdub never waits for an
 /// allocation. Three is one for the take that is starting, one for a second track starting at the
 /// same bar, and one in reserve.
-const SPARE_SLOTS: usize = 3;
+pub(crate) const SPARE_SLOTS: usize = 3;
 /// Width the status block is padded to, so remains of a longer previous line are erased.
 const LINE_WIDTH: usize = 208;
 
@@ -442,15 +442,16 @@ pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackD
     Ok(defs)
 }
 
+/// Counters both front ends fill from the audio callbacks and print afterwards.
 #[derive(Default)]
-struct LiveStats {
-    xruns: AtomicU64,
-    other_errors: AtomicU64,
+pub struct LiveStats {
+    pub xruns: AtomicU64,
+    pub other_errors: AtomicU64,
     /// Output callbacks that found the input FIFO short.
-    underruns: AtomicU64,
+    pub underruns: AtomicU64,
     /// Input callbacks that could not push - frames lost, alignment gone.
-    overruns: AtomicU64,
-    cb_nanos_max: AtomicU64,
+    pub overruns: AtomicU64,
+    pub cb_nanos_max: AtomicU64,
 }
 
 impl LiveStats {
@@ -930,11 +931,214 @@ impl Control {
     }
 }
 
+/// What a front end needs to build the engine and start both streams.
+pub struct EngineSpec<'a> {
+    pub setup: &'a audio::DuplexSetup,
+    pub timeline: Timeline,
+    /// Longest loop the session can record, in bars - the layer buffer length.
+    pub bars: u32,
+    pub defs: &'a [TrackDef],
+    pub latency_frames: u64,
+    /// Whether every track starts with monitoring on.
+    pub monitor: bool,
+    pub monitor_gain: f32,
+    pub click: bool,
+    pub click_gain: f32,
+}
+
+/// A running engine: two live cpal streams plus the control thread's ends of every channel.
+///
+/// Every field is public and the struct is meant to be **destructured**: `cpal::Stream` is `!Send`
+/// and dropping one stops it, so the two streams have to stay bound in the control loop's own
+/// scope. Taking them out of a struct by pattern is the way to do that without a borrow that
+/// outlives the loop.
+pub struct RunningEngine {
+    pub input: cpal::Stream,
+    pub output: cpal::Stream,
+    pub cmd: CommandSender,
+    pub status: StatusReceiver,
+    pub pool: LayerPool,
+    pub stats: Arc<LiveStats>,
+    /// Buffer size the driver actually granted, which is what the head start is computed from.
+    pub buffer_frames: u32,
+}
+
+/// German summary of what the callbacks saw, for the end of a session.
+pub fn stats_report(stats: &LiveStats) -> String {
+    format!(
+        "Xruns (cpal):        {}\nFIFO leer:           {}\nFIFO uebergelaufen:  {}\n\
+         Sonstige Fehler:     {}\nCallback-Dauer max:  {:.3} ms",
+        stats.xruns.load(Ordering::Relaxed),
+        stats.underruns.load(Ordering::Relaxed),
+        stats.overruns.load(Ordering::Relaxed),
+        stats.other_errors.load(Ordering::Relaxed),
+        stats.cb_nanos_max.load(Ordering::Relaxed) as f64 / 1e6,
+    )
+}
+
+/// Build the engine, wire both callbacks and start the streams.
+///
+/// One place rather than one per subcommand: the two conditions the latency compensation rests on -
+/// whole frames through the FIFO and **input stream started before the output stream** - are stated
+/// in the module comment and would otherwise have to be re-established every time a front end is
+/// added.
+pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
+    let setup = spec.setup;
+    let rate = setup.sample_rate();
+    let in_channels = setup.in_plan.config.channels as usize;
+    let out_channels = setup.out_plan.config.channels as usize;
+    let buffer_frames = setup.buffer_frames().max(1);
+    // Same reasoning as in audio.rs: room for a driver block far larger than requested, so the
+    // callback never has to allocate even if the driver ignores the request.
+    let scratch_frames = (buffer_frames * 16) as usize;
+
+    let capacity = loop_capacity(&spec.timeline, spec.bars);
+    let kinds: Vec<Channels> = spec.defs.iter().map(TrackDef::channels).collect();
+    let slots = spare_slots_for(&kinds, SPARE_SLOTS);
+
+    let stats = Arc::new(LiveStats::default());
+    let (mut producer, mut consumer) =
+        rtrb::RingBuffer::<f32>::new((buffer_frames * INPUT_FIFO_BUFFERS) as usize * in_channels);
+    let (cmd_tx, cmd_rx) = command_channel(256);
+    let (status_tx, status_rx) = status_channel(1024);
+    // The return queue has room for every buffer that can be inside the engine at once, so the
+    // audio thread can always hand one back instead of leaking it.
+    let (channel, buffer_endpoint) = buffer_channel(
+        slots[0] + slots[1] + 8,
+        spec.defs.len() * MAX_LAYERS + slots[0] + slots[1] + 8,
+    );
+    let mut pool = LayerPool::new(channel, capacity as usize, slots);
+    // Every layer buffer of the session is born here, in the control thread, before any stream
+    // exists; from now on the pool only recycles.
+    pool.service(None);
+
+    let tracks: Vec<Track> = spec
+        .defs
+        .iter()
+        .map(|d| Track::new(d.input, spec.monitor, d.pan, rate).with_latency(d.latency))
+        .collect();
+    let mut core = EngineCore::new(EngineConfig {
+        timeline: spec.timeline,
+        latency_frames: spec.latency_frames,
+        input_channels: in_channels,
+        tracks,
+        spares: [Vec::with_capacity(slots[0]), Vec::with_capacity(slots[1])],
+        layer_frames: capacity,
+        commands: cmd_rx,
+        status: status_tx,
+        buffers: buffer_endpoint,
+        monitor_gain: spec.monitor_gain,
+        click: spec.click,
+        click_gain: spec.click_gain,
+        status_interval: (rate / STATUS_HZ).max(1) as u64,
+    });
+
+    // ---- input stream: whole frames into the FIFO, nothing else --------------------------
+    let stats_in = Arc::clone(&stats);
+    let stats_in_err = Arc::clone(&stats);
+    let input = audio::build_input(
+        &setup.input,
+        &setup.in_plan,
+        move |data: &[f32], _: &InputCallbackInfo, _offset: usize| {
+            let t0 = Instant::now();
+            let mut overrun = false;
+            for frame in data.chunks_exact(in_channels) {
+                // Whole frames only: half a frame in the FIFO would shift every channel of every
+                // later recording against each other.
+                if producer.slots() < in_channels {
+                    overrun = true;
+                    break;
+                }
+                for &sample in frame {
+                    let _ = producer.push(sample);
+                }
+            }
+            if overrun {
+                stats_in.overruns.fetch_add(1, Ordering::Relaxed);
+            }
+            stats_in.record_callback(t0);
+        },
+        move |err| stats_in_err.count_error(err),
+    )?;
+
+    // ---- output stream: drives the engine ------------------------------------------------
+    let stats_out = Arc::clone(&stats);
+    let stats_out_err = Arc::clone(&stats);
+    let mut in_scratch = vec![0.0f32; scratch_frames * in_channels];
+    let mut out_scratch = vec![0.0f32; scratch_frames * OUT_CHANNELS];
+    let output = audio::build_output(
+        &setup.output,
+        &setup.out_plan,
+        move |data: &mut [f32], _: &OutputCallbackInfo, _offset: usize| {
+            let t0 = Instant::now();
+            let frames = data.len() / out_channels;
+            let mut done = 0usize;
+            while done < frames {
+                let n = (frames - done).min(scratch_frames);
+                let mut got = 0usize;
+                while got < n && consumer.slots() >= in_channels {
+                    for c in 0..in_channels {
+                        if let Ok(v) = consumer.pop() {
+                            in_scratch[got * in_channels + c] = v;
+                        }
+                    }
+                    got += 1;
+                }
+                if got < n {
+                    stats_out.underruns.fetch_add(1, Ordering::Relaxed);
+                }
+                core.process(
+                    &in_scratch[..got * in_channels],
+                    &mut out_scratch[..n * OUT_CHANNELS],
+                );
+                let base = done * out_channels;
+                for (i, frame) in data[base..base + n * out_channels]
+                    .chunks_exact_mut(out_channels)
+                    .enumerate()
+                {
+                    let bus = &out_scratch[i * OUT_CHANNELS..(i + 1) * OUT_CHANNELS];
+                    spread_frame(bus, frame);
+                }
+                done += n;
+            }
+            stats_out.record_callback(t0);
+        },
+        move |err| stats_out_err.count_error(err),
+    )?;
+
+    if let Ok(frames) = input.buffer_size() {
+        println!("Puffer laut Treiber: Eingang {frames} Frames");
+    }
+    if let Ok(frames) = output.buffer_size() {
+        println!("Puffer laut Treiber: Ausgang {frames} Frames");
+    }
+
+    // Order matters: input first, then output, exactly as in the phase 0 latency measurement. Both
+    // frame counters start on their stream's first callback, and only the same start order gives
+    // them the same origin the 827 samples were measured against.
+    input
+        .play()
+        .map_err(|e| format!("Eingangsstream startet nicht: {e}"))?;
+    output
+        .play()
+        .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+
+    Ok(RunningEngine {
+        input,
+        output,
+        cmd: cmd_tx,
+        status: status_rx,
+        pool,
+        stats,
+        buffer_frames,
+    })
+}
+
 /// Non-blocking keyboard: a helper thread owns stdin, the main loop reads lines from a channel.
 ///
 /// Line based rather than raw single keys - raw terminal mode would need another dependency, and
 /// every action is quantised to a bar boundary anyway, so the extra Enter costs no accuracy.
-fn spawn_keyboard() -> Receiver<String> {
+pub(crate) fn spawn_keyboard() -> Receiver<String> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
@@ -954,12 +1158,12 @@ fn spawn_keyboard() -> Receiver<String> {
     rx
 }
 
-fn on_off(v: bool) -> &'static str {
+pub(crate) fn on_off(v: bool) -> &'static str {
     if v { "an " } else { "aus" }
 }
 
 /// `Mitte`, `L50`, `R100` - short enough for a track line, unambiguous enough to read at a glance.
-fn pan_label(pan: f32) -> String {
+pub(crate) fn pan_label(pan: f32) -> String {
     let percent = (pan.abs() * 100.0).round() as i32;
     if percent == 0 {
         "Mitte".to_string()
@@ -972,14 +1176,14 @@ fn pan_label(pan: f32) -> String {
 
 /// `Ein 1 mono` for a microphone, `Ein 3+4 stereo` for a pair. Which inputs and how many channels
 /// end up in the loop buffer is the one setup fact worth repeating on every line.
-fn input_text(input: TrackInput) -> String {
+pub(crate) fn input_text(input: TrackInput) -> String {
     format!("Ein {:<4} {:<6}", input.label(), input.channels().label())
 }
 
 /// Where a track's compensation comes from, as a sentence fragment: `gemessen 512 + 96 Zuschlag`,
 /// `Vorgabe 827`. Never just a number - a value that looks like a setting but is inherited is
 /// exactly the thing this is here to prevent.
-fn latency_origin(latency: TrackLatency, default: u64) -> String {
+pub(crate) fn latency_origin(latency: TrackLatency, default: u64) -> String {
     let base = match latency.measured {
         Some(frames) => format!("gemessen {frames}"),
         None => format!("Vorgabe {default}"),
@@ -991,7 +1195,7 @@ fn latency_origin(latency: TrackLatency, default: u64) -> String {
 }
 
 /// The latency column of a track line: the effective number, and whether it is the track's own.
-fn latency_text(ts: &TrackStatus) -> String {
+pub(crate) fn latency_text(ts: &TrackStatus) -> String {
     let mark = if ts.latency.inherits() { "geerbt" } else { "eigen " };
     match ts.latency.trim {
         0 => format!("{:>5} {mark}", ts.latency_frames),
@@ -1000,7 +1204,7 @@ fn latency_text(ts: &TrackStatus) -> String {
 }
 
 /// `[1 2* 3]`, with `*` for muted and the gain appended where it is not 1.
-fn layer_list(ts: &TrackStatus, gains: &[f32]) -> String {
+pub(crate) fn layer_list(ts: &TrackStatus, gains: &[f32]) -> String {
     if ts.layers == 0 {
         return "-".to_string();
     }
@@ -1022,7 +1226,7 @@ fn layer_list(ts: &TrackStatus, gains: &[f32]) -> String {
 
 /// The effect column of a track line: `stimme HEK-R 1/8.` - which preset, which effects are on,
 /// and, when the delay is one of them, the note value it is locked to.
-fn fx_text(fx: &FxStatus) -> String {
+pub(crate) fn fx_text(fx: &FxStatus) -> String {
     if fx.bypass {
         return "aus".to_string();
     }
@@ -1125,7 +1329,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
 }
 
 /// Draw the block in place. Without cursor control every update is simply appended.
-fn draw(lines: &[String], previous_lines: usize, simple: bool) {
+pub(crate) fn draw(lines: &[String], previous_lines: usize, simple: bool) {
     let mut out = String::new();
     if !simple && previous_lines > 0 {
         out.push_str(&format!("\x1b[{previous_lines}A"));
@@ -1154,7 +1358,6 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     let timeline = Timeline::new(rate, opts.bpm, signature);
 
     let in_channels = setup.in_plan.config.channels as usize;
-    let out_channels = setup.out_plan.config.channels as usize;
     let mut defs = resolve_tracks(&opts.tracks, in_channels)?;
     apply_track_latencies(&mut defs, &opts.track_latencies)?;
     // The loop has to be longer than the *largest* compensation any track uses, not than the
@@ -1226,137 +1429,25 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
          \x20         einen eigenen Wert: calibrate --for-track, dann --track-latency NAME:FRAMES."
     );
 
-    let buffer_frames = setup.buffer_frames().max(1);
-    // Same reasoning as in audio.rs: room for a driver block far larger than requested, so the
-    // callback never has to allocate even if the driver ignores the request.
-    let scratch_frames = (buffer_frames * 16) as usize;
-
-    let stats = Arc::new(LiveStats::default());
-    let (mut producer, mut consumer) =
-        rtrb::RingBuffer::<f32>::new((buffer_frames * INPUT_FIFO_BUFFERS) as usize * in_channels);
-    let (cmd_tx, cmd_rx) = command_channel(256);
-    let (status_tx, mut status_rx) = status_channel(1024);
-    // The return queue has room for every buffer that can be inside the engine at once, so the
-    // audio thread can always hand one back instead of leaking it.
-    let (channel, buffer_endpoint) = buffer_channel(
-        slots[0] + slots[1] + 8,
-        defs.len() * MAX_LAYERS + slots[0] + slots[1] + 8,
-    );
-    let mut pool = LayerPool::new(channel, capacity as usize, slots);
-    // Every layer buffer of the session is born here, in the control thread, before any stream
-    // exists; from now on the pool only recycles.
-    pool.service(None);
-
-    let tracks: Vec<Track> = defs
-        .iter()
-        .map(|d| Track::new(d.input, opts.monitor, d.pan, rate).with_latency(d.latency))
-        .collect();
-    let core = EngineCore::new(EngineConfig {
+    let RunningEngine {
+        input,
+        output,
+        cmd: cmd_tx,
+        status: mut status_rx,
+        pool,
+        stats,
+        buffer_frames,
+    } = start_engine(EngineSpec {
+        setup: &setup,
         timeline,
+        bars: opts.bars,
+        defs: &defs,
         latency_frames: opts.latency_frames,
-        input_channels: in_channels,
-        tracks,
-        spares: [Vec::with_capacity(slots[0]), Vec::with_capacity(slots[1])],
-        layer_frames: capacity,
-        commands: cmd_rx,
-        status: status_tx,
-        buffers: buffer_endpoint,
+        monitor: opts.monitor,
         monitor_gain: opts.monitor_gain,
         click: !opts.no_click,
         click_gain: opts.click_gain,
-        status_interval: (rate / STATUS_HZ).max(1) as u64,
-    });
-
-    // ---- input stream: whole frames into the FIFO, nothing else --------------------------
-    let stats_in = Arc::clone(&stats);
-    let stats_in_err = Arc::clone(&stats);
-    let input = audio::build_input(
-        &setup.input,
-        &setup.in_plan,
-        move |data: &[f32], _: &InputCallbackInfo, _offset: usize| {
-            let t0 = Instant::now();
-            let mut overrun = false;
-            for frame in data.chunks_exact(in_channels) {
-                // Whole frames only: half a frame in the FIFO would shift every channel of every
-                // later recording against each other.
-                if producer.slots() < in_channels {
-                    overrun = true;
-                    break;
-                }
-                for &sample in frame {
-                    let _ = producer.push(sample);
-                }
-            }
-            if overrun {
-                stats_in.overruns.fetch_add(1, Ordering::Relaxed);
-            }
-            stats_in.record_callback(t0);
-        },
-        move |err| stats_in_err.count_error(err),
-    )?;
-
-    // ---- output stream: drives the engine ------------------------------------------------
-    let stats_out = Arc::clone(&stats);
-    let stats_out_err = Arc::clone(&stats);
-    let mut core = core;
-    let mut in_scratch = vec![0.0f32; scratch_frames * in_channels];
-    let mut out_scratch = vec![0.0f32; scratch_frames * OUT_CHANNELS];
-    let output = audio::build_output(
-        &setup.output,
-        &setup.out_plan,
-        move |data: &mut [f32], _: &OutputCallbackInfo, _offset: usize| {
-            let t0 = Instant::now();
-            let frames = data.len() / out_channels;
-            let mut done = 0usize;
-            while done < frames {
-                let n = (frames - done).min(scratch_frames);
-                let mut got = 0usize;
-                while got < n && consumer.slots() >= in_channels {
-                    for c in 0..in_channels {
-                        if let Ok(v) = consumer.pop() {
-                            in_scratch[got * in_channels + c] = v;
-                        }
-                    }
-                    got += 1;
-                }
-                if got < n {
-                    stats_out.underruns.fetch_add(1, Ordering::Relaxed);
-                }
-                core.process(
-                    &in_scratch[..got * in_channels],
-                    &mut out_scratch[..n * OUT_CHANNELS],
-                );
-                let base = done * out_channels;
-                for (i, frame) in data[base..base + n * out_channels]
-                    .chunks_exact_mut(out_channels)
-                    .enumerate()
-                {
-                    let bus = &out_scratch[i * OUT_CHANNELS..(i + 1) * OUT_CHANNELS];
-                    spread_frame(bus, frame);
-                }
-                done += n;
-            }
-            stats_out.record_callback(t0);
-        },
-        move |err| stats_out_err.count_error(err),
-    )?;
-
-    if let Ok(frames) = input.buffer_size() {
-        println!("Puffer laut Treiber: Eingang {frames} Frames");
-    }
-    if let Ok(frames) = output.buffer_size() {
-        println!("Puffer laut Treiber: Ausgang {frames} Frames");
-    }
-
-    // Order matters: input first, then output, exactly as in the phase 0 latency measurement. Both
-    // frame counters start on their stream's first callback, and only the same start order gives
-    // them the same origin the 827 samples were measured against.
-    input
-        .play()
-        .map_err(|e| format!("Eingangsstream startet nicht: {e}"))?;
-    output
-        .play()
-        .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+    })?;
 
     let grid = match opts.quantize {
         Quantize::Bar => "der naechsten Taktgrenze",
@@ -1466,23 +1557,7 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     control.pool.drain();
 
     println!("\n");
-    println!("Xruns (cpal):        {}", stats.xruns.load(Ordering::Relaxed));
-    println!(
-        "FIFO leer:           {}",
-        stats.underruns.load(Ordering::Relaxed)
-    );
-    println!(
-        "FIFO uebergelaufen:  {}",
-        stats.overruns.load(Ordering::Relaxed)
-    );
-    println!(
-        "Sonstige Fehler:     {}",
-        stats.other_errors.load(Ordering::Relaxed)
-    );
-    println!(
-        "Callback-Dauer max:  {:.3} ms",
-        stats.cb_nanos_max.load(Ordering::Relaxed) as f64 / 1e6
-    );
+    println!("{}", stats_report(&stats));
     Ok(())
 }
 

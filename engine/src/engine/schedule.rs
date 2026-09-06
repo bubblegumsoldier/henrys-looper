@@ -228,17 +228,25 @@ impl Scheduler {
             Quantize::Bar => self.timeline.bar_start_at_or_after(earliest),
             Quantize::Loop => match loop_grid {
                 Some((origin, loop_len)) if loop_len > 0 => {
-                    if earliest <= origin {
-                        origin
-                    } else {
-                        // Whole passes since the origin, rounded up: the next top of *this* loop.
-                        let passes = (earliest - origin).div_ceil(loop_len);
-                        origin + passes * loop_len
-                    }
+                    Scheduler::loop_grid_at_or_after(origin, loop_len, earliest)
                 }
                 _ => self.timeline.loop_start_at_or_after(earliest, self.bars),
             },
         }
+    }
+
+    /// The point of a track's own loop grid `origin + n * loop_len` at or after `pos`.
+    ///
+    /// Public and free-standing because the score runner needs the very same grid: a section
+    /// boundary is a *bar* line, and a bar line can sit a sample or two beside `origin + n *
+    /// loop_len` because every bar boundary is rounded on its own. A further layer has to land on
+    /// the loop's grid and not on the bar's - see the module comment.
+    pub fn loop_grid_at_or_after(origin: u64, loop_len: u64, pos: u64) -> u64 {
+        if loop_len == 0 || pos <= origin {
+            return origin;
+        }
+        // Whole passes since the origin, rounded up: the next top of *this* loop.
+        origin + (pos - origin).div_ceil(loop_len) * loop_len
     }
 
     /// Remember what a track is waiting for, so [`Scheduler::lead`] can count down to it.
@@ -254,11 +262,23 @@ impl Scheduler {
         }
     }
 
-    /// How far track `track` still is from its scheduled action, measured from `pos`.
+    /// How far `to` still is from `from`, in whole beats split at the bar line.
     ///
-    /// The distance is counted in whole beats between the beat `pos` is in and the beat the action
-    /// falls on, then split at the bar line. That is the same arithmetic the timeline uses for the
-    /// display, so the countdown reaches zero on exactly the beat the engine acts on.
+    /// The distance is counted between the beat `from` is in and the beat `to` falls on. That is
+    /// the same arithmetic the timeline uses for the display, so a countdown built on it reaches
+    /// zero on exactly the beat the engine acts on. Public because the score runner counts down to
+    /// a *section* boundary rather than to a track's own action, and both countdowns have to mean
+    /// the same thing on screen.
+    pub fn distance(&self, from: u64, to: u64) -> (u32, u32) {
+        let beats_per_bar = self.timeline.beats_per_bar().max(1);
+        let left = self
+            .timeline
+            .beat_index_at(to)
+            .saturating_sub(self.timeline.beat_index_at(from));
+        ((left / beats_per_bar) as u32, (left % beats_per_bar) as u32)
+    }
+
+    /// How far track `track` still is from its scheduled action, measured from `pos`.
     pub fn lead(&self, track: usize, pos: u64) -> Lead {
         let Some(Some(pending)) = self.pending.get(track).copied() else {
             return Lead::default();
@@ -266,15 +286,91 @@ impl Scheduler {
         if pos >= pending.at {
             return Lead::default();
         }
-        let beats_per_bar = self.timeline.beats_per_bar().max(1);
-        let left = self
-            .timeline
-            .beat_index_at(pending.at)
-            .saturating_sub(self.timeline.beat_index_at(pos));
+        let (bars, beats) = self.distance(pos, pending.at);
         Lead {
             kind: Some(pending.kind),
-            bars: (left / beats_per_bar) as u32,
-            beats: (left % beats_per_bar) as u32,
+            bars,
+            beats,
+        }
+    }
+
+    /// The three commands every take is made of, plus the pending entry the display counts down to.
+    ///
+    /// `end` is the position just after the last musical sample, so a loop-defining take produces a
+    /// loop of exactly `end - start` frames. The trailing [`Command::StartPlay`] is what makes the
+    /// switch from recording to playing seamless at that very sample.
+    fn take_commands(&mut self, track: usize, start: u64, end: u64, new_loop: bool) -> Vec<Command> {
+        let kind = if new_loop {
+            PendingKind::Record
+        } else {
+            PendingKind::Overdub
+        };
+        self.arm(track, kind, start);
+        let head = if new_loop {
+            Command::StartRecord { track, at: start }
+        } else {
+            Command::StartOverdub { track, at: start }
+        };
+        vec![
+            head,
+            Command::StopRecord { track, at: end },
+            Command::StartPlay { track, at: end },
+        ]
+    }
+
+    /// A new loop beginning at a position the caller already knows, over `bars` bars.
+    ///
+    /// This is the entry point the score runner uses: a section starts on a boundary the runner
+    /// computed itself, so there is nothing left to quantise - running it through
+    /// [`Scheduler::next_start`] a second time could only move it. [`Scheduler::record`] is this
+    /// method with the position worked out from a key press.
+    pub fn record_at(&mut self, track: usize, name: &str, start: u64, bars: u32) -> Scheduled {
+        let bar = self.timeline.bar_index_at(start);
+        let end = self.timeline.position_of(bar + bars as u64, 0);
+        Scheduled {
+            commands: self.take_commands(track, start, end, true),
+            message: format!("\"{name}\": neuer Loop ab Takt {} ueber {bars} Takte.", bar + 1),
+        }
+    }
+
+    /// A further layer between two positions the caller already knows.
+    pub fn overdub_at(
+        &mut self,
+        track: usize,
+        name: &str,
+        start: u64,
+        end: u64,
+        layers: u8,
+    ) -> Scheduled {
+        let bar = self.timeline.bar_index_at(start);
+        Scheduled {
+            commands: self.take_commands(track, start, end, false),
+            message: format!("\"{name}\": Ebene {} ab Takt {}.", layers as usize + 1, bar + 1),
+        }
+    }
+
+    /// Playback from a position the caller already knows.
+    pub fn play_at(&mut self, track: usize, name: &str, at: u64) -> Scheduled {
+        self.arm(track, PendingKind::Play, at);
+        Scheduled {
+            commands: vec![Command::StartPlay { track, at }],
+            message: format!(
+                "\"{name}\": Wiedergabe ab Takt {}.",
+                self.timeline.bar_index_at(at) + 1
+            ),
+        }
+    }
+
+    /// Silence from a position the caller already knows. Only the playback is switched off; what is
+    /// recorded stays where it is.
+    pub fn stop_play_at(&mut self, track: usize, name: &str, at: u64) -> Scheduled {
+        self.arm(track, PendingKind::Stop, at);
+        Scheduled {
+            commands: vec![Command::StopPlay { track, at }],
+            message: format!(
+                "\"{name}\": still ab Takt {}.",
+                self.timeline.bar_index_at(at) + 1
+            ),
         }
     }
 
@@ -284,21 +380,7 @@ impl Scheduler {
     /// aligning to.
     pub fn record(&mut self, track: usize, name: &str, est: u64) -> Scheduled {
         let start = self.next_start(est, None);
-        let bar = self.timeline.bar_index_at(start);
-        let end = self.timeline.position_of(bar + self.bars as u64, 0);
-        self.arm(track, PendingKind::Record, start);
-        Scheduled {
-            commands: vec![
-                Command::StartRecord { track, at: start },
-                Command::StopRecord { track, at: end },
-                Command::StartPlay { track, at: end },
-            ],
-            message: format!(
-                "\"{name}\": neuer Loop ab Takt {} ueber {} Takte.",
-                bar + 1,
-                self.bars
-            ),
-        }
+        self.record_at(track, name, start, self.bars)
     }
 
     /// A further layer. It covers exactly one pass of the existing loop and starts on that loop's
@@ -314,21 +396,13 @@ impl Scheduler {
         layers: u8,
     ) -> Scheduled {
         let start = self.next_start(est, Some((origin, loop_len)));
-        let bar = self.timeline.bar_index_at(start);
         let end = if loop_len > 0 {
             start + loop_len
         } else {
+            let bar = self.timeline.bar_index_at(start);
             self.timeline.position_of(bar + self.bars as u64, 0)
         };
-        self.arm(track, PendingKind::Overdub, start);
-        Scheduled {
-            commands: vec![
-                Command::StartOverdub { track, at: start },
-                Command::StopRecord { track, at: end },
-                Command::StartPlay { track, at: end },
-            ],
-            message: format!("\"{name}\": Ebene {} ab Takt {}.", layers as usize + 1, bar + 1),
-        }
+        self.overdub_at(track, name, start, end, layers)
     }
 
     /// One button for three situations, exactly as on the keyboard: a scheduled recording is
@@ -373,14 +447,7 @@ impl Scheduler {
 
     pub fn play(&mut self, track: usize, name: &str, est: u64) -> Scheduled {
         let at = self.next_bar(est);
-        self.arm(track, PendingKind::Play, at);
-        Scheduled {
-            commands: vec![Command::StartPlay { track, at }],
-            message: format!(
-                "\"{name}\": Wiedergabe ab Takt {}.",
-                self.timeline.bar_index_at(at) + 1
-            ),
-        }
+        self.play_at(track, name, at)
     }
 
     pub fn clear_track(&mut self, track: usize, name: &str, est: u64) -> Scheduled {

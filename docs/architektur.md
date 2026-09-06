@@ -50,7 +50,7 @@ andere ist die Eintrittskarte.
 | 0 | Audio-Nachweis unter Windows | **abgenommen**, am Instrument geprüft |
 | 1 | Loop-Kern, ein Track | **abgenommen**, Gitarre eingespielt, Kalibrierung bestätigt |
 | 2 | Mehrere Tracks, unbegrenzte Layer | gebaut, 52 Tests grün, Abnahme am Instrument offen |
-| 3 | Partitur und Runner | offen |
+| 3 | Partitur und Runner | **gebaut**, 273 Tests grün, Abnahme am Instrument offen. Compiler und Runner stehen, `score`-Subcommand bedient beides. Siehe Abschnitt 10 |
 | 4 | UI | vorgezogen, siehe unten |
 | 5 | Bühnentauglichkeit, MIDI | offen |
 | 6 | Effekte | DSP, Kommandos und CLI gebaut, Abnahme am Instrument offen. UI folgt |
@@ -567,7 +567,131 @@ Ein globaler Hall-Bus würde davon 1,7 Prozentpunkte sparen und bleibt damit **n
 wurde weiterhin bewusst nicht gebaut. Die beiden billigen Zustände sind billig geblieben: sieben
 von acht Tracks sind meistens still und kosten zusammen 0,12 %.
 
-## 10. Arbeitsweise
+## 10. Der Runner (Phase 3)
+
+Der Compiler (`engine/src/score/`) macht aus YAML eine statische `CompiledScore`. Der **Runner**
+(`engine/src/engine/runner.rs`) spielt sie. Er läuft im Steuer-Thread, kennt kein Terminal und
+keine Oberfläche, und alles, was er tut, verlässt ihn als `Command` mit Zeitstempel. Deshalb ist
+Phase 3 vollständig offline beweisbar — die 21 Tests in `runner/tests.rs` treiben denselben
+`EngineCore` über `sim.rs`, mit dem auch die Sample-Genauigkeit von Phase 1 bewiesen wurde.
+
+### Das deklarative Modell: Soll gegen Ist, und was **kein** Kommando erzeugt
+
+Eine Sektion beschreibt den vollständigen Sollzustand **aller** Tracks, keine Deltas. Der Runner
+merkt sich, was er zuletzt von einem Track verlangt hat, und schickt nur die Differenz:
+
+| vorher | jetzt | Kommandos |
+|---|---|---|
+| egal | `record` | `StartRecord`, `StopRecord`, `StartPlay` — ein Take über die Sektion |
+| egal | `overdub` | `StartOverdub`, `StopRecord`, `StartPlay` — eine Ebene, genau ein Loop-Durchlauf |
+| klingt schon | `play` | **keins** |
+| still, mit Inhalt | `play` | `StartPlay` |
+| klingt | `stop` / `hear_through` | `StopPlay` |
+| still | `stop` | **keins** |
+
+Ein Track, der über fünf Sektionen auf `play` steht, bekommt **null** Kommandos; einer, der
+durchgehend `stop` steht, ebenso. Das ist keine Sparsamkeit, sondern Klangschutz: Jedes
+überflüssige Kommando ist ein Zustandswechsel im Audio-Thread an einer musikalisch exponierten
+Stelle — die Sorte Fehler, die man erst nach zwanzig Minuten Spielen als Knacksen bemerkt.
+
+**Mithören** folgt demselben Prinzip: an bei `record`, `overdub` und `hear_through`, aus bei `play`
+und `stop`, und nur, wenn die Partitur es dem Track überhaupt erlaubt (`monitor:`). Ein Wechsel
+wird nur geschickt, wenn er den Zustand wirklich ändert.
+
+### Einzähler
+
+Ein Takt Klick vor der ersten Sektion, konfigurierbar über `--count-in`. Ein Takt ist der kürzeste
+Vorlauf, der noch ein *Takt* ist: Der Musiker hört ein vollständiges Muster der Taktart, die er
+gleich spielt (in 3/4 bei 141 BPM sind das 1,28 s). Zwei Takte wären Warten, ein halber würde die
+Taktart nicht etablieren. Der Einzähler beginnt auf der ersten Taktgrenze, die die Kommando-Queue
+noch rechtzeitig erreicht, also ist der tatsächliche Vorlauf ein voller Takt **plus** der Rest des
+angefangenen — nie weniger. Er läuft genau einmal, vor Sektion 0.
+
+### Autorelease, Pending, Quantisierung
+
+* `autorelease: true`: Der Folgewechsel liegt sample-genau `bars` Takte später und wird **sofort
+  beim Betreten der Sektion** armiert und abgeschickt. Der Runner wartet auf keine Taktgrenze.
+* `autorelease: false`: Die Sektion loopt. Beim Release wird der Wechsel quantisiert —
+  `quantize: bar` auf die nächste Taktgrenze, `quantize: loop` auf das Ende des laufenden
+  Durchlaufs — und ist bis dahin sichtbar armiert („Wechsel armiert: ‚voice_2‘ in 5 Takten").
+* **Zweimal Auslösen überspringt nichts.** Ist schon ein Wechsel armiert, meldet der zweite Druck
+  nur, wie weit er noch weg ist, und schickt kein einziges Kommando.
+* **Ein Wechsel landet nie in einem laufenden Take.** Ein Release in Takt 3 einer achttaktigen
+  Aufnahme würde einen Drei-Takte-Loop definieren, und alles, was danach dagegen aufgenommen wird,
+  säße falsch. Der Wechsel wird deshalb ans Ende des Takes geschoben, mit Meldung. Verglichen wird
+  in **Takten**, nicht in Samples: Ein Take darf eine Sekunde-Bruchteil-Sample über seine Taktgrenze
+  hinausragen, ohne den Wechsel eine ganze Sektion weiterzuschieben.
+
+### Warum der Runner die Loop-Geometrie vorhersagt
+
+Ein Overdub muss auf das eigene Raster des Tracks (`origin + n · loop_len`) einrasten, und eine
+Sektion wird geplant, **bevor** der Take, der dieses Raster definiert, fertig ist — der Status sagt
+zu dem Zeitpunkt noch `loop_len = 0`. Der Runner braucht ihn nicht: Er hat den Take selbst
+geschickt und weiß deshalb, dass der Loop genau `[start, end)` der aufnehmenden Sektion sein wird.
+Solange eine Partitur läuft, schickt nichts anderes Kommandos, also ist die Vorhersage exakt.
+
+Das ist mehr als Bequemlichkeit. Taktgrenzen werden einzeln gerundet (Abschnitt 3), also können
+`bar_start(b + 8)` und `origin + n · loop_len` um ein Sample auseinanderliegen. Eine Ebene, die auf
+der Taktgrenze statt auf dem Loop-Raster startet, ist am Ende des Durchlaufs ein Frame zu kurz —
+ein einzelnes Null-Sample, das sich bei jedem Durchlauf wiederholt —, und ein `StartOverdub` ein
+Sample vor dem `StopRecord` des laufenden Takes wird von der Engine als „Busy" abgelehnt. Beides
+ist in Henrys 3/4-Partitur bei 141 BPM real und in `henrys_score_plays_from_start_to_finish`
+festgehalten.
+
+### Mithören ist das eine, was keinen Zeitstempel trägt
+
+`Command::SetMonitor` hat kein `at` (Abschnitt „Kommandos" in `command.rs`). Fünf Takte im Voraus
+geschickt wäre der Sänger fünf Takte zu früh hörbar. Der Runner hält den Wechsel deshalb zurück
+und schickt ihn in `tick()`, wenn die Engine die Sektionsgrenze wirklich erreicht hat — auf eine
+Runde der Steuerschleife genau, also wenige Millisekunden. Nichts, was *aufgenommen* wird, hängt
+daran; eine Aufnahme trägt ihren Zeitstempel ohnehin.
+
+### Was beim Laden mit laufender Engine passiert
+
+**Gar nichts — es wird abgelehnt.** Die Track-Aufstellung der Engine (wie viele Tracks, wie sie
+heißen, auf welchen Eingängen sie hören) wird beim Start festgelegt und unter einer laufenden
+Sitzung nie geändert. `runner::check_tracks` vergleicht eine Partitur mit der laufenden Aufstellung
+und liefert eine deutsche Meldung mit Handlungsanweisung, wenn sie abweicht. Der Grund: Ein still
+umgehängter Eingang schickt den nächsten Take auf das falsche Mikrofon, und ein verschwundener
+Track nimmt einen aufgenommenen Loop mit. Panorama und Latenz sind bewusst **nicht** Teil des
+Vergleichs — beide ändern nichts an der Bedeutung eines Kommandos und sind zur Laufzeit einstellbar.
+Das `score`-Subcommand baut die Engine aus der Partitur, dort kann der Fall gar nicht auftreten; die
+Regel steht für die spätere Oberfläche.
+
+Aus demselben Grund kann ein **armierter** Wechsel nicht umgelenkt werden: Seine Kommandos liegen
+schon mit Zeitstempel im Wartezimmer des Audio-Threads und sind nicht zurückzuholen. `goto` wird
+deshalb abgelehnt, solange etwas armiert ist, und sagt das auch. `stop_all` kann nicht ablehnen und
+macht den armierten Wechsel stattdessen dort unschädlich, wo er landet (`ClearTrack` für Tracks, auf
+denen er einen Take gestartet hätte, `StopPlay` für den Rest) — mit Meldung.
+
+### CLI
+
+```
+looper-engine score examples/henry-3-4.rust.yaml --host asio --device Scarlett
+```
+
+Tempo, Taktart, Tracks, Eingänge, Sektionen und Quantisierung kommen aus der Datei; auf der
+Kommandozeile stehen nur noch die Dinge, die die *Maschine* betreffen (Gerät, Puffer, Latenz,
+Klick-Pegel, `--count-in`). `--check` übersetzt die Partitur und druckt ihren Aufbau, ohne ein Gerät
+zu öffnen. Übersetzungsfehler kommen mit Zeile, Spalte und Vorschlag heraus, alle auf einmal — das
+liefert der Compiler bereits.
+
+Die Anzeige zeigt Sektion mit Index und Namen, Takt im Abschnitt, Durchlauf, je Track den
+Sollzustand neben dem Ist-Zustand der Engine, und ob ein Wechsel armiert ist und in wie vielen
+Takten. Tasten: `<leer>` oder `n` für die nächste Sektion (der Release-Knopf), `g <nr>` zum
+Springen, `s` für Stopp aller Tracks, `k` Klick, `q` beenden.
+
+### Wo der Code liegt
+
+| Datei | Inhalt |
+|---|---|
+| `engine/src/engine/runner.rs` | Zustandsautomat, Soll-gegen-Ist, Einzähler, Autorelease, Pending |
+| `engine/src/engine/runner/tests.rs` | 21 Offline-Tests, inklusive Henrys Partitur von Anfang bis Ende |
+| `engine/src/engine/score_cli.rs` | `score`-Subcommand: Anzeige und Tastatur, sonst nichts |
+| `engine/src/engine/schedule.rs` | unverändert die *einzige* Stelle, an der Kommandos entstehen — der Runner benutzt die neuen `*_at`-Einstiege, die eine schon bekannte Position hineinreichen statt sie ein zweites Mal zu quantisieren |
+| `engine/src/engine/live.rs` | `start_engine` baut Engine und Streams; `live` und `score` teilen sich das, damit die Startreihenfolge (Eingang vor Ausgang) nur an einer Stelle steht |
+
+## 11. Arbeitsweise
 
 - Henry bedient Hardware selbst; Audio-Tests laufen nur mit seiner Zustimmung.
 - **Nie gleichzeitig an derselben Sache arbeiten.** Das hat schon Schaden angerichtet.

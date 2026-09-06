@@ -11,6 +11,7 @@ use looper_engine::audio::{self, DeviceOpts};
 use looper_engine::click::ClickOpts;
 use looper_engine::engine::calibrate::CalibrateOpts;
 use looper_engine::engine::live::LiveOpts;
+use looper_engine::engine::score_cli::ScoreOpts;
 use looper_engine::{click, duplex, engine, latency, soak};
 
 #[derive(Parser, Debug)]
@@ -82,6 +83,17 @@ enum Command {
         live: LiveOpts,
     },
 
+    /// Partitur abspielen (Phase 3): Tempo, Taktart, Tracks und Sektionen kommen aus der
+    /// YAML-Datei. Einzaehler, Autorelease und armierte Wechsel uebernimmt der Runner; von Hand
+    /// wird nur noch der Release-Knopf bedient.
+    Score {
+        #[command(flatten)]
+        dev: DeviceOpts,
+
+        #[command(flatten)]
+        score: ScoreOpts,
+    },
+
     /// Rechenlast der Effektkette messen: Zeit je Effekt und fuer die ganze Kette, als Anteil am
     /// Callback-Budget. Oeffnet kein Geraet und macht keinen Ton - aussagekraeftig nur im
     /// Release-Build.
@@ -128,6 +140,7 @@ fn main() -> ExitCode {
         Command::Latency { dev, runs } => latency::cmd_latency(dev, *runs),
         Command::Soak { dev, minutes, gain } => soak::cmd_soak(dev, *minutes, *gain),
         Command::Live { dev, live } => engine::live::cmd_live(dev, live),
+        Command::Score { dev, score } => engine::score_cli::cmd_score(dev, score),
         Command::Fxbench { rate, seconds } => engine::fx::bench::cmd_fxbench(*rate, *seconds),
         Command::Calibrate { dev, calibrate } => engine::calibrate::cmd_calibrate(dev, calibrate),
     };

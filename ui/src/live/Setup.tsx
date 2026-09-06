@@ -85,9 +85,14 @@ function loadStored(): StartConfig {
     // `latency_samples` was the old name of the global default; it always counted frames, the name
     // just did not say so. A setup stored under it keeps its number instead of silently falling
     // back to 827.
-    const legacy = (parsed as { latency_samples?: number }).latency_samples;
+    // Destructure the legacy name out of the rest: spreading `parsed` unchanged would carry it
+    // along, and the Rust side accepts it as an alias of `latency_frames` - so a setup stored
+    // under the old name would arrive carrying both spellings and be rejected as a duplicate field.
+    const { latency_samples: legacy, ...rest } = parsed as Partial<StartConfig> & {
+      latency_samples?: number;
+    };
     const latency_frames = parsed.latency_frames ?? legacy ?? DEFAULT_SETUP.latency_frames;
-    return { ...DEFAULT_SETUP, ...parsed, latency_frames, tracks };
+    return { ...DEFAULT_SETUP, ...rest, latency_frames, tracks };
   } catch {
     return DEFAULT_SETUP;
   }
