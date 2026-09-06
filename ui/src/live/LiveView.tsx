@@ -20,7 +20,7 @@ import { Setup } from "./Setup";
 import { TrackCard, type TrackActions } from "./TrackCard";
 import { Warnings } from "./Warnings";
 import { Meter } from "./Meter";
-import type { AppInfo, EngineInfo, LooperStatus, StartConfig } from "../types";
+import type { AppInfo, EngineInfo, LooperStatus, Quantize, StartConfig } from "../types";
 
 interface Tempo {
   bpm: number;
@@ -29,6 +29,7 @@ interface Tempo {
   bars: number;
   loopSeconds: number;
   click: boolean;
+  quantize: Quantize;
   sampleRate: number;
   latencySamples: number;
 }
@@ -41,6 +42,7 @@ function pickTempo(s: LooperStatus): Tempo {
     bars: s.bars,
     loopSeconds: s.loop_seconds,
     click: s.click,
+    quantize: s.quantize,
     sampleRate: s.sample_rate,
     latencySamples: s.latency_samples,
   };
@@ -54,6 +56,7 @@ function sameTempo(a: Tempo, b: Tempo): boolean {
     a.bars === b.bars &&
     a.loopSeconds === b.loopSeconds &&
     a.click === b.click &&
+    a.quantize === b.quantize &&
     a.sampleRate === b.sampleRate &&
     a.latencySamples === b.latencySamples
   );
@@ -244,6 +247,17 @@ export function LiveView({ info }: { info: AppInfo | null }) {
         </div>
         <div className="spacer" />
         <Meter label="Summe" kind="out" pick={masterPeak} />
+        <button
+          className="btn btn-big btn-quantize"
+          onClick={() => run(() => api.setQuantize(tempo.quantize === "loop" ? "bar" : "loop"))}
+          title={
+            tempo.quantize === "loop"
+              ? "Aufnahme beginnt am nächsten Loop-Anfang. Klick schaltet auf die nächste Taktgrenze um."
+              : "Aufnahme beginnt an der nächsten Taktgrenze. Klick schaltet auf den nächsten Loop-Anfang um."
+          }
+        >
+          Start ab {tempo.quantize === "loop" ? "Loop" : "Takt"}
+        </button>
         <button
           className={`btn btn-big${tempo.click ? " btn-on" : ""}`}
           onClick={() => run(() => api.setClick(!tempo.click))}

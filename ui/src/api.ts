@@ -13,6 +13,7 @@ import type {
   DeviceReport,
   EngineInfo,
   LoadResult,
+  Quantize,
   StartConfig,
   StateEvent,
 } from "./types";
@@ -81,6 +82,8 @@ export const api = {
   setClick: (on: boolean) => call<void>("set_click", { on }),
   setTempo: (bpm: number, beatsPerBar: number, beatUnit: number) =>
     call<void>("set_tempo", { bpm, beats_per_bar: beatsPerBar, beat_unit: beatUnit }),
+  /** Grid a recording and an overdub snap to. Armed takes keep the position they already have. */
+  setQuantize: (quantize: Quantize) => call<void>("set_quantize", { quantize }),
   /** Makes sound and takes over the device. Only from a stopped engine. */
   calibrate: (config: Record<string, unknown>) => call<CalibrateOutcome>("calibrate", { config }),
 };

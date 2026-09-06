@@ -30,6 +30,32 @@ interface Props {
 /** A dragged slider would otherwise send a command per pixel. */
 const GAIN_THROTTLE_MS = 60;
 
+/**
+ * The count-in, big enough to read with a guitar in your hands and a few metres of stage in
+ * between. "scharf" alone never said *when*; this does.
+ *
+ * Whole bars while there is still time to walk over, and beats once the last bar is running -
+ * that is the moment the number stops being information and becomes a count-in.
+ */
+function Countdown({ track }: { track: LooperTrackStatus }) {
+  if (!track.pending_kind) return null;
+  const bars = track.pending_bars;
+  const beats = track.pending_beats;
+  const lastBar = bars === 0;
+  const value = lastBar ? beats : bars;
+  const unit = lastBar ? (beats === 1 ? "Schlag" : "Schläge") : bars === 1 ? "Takt" : "Takte";
+
+  return (
+    <div className={`live-countdown${lastBar ? " live-countdown-now" : ""}`} aria-live="polite">
+      <span className="live-countdown-what">{track.pending_label}</span>
+      <span className="live-countdown-in">in</span>
+      <span className="live-countdown-value mono">{value}</span>
+      <span className="live-countdown-unit">{unit}</span>
+      {!lastBar && beats > 0 && <span className="live-countdown-rest mono">+{beats}</span>}
+    </div>
+  );
+}
+
 function LayerRow({
   track,
   layer,
@@ -149,6 +175,8 @@ function TrackCardInner({ track, selected, onSelect, actions }: Props) {
         </span>
         <span className={`live-state state-badge-${track.state}`}>{track.state_label}</span>
       </header>
+
+      <Countdown track={track} />
 
       <div className="live-track-meters">
         <Meter label="Ein" kind="in" pick={inputPeak} />

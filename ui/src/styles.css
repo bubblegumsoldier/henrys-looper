@@ -1188,6 +1188,51 @@ body {
   animation: blink 0.8s steps(2, start) infinite;
 }
 
+/* ---------- the count-in ----------
+   "scharf" says that something will happen, not when. This says when, and it is the one thing on
+   the card that has to be legible from a few metres away with an instrument in both hands. Whole
+   bars while there is still time to walk over, beats once the last bar is running - and then it
+   goes red and pulses on every beat. */
+.live-countdown {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 14px;
+  border-radius: var(--radius);
+  background: #3a3208;
+  border: 2px solid var(--st-armed);
+  color: var(--st-armed);
+}
+.live-countdown-what {
+  font-size: 22px;
+  font-weight: 800;
+}
+.live-countdown-in {
+  font-size: 18px;
+  opacity: 0.75;
+}
+.live-countdown-value {
+  font-size: 52px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.live-countdown-unit {
+  font-size: 22px;
+  font-weight: 700;
+}
+.live-countdown-rest {
+  font-size: 18px;
+  opacity: 0.75;
+  margin-left: auto;
+}
+.live-countdown-now {
+  background: #3a1010;
+  border-color: var(--st-record);
+  color: #ffd7d7;
+  animation: blink 0.5s steps(2, start) infinite;
+}
+
 .live-track-meters {
   display: flex;
   flex-direction: column;
@@ -1443,4 +1488,44 @@ body {
   .live-tracks {
     grid-template-columns: 1fr;
   }
+}
+
+/* --- Tap tempo ------------------------------------------------------------ */
+
+.tap {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px 10px;
+  margin: -2px 0 2px;
+}
+
+.tap-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 14px;
+  font-size: 15px;
+  /* No transition: the button has to feel like it reacts on the beat, not after it. */
+  transition: none;
+}
+
+.tap-btn:active,
+.tap-active {
+  border-color: var(--accent, #4a9eff);
+  background: color-mix(in srgb, var(--accent, #4a9eff) 18%, transparent);
+}
+
+.tap-value {
+  font-variant-numeric: tabular-nums;
+  font-size: 20px;
+  font-weight: 700;
+  min-width: 4ch;
+  text-align: right;
+}
+
+.tap-hint {
+  grid-column: 1 / -1;
+  margin-top: -4px;
 }

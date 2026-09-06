@@ -167,6 +167,31 @@ impl Timeline {
         }
     }
 
+    /// Smallest boundary of a `bars`-bar loop grid that is at or after `pos`.
+    ///
+    /// The grid is counted from the start of the session: bar 0, bar `bars`, bar `2*bars` ... (in
+    /// the one-based numbering the musician reads, bar 1, `bars+1`, `2*bars+1`). This is the raster
+    /// a fresh recording snaps to when there is no loop yet to align against; a track that already
+    /// has one uses its own `origin` / `loop_len` instead - see `engine::schedule`.
+    ///
+    /// `bars == 0` would have no grid at all, so it degrades to the bar grid.
+    pub fn loop_start_at_or_after(&self, pos: u64, bars: u32) -> u64 {
+        if bars == 0 {
+            return self.bar_start_at_or_after(pos);
+        }
+        let bars = bars as u64;
+        // Round the current bar up to the next multiple of `bars`. That boundary can still lie
+        // before `pos` when `pos` sits inside a bar that is itself on the grid, so one more step is
+        // taken in that case - never two, because the rounded-up bar is at most one grid step away.
+        let grid_bar = self.bar_index_at(pos).div_ceil(bars) * bars;
+        let start = self.bar_start(grid_bar);
+        if start >= pos {
+            start
+        } else {
+            self.bar_start(grid_bar + bars)
+        }
+    }
+
     /// Length in samples of `bars` bars beginning at bar `from_bar`.
     ///
     /// Not a constant: because bar boundaries are rounded individually, the same number of bars
@@ -296,5 +321,55 @@ mod tests {
             assert_eq!(t.bar_start_at_or_after(start), start);
             assert_eq!(t.bar_start_at_or_after(start + 1), t.bar_start(bar + 1));
         }
+    }
+
+    /// The loop grid is what the musician actually counts in: every `bars`-th bar, from the start
+    /// of the session. A position exactly on a grid point must stay there, everything else must
+    /// move forward to the next one - never two forward, never backwards.
+    #[test]
+    fn the_loop_grid_snaps_to_every_nth_bar() {
+        for (bpm, bpb, unit) in [(120.0, 4, 4), (100.0, 3, 4), (137.0, 7, 8)] {
+            let t = tl(bpm, bpb, unit);
+            for bars in [1u32, 2, 4, 8] {
+                for step in 0..40u64 {
+                    let grid = t.bar_start(step * bars as u64);
+                    assert_eq!(t.loop_start_at_or_after(grid, bars), grid, "auf der Grenze");
+                    assert_eq!(
+                        t.loop_start_at_or_after(grid + 1, bars),
+                        t.bar_start((step + 1) * bars as u64),
+                        "einen Sample dahinter"
+                    );
+                }
+                // Every bar inside a loop lands on that loop's end, not one grid further.
+                for bar in 0..40u64 {
+                    let want = t.bar_start(bar.div_ceil(bars as u64) * bars as u64);
+                    assert_eq!(t.loop_start_at_or_after(t.bar_start(bar), bars), want);
+                }
+            }
+        }
+    }
+
+    /// Eight bars, the case from the report: pressing in bar 3 or bar 8 must both land on bar 9.
+    #[test]
+    fn eight_bar_loops_collect_bar_three_and_bar_eight_on_bar_nine() {
+        let t = tl(120.0, 4, 4);
+        // One-based bar 3 is index 2, bar 8 is index 7; both belong to the loop that ends at
+        // index 8, i.e. one-based bar 9.
+        for bar in [2u64, 7] {
+            assert_eq!(
+                t.loop_start_at_or_after(t.bar_start(bar) + 17, 8),
+                t.bar_start(8)
+            );
+        }
+        assert_eq!(t.loop_start_at_or_after(t.bar_start(8), 8), t.bar_start(8));
+        // A bar grid still gives the next bar - the two modes really differ.
+        assert_eq!(t.bar_start_at_or_after(t.bar_start(2) + 17), t.bar_start(3));
+    }
+
+    /// `bars = 0` has no grid; it must not divide by zero but behave like the bar grid.
+    #[test]
+    fn a_loop_of_zero_bars_falls_back_to_the_bar_grid() {
+        let t = tl(120.0, 4, 4);
+        assert_eq!(t.loop_start_at_or_after(100_000, 0), t.bar_start_at_or_after(100_000));
     }
 }

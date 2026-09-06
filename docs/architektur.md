@@ -88,6 +88,39 @@ Taktgrenzen werden **absolut** berechnet (`(beat_index * samples_per_beat).round
 inkrementell aufaddiert. Ein aufaddierender Zähler driftet nachweislich; der Test dazu prüft
 1000 Takte in 4/4, 3/4 und 7/8.
 
+### Quantisierung: Loop-Grenze statt Taktgrenze
+
+Aufnahme (`r`) und Overdub (`o`) rasten standardmäßig auf die **nächste Loop-Grenze** ein, nicht
+mehr auf die nächste Taktgrenze. Bei acht Takten Loop-Länge hieß Taktquantisierung: bis 8/8 warten,
+dann hetzen. Loop-Quantisierung heißt: einmal früh drücken, dann in Ruhe zum Einsatz kommen. Der
+Modus ist umschaltbar (`--quantize bar|loop`, `StartConfig.quantize`, Kommando `set_quantize`).
+
+**Stopp und Wiedergabe bleiben auf der Taktgrenze.** Das sind Korrekturen, keine Takes — ein Stopp,
+der acht Takte wartet, wirkt kaputt. Die Wiedergabe verliert dabei nichts, weil ein Loop als
+`(Position − origin) mod loop_len` gelesen wird und deshalb phasenrichtig weiterläuft, egal wann man
+sie einschaltet.
+
+**Welches Raster gilt:**
+
+| Track | Raster | Warum |
+|---|---|---|
+| hat schon einen Loop | `origin + n · loop_len` | Das ist die Geometrie, in der die Ebenen adressiert werden. Taktgrenzen werden einzeln gerundet und treffen sie im Allgemeinen nicht. |
+| ist leer | Takt 0, `bars`, `2·bars` … ab Engine-Start | Es gibt noch kein `origin`. Dasselbe Raster, das der Klick seit dem Start markiert — deshalb passen zwei Tracks zusammen, die Minuten auseinander aufgenommen wurden. |
+
+Ein *neuer* Loop (`r`) nimmt immer das globale Raster, auch auf einem belegten Track: er wirft die
+alte Geometrie weg und definiert ein neues `origin`.
+
+Die ganze Rechnung steht in `engine/src/engine/schedule.rs`, mit Modulkommentar und Tests.
+**Dieses Modul ist die einzige Stelle, an der aus einer Bedienhandlung getimte Kommandos werden** —
+CLI und Tauri-App teilen es sich. Vorher stand es zweimal da, einmal je Frontend.
+
+### Sichtbarer Vorlauf
+
+Der Zustand „scharf" sagt nicht, wann. Der Scheduler merkt sich je Track, was ansteht und wann, und
+das Status-Event trägt es als `pending_kind`, `pending_label`, `pending_bars`, `pending_beats`. Die
+Track-Karte zeigt es groß („Aufnahme in 5 Takten"), im letzten Takt in Schlägen und rot blinkend;
+die CLI hängt denselben Text an den Zustand.
+
 ## 4. Latenzkompensation
 
 Der volle Roundtrip wird beim **Aufnehmen** herausgerechnet, die Wiedergabe bleibt unangetastet.
@@ -193,6 +226,13 @@ konkurriert nur um CPU-Zeit.
 6. `stdout` ist im Release-Build weg (`windows_subsystem = "windows"`). Diagnose über Events
    oder eine Logdatei, nicht über `println!`.
 7. `tauri-build` verlangt zwingend `icons/icon.ico`, auch bei deaktiviertem Bundle.
+8. **Die Pfade in `tauri.conf.json` haben zwei verschiedene Bezugspunkte.** `frontendDist` wird
+   relativ zur Konfigurationsdatei aufgelöst, also ab `app/src-tauri/` — dort ist `../../ui/dist`
+   richtig. Die Befehle `beforeDevCommand` und `beforeBuildCommand` laufen dagegen aus `app/`,
+   eine Ebene höher, dort ist `--prefix ../ui` richtig. Beide Angaben stehen im selben Block
+   und sehen deshalb inkonsistent aus, sind es aber nicht. Verifiziert mit `cargo tauri dev`
+   und `cargo tauri build --no-bundle`. Wer das „korrigiert", bricht den Start mit
+   `ENOENT ... repos\ui\package.json`.
 
 ### Anbindung des vorhandenen Frontends
 

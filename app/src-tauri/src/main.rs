@@ -25,7 +25,7 @@ use tauri::{Emitter, Manager, State};
 use host::{Action, EngineHandle, READY_EVENT};
 use logfile::log;
 use proto::{
-    AppInfo, CalibrateConfig, CalibrateOutcome, DeviceReport, EngineInfo, StartConfig,
+    AppInfo, CalibrateConfig, CalibrateOutcome, DeviceReport, EngineInfo, QuantizeName, StartConfig,
 };
 
 /// Run blocking work on Tauri's blocking pool and translate a lost worker into German.
@@ -203,6 +203,22 @@ async fn set_tempo(
     .await
 }
 
+/// Which grid a recording and an overdub snap to: `"loop"` (next loop boundary, so one early press
+/// is enough) or `"bar"` (next bar boundary). Takes that are already armed keep their position.
+#[tauri::command(rename_all = "snake_case")]
+async fn set_quantize(
+    quantize: QuantizeName,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    act(
+        engine,
+        Action::SetQuantize {
+            quantize: quantize.into(),
+        },
+    )
+    .await
+}
+
 /// Check the latency compensation against the hardware, through a loopback cable.
 ///
 /// **This makes sound** and takes over the device for the whole measurement, so the engine has to
@@ -260,6 +276,7 @@ fn main() {
             clear_all,
             set_click,
             set_tempo,
+            set_quantize,
             calibrate
         ])
         .run(tauri::generate_context!())

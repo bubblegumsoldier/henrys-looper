@@ -179,6 +179,15 @@ impl Track {
         self.loop_len
     }
 
+    /// Musical position loop index 0 corresponds to; 0 while no take has defined a loop.
+    ///
+    /// The control thread needs it to place a further layer on exactly this track's grid instead of
+    /// on the global one - see `engine::schedule`.
+    #[inline]
+    pub fn origin(&self) -> u64 {
+        self.origin
+    }
+
     #[inline]
     pub fn filled(&self) -> u64 {
         self.filled

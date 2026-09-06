@@ -171,6 +171,9 @@ pub struct TrackStatus {
     pub muted_mask: u32,
     /// Loop length in samples, 0 while nothing is recorded.
     pub loop_len: u64,
+    /// Musical position loop index 0 sits at, 0 while nothing is recorded. Together with `loop_len`
+    /// this is the track's own grid, which is what a further layer has to be quantised to.
+    pub origin: u64,
     /// Samples already written during a running loop-defining take.
     pub filled: u64,
     /// Peak of this track's input channel, absolute value.

@@ -10,6 +10,18 @@
 /** Track state as the engine reports it; `state_label` carries the German word to print. */
 export type LooperTrackState = "empty" | "armed" | "recording" | "overdub" | "ready" | "playing";
 
+/**
+ * Grid a recording and an overdub snap to.
+ *
+ * `loop` - the default - starts the take at the next loop boundary, so one early press is enough
+ * and there is time to get to the instrument. `bar` is the old next-bar behaviour, which means
+ * waiting for the last bar of the loop and then hurrying.
+ */
+export type Quantize = "bar" | "loop";
+
+/** What a track is waiting for while its count-in runs. */
+export type PendingKind = "record" | "overdub" | "play" | "stop";
+
 export interface LayerStatus {
   /** Zero-based; this is what a layer command expects. */
   index: number;
@@ -40,6 +52,14 @@ export interface LooperTrackStatus {
   output_peak: number;
   output_dbfs: number | null;
   layers: LayerStatus[];
+  /** What this track is waiting for, or null when nothing is scheduled. */
+  pending_kind: PendingKind | null;
+  /** German word for it, ready to print - same idea as `state_label`. */
+  pending_label: string | null;
+  /** Whole bars still to go. */
+  pending_bars: number;
+  /** Beats on top of that; inside the last bar `pending_bars` is 0 and this counts down. */
+  pending_beats: number;
 }
 
 /** Event `looper://status`, pushed about twenty times a second while the engine runs. */
@@ -59,6 +79,8 @@ export interface LooperStatus {
   bars: number;
   loop_samples: number;
   loop_seconds: number;
+  /** Grid a recording and an overdub currently snap to. Changeable while the engine runs. */
+  quantize: Quantize;
   sample_rate: number;
   latency_samples: number;
   click: boolean;
@@ -91,6 +113,7 @@ export const IDLE_STATUS: LooperStatus = {
   bars: 0,
   loop_samples: 0,
   loop_seconds: 0,
+  quantize: "loop",
   sample_rate: 0,
   latency_samples: 0,
   click: false,
@@ -165,6 +188,8 @@ export interface StartConfig {
   beat_unit: number;
   /** Loop length in bars. */
   bars: number;
+  /** Grid a recording and an overdub snap to. */
+  quantize: Quantize;
   latency_samples: number;
   monitor_gain: number;
   click_gain: number;

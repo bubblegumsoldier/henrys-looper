@@ -111,6 +111,10 @@ export function structureSignature(status: LooperStatus): string {
   let sig = status.running ? "1" : "0";
   for (const t of status.tracks) {
     sig += `|${t.index}${t.name}${t.input_channel}${t.state}${t.monitor}${t.playing}${t.loop_samples}`;
+    // The count-in belongs in the signature: it only changes on a beat line, so it costs a handful
+    // of renders per bar rather than twenty a second - and a countdown that does not count is
+    // useless.
+    sig += `~${t.pending_kind ?? ""}~${t.pending_bars}~${t.pending_beats}`;
     for (const l of t.layers) sig += `${l.index}${l.muted ? 1 : 0}${l.gain}`;
   }
   return sig;

@@ -17,6 +17,7 @@
 use serde::{Deserialize, Serialize};
 
 use looper_engine::engine::command::TrackStatus;
+use looper_engine::engine::schedule::{Lead, PendingKind, Quantize};
 use looper_engine::engine::track::TrackState;
 
 /// dBFS for display, or `None` at digital silence.
@@ -92,6 +93,63 @@ pub struct TrackConfig {
     pub input_channel: u32,
 }
 
+// ---------------------------------------------------------------------------------------------
+// Quantisation
+// ---------------------------------------------------------------------------------------------
+
+/// Which grid a take snaps to, mirroring [`Quantize`] one to one.
+///
+/// The engine crate carries no `serde`, so this is its wire twin - the same arrangement
+/// [`TrackStateName`] has with [`TrackState`].
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuantizeName {
+    /// Next bar boundary.
+    Bar,
+    /// Next loop boundary. The default: one early press is enough.
+    #[default]
+    Loop,
+}
+
+impl From<Quantize> for QuantizeName {
+    fn from(q: Quantize) -> Self {
+        match q {
+            Quantize::Bar => QuantizeName::Bar,
+            Quantize::Loop => QuantizeName::Loop,
+        }
+    }
+}
+
+impl From<QuantizeName> for Quantize {
+    fn from(q: QuantizeName) -> Self {
+        match q {
+            QuantizeName::Bar => Quantize::Bar,
+            QuantizeName::Loop => Quantize::Loop,
+        }
+    }
+}
+
+/// What a track is waiting for, mirroring [`PendingKind`] one to one.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingKindName {
+    Record,
+    Overdub,
+    Play,
+    Stop,
+}
+
+impl From<PendingKind> for PendingKindName {
+    fn from(kind: PendingKind) -> Self {
+        match kind {
+            PendingKind::Record => PendingKindName::Record,
+            PendingKind::Overdub => PendingKindName::Overdub,
+            PendingKind::Play => PendingKindName::Play,
+            PendingKind::Stop => PendingKindName::Stop,
+        }
+    }
+}
+
 /// Everything the engine needs to open a device and start counting.
 ///
 /// Every field except `tracks` has a default, so a frontend can send only what it wants to change
@@ -131,6 +189,10 @@ pub struct StartConfig {
     /// Loop length in bars.
     #[serde(default = "default_bars")]
     pub bars: u32,
+    /// Grid a recording and an overdub snap to. `loop` (the default) starts the take at the next
+    /// loop boundary, so one early press is enough; `bar` is the old next-bar behaviour.
+    #[serde(default)]
+    pub quantize: QuantizeName,
     /// Roundtrip latency removed while recording. Measure it with `calibrate` after every change
     /// of device, sample rate or buffer size.
     #[serde(default = "default_latency_samples")]
@@ -290,6 +352,18 @@ pub struct TrackStatusEvent {
     pub output_peak: f32,
     pub output_dbfs: Option<f64>,
     pub layers: Vec<LayerStatus>,
+
+    // --- the count-in ------------------------------------------------------------------------
+    // "scharf" alone does not say whether to pick the instrument up now or in five bars. These
+    // four fields say it. They are all quiet (`null` / 0) when nothing is scheduled.
+    /// What this track is waiting for, or `null` when nothing is scheduled.
+    pub pending_kind: Option<PendingKindName>,
+    /// German word for it, ready to print - same idea as `state_label`.
+    pub pending_label: Option<String>,
+    /// Whole bars still to go before it happens.
+    pub pending_bars: u32,
+    /// Beats on top of `pending_bars`. Inside the last bar `pending_bars` is 0 and this counts down.
+    pub pending_beats: u32,
 }
 
 /// Pushed to the frontend as event `looper://status`, about twenty times a second while the engine
@@ -317,6 +391,8 @@ pub struct StatusEvent {
     /// The same in samples and seconds, at the current tempo.
     pub loop_samples: u64,
     pub loop_seconds: f64,
+    /// Grid a recording and an overdub currently snap to. Changeable while the engine runs.
+    pub quantize: QuantizeName,
     pub sample_rate: u32,
     pub latency_samples: u64,
     pub click: bool,
@@ -362,6 +438,7 @@ impl StatusEvent {
             bars: 0,
             loop_samples: 0,
             loop_seconds: 0.0,
+            quantize: QuantizeName::default(),
             sample_rate: 0,
             latency_samples: 0,
             click: false,
@@ -388,6 +465,7 @@ pub fn track_event(
     ts: &TrackStatus,
     gains: &[f32],
     sample_rate: u32,
+    lead: Lead,
 ) -> TrackStatusEvent {
     let layers = (0..ts.layers as usize)
         .map(|i| LayerStatus {
@@ -414,6 +492,10 @@ pub fn track_event(
         output_peak: ts.output_peak,
         output_dbfs: dbfs(ts.output_peak),
         layers,
+        pending_kind: lead.kind.map(PendingKindName::from),
+        pending_label: lead.kind.map(|k| k.label().to_string()),
+        pending_bars: lead.bars,
+        pending_beats: lead.beats,
     }
 }
 
@@ -502,6 +584,7 @@ mod tests {
             // Layer 2 (one-based) is muted.
             muted_mask: 0b010,
             loop_len: 96_000,
+            origin: 0,
             filled: 0,
             input_peak: 0.5,
             output_peak: 1.0,
@@ -515,7 +598,14 @@ mod tests {
     /// The one conversion the whole frontend depends on: engine snapshot in, display numbers out.
     #[test]
     fn a_track_snapshot_becomes_the_wire_format_with_the_right_numbering() {
-        let event = track_event(0, "gitarre", &sample_status(), &[1.0, 1.0, 0.25], RATE);
+        let event = track_event(
+            0,
+            "gitarre",
+            &sample_status(),
+            &[1.0, 1.0, 0.25],
+            RATE,
+            Lead::default(),
+        );
         assert_eq!(event.index, 0);
         assert_eq!(event.input_channel, 2, "Kanal wird eins-basiert gemeldet");
         assert_eq!(event.state, TrackStateName::Playing);
@@ -531,13 +621,67 @@ mod tests {
         // Full scale is 0 dBFS, half of it is about -6.
         assert_eq!(event.output_dbfs, Some(0.0));
         assert!((event.input_dbfs.unwrap() + 6.02).abs() < 0.01);
+        assert_eq!(event.pending_kind, None, "ohne Vorlauf ist nichts geplant");
+        assert_eq!(event.pending_label, None);
+        assert_eq!(event.pending_bars, 0);
+        assert_eq!(event.pending_beats, 0);
+    }
+
+    /// The count-in is what the stage screen prints in big letters, so both halves of it - the
+    /// German word and the two numbers - have to survive the conversion.
+    #[test]
+    fn a_scheduled_action_reaches_the_frontend_as_a_countdown() {
+        let lead = Lead {
+            kind: Some(PendingKind::Record),
+            bars: 5,
+            beats: 2,
+        };
+        let event = track_event(0, "gitarre", &sample_status(), &[], RATE, lead);
+        assert_eq!(event.pending_kind, Some(PendingKindName::Record));
+        assert_eq!(event.pending_label.as_deref(), Some("Aufnahme"));
+        assert_eq!(event.pending_bars, 5);
+        assert_eq!(event.pending_beats, 2);
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["pending_kind"], json!("record"));
+        assert_eq!(value["pending_label"], json!("Aufnahme"));
+
+        // Every kind the scheduler can announce has a snake_case name and a German word.
+        for (kind, wire, label) in [
+            (PendingKind::Record, "record", "Aufnahme"),
+            (PendingKind::Overdub, "overdub", "Overdub"),
+            (PendingKind::Play, "play", "Wiedergabe"),
+            (PendingKind::Stop, "stop", "Stopp"),
+        ] {
+            let name: PendingKindName = kind.into();
+            assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
+            assert_eq!(kind.label(), label);
+        }
+    }
+
+    /// The grid is part of the wire format in both directions: it comes in with the start
+    /// configuration and goes back out with every status, so the window can show what is set.
+    #[test]
+    fn the_quantisation_mode_travels_as_bar_or_loop() {
+        assert_eq!(
+            serde_json::to_value(QuantizeName::Loop).unwrap(),
+            json!("loop")
+        );
+        assert_eq!(serde_json::to_value(QuantizeName::Bar).unwrap(), json!("bar"));
+        assert_eq!(QuantizeName::default(), QuantizeName::Loop);
+        // Round trip through the engine's own enum, in both directions.
+        for name in [QuantizeName::Bar, QuantizeName::Loop] {
+            let engine: Quantize = name.into();
+            assert_eq!(QuantizeName::from(engine), name);
+        }
+        assert_eq!(Quantize::from(QuantizeName::Loop), Quantize::Loop);
     }
 
     /// A gain mirror shorter than the engine's layer count must not lose layers - the missing ones
     /// are simply unity, which is what a layer starts at.
     #[test]
     fn missing_mirrored_gains_default_to_one() {
-        let event = track_event(1, "stimme", &sample_status(), &[], RATE);
+        let event = track_event(1, "stimme", &sample_status(), &[], RATE, Lead::default());
         assert_eq!(event.layers.len(), 3);
         assert!(event.layers.iter().all(|l| l.gain == 1.0));
     }
@@ -546,7 +690,10 @@ mod tests {
     fn silence_has_no_decibel_value() {
         assert_eq!(dbfs(0.0), None, "minus unendlich gibt es in JSON nicht");
         assert_eq!(dbfs(1.0), Some(0.0));
-        assert_eq!(track_event(0, "t", &TrackStatus::default(), &[], RATE).input_dbfs, None);
+        assert_eq!(
+            track_event(0, "t", &TrackStatus::default(), &[], RATE, Lead::default()).input_dbfs,
+            None
+        );
     }
 
     /// Every state the engine can report must survive the round trip as a snake_case string, and
@@ -598,6 +745,7 @@ mod tests {
                 "output_dbfs",
                 "output_peak",
                 "pos",
+                "quantize",
                 "running",
                 "sample_rate",
                 "samples_per_beat",
@@ -614,7 +762,14 @@ mod tests {
 
     #[test]
     fn a_track_entry_has_exactly_the_documented_keys() {
-        let event = track_event(0, "gitarre", &sample_status(), &[1.0, 1.0, 1.0], RATE);
+        let event = track_event(
+            0,
+            "gitarre",
+            &sample_status(),
+            &[1.0, 1.0, 1.0],
+            RATE,
+            Lead::default(),
+        );
         let value = serde_json::to_value(&event).unwrap();
         let mut keys: Vec<&str> = value
             .as_object()
@@ -638,6 +793,10 @@ mod tests {
                 "name",
                 "output_dbfs",
                 "output_peak",
+                "pending_bars",
+                "pending_beats",
+                "pending_kind",
+                "pending_label",
                 "playing",
                 "state",
                 "state_label",
@@ -665,6 +824,11 @@ mod tests {
         assert_eq!(config.beats_per_bar, 4);
         assert_eq!(config.beat_unit, 4);
         assert_eq!(config.bars, 8);
+        assert_eq!(
+            config.quantize,
+            QuantizeName::Loop,
+            "ohne Angabe rastet eine Aufnahme auf den Loop-Anfang ein"
+        );
         assert_eq!(config.latency_samples, 827);
         assert_eq!(config.monitor_gain, 1.0);
         assert_eq!(config.click_gain, 1.0);
@@ -698,6 +862,7 @@ mod tests {
             "beats_per_bar": 7,
             "beat_unit": 8,
             "bars": 4,
+            "quantize": "bar",
             "latency_samples": 900,
             "monitor_gain": 0.5,
             "click_gain": 0.25,
@@ -714,6 +879,7 @@ mod tests {
         assert!(config.force_buffer);
         assert!(!config.click);
         assert!(config.monitor);
+        assert_eq!(config.quantize, QuantizeName::Bar);
     }
 
     #[test]

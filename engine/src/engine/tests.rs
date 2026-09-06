@@ -1130,3 +1130,111 @@ fn clear_all_restores_a_fresh_start_and_returns_every_buffer() {
     assert_eq!(sim.core.track(0).layer_count(), 1);
     assert_eq!(sim.core.track(0).loop_len(), len);
 }
+
+// -------------------------------------------------------------------------------------------
+// 12. The loop grid, end to end: what the scheduler plans really does land on the layer below
+// -------------------------------------------------------------------------------------------
+
+/// The whole point of quantising an overdub to the track's own grid, proven through the engine
+/// rather than on paper: a further layer planned by [`Scheduler`] in [`Quantize::Loop`] mode has to
+/// end up sample-identical over the first one.
+///
+/// The probe is deliberately *not* a signal locked to the beat. Bar boundaries are rounded
+/// individually while a loop is a fixed number of samples, so the ideal beat grid slides against
+/// the loop index by up to a sample per pass (`docs/architektur.md`, section 6). What the musician
+/// hears as "the same moment in the loop" is a distance from the loop's top, and that is what is
+/// played here: the same waveform, measured from the start of each take.
+///
+/// Odd time signatures are the interesting ones - 3/4 and 7/8 both have a bar length that is not a
+/// whole number of samples, which is exactly where a grid derived from bar boundaries instead of
+/// from `origin` and `loop_len` would miss.
+#[test]
+fn an_overdub_planned_on_the_loop_grid_lands_sample_identical_on_the_first_layer() {
+    use super::schedule::{Quantize, Scheduler};
+
+    for (bpm, beats_per_bar, beat_unit, bars) in [(100.0, 3u32, 4u32, 4u32), (137.0, 7, 8, 5)] {
+        let signature = TimeSignature::new(beats_per_bar, beat_unit);
+        let timeline = Timeline::new(RATE, bpm, signature);
+        let mut sched = Scheduler::new(timeline, bars, BLOCK as u32, Quantize::Loop);
+
+        // The musician presses "record" early, inside bar 2 of the very first loop. With the loop
+        // grid that arms the take for the start of the next loop - the whole point of the change.
+        let press = timeline.bar_start(1) + 137;
+        let record = sched.record(0, "t", press);
+        let start = record.commands[0].at().expect("Aufnahme ist getimt");
+        let end = record.commands[1].at().expect("Stopp ist getimt");
+        let len = end - start;
+        assert_eq!(
+            start,
+            timeline.bar_start(bars as u64),
+            "{beats_per_bar}/{beat_unit}: aus Takt 2 wird der Beginn des naechsten Loops"
+        );
+
+        // Then "overdub", pressed somewhere in the middle of the second pass.
+        let press_again = start + len + len / 3;
+        let over = sched.overdub(0, "t", press_again, start, len, 1);
+        let start2 = over.commands[0].at().expect("Overdub ist getimt");
+        let end2 = over.commands[1].at().expect("Stopp ist getimt");
+        assert_eq!(
+            (start2 - start) % len,
+            0,
+            "{beats_per_bar}/{beat_unit}: die Ebene setzt auf dem Loop-Raster an"
+        );
+        assert_eq!(end2 - start2, len, "und dauert genau einen Durchlauf");
+
+        // The same waveform on both takes, at half the level the second time, measured from the
+        // start of whichever take is running.
+        let played = mono(move |k: u64| {
+            if k < R {
+                return 0.0;
+            }
+            let musical = k - R;
+            if (start..end).contains(&musical) {
+                0.5 * fingerprint(musical - start)
+            } else if (start2..end2).contains(&musical) {
+                0.25 * fingerprint(musical - start2)
+            } else {
+                0.0
+            }
+        });
+
+        let spec = SimSpec {
+            bpm,
+            signature,
+            bars,
+            loopback_channel: None,
+            ..spec_4_4()
+        };
+        let mut sim = Sim::new(spec, played);
+        for cmd in record.commands.iter().chain(over.commands.iter()) {
+            sim.send(*cmd);
+        }
+        sim.run_to(end2 + R + 4 * BLOCK as u64);
+
+        assert_eq!(sim.core.track(0).layer_count(), 2);
+        assert_eq!(sim.core.track(0).loop_len(), len);
+        let first = layer_content(&sim, 0, 0);
+        let second = layer_content(&sim, 0, 1);
+        assert_eq!(first.len(), len as usize);
+        assert_eq!(second.len(), len as usize);
+
+        // Zero tolerance: every index of the loop carries the same moment of the performance in
+        // both layers, at exactly half the amplitude. One sample of offset breaks this everywhere.
+        let mut written = 0usize;
+        for i in 0..len as usize {
+            assert_eq!(
+                second[i] * 2.0,
+                first[i],
+                "{beats_per_bar}/{beat_unit}: Loop-Index {i} liegt nicht uebereinander"
+            );
+            if first[i] != 0.0 {
+                written += 1;
+            }
+        }
+        assert!(
+            written as u64 > len - 64,
+            "{beats_per_bar}/{beat_unit}: der Loop ist fast vollstaendig beschrieben, nicht nur \
+             an ein paar Stellen ({written} von {len})"
+        );
+    }
+}

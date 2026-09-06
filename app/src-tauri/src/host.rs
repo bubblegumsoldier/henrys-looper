@@ -49,9 +49,9 @@ use looper_engine::engine::track::{MAX_LAYERS, Track, TrackState};
 use crate::logfile::{self, log};
 use crate::proto::{
     AppInfo, CalibrateConfig, CalibrateOutcome, ConfigInfo, DeviceInfo, DeviceReport, EngineInfo,
-    HostInfo, StartConfig, StatusEvent, TrackConfig, dbfs, track_event,
+    HostInfo, QuantizeName, StartConfig, StatusEvent, TrackConfig, dbfs, track_event,
 };
-use crate::schedule::{Scheduled, Scheduler, build_timeline, resolve_tracks};
+use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tracks};
 
 /// Event the status snapshot is pushed on.
 pub const STATUS_EVENT: &str = "looper://status";
@@ -94,6 +94,9 @@ pub enum Action {
     ClearAll,
     SetClick { on: bool },
     SetTempo { bpm: f64, beats_per_bar: u32, beat_unit: u32 },
+    /// Switch the grid a take snaps to while the engine runs. Takes that are already armed keep
+    /// the position they were given - the engine has those commands already.
+    SetQuantize { quantize: Quantize },
 }
 
 impl Action {
@@ -109,7 +112,10 @@ impl Action {
             | Action::LayerMute { track, .. }
             | Action::LayerRemove { track, .. }
             | Action::LayerGain { track, .. } => Some(track),
-            Action::ClearAll | Action::SetClick { .. } | Action::SetTempo { .. } => None,
+            Action::ClearAll
+            | Action::SetClick { .. }
+            | Action::SetTempo { .. }
+            | Action::SetQuantize { .. } => None,
         }
     }
 }
@@ -730,7 +736,12 @@ impl Session {
             status_rx,
             pool,
             stats,
-            scheduler: Scheduler::new(timeline, config.bars, buffer_frames),
+            scheduler: Scheduler::new(
+                timeline,
+                config.bars,
+                buffer_frames,
+                config.quantize.into(),
+            ),
             tracks: defs
                 .iter()
                 .map(|d| TrackUi {
@@ -825,6 +836,7 @@ impl Session {
                 .scheduler
                 .timeline
                 .samples_to_secs(self.scheduler.timeline.span_bars(0, self.scheduler.bars)),
+            quantize: QuantizeName::from(self.scheduler.quantize),
             sample_rate: rate,
             latency_samples: self.info.latency_samples,
             click: status.click,
@@ -836,7 +848,10 @@ impl Session {
                 .enumerate()
                 .map(|(i, ui)| {
                     let ts = status.tracks().get(i).copied().unwrap_or_default();
-                    track_event(i, &ui.name, &ts, &ui.gains, rate)
+                    // The count-in is measured against the position of this very snapshot, so the
+                    // number on screen and the beat that is sounding belong together.
+                    let lead = self.scheduler.lead(i, status.pos);
+                    track_event(i, &ui.name, &ts, &ui.gains, rate, lead)
                 })
                 .collect(),
             xruns: stats.xruns.load(Ordering::Relaxed),
@@ -925,36 +940,35 @@ impl Session {
 
         match action {
             Action::Record { track } => {
-                let plan = self.scheduler.record(track, &self.tracks[track].name, est);
+                let name = self.tracks[track].name.clone();
+                let plan = self.scheduler.record(track, &name, est);
                 self.tracks[track].gains.clear();
                 self.send_all(plan)
             }
             Action::Overdub { track } => {
                 let ts = self.status_of(track);
-                let plan = self.scheduler.overdub(
-                    track,
-                    &self.tracks[track].name,
-                    est,
-                    ts.loop_len,
-                    ts.layers,
-                );
+                let name = self.tracks[track].name.clone();
+                // `origin` and `loop_len` are this track's own grid; a further layer has to start
+                // on it, not on the global one. See looper_engine::engine::schedule.
+                let plan =
+                    self.scheduler
+                        .overdub(track, &name, est, ts.origin, ts.loop_len, ts.layers);
                 self.send_all(plan)
             }
             Action::StopTrack { track } => {
                 let ts = self.status_of(track);
-                let plan = self
-                    .scheduler
-                    .stop(track, &self.tracks[track].name, est, ts.state);
+                let name = self.tracks[track].name.clone();
+                let plan = self.scheduler.stop(track, &name, est, ts.state);
                 self.send_all(plan)
             }
             Action::Play { track } => {
-                let plan = self.scheduler.play(track, &self.tracks[track].name, est);
+                let name = self.tracks[track].name.clone();
+                let plan = self.scheduler.play(track, &name, est);
                 self.send_all(plan)
             }
             Action::ClearTrack { track } => {
-                let plan = self
-                    .scheduler
-                    .clear_track(track, &self.tracks[track].name, est);
+                let name = self.tracks[track].name.clone();
+                let plan = self.scheduler.clear_track(track, &name, est);
                 self.tracks[track].gains.clear();
                 self.send_all(plan)
             }
@@ -1034,6 +1048,10 @@ impl Session {
                 beats_per_bar,
                 beat_unit,
             } => self.set_tempo(bpm, beats_per_bar, beat_unit),
+            Action::SetQuantize { quantize } => {
+                self.message = Some(self.scheduler.set_quantize(quantize));
+                Ok(())
+            }
         }
     }
 

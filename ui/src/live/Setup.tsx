@@ -7,7 +7,16 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import type { AppInfo, ConfigInfo, DeviceInfo, DeviceReport, StartConfig, StartTrack } from "../types";
+import type {
+  AppInfo,
+  ConfigInfo,
+  DeviceInfo,
+  DeviceReport,
+  Quantize,
+  StartConfig,
+  StartTrack,
+} from "../types";
+import { TapTempo } from "./TapTempo";
 
 const STORE_KEY = "looper.setup";
 
@@ -29,6 +38,7 @@ export const DEFAULT_SETUP: StartConfig = {
   beats_per_bar: 4,
   beat_unit: 4,
   bars: 8,
+  quantize: "loop",
   latency_samples: 827,
   monitor_gain: 1,
   click_gain: 1,
@@ -299,6 +309,7 @@ export function Setup({ info, busy, onStart, onError }: Props) {
           <div className="panel-title">Takt und Loop</div>
           <div className="panel-body">
             <NumberField label="Tempo (BPM)" value={config.bpm} onChange={(v) => patch({ bpm: v })} min={20} max={300} step={0.5} />
+            <TapTempo onTempo={(v) => patch({ bpm: v })} />
             <div className="field-row">
               <NumberField label="Schläge/Takt" value={config.beats_per_bar} onChange={(v) => patch({ beats_per_bar: Math.max(1, Math.round(v)) })} min={1} max={16} step={1} />
               <NumberField label="Notenwert" value={config.beat_unit} onChange={(v) => patch({ beat_unit: Math.max(1, Math.round(v)) })} min={1} max={16} step={1} />
@@ -312,6 +323,21 @@ export function Setup({ info, busy, onStart, onError }: Props) {
               step={1}
               hint={`${((config.bars * config.beats_per_bar * 60) / (config.bpm || 100)).toFixed(2)} s bei ${config.bpm} BPM`}
             />
+            <label className="field field-wide">
+              <span className="field-label">Aufnahme startet</span>
+              <select
+                value={config.quantize}
+                onChange={(e) => patch({ quantize: e.target.value as Quantize })}
+              >
+                <option value="loop">am nächsten Loop-Anfang</option>
+                <option value="bar">an der nächsten Taktgrenze</option>
+              </select>
+              <span className="field-hint">
+                {config.quantize === "loop"
+                  ? `Einmal früh drücken reicht: R oder O irgendwo im Loop rüstet die Aufnahme für den Anfang des nächsten Loops scharf. Bis dahin steht auf der Karte, wie viele Takte noch fehlen — Zeit, zur Gitarre zu kommen.`
+                  : `R oder O beginnen schon im nächsten Takt. Dann muss man bis Takt ${config.bars} warten und den Einsatz hetzen — dafür lässt sich mitten im Loop anfangen.`}
+              </span>
+            </label>
             <label className="field field-check">
               <input type="checkbox" checked={config.click} onChange={(e) => patch({ click: e.target.checked })} />
               <span>Klick beim Start an</span>

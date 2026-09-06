@@ -649,6 +649,7 @@ impl EngineCore {
                 layers: track.layer_count() as u8,
                 muted_mask: track.muted_mask(),
                 loop_len: track.loop_len(),
+                origin: track.origin(),
                 filled: track.filled(),
                 input_peak: track.take_input_peak(),
                 output_peak: track.take_output_peak(),

@@ -61,6 +61,7 @@ use super::command::{
     command_channel, status_channel,
 };
 use super::process::{EngineConfig, EngineCore, check_loop, limits_line, loop_capacity};
+use super::schedule::{Lead, Quantize, Scheduled, Scheduler};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{MAX_LAYERS, Track, TrackState};
 
@@ -100,6 +101,11 @@ pub struct LiveOpts {
     /// Loop-Laenge in Takten
     #[arg(long, default_value_t = 8)]
     pub bars: u32,
+
+    /// Raster, auf das Aufnahme und Overdub einrasten:
+    /// loop = naechster Loop-Anfang (einmal frueh druecken reicht), bar = naechste Taktgrenze
+    #[arg(long, value_enum, default_value_t = Quantize::Loop)]
+    pub quantize: Quantize,
 
     /// Roundtrip-Latenz in Samples, die beim Aufnehmen herausgerechnet wird.
     /// Standard ist der Messwert aus Phase 0 (128 Frames, 48 kHz, Scarlett 2i2 an ASIO).
@@ -262,14 +268,15 @@ struct TrackUi {
 }
 
 /// Everything the main thread needs to schedule commands.
+///
+/// All the arithmetic - which grid, how much head start, how long a take runs - lives in
+/// [`Scheduler`], the same one the desktop app uses. This struct is only the keyboard in front of
+/// it.
 struct Control {
     cmd: CommandSender,
     pool: LayerPool,
-    timeline: Timeline,
-    bars: u32,
+    sched: Scheduler,
     latency: u64,
-    /// Head start every scheduled command gets, so it can never arrive after its own time.
-    guard: u64,
     tracks: Vec<TrackUi>,
     active: usize,
     message: String,
@@ -284,9 +291,12 @@ impl Control {
         }
     }
 
-    /// Next bar boundary that is far enough ahead for the audio thread to still see the command.
-    fn next_bar(&self, est: u64) -> u64 {
-        self.timeline.bar_start_at_or_after(est + self.guard)
+    /// Push a whole plan into the queue and keep its German sentence.
+    fn send_all(&mut self, plan: Scheduled) {
+        for cmd in plan.commands {
+            self.send(cmd);
+        }
+        self.message = plan.message;
     }
 
     fn status_of(&self, last: Option<(Status, Instant)>, track: usize) -> TrackStatus {
@@ -317,89 +327,41 @@ impl Control {
                 }
             }
             "r" => {
-                let start = self.next_bar(est);
-                let bar = self.timeline.bar_index_at(start);
-                let end = self.timeline.position_of(bar + self.bars as u64, 0);
-                self.send(Command::StartRecord { track, at: start });
-                self.send(Command::StopRecord { track, at: end });
-                self.send(Command::StartPlay { track, at: end });
+                let name = self.tracks[track].name.clone();
+                let plan = self.sched.record(track, &name, est);
                 self.tracks[track].gains.clear();
-                self.message = format!(
-                    "\"{}\": neuer Loop ab Takt {} ueber {} Takte.",
-                    self.tracks[track].name,
-                    bar + 1,
-                    self.bars
-                );
+                self.send_all(plan);
             }
             "o" => {
-                let start = self.next_bar(est);
-                let bar = self.timeline.bar_index_at(start);
-                // An overdub covers exactly one pass of the existing loop; on an empty track it is
-                // the first take and gets the configured number of bars.
-                let end = if ts.loop_len > 0 {
-                    start + ts.loop_len
-                } else {
-                    self.timeline.position_of(bar + self.bars as u64, 0)
-                };
-                self.send(Command::StartOverdub { track, at: start });
-                self.send(Command::StopRecord { track, at: end });
-                self.send(Command::StartPlay { track, at: end });
-                self.message = format!(
-                    "\"{}\": Ebene {} ab Takt {}.",
-                    self.tracks[track].name,
-                    ts.layers as usize + 1,
-                    bar + 1
-                );
+                let name = self.tracks[track].name.clone();
+                let plan =
+                    self.sched
+                        .overdub(track, &name, est, ts.origin, ts.loop_len, ts.layers);
+                self.send_all(plan);
             }
-            "s" => match ts.state {
-                TrackState::Armed => {
-                    self.send(Command::ClearTrack {
-                        track,
-                        at: est + self.guard,
-                    });
-                    self.message = "Geplante Aufnahme abgebrochen.".to_string();
-                }
-                TrackState::Recording | TrackState::Overdub => {
-                    let end = self.next_bar(est);
-                    self.send(Command::StopRecord { track, at: end });
-                    self.send(Command::StartPlay { track, at: end });
-                    let bar = self.timeline.bar_index_at(end);
-                    self.message = format!("Aufnahme endet mit Takt {bar}.");
-                }
-                _ => {
-                    self.send(Command::StopPlay {
-                        track,
-                        at: est + self.guard,
-                    });
-                    self.message = format!("\"{}\": Wiedergabe gestoppt.", self.tracks[track].name);
-                }
-            },
+            "s" => {
+                let name = self.tracks[track].name.clone();
+                let plan = self.sched.stop(track, &name, est, ts.state);
+                self.send_all(plan);
+            }
             "p" => {
-                let at = self.next_bar(est);
-                self.send(Command::StartPlay { track, at });
-                self.message = format!(
-                    "\"{}\": Wiedergabe ab Takt {}.",
-                    self.tracks[track].name,
-                    self.timeline.bar_index_at(at) + 1
-                );
+                let name = self.tracks[track].name.clone();
+                let plan = self.sched.play(track, &name, est);
+                self.send_all(plan);
             }
             "c" => {
-                self.send(Command::ClearTrack {
-                    track,
-                    at: est + self.guard,
-                });
+                let name = self.tracks[track].name.clone();
+                let plan = self.sched.clear_track(track, &name, est);
                 self.tracks[track].gains.clear();
-                self.message = format!("\"{}\" geleert.", self.tracks[track].name);
+                self.send_all(plan);
             }
             "a" => {
-                self.send(Command::ClearAll {
-                    at: est + self.guard,
-                });
+                let plan = self.sched.clear_all(est);
                 for t in self.tracks.iter_mut() {
                     t.gains.clear();
                 }
                 self.active = 0;
-                self.message = "Alles geleert - Zustand wie frisch gestartet.".to_string();
+                self.send_all(plan);
             }
             "m" => {
                 let on = !ts.monitor;
@@ -544,7 +506,7 @@ impl Control {
             self.message = "Aufruf: t <bpm> [schlaege_pro_takt] [zaehlzeit]".to_string();
             return;
         };
-        let old = self.timeline.signature();
+        let old = self.sched.timeline.signature();
         let beats_per_bar = match beats.map(str::parse::<u32>) {
             Some(Ok(v)) => v,
             None => old.beats_per_bar,
@@ -562,17 +524,17 @@ impl Control {
             }
         };
         let signature = TimeSignature::new(beats_per_bar, beat_unit);
-        let rate = self.timeline.sample_rate();
+        let rate = self.sched.timeline.sample_rate();
         if let Err(e) = Timeline::validate(rate, bpm, signature) {
             self.message = e;
             return;
         }
         let timeline = Timeline::new(rate, bpm, signature);
-        if let Err(e) = check_loop(&timeline, self.bars, self.latency) {
+        if let Err(e) = check_loop(&timeline, self.sched.bars, self.latency) {
             self.message = e;
             return;
         }
-        let layer_capacity = loop_capacity(&timeline, self.bars);
+        let layer_capacity = loop_capacity(&timeline, self.sched.bars);
         self.send(Command::SetTempo {
             bpm,
             signature,
@@ -581,22 +543,15 @@ impl Control {
         // Every allocation of a new layer length happens here, in the control thread; the old stock
         // is dropped and the engine hands back what it still holds.
         self.pool.set_layer_len(layer_capacity as usize);
-        self.timeline = timeline;
+        self.sched.timeline = timeline;
         self.message = format!("Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}.");
     }
 
-    /// Where the audio thread is right now, as well as the main thread can know: the position of
-    /// the newest status snapshot plus the time that has passed since it was received. Both
-    /// streams run on the interface clock, so the extrapolation is good to a few samples - and the
-    /// remaining error is absorbed by `guard` and by quantising to a bar boundary.
+    /// Where the audio thread is right now, as well as the main thread can know. The extrapolation
+    /// itself lives in [`Scheduler::estimated_pos`].
     fn estimated_pos(&self, last: Option<(Status, Instant)>) -> u64 {
-        match last {
-            Some((s, seen)) => {
-                let rate = self.timeline.sample_rate() as f64;
-                s.pos + (seen.elapsed().as_secs_f64() * rate) as u64
-            }
-            None => 0,
-        }
+        self.sched
+            .estimated_pos(last.map(|(s, seen)| (s.pos, seen.elapsed())))
     }
 }
 
@@ -649,8 +604,10 @@ fn layer_list(ts: &TrackStatus, gains: &[f32]) -> String {
     format!("[{}]", parts.join(" "))
 }
 
-/// The global line: bar, beat, loop length, tempo, click.
-fn global_line(s: &Status, tl: &Timeline, bars: u32, stats: &LiveStats) -> String {
+/// The global line: bar, beat, loop length, tempo, click, and which grid takes snap to.
+fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
+    let tl = &sched.timeline;
+    let bars = sched.bars;
     let beats_per_bar = tl.signature().beats_per_bar;
     let progress = if s.samples_per_beat > 0.0 {
         (s.beat_offset as f64 / s.samples_per_beat * 8.0) as usize
@@ -663,7 +620,7 @@ fn global_line(s: &Status, tl: &Timeline, bars: u32, stats: &LiveStats) -> Strin
     let loop_len = tl.span_bars(0, bars);
 
     let mut line = format!(
-        "Takt {:>4} Schlag {}/{} [{}] | Loop {} Takte = {} Samples = {:.2} s | {:.1} BPM | Klick {} | Aus {}",
+        "Takt {:>4} Schlag {}/{} [{}] | Loop {} Takte = {} Samples = {:.2} s | {:.1} BPM | Raster {} | Klick {} | Aus {}",
         s.bar + 1,
         s.beat + 1,
         beats_per_bar,
@@ -672,6 +629,7 @@ fn global_line(s: &Status, tl: &Timeline, bars: u32, stats: &LiveStats) -> Strin
         loop_len,
         tl.samples_to_secs(loop_len),
         s.bpm,
+        sched.quantize.label(),
         on_off(s.click),
         fmt_dbfs(s.output_peak),
     );
@@ -689,8 +647,10 @@ fn global_line(s: &Status, tl: &Timeline, bars: u32, stats: &LiveStats) -> Strin
     line
 }
 
-/// One line per track: name, input channel, state, layers, level, monitoring.
-fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, active: bool) -> String {
+/// One line per track: name, input channel, state, layers, level, monitoring - and, while something
+/// is armed, how much of the count-in is left. That last part is the difference between "scharf"
+/// and knowing whether to pick the instrument up now or in five bars.
+fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active: bool) -> String {
     let loop_text = if ts.loop_len > 0 {
         format!("{:.2} s", tl.samples_to_secs(ts.loop_len))
     } else if ts.state == TrackState::Recording {
@@ -698,12 +658,16 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, active: bool) -> St
     } else {
         "-".to_string()
     };
+    let state_text = match lead.text() {
+        Some(text) => format!("{} - {text}", ts.state.label()),
+        None => ts.state.label().to_string(),
+    };
     format!(
-        "{} {:<10} Ein {} | {:<10} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Mithoeren {}",
+        "{} {:<10} Ein {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Mithoeren {}",
         if active { '>' } else { ' ' },
         ui.name,
         ui.channel + 1,
-        ts.state.label(),
+        state_text,
         loop_text,
         ts.layers,
         layer_list(ts, &ui.gains),
@@ -760,6 +724,11 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         opts.bars,
         loop_len,
         timeline.samples_to_secs(loop_len)
+    );
+    println!(
+        "Raster:   {} - {}",
+        opts.quantize.label(),
+        opts.quantize.explanation()
     );
     let capacity = loop_capacity(&timeline, opts.bars);
     println!("{}", limits_line(capacity, defs.len(), SPARE_SLOTS));
@@ -915,11 +884,15 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         .play()
         .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
 
+    let grid = match opts.quantize {
+        Quantize::Bar => "der naechsten Taktgrenze",
+        Quantize::Loop => "dem naechsten Loop-Anfang",
+    };
     println!(
         "\nTasten (jeweils mit Enter bestaetigen). Alles ausser 1-{} wirkt auf den gewaehlten Track:\n\
          \x20 1-{}  Track waehlen\n\
-         \x20 r   neuer Loop ab der naechsten Taktgrenze, {} Takte (ersetzt vorhandene Ebenen)\n\
-         \x20 o   Overdub: weitere Ebene ab der naechsten Taktgrenze, eine Loop-Laenge lang\n\
+         \x20 r   neuer Loop ab {grid}, {} Takte (ersetzt vorhandene Ebenen)\n\
+         \x20 o   Overdub: weitere Ebene ab {grid}, eine Loop-Laenge lang\n\
          \x20 s   Stopp: laufende Aufnahme auf der naechsten Taktgrenze beenden, sonst Wiedergabe aus\n\
          \x20 p   Wiedergabe ab der naechsten Taktgrenze\n\
          \x20 c   diesen Track leeren\n\
@@ -940,12 +913,10 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     let mut control = Control {
         cmd: cmd_tx,
         pool,
-        timeline,
-        bars: opts.bars,
+        // The head start is four buffers plus 20 ms; the Scheduler works it out and owns every
+        // other rule about when a command may take effect.
+        sched: Scheduler::new(timeline, opts.bars, buffer_frames, opts.quantize),
         latency: opts.latency_samples,
-        // Four buffers plus 20 ms: comfortably more than one round through the callbacks, so a
-        // scheduled command always reaches the audio thread before its own timestamp.
-        guard: (buffer_frames * 4 + rate / 50) as u64,
         tracks: defs
             .iter()
             .map(|d| TrackUi {
@@ -988,7 +959,8 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         if last_print.elapsed() >= DISPLAY_INTERVAL {
             last_print = Instant::now();
             if let Some((s, _)) = last {
-                let mut lines = vec![global_line(&s, &control.timeline, control.bars, &stats)];
+                let sched = control.sched;
+                let mut lines = vec![global_line(&s, &sched, &stats)];
                 for (i, ui) in control.tracks.iter_mut().enumerate() {
                     let ts = s.tracks().get(i).copied().unwrap_or_default();
                     // Keep the gain mirror the same length the engine reports.
@@ -996,7 +968,8 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
                         ui.gains.push(1.0);
                     }
                     ui.gains.truncate(ts.layers as usize);
-                    lines.push(track_line(&ts, ui, &control.timeline, i == control.active));
+                    let lead = sched.lead(i, s.pos);
+                    lines.push(track_line(&ts, ui, &sched.timeline, lead, i == control.active));
                 }
                 lines.push(format!("  {}", control.message));
                 draw(&lines, printed_lines, opts.simple_display);
