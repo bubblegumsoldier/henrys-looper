@@ -1,0 +1,62 @@
+# Henrys 3/4-Song fuer die eigene Engine: Gitarre-Loop, dann drei Voice-Ebenen stapeln.
+#
+# Inhaltlich dieselbe Partitur wie examples/henry-3-4-group.yaml, nur ohne Ableton:
+# es gibt keine Gruppenspuren und keine Layer-Reserve mehr. Die Engine legt Ebenen selbst an,
+# so viele wie gebraucht werden. Ein Track sagt nur noch, auf welchem Eingang er hoert.
+#
+# Verkabelung am Interface:
+#   Eingang 1  Mikrofon (voice)
+#   Eingang 2  Gitarre
+title: Henry 3/4
+bpm: 141
+time_signature: 3/4
+
+tracks:
+  gitarre: {input: 2}
+  voice:   {input: 1}        # monitor: true ist Default - du hoerst dich durch die Engine
+
+sections:
+  # 8 Takte Gitarre aufnehmen. Die Stimme laeuft mit, wird aber nicht aufgenommen.
+  - id: gitarre_rec
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: record
+      voice: hear_through
+
+  # Gitarre loopt. Erste Voice-Ebene.
+  - id: voice_1
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: play
+      voice: record
+
+  # Ebene 1 laeuft weiter, Ebene 2 kommt darueber.
+  - id: voice_2
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: play
+      voice: overdub
+
+  # Ebene 3. Loopt, bis du den Release-Knopf drueckst.
+  - id: voice_3
+    repeat: voice_2
+    autorelease: false
+    quantize: loop
+
+  # Alle drei Ebenen klingen gleichzeitig, du singst live darueber.
+  # Release beendet im naechsten Takt.
+  - id: alles
+    bars: 8
+    autorelease: false
+    quantize: bar
+    tracks:
+      gitarre: play
+      voice: play
+
+  # Nichts mehr genannt heisst: alles auf stop.
+  - id: ende
+    bars: 1
+    autorelease: false

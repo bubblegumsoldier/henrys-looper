@@ -23,3 +23,16 @@ asio = ["cpal/asio"]
 clap = { version = "4.6.6", features = ["derive"] }
 cpal = "0.18"
 rtrb = "0.4.0"
+# The score compiler (`src/score/`). Three small, control-thread-only additions:
+#   * `saphyr-parser` - YAML 1.2 event parser. Chosen over serde_yaml/serde_yml (both deprecated)
+#     because it hands out a `Span` with 1-based line and column for *every* token, which is what
+#     the error messages are built on. Two tiny dependencies of its own (arraydeque, thiserror).
+#   * `strsim` - "meintest du 'bass'?" suggestions.
+#   * `serde` - the compiled score is a serialisable contract towards the UI.
+saphyr-parser = "0.0.12"
+serde = { version = "1", features = ["derive"] }
+strsim = "0.11.1"
+
+[dev-dependencies]
+# Only to prove in a test that the compiled score serialises to the documented JSON shape.
+serde_json = "1"

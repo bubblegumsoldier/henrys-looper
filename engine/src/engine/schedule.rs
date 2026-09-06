@@ -64,7 +64,12 @@ use super::timeline::Timeline;
 use super::track::TrackState;
 
 /// Which grid a take is quantised to.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
+/// The score format spells these `quantize: bar` / `quantize: loop`, so the serde names are the
+/// same words the musician types; the compiled score reuses this very type rather than a copy.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum Quantize {
     /// Next bar boundary. What the looper did before there was a choice.
     Bar,

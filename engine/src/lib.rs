@@ -17,6 +17,7 @@ pub mod duplex;
 pub mod engine;
 pub mod latency;
 pub mod meter;
+pub mod score;
 pub mod soak;
 
 use std::sync::mpsc::{Receiver, channel};
