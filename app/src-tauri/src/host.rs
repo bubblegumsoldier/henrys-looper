@@ -48,7 +48,9 @@ use looper_engine::engine::process::{
     EngineConfig, EngineCore, OUT_CHANNELS, loop_capacity, max_latency, max_memory_bytes,
     spare_channels, spare_slots_for, spread_frame, total_channels,
 };
-use looper_engine::engine::runner::{DEFAULT_COUNT_IN_BARS, Phase, Runner, check_tracks};
+use looper_engine::engine::runner::{
+    DEFAULT_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks,
+};
 use looper_engine::engine::timeline::Timeline;
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
 use looper_engine::score::{ScoreError, compile_score};
@@ -1274,12 +1276,9 @@ impl Session {
             self.check_track(track)?;
         }
         if action.moves_transport() && self.score_is_playing() {
-            return Err(
-                "Die Partitur laeuft - sie schickt die Aufnahme- und Wiedergabekommandos selbst. \
-                 Von Hand geht das erst nach \"Alles stoppen\". Pegel, Panorama, Ebenen und \
-                 Effekte lassen sich waehrenddessen weiter einstellen."
-                    .to_string(),
-            );
+            // The sentence is the engine's, not this file's: a MIDI pad runs into the same wall
+            // and has to say the same thing. See `runner::TRANSPORT_BELONGS_TO_SCORE`.
+            return Err(TRANSPORT_BELONGS_TO_SCORE.to_string());
         }
         let est = self.estimated_pos();
 
@@ -1711,6 +1710,106 @@ mod tests {
                 !action.moves_transport(),
                 "{action:?} gehoert weiter dem Menschen, auch waehrend die Partitur laeuft"
             );
+        }
+    }
+
+    /// **The line has to be in the same place for a pad as for the mouse.**
+    ///
+    /// While a score plays, the runner owns the transport (`docs/architektur.md` section 10). The
+    /// mouse runs into that through [`Action::moves_transport`] here; a MIDI pad runs into it
+    /// through `midi::Target::moves_transport` in the engine library, and the two are separate
+    /// lists because they are separate vocabularies. Separate lists drift, so this test pairs them
+    /// up and insists they agree - and then insists that every address which moves the transport is
+    /// actually in the pairing, so a new one cannot be added on one side only.
+    #[test]
+    fn a_midi_pad_hits_the_same_transport_boundary_as_a_mouse_click() {
+        use looper_engine::midi::{Target, TrackRef, catalogue};
+
+        let track = || TrackRef::Index(0);
+        let pairs: Vec<(Target, Action)> = vec![
+            (Target::Record(track()), Action::Record { track: 0 }),
+            (Target::Overdub(track()), Action::Overdub { track: 0 }),
+            (Target::Play(track()), Action::Play { track: 0 }),
+            (Target::StopTrack(track()), Action::StopTrack { track: 0 }),
+            (Target::ClearTrack(track()), Action::ClearTrack { track: 0 }),
+            (Target::ClearAll, Action::ClearAll),
+            (
+                Target::Tempo,
+                Action::SetTempo {
+                    bpm: 120.0,
+                    beats_per_bar: 4,
+                    beat_unit: 4,
+                },
+            ),
+            (
+                Target::Quantize(Quantize::Bar),
+                Action::SetQuantize {
+                    quantize: Quantize::Bar,
+                },
+            ),
+            (
+                Target::Quantize(Quantize::Loop),
+                Action::SetQuantize {
+                    quantize: Quantize::Loop,
+                },
+            ),
+            // The other half of the rule: the mix stays the human's, from either input.
+            (
+                Target::Monitor(track()),
+                Action::SetMonitor {
+                    track: 0,
+                    on: true,
+                },
+            ),
+            (Target::Pan(track()), Action::SetPan { track: 0, pan: 0.5 }),
+            (Target::Click, Action::SetClick { on: true }),
+            (
+                Target::LayerGain(track(), 0),
+                Action::LayerGain {
+                    track: 0,
+                    layer: 0,
+                    gain: 0.5,
+                },
+            ),
+            (
+                Target::LayerMute(track(), 0),
+                Action::LayerMute {
+                    track: 0,
+                    layer: 0,
+                    muted: true,
+                },
+            ),
+            (
+                Target::FxBypass(track()),
+                Action::FxBypass { track: 0, on: true },
+            ),
+            (
+                Target::FxPreset(track(), FxPreset::Voice),
+                Action::FxPreset {
+                    track: 0,
+                    preset: FxPreset::Voice,
+                },
+            ),
+        ];
+
+        for (target, action) in &pairs {
+            assert_eq!(
+                target.moves_transport(),
+                action.moves_transport(),
+                "\"{target}\" und {action:?} sind sich uneinig darueber, ob das den Transport \
+                 verschiebt"
+            );
+        }
+
+        for target in catalogue(1, 1, 2) {
+            if target.moves_transport() {
+                assert!(
+                    pairs.iter().any(|(paired, _)| *paired == target),
+                    "\"{target}\" verschiebt den Transport, steht aber in keiner Paarung - die \
+                     MIDI-Seite und die Maus-Seite koennen auseinanderlaufen, ohne dass es \
+                     auffaellt"
+                );
+            }
         }
     }
 

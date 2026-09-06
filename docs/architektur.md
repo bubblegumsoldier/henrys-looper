@@ -11,7 +11,7 @@ Begründung und den Messwerten, auf denen sie beruhen. Stand 2026-09-06.
 | `docs/architektur.md` | dieses Dokument: getroffene Entscheidungen, Regeln, Datenmodell |
 | `docs/plan-standalone-rust.md` | der Plan mit Phasen und Zielen. Bleibt gültig |
 | `docs/phase0-audio-messung.md` | Messbericht: Latenz, Aussetzer, WASAPI gegen ASIO |
-| `docs/contracts-v0.md` | Partitur-Format und Event-Formate. Konzeptionell gültig, Ableton-Teile veraltet |
+| `docs/contracts-v0.md` | Partitur-Format und Event-Formate. Konzeptionell gültig, Ableton-Teile veraltet. Das dort festgelegte MIDI-Id-Format `ch1.note36` gilt unverändert; der Umfang der Bindungen ist seit Abschnitt 11 viel größer |
 | `docs/handover-tag1.md` | Vision und Geschichte des ersten Ansatzes. Historisch |
 
 Der Code liegt in `engine/`. Ausführliche Herleitungen stehen als Modulkommentar im Code,
@@ -52,7 +52,7 @@ andere ist die Eintrittskarte.
 | 2 | Mehrere Tracks, unbegrenzte Layer | gebaut, 52 Tests grün, Abnahme am Instrument offen |
 | 3 | Partitur und Runner | **gebaut**, 273 Tests grün, Abnahme am Instrument offen. Compiler und Runner stehen, `score`-Subcommand bedient beides. Siehe Abschnitt 10 |
 | 4 | UI | vorgezogen, siehe unten |
-| 5 | Bühnentauglichkeit, MIDI | offen |
+| 5 | Bühnentauglichkeit, MIDI | **Fundament gebaut**, 334 Tests grün, ohne Gerät geprüft. MIDI-Eingang (`midir`), Parameterbaum, zweistufiges Mapping (Controller-Profil + Partitur), Wertesprung-Schutz, Learn-Mechanik, `midi`-Subkommando. Learn-Modus im UI und die Anbindung an die laufende Sitzung sind offen. Siehe Abschnitt 11 |
 | 6 | Effekte | DSP, Kommandos und CLI gebaut, Abnahme am Instrument offen. UI folgt |
 | 7 | Stereo | **gebaut**, Abnahme am Instrument offen. Aufnahme mono oder stereo je Quelle, Kette und Mixbus stereo, Panorama je Track |
 | 8 | Latenzkompensation je Track | **gebaut**, 252 Tests grün, Abnahme am Instrument offen. Globaler Wert als Vorgabe, eigener Wert je Track aus Messwert plus Zuschlag, `calibrate --for-track`. Siehe Abschnitt 4 |
@@ -717,7 +717,228 @@ Waehrend eine Partitur laeuft, gehoert der **Transport dem Runner und der Mix de
 Panorama, Ebenenlautstaerke, Stummschaltung, Effekte und Klick bleiben bedienbar. Ein Take, den der
 Runner nicht geschickt hat, wuerde seine Vorhersage ab diesem Moment falsch machen.
 
-## 11. Arbeitsweise
+## 11. MIDI-Steuerung (Phase 5)
+
+Der Code liegt in `engine/src/midi/`. Eine einzige neue Abhängigkeit: **`midir` 0.11** — unter
+Windows eine dünne Hülle um `midiInOpen` aus winmm. Alles oberhalb des Bytestroms ist selbst
+geschrieben, und das ist der Grund, warum von diesem ganzen Kapitel genau *eine* Datei ein Gerät
+braucht.
+
+### Der Parameterbaum: alles Bedienbare hat eine Adresse
+
+Ohne stabile, textliche Adresse kann ein Learn-Modus nichts festhalten und keine Datei etwas
+speichern. Deshalb bekommt jede bedienbare Sache einen gepunkteten Pfad:
+
+```text
+transport.start | transport.next | transport.stop_all | transport.goto.<n>
+global.click | global.clear_all | global.tempo | global.quantize.bar|loop
+track.<ref>.record | overdub | play | stop | clear | monitor | pan | latency_trim
+track.<ref>.layer.<n>.mute | remove | gain
+track.<ref>.fx.bypass
+track.<ref>.fx.<high_pass|eq|comp|delay|reverb>.on
+track.<ref>.fx.preset.<trocken|stimme|gitarre>
+track.<ref>.fx.high_pass.hz · eq.<1-3>.<hz|q|gain|peak|low_shelf|high_shelf>
+track.<ref>.fx.comp.<threshold|ratio|attack|release|knee|makeup>
+track.<ref>.fx.delay.<note.<wert>|feedback|mix> · reverb.<size|damping|mix>
+```
+
+**Alles ist außen 1-basiert und innen 0-basiert**, auf jeder Ebene — `track.1` ist `tracks[0]`,
+`layer.2` ist `layers[1]`, `eq.3` ist `bands[2]`. Dieselbe Regel, der die CLI und die Anzeige
+ohnehin folgen: ein Musiker zählt ab eins.
+
+**Tracks per Nummer *und* per Name**, und die Begründung ist der eigentliche Grund für die zwei
+Stufen unten:
+
+| Wo | Schreibweise | Warum |
+|---|---|---|
+| Controller-Profil | `track.1.record` | Ein Profil soll jedes Stück überleben. „Track 1" ist in jedem Stück der erste Track; `track.stimme` wäre im nächsten Stück tot, weil die Stimme dort `gesang` heißt |
+| Partitur | `track.stimme.record` | Die Partitur kennt ihre eigenen Namen, wird von Hand geschrieben, und ein Name kann bei geänderter Track-Reihenfolge nicht still auf den falschen Track zeigen |
+
+Die Leseregel ist mechanisch: **ein Segment aus lauter Ziffern ist eine Position, alles andere ein
+Name.** Ein Track, der nur aus Ziffern besteht oder einen Punkt im Namen trägt, ist damit nicht per
+Name adressierbar — bewusst in Kauf genommen, weil die Alternative Anführungszeichen in Adressen
+wären.
+
+`looper-engine midi targets` druckt den Baum; er wird aus denselben Werten erzeugt, die der Parser
+liest, kann also nicht davon abweichen, was tatsächlich bindbar ist.
+
+### Schalter, Taster, Regler
+
+`Control` sagt, *was* ein Ziel ist, und daraus folgt, was ein MIDI-Ereignis damit tun darf:
+
+| Art | Beispiele | Pad | Regler |
+|---|---|---|---|
+| **Taster** | `record`, `transport.next`, `preset.stimme` | löst aus | löst aus beim Überschreiten von 64 |
+| **Schalter** | `monitor`, `fx.reverb.on`, `layer.1.mute` | umschalten oder halten | an ab 64 |
+| **Wert** | `pan`, `fx.reverb.mix` | Anschlagstärke wird zum Wert | fährt den Wert |
+
+Das Tastenverhalten ist **je Bindung** einstellbar (`press`, `release`, `toggle`, `momentary`), mit
+einer Vorgabe je Ziel: *auslösen* bei einem Taster, *umschalten* bei einem Schalter. Beides ist
+nötig, und zwar am selben Ziel: „Mithören" will meistens ein Umschalter sein (mit einer Gitarre in
+beiden Händen hält man kein Pad), manchmal aber ein Halteschalter (Talkback, eine Phrase über den
+Loop). Ein *Taster* als Umschalter wird dagegen **abgelehnt**, wenn die Datei gelesen wird:
+„Aufnahme, aber umgeschaltet" hat keinen zweiten Zustand, und es still als Druck zu behandeln,
+hinterlässt eine Datei, die etwas anderes tut, als sie sagt.
+
+Die Wertebereiche sind **nicht hier erfunden**, sondern die Klemmwerte der Engine selbst, abgelesen
+in `fx/dynamics.rs`, `fx/delay.rs`, `fx/reverb.rs`, `fx/mod.rs` und der Kommandoschicht. Ein Regler
+am Anschlag landet damit exakt dort, wo die Engine ohnehin geklemmt hätte. Zwei Feinheiten:
+
+* **Frequenzen und Zeiten sind logarithmisch**, dB und Anteile linear. Von 20 Hz bis 20 kHz linear
+  läge der ganze Bassbereich in den ersten zwei von 127 Schritten.
+* **Ein Bereich um die Null hat bei CC 64 exakt die Mitte.** Panorama, EQ-Verstärkung und
+  Makeup-Gain sind so; „den Regler wieder genau in die Mitte" ist etwas, das man dauernd tut, und
+  `64/127` wäre nicht die Mitte. An beiden Enden ist die Abbildung ohnehin exakt, ohne Arithmetik,
+  die daneben landen könnte.
+
+### Der Wertesprung: Pickup
+
+Der Regler steht irgendwo, der Parameter woanders — weil ein Preset ihn verschoben hat, weil die
+Maus ihn verschoben hat, oder einfach weil seit dem Programmstart niemand ihn angefasst hat. Der
+erste Millimeter Bewegung lässt den Parameter dann springen. Auf einem Hall-Anteil hört man das, auf
+einer Ebenenlautstärke während eines Takes ruiniert es den Take.
+
+| Verfahren | wirkt | hier |
+|---|---|---|
+| **Pickup** | erst, wenn der Regler den aktuellen Wert passiert | **Standard** |
+| Relativ | Regler sendet Differenzen | **braucht einen Endlos-Encoder** — der MPD218 hat Potis |
+| Skalierung | Restweg auf Restbereich dehnen | kein Sprung, aber der Regler zeigt auf einen Wert, auf dem er nicht steht |
+
+Der MPD218 hat Potentiometer mit Anschlag; relativ steht damit gar nicht zur Verfügung. Pickup
+fängt sowohl das *Erreichen* des Wertes (Toleranz zwei von 127 Schritten — ein Poti zittert) als
+auch das *Überfahren* ab, weil ein schnell gedrehter Regler Schritte überspringt. Weil „die erste
+Bewegung tut nichts" verwirrend ist, wenn man nicht weiß, dass es an ist, ist es je Bindung
+abschaltbar (`takeover: jump`). Nach einem Preset muss jeder Regler neu fangen (`Router::rearm`),
+sonst schützt Pickup die erste Berührung nach dem Start und danach nie wieder.
+
+### Zwei Stufen: das Gerät und das Stück
+
+| Stufe | Datei | gilt für | Schlüssel ist |
+|---|---|---|---|
+| Controller-Profil | `%APPDATA%\henrys-looper\midi\<gerät>.yaml` | jedes Stück | die **Taste** (`ch1.note36`) |
+| Partitur-Ergänzung | der `midi:`-Block der Partitur | dieses Stück | die **Adresse** (`track.stimme.record`) |
+
+Das Profil liegt im Anwendungsdatenverzeichnis und nicht neben der Partitur, aus demselben Grund,
+aus dem es die zwei Stufen überhaupt gibt: es beschreibt ein Stück Hardware an *diesem* Rechner.
+Neben der Partitur würde es mit ihr auf einen Rechner reisen, an dem der MPD218 nicht hängt.
+`HENRYS_LOOPER_CONFIG_DIR` verlegt das Verzeichnis (das benutzen die Tests, und wer seine
+Einstellungen auf einem Stick hält).
+
+Jede Datei ist so herum geschlüsselt, wie sie sich liest: ein Profil ist eine Liste dessen, was die
+Pads tun; eine Partitur ist eine Liste dessen, was das Stück braucht. Der `device:`-Eintrag wird
+**locker** gegen den Portnamen verglichen, weil Windows dekoriert: derselbe MPD218 heißt einmal
+`MPD218` und einmal `2- MPD218`, je nachdem, was vorher eingesteckt war.
+
+```yaml
+# %APPDATA%\henrys-looper\midi\mpd218.yaml — Vorlage: examples/midi-mpd218.yaml
+device: MPD218
+bindings:
+  ch10.note36: {target: track.1.record}
+  ch10.note45: {target: transport.next}                 # der Release-Knopf
+  ch10.note48: {target: track.1.monitor, mode: momentary}
+  ch1.cc3:     {target: track.1.fx.reverb.mix, max: 0.5}
+```
+
+```yaml
+# in der Partitur — überschreibt das Profil für dieses eine Stück
+midi:
+  next_section:               {cc: 64}                  # das alte Format, unverändert gültig
+  stop_all:                   {note: 37}
+  track.stimme.record:        {note: 36}
+  track.stimme.fx.reverb.mix: {cc: 3, max: 0.4}
+  transport.goto.3:           {note: 45}
+```
+
+**Das bestehende Format übersetzt weiter.** `next_section` und `stop_all` sind gültige Adressen von
+`transport.next` und `transport.stop_all`; der kompilierte Schlüssel bleibt, wie er geschrieben
+wurde, und `target` trägt daneben die kanonische Adresse. Ein Leser, der nur das alte
+Zwei-Bindungs-Format kannte, findet weiterhin, wonach er sucht.
+
+**Konflikte werden gemeldet, nicht still entschieden.** Zwei Ziele auf derselben Taste sind in einer
+Datei ein Fehler mit Zeilennummer (eine Taste kann nur eine Sache tun); zwei Tasten auf demselben
+Ziel sind erlaubt und nützlich. Legt die Partitur eine Taste des Profils neu, ist das *kein* Fehler
+— dafür ist der `midi:`-Block da —, aber jede solche Übernahme kommt als deutscher Satz heraus: ein
+Pad, das in diesem einen Stück still etwas anderes tut, ist die Sorte Überraschung, die auf der
+Bühne teuer wird.
+
+### Anwenden, und wo die Grenze liegt
+
+Ein eingehendes Ereignis wird gegen das Mapping aufgelöst und wird zu einer `MidiAction` — derselben
+Art Absicht, die auch ein Mausklick erzeugt, mit aufgelöstem Track-Index und fertigem Wert.
+Bewusst **kein** `Command`: die Hälfte davon braucht einen musikalischen Zeitstempel, und aus einer
+Bedienhandlung werden getimte Kommandos an genau einer Stelle (`engine/src/engine/schedule.rs`,
+Abschnitt 3). Für alles Ungetimte liefert `MidiAction::command()` das fertige Kommando.
+
+**Während die Partitur läuft, gehört der Transport dem Runner — auch für ein Pad.** Ein Pad, das
+eine Aufnahme startet, die der Runner nicht geplant hat, macht seine vorhergesagte Loop-Geometrie ab
+diesem Moment falsch (Abschnitt 10). Die Ablehnung ist **derselbe Satz** wie für die Maus, aus
+derselben Konstante `runner::TRANSPORT_BELONGS_TO_SCORE` — zwei Formulierungen würden zwei Regeln
+suggerieren. `transport.*` ist ausdrücklich *nicht* betroffen: das ist der Release-Knopf des
+Runners, und ihn zu sperren hieße, genau das zu sperren, wofür der Musiker den Controller in der
+Hand hat. Ein Test paart die MIDI-Liste mit der Maus-Liste und besteht darauf, dass sie sich einig
+sind — und dass jede Adresse, die den Transport verschiebt, in der Paarung steht.
+
+### Echtzeit
+
+Der MIDI-Callback ist **nicht** der Audio-Thread — er kommt von einem Treiber-Thread, ein langsamer
+Callback kann also keinen Aussetzer erzeugen. Er kann etwas fast so Schlimmes erzeugen: verspätete
+Ereignisse, und das heißt auf einem Looper einen Take auf dem falschen Schlag. Deshalb gelten die
+Regeln aus Abschnitt 5 hier trotzdem: der Callback dekodiert drei Bytes und schiebt sie in einen
+lock-freien Ringpuffer (`rtrb`, derselbe wie beim Audio-Thread), alles Weitere macht der
+Steuer-Thread. Eine volle Queue verwirft und zählt.
+
+Behandelt werden Note On, Note Off, Control Change und Pitch Bend. **Note On mit Velocity 0 ist ein
+Note Off** — fast kein Controller sendet `0x8n`, und wer `90 24 00` als Druck liest, lässt jedes Pad
+für immer gedrückt. Laufender Status, über zwei Lieferungen zerrissene Nachrichten, eingestreute
+Echtzeit-Bytes und SysEx sind behandelt; unter Windows zerlegt winmm den Strom zwar schon selbst,
+aber ein Dekoder, der nur bei freundlicher Unterlage funktioniert, fällt bei genau dem einen
+Controller aus, der nicht freundlich ist.
+
+### Windows gibt MIDI exklusiv heraus
+
+`midiInOpen` scheitert mit `MMSYSERR_ALLOCATED`, wenn ein anderes Programm den Port schon hält, und
+das ist hier der Normalfall: läuft Ableton mit dem MPD218 als Control Surface, bekommen wir ihn
+nicht. Dieser eine Fehler hat deshalb einen eigenen Satz, der den wahrscheinlichen Schuldigen nennt,
+statt „Fehler beim Oeffnen". `midi list` öffnet nichts und funktioniert deswegen auch dann.
+
+### CLI
+
+```
+looper-engine midi list                             # Eingaenge, mit dem Profil, das dazu passt
+looper-engine midi monitor [--device X] [--profile P]   # was sendet dieses Pad, und was tut es
+looper-engine midi learn --target track.1.record [--save]
+looper-engine midi profile [--device X | --profile P]
+looper-engine midi targets [--tracks N --layers M --sections K --filter TEXT]
+```
+
+`monitor` ist das, was tatsächlich benutzt wird: das Handbuch eines Control Surface ist meistens
+falsch oder gar nicht da, und jede Pad-Bank des MPD218 sendet andere Noten. `targets` braucht kein
+Gerät.
+
+### Wo der Code liegt
+
+| Datei | braucht Gerät | Inhalt |
+|---|---|---|
+| `engine/src/midi/event.rs` | nein | Bytes zu Ereignissen, laufender Status, die Ids |
+| `engine/src/midi/target.rs` | nein | der Parameterbaum, Wertebereiche, Kurven |
+| `engine/src/midi/binding.rs` | nein | Taster gegen Umschalter, Wertesprung-Schutz, das Mapping |
+| `engine/src/midi/router.rs` | nein | Ereignis + Mapping → Absicht, samt Runner-Grenze |
+| `engine/src/midi/profile.rs` | nur Dateisystem | Controller-Profil lesen und schreiben |
+| `engine/src/midi/learn.rs` | nein | „die nächste Taste wird X" |
+| `engine/src/midi/input.rs` | **ja** | midir, Geräteliste, Öffnen, Queue |
+| `engine/src/midi/cli.rs` | ja, außer `targets` | das `midi`-Subkommando |
+| `engine/src/midi/tests.rs` | nein | 51 Offline-Tests |
+| `examples/midi-mpd218.yaml` | — | Vorlage für Henrys Controller |
+
+### Was noch fehlt
+
+Der **Learn-Modus in der Oberfläche** (Strg-Klick auf ein Bedienelement, das nächste Pad gehört
+dazu) und die **Anbindung an die laufende Sitzung**: ein MIDI-Thread neben dem Audio-Thread, dessen
+Ereignisse durch `Session::apply` laufen, und `ParamState` aus dem Status-Snapshot, damit Pickup
+und Umschalter den wirklichen Zustand sehen statt ihr eigenes Gedächtnis. Beides ist ein eigener
+Auftrag; das Fundament dafür steht.
+
+## 12. Arbeitsweise
 
 - Henry bedient Hardware selbst; Audio-Tests laufen nur mit seiner Zustimmung.
 - **Nie gleichzeitig an derselben Sache arbeiten.** Das hat schon Schaden angerichtet.

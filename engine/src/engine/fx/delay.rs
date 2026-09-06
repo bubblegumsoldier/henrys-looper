@@ -105,13 +105,24 @@ impl DelayNote {
         }
     }
 
-    /// Parse what the CLI accepts.
+    /// Machine name, for anything that cannot contain a slash - a MIDI address, a JSON field.
+    /// The app's wire format (`DelayNoteName`) uses exactly these words.
+    pub fn name(self) -> &'static str {
+        match self {
+            DelayNote::Quarter => "quarter",
+            DelayNote::DottedEighth => "dotted_eighth",
+            DelayNote::Eighth => "eighth",
+            DelayNote::TripletEighth => "triplet_eighth",
+        }
+    }
+
+    /// Parse what the CLI accepts, plus the machine names of [`Self::name`].
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_lowercase().as_str() {
-            "1/4" | "4" | "viertel" => Some(DelayNote::Quarter),
-            "1/8." | "8." | "punktiert" => Some(DelayNote::DottedEighth),
-            "1/8" | "8" | "achtel" => Some(DelayNote::Eighth),
-            "1/8t" | "8t" | "triole" => Some(DelayNote::TripletEighth),
+            "1/4" | "4" | "viertel" | "quarter" => Some(DelayNote::Quarter),
+            "1/8." | "8." | "punktiert" | "dotted_eighth" => Some(DelayNote::DottedEighth),
+            "1/8" | "8" | "achtel" | "eighth" => Some(DelayNote::Eighth),
+            "1/8t" | "8t" | "triole" | "triplet_eighth" => Some(DelayNote::TripletEighth),
             _ => None,
         }
     }

@@ -2,8 +2,8 @@
 //!
 //! The crate has two front ends and one body:
 //!
-//! * `src/main.rs` - the CLI (`list`, `thru`, `click`, `latency`, `soak`, `live`, `calibrate`).
-//!   It is the measuring instrument and stays exactly as it was.
+//! * `src/main.rs` - the CLI (`list`, `thru`, `click`, `latency`, `soak`, `live`, `score`,
+//!   `fxbench`, `calibrate`, `midi`). It is the measuring instrument and stays exactly as it was.
 //! * `app/src-tauri` - the desktop app. It uses [`audio`] to open devices and [`engine`] to run
 //!   the loop core, and puts a window in front of it instead of a keyboard.
 //!
@@ -17,6 +17,7 @@ pub mod duplex;
 pub mod engine;
 pub mod latency;
 pub mod meter;
+pub mod midi;
 pub mod score;
 pub mod soak;
 

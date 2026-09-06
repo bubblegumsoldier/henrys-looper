@@ -22,6 +22,11 @@ asio = ["cpal/asio"]
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
 cpal = "0.18"
+# MIDI input (`src/midi/`). The only new dependency of phase 5, and a small one: on Windows it is
+# a thin wrapper around winmm's `midiInOpen` - which is also where the exclusive-access failure
+# (MMSYSERR_ALLOCATED) comes from that we have to explain rather than swallow. Everything above the
+# byte stream is our own, so the whole mapping layer is provable without a controller on the desk.
+midir = "0.11.0"
 rtrb = "0.4.0"
 # The score compiler (`src/score/`). Three small, control-thread-only additions:
 #   * `saphyr-parser` - YAML 1.2 event parser. Chosen over serde_yaml/serde_yml (both deprecated)

@@ -159,6 +159,22 @@ impl FxSlot {
         }
     }
 
+    /// Machine name, as a command and a MIDI address spell it. The app's wire format
+    /// (`FxSlotName`) uses exactly these words, and so does `midi::Target`.
+    pub fn name(self) -> &'static str {
+        match self {
+            FxSlot::HighPass => "high_pass",
+            FxSlot::Eq => "eq",
+            FxSlot::Comp => "comp",
+            FxSlot::Delay => "delay",
+            FxSlot::Reverb => "reverb",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::all().into_iter().find(|slot| slot.name() == text)
+    }
+
     /// One letter for the compact status line: `HEKDR`.
     pub fn letter(self) -> char {
         match self {

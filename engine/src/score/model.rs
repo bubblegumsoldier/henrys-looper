@@ -28,6 +28,7 @@ use crate::engine::frame::TrackInput;
 use crate::engine::schedule::Quantize;
 use crate::engine::timeline::TimeSignature;
 use crate::engine::track::TrackLatency;
+use crate::midi::{ButtonMode, Takeover};
 
 /// What a track is supposed to do during a section. The complete state, not a delta: a section
 /// that does not mention a track puts it on [`TrackState::Stop`].
@@ -154,13 +155,47 @@ fn default_true() -> bool {
 }
 
 /// A MIDI binding, before it is turned into an id.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// # What grew here, and what did not
+///
+/// The Ableton-era format had exactly two bindings, `next_section` and `stop_all`, and a binding
+/// was a note or a controller number and nothing else. Both spellings still work, unchanged - see
+/// [`crate::midi::Target::parse`], which accepts them as the addresses `transport.next` and
+/// `transport.stop_all`.
+///
+/// What is new is that the *key* of the `midi:` mapping may be any address out of the parameter
+/// tree, and that a binding may say how it behaves:
+///
+/// ```yaml
+/// midi:
+///   next_section:              {cc: 64}                    # wie bisher
+///   track.stimme.record:       {note: 36}
+///   track.stimme.monitor:      {note: 40, mode: momentary}
+///   track.stimme.fx.reverb.mix:{cc: 3, max: 0.4}
+///   transport.goto.3:          {note: 45}
+/// ```
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MidiBindingSource {
     /// 1-based MIDI channel, default 1.
     pub channel: u8,
     pub kind: MidiKind,
     /// Note number or controller number, 0..=127.
     pub number: u8,
+    /// The canonical address of what this control does, whatever the key was spelled as. The
+    /// reader fills it in, so `next_section` and `transport.next` arrive here as one thing.
+    pub target: String,
+    /// How a button behaves. `None` means the default for the target: fire for a trigger, toggle
+    /// for a switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ButtonMode>,
+    /// How a knob takes its parameter over. `None` means pickup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takeover: Option<Takeover>,
+    /// Narrowed ends of the target's range, so a knob can cover the part that matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,11 +327,25 @@ pub struct CompiledSection {
     pub source_line: Option<u32>,
 }
 
-/// A MIDI binding in the compiled score. An object rather than a bare string because the contract
-/// says so and because a binding may grow fields (a device name, say) without breaking readers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A MIDI binding in the compiled score.
+///
+/// An object rather than a bare string because the contract says so and because a binding may grow
+/// fields without breaking readers - which is exactly what happened: `id` is untouched and
+/// everything the extended format adds sits beside it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompiledMidiBinding {
+    /// `ch1.note36` / `ch1.cc64` - the same string the MIDI monitor shows for an incoming event.
     pub id: String,
+    /// The canonical address this control operates, resolved from the key.
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ButtonMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takeover: Option<Takeover>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f32>,
 }
 
 /// The compiled score - static, fully resolved, serialisable.

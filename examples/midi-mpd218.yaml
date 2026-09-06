@@ -1,0 +1,50 @@
+# Controller-Profil fuer Henrys Looper - Vorlage fuer einen Akai MPD218.
+#
+# Kopieren nach %APPDATA%\henrys-looper\midi\mpd218.yaml, dann gilt es fuer jedes Stueck.
+# Der Ort steht auch in 'looper-engine midi profile'.
+#
+# Die Noten- und CC-Nummern unten sind die Werkseinstellung des MPD218 (Pads Bank A auf
+# MIDI-Kanal 10, Regler K1-K6 auf Kanal 1). **Verlass dich nicht darauf** - der MPD218 hat
+# Presets, und jedes Pad-Bank sendet andere Noten. Was wirklich ankommt, zeigt
+#
+#     looper-engine midi monitor
+#
+# Eine Zeile je Pad, links die Adresse aus 'looper-engine midi targets'.
+#
+# Tracks stehen hier als Nummern und nicht als Namen: ein Profil soll fuer jedes Stueck
+# gelten, und 'track.1' ist in jedem Stueck der erste Track. Namen gehoeren in den
+# midi:-Block der Partitur, wo sie fuer dieses eine Stueck ueberschreiben.
+device: MPD218
+bindings:
+  # --- Pads Bank A, untere zwei Reihen: Transport je Track ---------------------------------
+  ch10.note36: {target: track.1.record}
+  ch10.note37: {target: track.1.overdub}
+  ch10.note38: {target: track.1.play}
+  ch10.note39: {target: track.1.stop}
+  ch10.note40: {target: track.2.record}
+  ch10.note41: {target: track.2.overdub}
+  ch10.note42: {target: track.2.play}
+  ch10.note43: {target: track.2.stop}
+
+  # --- dritte Reihe: die Partitur ----------------------------------------------------------
+  ch10.note44: {target: transport.start}
+  ch10.note45: {target: transport.next}      # der Release-Knopf
+  ch10.note46: {target: transport.stop_all}
+  ch10.note47: {target: global.click}
+
+  # --- obere Reihe: Mithoeren und der Panikschalter -----------------------------------------
+  # 'momentary' heisst: an, solange das Pad gehalten wird. Ohne die Zeile schaltet es um.
+  ch10.note48: {target: track.1.monitor, mode: momentary}
+  ch10.note49: {target: track.2.monitor, mode: momentary}
+  ch10.note50: {target: track.1.fx.bypass}
+  ch10.note51: {target: track.2.fx.bypass}
+
+  # --- Regler K1 bis K6 ---------------------------------------------------------------------
+  # 'max' verteilt die 128 Schritte auf den Teil, der gebraucht wird: ein Hall-Regler, der
+  # bis 100 % geht, hat die brauchbaren ersten 40 % in 51 Schritten.
+  ch1.cc3:  {target: track.1.fx.reverb.mix, max: 0.5}
+  ch1.cc9:  {target: track.1.pan}
+  ch1.cc12: {target: track.2.fx.reverb.mix, max: 0.5}
+  ch1.cc13: {target: track.2.pan}
+  ch1.cc14: {target: track.1.layer.1.gain, max: 2}
+  ch1.cc15: {target: track.2.layer.1.gain, max: 2}

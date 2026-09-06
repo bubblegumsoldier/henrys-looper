@@ -19,6 +19,7 @@ use super::model::{
 use super::yaml::{Entry, Node, NodeKind, Pos, parse_document};
 use crate::engine::command::MAX_TRACKS;
 use crate::engine::schedule::Quantize;
+use crate::midi::{Binding, ButtonMode, Control, Takeover, Target, TrackRef};
 
 const ROOT_FIELDS: [&str; 7] = [
     "title",
@@ -31,8 +32,11 @@ const ROOT_FIELDS: [&str; 7] = [
 ];
 const TRACK_FIELDS: [&str; 5] = ["input", "pan", "monitor", "latency", "latency_trim"];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
-const MIDI_FIELDS: [&str; 2] = ["next_section", "stop_all"];
-const MIDI_BINDING_FIELDS: [&str; 3] = ["note", "cc", "channel"];
+/// Fields one binding may carry. The *keys* of `midi:` are not a closed list any more - any address
+/// of the parameter tree does, and the two Ableton-era names `next_section` and `stop_all` are
+/// among them, so a score that compiled before this existed compiles now.
+const MIDI_BINDING_FIELDS: [&str; 7] =
+    ["note", "cc", "channel", "mode", "takeover", "min", "max"];
 const QUANTIZE_NAMES: [&str; 2] = ["bar", "loop"];
 
 /// Fields the Ableton-era format had. They are not "unknown" - they are *gone*, and saying so is
@@ -334,14 +338,16 @@ impl Reader {
             .get("tracks")
             .and_then(|node| self.read_tracks(node))
             .unwrap_or_default();
-        let midi = fields
-            .get("midi")
-            .and_then(|node| self.read_midi(node))
-            .unwrap_or_default();
         let track_names: Vec<&str> = tracks.keys().collect();
         let sections = fields
             .get("sections")
             .and_then(|node| self.read_sections(node, &track_names))
+            .unwrap_or_default();
+        // After the sections on purpose: a binding may name one (`transport.goto.3`), and checking
+        // it needs to know how many there are.
+        let midi = fields
+            .get("midi")
+            .and_then(|node| self.read_midi(node, &track_names, sections.len()))
             .unwrap_or_default();
 
         Some(ScoreSource {
@@ -583,23 +589,138 @@ impl Reader {
         Some(value as f32)
     }
 
-    fn read_midi(&mut self, node: &Node<'_>) -> Option<OrderedMap<MidiBindingSource>> {
+    /// The `midi:` block: any address of the parameter tree on the left, one control on the right.
+    ///
+    /// Unlike every other mapping in this file the keys are **not** a closed list, so
+    /// [`Self::index_fields`] cannot be used: the check is not "is this one of six words" but "is
+    /// this a valid address", and that lives in [`crate::midi::Target::parse`], which owns the
+    /// tree. What is still checked here, because only this file knows it, is that the address
+    /// points at something *this score has*: a track it declares, a section it contains.
+    ///
+    /// A control bound twice is reported rather than letting the second entry win. Two pads on one
+    /// target is fine and useful; one pad on two targets is a file that does something other than
+    /// it says.
+    fn read_midi(
+        &mut self,
+        node: &Node<'_>,
+        track_names: &[&str],
+        sections: usize,
+    ) -> Option<OrderedMap<MidiBindingSource>> {
         let entries = self.as_map(node, "'midi'")?;
-        let fields = self.index_fields(entries, &MIDI_FIELDS, &[], "'midi'");
-        let mut midi = OrderedMap::new();
-        // Iterate over MIDI_FIELDS rather than the map so the order is stable regardless of how the
-        // file is written.
-        for action in MIDI_FIELDS {
-            let Some(node) = fields.get(action) else { continue };
-            if let Some(binding) = self.read_midi_binding(action, node) {
-                midi.insert(action, binding);
+        let mut midi: OrderedMap<MidiBindingSource> = OrderedMap::new();
+        // Which control is already taken, and under which key - for the conflict message.
+        let mut taken: Vec<(String, String)> = Vec::new();
+
+        for entry in entries {
+            let Some(key) = entry.key.as_str() else {
+                self.error(
+                    Some(entry.key.pos),
+                    format!(
+                        "Schluessel in 'midi' muessen Text sein, gefunden: {}.",
+                        entry.key.describe()
+                    ),
+                );
+                continue;
+            };
+            if midi.contains_key(key) {
+                self.error_with(
+                    Some(entry.key.pos),
+                    format!("'{key}' kommt in 'midi' mehrfach vor."),
+                    "Jeder Schluessel darf pro Mapping nur einmal stehen; der zweite wuerde den ersten still ueberschreiben.",
+                );
+                continue;
             }
+            let Some(target) = self.read_midi_target(key, entry.key.pos, track_names, sections)
+            else {
+                continue;
+            };
+            let Some(binding) = self.read_midi_binding(key, &target, &entry.value) else {
+                continue;
+            };
+            let id = binding.id();
+            if let Some((_, other)) = taken.iter().find(|(used, _)| *used == id) {
+                self.error_with(
+                    Some(entry.key.pos),
+                    format!("{id} ist schon mit '{other}' belegt."),
+                    format!(
+                        "Eine Taste kann nur eine Sache tun. Fuer '{key}' eine andere Note oder \
+                         einen anderen Regler nehmen."
+                    ),
+                );
+                continue;
+            }
+            taken.push((id, key.to_string()));
+            midi.insert(key, binding);
         }
         Some(midi)
     }
 
-    fn read_midi_binding(&mut self, action: &str, node: &Node<'_>) -> Option<MidiBindingSource> {
-        let what = format!("MIDI-Bindung '{action}'");
+    /// The key of a `midi:` entry as an address, checked against this score.
+    fn read_midi_target(
+        &mut self,
+        key: &str,
+        pos: Pos,
+        track_names: &[&str],
+        sections: usize,
+    ) -> Option<Target> {
+        let target = match Target::parse(key) {
+            Ok(target) => target,
+            Err(message) => {
+                self.error_with(
+                    Some(pos),
+                    format!("'{key}' in 'midi' ist kein bekanntes Ziel."),
+                    message,
+                );
+                return None;
+            }
+        };
+        match target.track() {
+            Some(TrackRef::Name(name)) if !track_names.contains(&name.as_str()) => {
+                self.error_with(
+                    Some(pos),
+                    format!("'{key}' bindet den Track '{name}', den es in 'tracks' nicht gibt."),
+                    suggest_or_list(name, track_names),
+                );
+                return None;
+            }
+            Some(TrackRef::Index(index)) if *index >= track_names.len() => {
+                self.error_with(
+                    Some(pos),
+                    format!(
+                        "'{key}' bindet Track {}, die Partitur hat {}.",
+                        index + 1,
+                        track_names.len()
+                    ),
+                    "Ein Track wird in einer Bindung mit seiner Nummer (ab 1) oder mit seinem \
+                     Namen angesprochen.",
+                );
+                return None;
+            }
+            _ => {}
+        }
+        if let Target::ScoreGoto(section) = &target
+            && *section >= sections
+        {
+            self.error_with(
+                Some(pos),
+                format!(
+                    "'{key}' springt zu Sektion {}, die Partitur hat {sections}.",
+                    section + 1
+                ),
+                "Sektionen werden ab 1 gezaehlt, in der Reihenfolge, in der sie unter 'sections' stehen.",
+            );
+            return None;
+        }
+        Some(target)
+    }
+
+    fn read_midi_binding(
+        &mut self,
+        key: &str,
+        target: &Target,
+        node: &Node<'_>,
+    ) -> Option<MidiBindingSource> {
+        let what = format!("MIDI-Bindung '{key}'");
         let entries = self.as_map(node, &what)?;
         let fields = self.index_fields(entries, &MIDI_BINDING_FIELDS, &[], &what);
 
@@ -624,13 +745,81 @@ impl Reader {
                 self.error_with(
                     Some(node.pos),
                     format!("{what} nennt weder 'note' noch 'cc'."),
-                    "z. B. 'next_section: {cc: 64}' oder 'stop_all: {note: 37}'.",
+                    "z. B. 'next_section: {cc: 64}' oder 'track.stimme.record: {note: 36}'.",
                 );
                 return None;
             }
         };
         let number = self.as_int(value_node, &format!("Nummer in {what}"), 0, 127)? as u8;
-        Some(MidiBindingSource { channel, kind, number })
+
+        let mode = match fields.get("mode") {
+            Some(node) => {
+                let text = self.as_str(node, &format!("'mode' in {what}"))?;
+                match ButtonMode::parse(text) {
+                    Some(mode) => Some(mode),
+                    None => {
+                        self.error_with(
+                            Some(node.pos),
+                            format!("'{text}' ist kein Tastenverhalten in {what}."),
+                            suggest_or_list(text, &ButtonMode::names()),
+                        );
+                        return None;
+                    }
+                }
+            }
+            None => None,
+        };
+        let takeover = match fields.get("takeover") {
+            Some(node) => {
+                let text = self.as_str(node, &format!("'takeover' in {what}"))?;
+                match Takeover::parse(text) {
+                    Some(takeover) => Some(takeover),
+                    None => {
+                        self.error_with(
+                            Some(node.pos),
+                            format!("'{text}' ist keine Wertuebernahme in {what}."),
+                            suggest_or_list(text, &Takeover::names()),
+                        );
+                        return None;
+                    }
+                }
+            }
+            None => None,
+        };
+        let min = match fields.get("min") {
+            Some(node) => Some(self.as_number(node, &format!("'min' in {what}"))? as f32),
+            None => None,
+        };
+        let max = match fields.get("max") {
+            Some(node) => Some(self.as_number(node, &format!("'max' in {what}"))? as f32),
+            None => None,
+        };
+
+        // The combination check belongs to the binding itself - "Aufnahme, aber umgeschaltet" is
+        // nonsense whether it arrives from a score or from a controller profile.
+        let mut binding = Binding::new(target.clone());
+        if let Some(mode) = mode {
+            binding.button = mode;
+        }
+        binding = binding.with_bounds(min, max);
+        if let Err(message) = binding.check() {
+            self.error_with(Some(node.pos), format!("{what}: {message}"), match target.control() {
+                Control::Trigger => "Erlaubt sind hier 'press' und 'release'.".to_string(),
+                _ => allowed(&ButtonMode::names()),
+            });
+            return None;
+        }
+
+        Some(MidiBindingSource {
+            channel,
+            kind,
+            number,
+            target: target.to_string(),
+            mode,
+            takeover,
+            min,
+            max,
+        })
     }
 
     fn read_sections(&mut self, node: &Node<'_>, track_names: &[&str]) -> Option<Vec<SectionSource>> {

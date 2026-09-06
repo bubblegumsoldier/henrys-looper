@@ -12,7 +12,8 @@ use looper_engine::click::ClickOpts;
 use looper_engine::engine::calibrate::CalibrateOpts;
 use looper_engine::engine::live::LiveOpts;
 use looper_engine::engine::score_cli::ScoreOpts;
-use looper_engine::{click, duplex, engine, latency, soak};
+use looper_engine::midi::cli::MidiOpts;
+use looper_engine::{click, duplex, engine, latency, midi, soak};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -107,6 +108,14 @@ enum Command {
         seconds: f64,
     },
 
+    /// MIDI-Steuerung (Phase 5): Geraete auflisten, eingehende Ereignisse anzeigen, Tasten auf
+    /// Ziele lernen und im Controller-Profil speichern. Macht keinen Ton und oeffnet kein
+    /// Audiogeraet.
+    Midi {
+        #[command(flatten)]
+        midi: MidiOpts,
+    },
+
     /// Latenzkompensation pruefen: die Engine nimmt per Loopback-Kabel ihren eigenen Klick auf
     /// und misst, wie weit er vom Schlagraster abweicht
     Calibrate {
@@ -142,6 +151,7 @@ fn main() -> ExitCode {
         Command::Live { dev, live } => engine::live::cmd_live(dev, live),
         Command::Score { dev, score } => engine::score_cli::cmd_score(dev, score),
         Command::Fxbench { rate, seconds } => engine::fx::bench::cmd_fxbench(*rate, *seconds),
+        Command::Midi { midi } => midi::cli::cmd_midi(midi),
         Command::Calibrate { dev, calibrate } => engine::calibrate::cmd_calibrate(dev, calibrate),
     };
     match result {

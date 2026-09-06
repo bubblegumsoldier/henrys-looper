@@ -74,6 +74,17 @@ use super::timeline::Timeline;
 /// the bar he pressed in *plus* the full count-in.
 pub const DEFAULT_COUNT_IN_BARS: u32 = 1;
 
+/// The refusal every by-hand transport action gets while a score is playing.
+///
+/// It lives here, next to the runner whose rule it is, because it has to be **one** sentence for
+/// **every** way of pressing the button: the mouse (`Action::moves_transport` in the app's
+/// `host.rs`) and a MIDI pad (`midi::Target::moves_transport`) run into the same wall for the same
+/// reason, and two wordings would suggest two rules. See `docs/architektur.md` section 10.
+pub const TRANSPORT_BELONGS_TO_SCORE: &str =
+    "Die Partitur laeuft - sie schickt die Aufnahme- und Wiedergabekommandos selbst. \
+     Von Hand geht das erst nach \"Alles stoppen\". Pegel, Panorama, Ebenen und \
+     Effekte lassen sich waehrenddessen weiter einstellen.";
+
 /// What the runner is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {

@@ -57,10 +57,25 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
         })
         .collect();
 
+    // The key stays exactly as it was written - `next_section` remains `next_section` - while
+    // `target` carries the address it resolves to. A reader that only knew the old two-binding
+    // format still finds what it looked for.
     let midi: OrderedMap<CompiledMidiBinding> = source
         .midi
         .iter()
-        .map(|(action, binding)| (action.to_string(), CompiledMidiBinding { id: binding.id() }))
+        .map(|(action, binding)| {
+            (
+                action.to_string(),
+                CompiledMidiBinding {
+                    id: binding.id(),
+                    target: binding.target.clone(),
+                    mode: binding.mode,
+                    takeover: binding.takeover,
+                    min: binding.min,
+                    max: binding.max,
+                },
+            )
+        })
         .collect();
 
     let by_id: HashMap<&str, &SectionSource> = source
