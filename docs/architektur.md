@@ -18,6 +18,31 @@ Der Code liegt in `engine/`. Ausführliche Herleitungen stehen als Modulkommenta
 besonders in `engine/src/engine/process.rs` (Latenzkompensation). Die Commit-Messages sind
 bewusst lang und erklären das Warum.
 
+## 0. Die Vision (präzisiert 2026-09-06)
+
+**Ein digitaler Looper mit Tonstudio-Standard.** Das Ziel ist die Aufnahme hochwertig
+produzierter Musik *on the spot* — in einer Qualität, die neben Radio und Spotify bestehen
+kann. Die Live-Performance ist ein willkommenes Add-on, nicht der Zweck.
+
+Diese Präzisierung ist folgenreich, weil sie mehrere frühere Entscheidungen umdreht:
+
+| Punkt | vorher | jetzt |
+|---|---|---|
+| Tracks | mono, „Gitarre und Stimme brauchen kein Stereo" | **Stereo ist Pflicht.** Ein Klavier oder eine Fläche in Mono verliert genau das, wofür man solche Bibliotheken kauft |
+| VST-Hosting | ausdrücklich kein Ziel | **zentral.** Ohne fremde Instrumente und Effekte gibt es keinen Studio-Standard |
+| Stems | „kein eigenes Export-Feature in v1" | **Pflicht.** Wer produziert, muss aus dem Programm herauskommen |
+| Ausgänge | ein Ausgang für alles | **getrennte Busse**, Klick nur auf den Monitorweg |
+| Maßstab | „klingt gut genug für die Bühne" | **Es muss aufnahmetauglich sein.** Der Vergleich ist eine DAW, nicht ein Hardware-Looper |
+
+Der Unterschied in einem Satz: Ein Bühnen-Looper darf Kompromisse machen, die man live nicht
+hört. Ein Aufnahmewerkzeug darf das nicht — was einmal in der Datei steht, hört man später
+auf guten Boxen.
+
+Was **bleibt**: die Partitur als Alleinstellungsmerkmal. Vorher aufschreiben, was passieren
+soll, und live nur noch auslösen. Plugin-Hosting kann jede DAW; ein Looper, der eine
+geschriebene Partitur abarbeitet, ist neu. Das ist der eigentliche Wert des Projekts, alles
+andere ist die Eintrittskarte.
+
 ## Stand
 
 | Phase | Inhalt | Status |
@@ -164,8 +189,9 @@ werden nicht im Callback freigegeben.
 
 ## 6. Datenmodell
 
-- **Track**: eigener Eingangskanal, eigenes Mithören, beliebig viele Layer. **Mono** — Gitarre
-  und Stimme brauchen kein Stereo, das spart Speicher und Rechenzeit.
+- **Track**: eigener Eingangskanal, eigenes Mithören, beliebig viele Layer. Derzeit **mono**;
+  **Stereo ist beschlossen und steht aus** (siehe Abschnitt 0). Der Umbau betrifft Layer-Puffer,
+  Mixer und Effektkette und wird mit jeder Woche teurer, die darauf aufbaut.
 - **Layer**: `Vec<f32>` in Loop-Länge. Overdub legt einen weiteren an, alle werden summiert.
 - **Ausrichtung**: Jeder Track hält genau zwei Zahlen, `origin` und `loop_len`. Jeder Layer
   wird als `index = (Position − origin) mod loop_len` adressiert. Damit ist Loop-Index *n* in
@@ -251,18 +277,20 @@ und die Live-Ansicht liest die Taktart von dort statt aus der kompilierten Parti
 
 ## 8. Was ausdrücklich nicht gemacht wird
 
-- **VST-Hosting: als Fernziel revidiert (2026-09-06).** Der Plan schließt es aus, Henry hält es
-  langfristig für unvermeidlich. Kurzfristig ändert das nichts — eigene Effekte kommen zuerst.
-  Wenn es ernst wird, ist die Vorentscheidung zu treffen, ob **CLAP** (offen, moderne API,
-  brauchbare Rust-Anbindung) oder **VST3** (verbreiteter, C++-lastig, eigene Lizenzfragen). CLAP
-  wäre für dieses Projekt der naheliegendere Weg. Zu bedenken ist außerdem: Ein fremdes Plugin
-  darf im Audio-Callback tun, was es will — allozieren, sperren, abstürzen. Die
-  Echtzeit-Garantien dieses Projekts enden an dieser Grenze, und ein Absturz reißt ohne
-  Prozesstrennung die ganze Engine mit.
 - **WASAPI als Rückfallebene.** Siehe Abschnitt 2.
 - **Anbindung des Python-Codes.** Er wird ersetzt. Prozessgrenzen waren das Problem.
-- **Stereo-Tracks.** Mono ist die Entscheidung.
-- **Effekte vor Phase 6.** Aufgenommen wird trocken.
+- **Effekte in die Aufnahme rechnen.** Aufgenommen wird trocken; Effekte sitzen auf der
+  Wiedergabe und dem Mithörweg. Was eingebrannt ist, bekommt man nie wieder heraus.
+
+**Nicht mehr ausgeschlossen, sondern eingeplant** (siehe Abschnitt 0): Stereo-Tracks,
+Stem-Export und **VST-Hosting**. Bei letzterem ist die Formatfrage offen: **CLAP** wäre
+technisch der ruhigere Weg — C-API statt COM-artigem C++, MIT-Lizenz, ausdrücklich
+spezifiziertes Threading-Modell. Nur gibt es die Bibliotheken, um die es geht (Kontakt,
+Superior Drummer), dort nicht; Toontrack listet VST, AU und AAX, Native Instruments hat CLAP
+nie angekündigt. Damit läuft es auf **VST3** hinaus. Zu bedenken bleibt: Ein fremdes Plugin
+darf im Audio-Callback allozieren, sperren und abstürzen. Die Echtzeit-Garantien dieses
+Projekts enden an dieser Grenze, und ohne Prozesstrennung reißt ein Absturz die ganze Engine
+mit — samt laufender Aufnahme.
 
 ## 9. Arbeitsweise
 
