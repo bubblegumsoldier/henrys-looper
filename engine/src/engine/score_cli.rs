@@ -22,11 +22,12 @@ use crate::audio::{self, DeviceOpts};
 use crate::meter::fmt_dbfs;
 use crate::score::{CompiledScore, ScoreError, TrackState as ScoreState, compile_score};
 
+use super::bus::{Bus, routing_note};
 use super::command::{Command, Refusal, Status, TrackStatus};
 use super::live::{
-    DISPLAY_INTERVAL, EngineSpec, RunningEngine, TrackDef, apply_track_latencies, draw, fx_text,
-    input_text, latency_origin, latency_text, layer_list, on_off, pan_label, spawn_keyboard,
-    start_engine, stats_report,
+    DISPLAY_INTERVAL, EngineSpec, RunningEngine, TrackDef, apply_track_latencies, bus_text, draw,
+    fx_text, input_text, latency_origin, latency_text, layer_list, on_off, pan_label, resolve_bus_gains,
+    resolve_routing, send_text, spawn_keyboard, start_engine, stats_report,
 };
 use super::process::{check_loop, loop_capacity, max_latency};
 use super::runner::{DEFAULT_COUNT_IN_BARS, Phase, Runner, check_tracks};
@@ -60,6 +61,15 @@ pub struct ScoreOpts {
     /// Lautstaerke des Klicks
     #[arg(long, default_value_t = 1.0)]
     pub click_gain: f32,
+
+    /// Ausgangspaar eines Busses: BUS:KANAL[-KANAL] mit BUS = main oder monitor, mehrfach
+    /// angebbar. Der Klick liegt immer und nur auf dem Monitor-Bus.
+    #[arg(long = "bus-out", value_name = "BUS:KANAL[-KANAL]")]
+    pub bus_outs: Vec<String>,
+
+    /// Lautstaerke eines Busses: BUS:WERT, mehrfach angebbar.
+    #[arg(long = "bus-gain", value_name = "BUS:WERT")]
+    pub bus_gains: Vec<String>,
 
     /// Ohne Klick starten (der Einzaehler ist dann stumm)
     #[arg(long)]
@@ -117,6 +127,8 @@ pub fn track_defs(score: &CompiledScore) -> Vec<TrackDef> {
             input: track.track_input(),
             pan: track.pan,
             latency: track.track_latency(),
+            loop_send: track.loop_send(),
+            monitor_send: track.monitor_send(),
         })
         .collect()
 }
@@ -142,12 +154,12 @@ fn section_line(runner: &Runner, view: &super::runner::RunnerView, status: &Stat
         None => String::new(),
     };
     format!(
-        "{head} | {armed} | {:.1} BPM {} | Klick {} | Aus L {} R {}",
+        "{head} | {armed} | {:.1} BPM {} | Klick {} | {} | {}",
         status.bpm,
         runner.score().time_signature,
         on_off(status.click),
-        fmt_dbfs(status.output_peak[0]),
-        fmt_dbfs(status.output_peak[1]),
+        bus_text(status, Bus::Main),
+        bus_text(status, Bus::Monitor),
     )
 }
 
@@ -181,7 +193,7 @@ fn track_line(
         _ => format!("{}      ", fmt_dbfs(ts.input_peak[0])),
     };
     format!(
-        "  {:<10} {} | Soll {:<11} | Ist {:<32} | Loop {:>10} | Ebenen {:>2} {:<20} | Pegel {} | Pan {:<5} | Lat {:<14} | Mithoeren {} | FX {:<16}",
+        "  {:<10} {} | Soll {:<11} | Ist {:<32} | Loop {:>10} | Ebenen {:>2} {:<20} | Pegel {} | Pan {:<5} | Bus {:<5} | Lat {:<14} | Mithoeren {} | FX {:<16}",
         name,
         input_text(def.input),
         want.label(),
@@ -191,6 +203,7 @@ fn track_line(
         layer_list(ts, &[]),
         level,
         pan_label(ts.pan),
+        send_text(ts),
         latency_text(ts),
         on_off(ts.monitor),
         fx_text(&ts.fx),
@@ -211,7 +224,7 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
     for (track, def) in score.tracks.iter().zip(defs) {
         let effective = def.latency.resolve(default_latency);
         println!(
-            "  {} {:<10} Eingang {} ({}), Panorama {}, Mithoeren {}, Latenz {} Frames ({:.2} ms, {})",
+            "  {} {:<10} Eingang {} ({}), Panorama {}, Mithoeren {}, Latenz {} Frames ({:.2} ms, {}), Loop -> {}, Mithoer-Bus {}",
             track.index + 1,
             track.name,
             def.input.label(),
@@ -221,6 +234,8 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
             effective,
             effective as f64 * 1000.0 / rate.max(1) as f64,
             latency_origin(def.latency, default_latency),
+            def.loop_send.label(),
+            def.monitor_send.label(),
         );
     }
     println!("Sektionen:");
@@ -313,6 +328,22 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
         timeline.samples_to_secs(capacity)
     );
 
+    let out_channels = setup.out_plan.config.channels as usize;
+    let routing = resolve_routing(&opts.bus_outs, out_channels)?;
+    let bus_gain = resolve_bus_gains(&opts.bus_gains)?;
+    println!(
+        "Busse:    Main -> Ausgang {} (x{:.2}), Monitor -> Ausgang {} (x{:.2}), von {} Kanaelen. \
+         Der Klick liegt auf Monitor und nie auf Main.",
+        routing.get(Bus::Main).label(),
+        bus_gain[Bus::Main.index()],
+        routing.get(Bus::Monitor).label(),
+        bus_gain[Bus::Monitor.index()],
+        out_channels
+    );
+    if let Some(note) = routing_note(&routing, out_channels) {
+        println!("ACHTUNG:  {note}");
+    }
+
     let RunningEngine {
         input,
         output,
@@ -333,6 +364,8 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
         monitor_gain: opts.monitor_gain,
         click: !opts.no_click,
         click_gain: opts.click_gain,
+        bus_gain,
+        routing,
     })?;
 
     let mut runner = Runner::new(score, timeline, buffer_frames)?.with_count_in(opts.count_in);

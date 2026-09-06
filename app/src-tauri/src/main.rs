@@ -26,10 +26,12 @@ use tauri::{Emitter, Manager, State};
 use host::{Action, EngineHandle, READY_EVENT, ScoreAction};
 use logfile::log;
 use midi::{MidiPortView, MidiSaved, MidiView};
+use looper_engine::engine::bus::{Bus, TrackSource};
 use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
 use looper_engine::engine::track::TrackLatency as EngineTrackLatency;
 use proto::{
-    AppInfo, BandKindName, CalibrateConfig, CalibrateOutcome, CompileOutcome, DelayNoteName,
+    AppInfo, BandKindName, BusOutConfig, CalibrateConfig, CalibrateOutcome, CompileOutcome,
+    DelayNoteName,
     DeviceReport, EngineInfo, FxParamName, FxPresetName, FxSlotName, QuantizeName, ScoreLoaded,
     StartConfig,
 };
@@ -139,6 +141,71 @@ async fn track_monitor(
 #[tauri::command(rename_all = "snake_case")]
 async fn track_pan(track: usize, pan: f32, engine: State<'_, EngineHandle>) -> Result<(), String> {
     act(engine, Action::SetPan { track, pan }).await
+}
+
+/// Which output buses one source of a track is heard on.
+///
+/// `source` is `loop` (the recorded layers) or `monitor` (the live input while monitoring is on);
+/// `bus` is `main` (to the PA) or `monitor` (to the headphones). Two switches per source rather
+/// than one word, because that is how they are operated: "geht dieser Track in den Saal" has a yes
+/// and a no.
+///
+/// A bus assignment is an **output** decision - it cannot reach a layer buffer - which is why it
+/// stays available while a score is running and while a take is being recorded.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_bus(
+    track: usize,
+    source: String,
+    bus: String,
+    on: bool,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    let source = TrackSource::parse(&source)
+        .ok_or_else(|| format!("\"{source}\" ist keine Quelle. Es gibt loop und monitor."))?;
+    let bus = Bus::parse(&bus)
+        .ok_or_else(|| format!("\"{bus}\" ist kein Bus. Es gibt main und monitor."))?;
+    // One bit of a set. The set is read back on the host thread, where the newest engine snapshot
+    // is - doing it here would need a round trip, and switching Main off without reading it first
+    // would take the track off the headphones as well.
+    act(
+        engine,
+        Action::SetTrackBus {
+            track,
+            source,
+            bus,
+            on,
+        },
+    )
+    .await
+}
+
+/// Volume of one output bus, linear, 0.0 to 4.0.
+///
+/// This is half the reason there are two buses: the headphones can be turned down without the room
+/// changing.
+#[tauri::command(rename_all = "snake_case")]
+async fn bus_gain(bus: String, gain: f32, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    let bus = Bus::parse(&bus)
+        .ok_or_else(|| format!("\"{bus}\" ist kein Bus. Es gibt main und monitor."))?;
+    act(engine, Action::SetBusGain { bus, gain }).await
+}
+
+/// Which device output channels one bus leaves on.
+///
+/// `channel` is one-based as printed on the interface, `width` is 2 for a stereo pair and 1 for a
+/// single channel - the latter being the stopgap on a two-output interface: main on 1, monitor on
+/// 2, split with a Y-cable.
+#[tauri::command(rename_all = "snake_case")]
+async fn bus_output(
+    bus: String,
+    channel: u32,
+    width: u32,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    let bus = Bus::parse(&bus)
+        .ok_or_else(|| format!("\"{bus}\" ist kein Bus. Es gibt main und monitor."))?;
+    let out = BusOutConfig { channel, width }.to_output(bus)?;
+    act(engine, Action::SetBusOutput { bus, out }).await
 }
 
 /// What this track subtracts while recording, in **frames**, as the two numbers it is made of.
@@ -586,6 +653,9 @@ fn main() {
             track_clear,
             track_monitor,
             track_pan,
+            track_bus,
+            bus_gain,
+            bus_output,
             track_latency,
             layer_mute,
             layer_remove,

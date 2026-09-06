@@ -54,6 +54,10 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
             // compiled score knows nothing about.
             latency: spec.latency,
             latency_trim: spec.latency_trim,
+            // Likewise passed through: the reader has already refused anything that is not a bus
+            // name, so what stands here is one of the four words `BusSend` writes.
+            bus: spec.bus.clone(),
+            monitor_bus: spec.monitor_bus.clone(),
         })
         .collect();
 

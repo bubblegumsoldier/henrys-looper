@@ -121,6 +121,8 @@ pub fn resolve_tracks(
             input,
             pan: config.pan,
             latency: config.track_latency(),
+            loop_send: config.loop_send(name)?,
+            monitor_send: config.monitor_send(name)?,
         });
     }
     Ok(defs)
@@ -265,5 +267,33 @@ mod tests {
                 at: 8 * 96_000
             }
         );
+    }
+
+    /// The bus assignment travels from the configuration into the track definition, and a word that
+    /// is not a bus is refused by name rather than turned into silence.
+    #[test]
+    fn a_track_definition_carries_its_bus_assignment() {
+        use looper_engine::engine::bus::BusSend;
+
+        let plain = resolve_tracks(&[config("stimme", 1)], 2).expect("ein Track");
+        assert_eq!(plain[0].loop_send, BusSend::BOTH);
+        assert_eq!(plain[0].monitor_send, BusSend::MONITOR);
+
+        let cue = TrackConfig {
+            bus: Some("monitor".to_string()),
+            monitor_bus: Some("none".to_string()),
+            ..config("klick_gtr", 2)
+        };
+        let defs = resolve_tracks(&[cue], 2).expect("ein Track");
+        assert_eq!(defs[0].loop_send, BusSend::MONITOR);
+        assert_eq!(defs[0].monitor_send, BusSend::NONE);
+
+        let wrong = TrackConfig {
+            bus: Some("buehne".to_string()),
+            ..config("stimme", 1)
+        };
+        let err = resolve_tracks(&[wrong], 2).expect_err("kein Bus");
+        assert!(err.contains("buehne"), "{err}");
+        assert!(err.contains("main+monitor"), "die Liste steht dabei: {err}");
     }
 }

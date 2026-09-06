@@ -28,7 +28,7 @@
 //! `layers[1]`, `eq.3` is `bands[2]`. The indices this file is called with are the 0-based ones the
 //! status event uses, and the conversion happens here - once.
 
-import type { DelayNoteName, FxSlotName } from "../types";
+import type { BusId, DelayNoteName, FxSlotName, TrackSourceId } from "../types";
 import type { LoadablePreset } from "../live/FxRow";
 
 /** The score's transport. Available while a score runs - it *is* the score's transport. */
@@ -48,6 +48,20 @@ export const GLOBAL = {
   clearAll: "global.clear_all",
   tempo: "global.tempo",
 } as const;
+
+/** Volume of one output bus - the fader that moves the headphones without moving the room. */
+export function busGainAddress(bus: BusId): string {
+  return `global.bus.${bus}.gain`;
+}
+
+/**
+ * Whether one source of a track is heard on one bus. One address per source *and* per bus, because
+ * that is how it is operated: a switch has a yes and a no.
+ */
+export function sendAddress(track: number, source: TrackSourceId, bus: BusId): string {
+  const field = source === "loop" ? "bus" : "monitor_bus";
+  return `track.${track + 1}.${field}.${bus}`;
+}
 
 /** The grid a take snaps to. Two separate triggers, because each one is a state to arrive at. */
 export function quantizeAddress(quantize: "bar" | "loop"): string {

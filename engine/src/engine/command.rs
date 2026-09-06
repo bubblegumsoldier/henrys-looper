@@ -31,6 +31,7 @@
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
+use super::bus::{BUS_CHANNELS, BUS_COUNT, Bus, BusOutput, BusRouting, BusSend, TrackSource};
 #[cfg(test)]
 use super::frame::Channels;
 use super::fx::{FxParam, FxPreset, FxSlot, FxStatus};
@@ -74,6 +75,19 @@ pub enum Command {
     /// Untimed - a pan is a mix decision, not a musical event, and it is set before a take rather
     /// than during one.
     SetPan { track: usize, pan: f32 },
+    /// Which output buses one source of one track feeds. Untimed and deliberately harmless: it
+    /// changes the output stage only, never a layer buffer, so it can be pressed during a take.
+    SetTrackSend {
+        track: usize,
+        source: TrackSource,
+        send: BusSend,
+    },
+    /// Volume of one output bus, linear, clamped to `0..MAX_BUS_GAIN`. Untimed. The whole point of
+    /// two buses: turning the headphones down must not change the room.
+    SetBusGain { bus: Bus, gain: f32 },
+    /// Which device output channels one bus leaves on. Untimed, and clamped by the engine against
+    /// what the device really has.
+    SetBusOutput { bus: Bus, out: BusOutput },
     /// Latency compensation of one track, in frames. Untimed: it decides where *later* input
     /// frames are stored and has no business moving anything already recorded - a take that is
     /// running keeps writing with the new value from the next frame on, which is the only
@@ -135,6 +149,9 @@ impl Command {
             | Command::ClearAll { at } => Some(*at),
             Command::SetMonitor { .. }
             | Command::SetPan { .. }
+            | Command::SetTrackSend { .. }
+            | Command::SetBusGain { .. }
+            | Command::SetBusOutput { .. }
             | Command::SetTrackLatency { .. }
             | Command::SetLayerMute { .. }
             | Command::SetLayerGain { .. }
@@ -160,6 +177,7 @@ impl Command {
             | Command::ClearTrack { track, .. }
             | Command::SetMonitor { track, .. }
             | Command::SetPan { track, .. }
+            | Command::SetTrackSend { track, .. }
             | Command::SetTrackLatency { track, .. }
             | Command::SetLayerMute { track, .. }
             | Command::SetLayerGain { track, .. }
@@ -170,6 +188,8 @@ impl Command {
             | Command::LoadFxPreset { track, .. } => Some(*track),
             Command::ClearAll { .. }
             | Command::SetClick { .. }
+            | Command::SetBusGain { .. }
+            | Command::SetBusOutput { .. }
             | Command::SetTempo { .. }
             | Command::Stop => None,
         }
@@ -243,6 +263,10 @@ pub struct TrackStatus {
     pub channels: u8,
     /// Position in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
     pub pan: f32,
+    /// Which output buses this track's loop playback feeds.
+    pub loop_send: BusSend,
+    /// Which output buses this track's monitored live input feeds. Independent of `loop_send`.
+    pub monitor_send: BusSend,
     /// How this track's latency compensation is configured: the measured part (or "follow the
     /// engine's default") and the manual surcharge.
     pub latency: TrackLatency,
@@ -273,6 +297,8 @@ impl Default for TrackStatus {
             input_channels: [0; 2],
             channels: 1,
             pan: 0.0,
+            loop_send: BusSend::BOTH,
+            monitor_send: BusSend::MONITOR,
             latency: TrackLatency::INHERITED,
             latency_frames: 0,
             fx: FxStatus::default(),
@@ -316,8 +342,16 @@ pub struct Status {
     pub samples_per_beat: f64,
     pub tracks: [TrackStatus; MAX_TRACKS],
     pub track_count: u8,
-    /// Peak of the produced output block, left and right, absolute values.
-    pub output_peak: [f32; 2],
+    /// Peak of each output bus, left and right, absolute values - measured after the bus volume,
+    /// because a meter has to show what actually leaves the machine.
+    pub bus_peak: [[f32; BUS_CHANNELS]; BUS_COUNT],
+    /// Volume of each output bus, linear.
+    pub bus_gain: [f32; BUS_COUNT],
+    /// Which device output channels each bus leaves on, already clamped to what the device has.
+    pub bus_out: BusRouting,
+    /// Channels the device's output really has, so a display can offer the pairs that exist and
+    /// explain the two-output case without asking anybody else.
+    pub output_channels: u8,
     pub click: bool,
     pub bpm: f64,
     /// Commands the engine refused, in total.
@@ -340,9 +374,31 @@ impl Status {
         &self.tracks[..(self.track_count as usize).min(MAX_TRACKS)]
     }
 
-    /// Louder side of the produced output block.
+    /// Both channels of one bus.
+    pub fn bus_peak(&self, bus: Bus) -> [f32; BUS_CHANNELS] {
+        self.bus_peak[bus.index()]
+    }
+
+    /// Louder side of one bus.
+    pub fn bus_peak_max(&self, bus: Bus) -> f32 {
+        let peak = self.bus_peak(bus);
+        peak[0].max(peak[1])
+    }
+
+    /// The main bus, i.e. what goes to the room. What "the output level" means when only one
+    /// number is wanted; the monitor bus carries the click and would make that number useless.
+    pub fn output_peak(&self) -> [f32; BUS_CHANNELS] {
+        self.bus_peak(Bus::Main)
+    }
+
+    /// Louder side of the main bus.
     pub fn output_peak_max(&self) -> f32 {
-        self.output_peak[0].max(self.output_peak[1])
+        self.bus_peak_max(Bus::Main)
+    }
+
+    /// Volume of one bus, linear.
+    pub fn bus_gain(&self, bus: Bus) -> f32 {
+        self.bus_gain[bus.index()]
     }
 
     /// Prepared buffers of both kinds together, for a display that only wants one number.
@@ -679,23 +735,53 @@ mod tests {
     /// The snapshot is memcpy'd into the queue **inside the audio callback**, so its size is a
     /// real-time concern and not just a memory one. Phase 6 put the effect state into it; the
     /// stereo rebuild added a second peak per meter, the channel count, the second input channel
-    /// and the pan - fourteen bytes per track, which the padding rounds to sixteen. The per-track
-    /// latency added another sixteen (an `Option<u32>`, an `i32` and the resolved frame count),
-    /// bringing the whole thing to 1624 bytes.
+    /// and the pan; the per-track latency added another sixteen bytes, bringing it to 1624.
     ///
-    /// 1.6 kB at 200 snapshots per second is a copy of well under a microsecond per callback,
-    /// against a budget of 2667 - and the queue of 1024 slots costs 1.6 MB, allocated once in the
+    /// The two output buses add, in this order of size: the routing (two channel/width pairs, 32
+    /// bytes), a peak per bus per channel where there used to be one stereo pair (+8), a volume per
+    /// bus (+8), the device's output channel count, and **two bytes per track** for the loop and
+    /// monitor sends - which is exactly why a send is a bitmask and not four bools.
+    ///
+    /// 1.7 kB at 200 snapshots per second is a copy of well under a microsecond per callback,
+    /// against a budget of 2667 - and the queue of 1024 slots costs 1.7 MB, allocated once in the
     /// control thread. The limit is pinned so the next addition has to be a decision rather than
     /// an accident.
     #[test]
     fn the_status_snapshot_stays_small_enough_to_memcpy_in_a_callback() {
         let size = std::mem::size_of::<Status>();
         assert!(
-            size <= 1_664,
+            size <= 1_792,
             "Der Status ist auf {size} Bytes gewachsen - das wandert bei jedem Snapshot durch \
              den Audio-Callback."
         );
         assert!(std::mem::size_of::<Command>() <= 32, "Kommandos bleiben klein");
+    }
+
+    /// The bus commands are output-stage changes and carry no musical timestamp: a routing switch
+    /// that waited for the next bar would be a routing switch nobody trusts.
+    #[test]
+    fn the_bus_commands_are_untimed_and_only_the_track_send_names_a_track() {
+        let send = Command::SetTrackSend {
+            track: 2,
+            source: TrackSource::Monitor,
+            send: BusSend::MONITOR,
+        };
+        assert_eq!(send.at(), None);
+        assert_eq!(send.track(), Some(2));
+
+        let gain = Command::SetBusGain {
+            bus: Bus::Monitor,
+            gain: 0.5,
+        };
+        assert_eq!(gain.at(), None);
+        assert_eq!(gain.track(), None, "eine Bus-Lautstaerke gehoert keinem Track");
+
+        let out = Command::SetBusOutput {
+            bus: Bus::Monitor,
+            out: BusOutput::pair(2),
+        };
+        assert_eq!(out.at(), None);
+        assert_eq!(out.track(), None);
     }
 
     #[test]
@@ -718,6 +804,10 @@ mod tests {
         let ts = TrackStatus::default();
         assert_eq!(ts.channels, 1);
         assert_eq!(ts.pan, 0.0);
+        // A track is heard in the room and in the headphones; what it monitors is a cue and stays
+        // in the headphones unless someone says otherwise.
+        assert_eq!(ts.loop_send, BusSend::BOTH);
+        assert_eq!(ts.monitor_send, BusSend::MONITOR);
         assert_eq!(ts.used_input_channels(), &[0]);
         assert_eq!(ts.input_peak_max(), 0.0);
         assert_eq!(ts.output_peak_max(), 0.0);

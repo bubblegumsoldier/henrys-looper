@@ -1,5 +1,6 @@
 //! Offline proof of sample accuracy. Nothing here opens an audio device.
 
+use super::bus::{Bus, BusOutput, BusRouting, BusSend, TrackSource};
 use super::command::Command;
 use super::frame::{Channels, Frame};
 use super::metro::Metronome;
@@ -2216,8 +2217,8 @@ fn a_centred_mono_track_is_equally_loud_on_both_sides_and_hard_left_silences_the
     }
     let status = sim.latest_status().expect("Status");
     assert_eq!(status.tracks()[0].pan, -1.0);
-    assert_eq!(status.output_peak[1], 0.0, "die rechte Summe bleibt stumm");
-    assert!(status.output_peak[0] > 0.0, "die linke Summe klingt");
+    assert_eq!(status.output_peak()[1], 0.0, "die rechte Summe bleibt stumm");
+    assert!(status.output_peak()[0] > 0.0, "die linke Summe klingt");
 }
 
 /// **The dryness test, in stereo.** With every effect switched on at settings that change the
@@ -2407,4 +2408,481 @@ fn a_stereo_track_gets_buffers_of_twice_the_length() {
         8_192,
         "stereo: dieselben 4096 Frames sind 8192 Samples"
     );
+}
+
+// -------------------------------------------------------------------------------------------
+// 12. The two output buses: Main to the room, Monitor to the headphones
+// -------------------------------------------------------------------------------------------
+//
+// The whole point of the split is one sentence from the plan: "Klick nur auf den Monitorweg".
+// Everything below is that sentence, plus the routing questions it drags in - what happens on a
+// device with only one output pair, and what a bus assignment must **not** be able to touch.
+
+/// A four-output device, which is what it takes to keep the two buses apart at all.
+fn spec_four_outputs() -> SimSpec {
+    SimSpec {
+        output_channels: 4,
+        // No cable from the output back into an input: these tests are about what leaves the
+        // machine, and a loopback would feed it straight back in.
+        loopback_channel: None,
+        ..spec_4_4()
+    }
+}
+
+/// Record a loop on track 0 and start it playing; returns the recorded content.
+fn record_and_play(sim: &mut Sim, start: u64, len: u64, play_at: u64) -> Vec<f32> {
+    sim.send(Command::StartRecord { track: 0, at: start });
+    sim.send(Command::StopRecord {
+        track: 0,
+        at: start + len,
+    });
+    sim.run_to(start + len + R + 4 * BLOCK as u64);
+    sim.send(Command::StartPlay {
+        track: 0,
+        at: play_at,
+    });
+    layer_content(sim, 0, 0)
+}
+
+/// **The core test.** The click is on the monitor bus, and it is provably nowhere near Main - not
+/// in the bus, and not on the sockets Main leaves by.
+#[test]
+fn the_click_is_on_the_monitor_bus_and_provably_not_on_main() {
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let metro = Metronome::new(RATE);
+    let mut sim = Sim::new(
+        SimSpec {
+            click: true,
+            ..spec_four_outputs()
+        },
+        silence(),
+    );
+    // Two beats at 100 BPM, so several clicks and the silence between them are covered.
+    let until = 2 * timeline.samples_per_beat().round() as u64;
+    sim.run_to(until);
+
+    let mut heard = 0usize;
+    for pos in 0..until {
+        let expected = metro.sample_at(&timeline, pos);
+        assert_eq!(
+            sim.bus(Bus::Main, pos),
+            Frame::SILENT,
+            "der Klick darf den Main-Bus bei Position {pos} nicht beruehren"
+        );
+        assert_eq!(
+            sim.bus(Bus::Monitor, pos),
+            Frame::mono(expected),
+            "der Klick liegt mittig auf dem Monitor-Bus, Position {pos}"
+        );
+        // The same statement one step further on, at the sockets: outputs 1/2 are Main.
+        assert_eq!(sim.device(0, pos), 0.0, "Ausgang 1 bei Position {pos}");
+        assert_eq!(sim.device(1, pos), 0.0, "Ausgang 2 bei Position {pos}");
+        assert_eq!(sim.device(2, pos), expected, "Ausgang 3 bei Position {pos}");
+        assert_eq!(sim.device(3, pos), expected, "Ausgang 4 bei Position {pos}");
+        if expected != 0.0 {
+            heard += 1;
+        }
+    }
+    assert!(
+        heard > 100,
+        "Testaufbau: der Klick muss ueberhaupt geklungen haben, gezaehlt {heard}"
+    );
+}
+
+/// A track assigned to one bus appears on that bus and on no other - in both directions, because
+/// "it never reaches Main" and "it never reaches Monitor" are two different mistakes.
+#[test]
+fn a_track_on_one_bus_only_stays_off_the_other_one() {
+    let start = 4_096u64;
+    let len = 20_000u64;
+    let play_at = start + len + R + 8_000;
+
+    for (send, audible, silent) in [
+        (BusSend::MONITOR, Bus::Monitor, Bus::Main),
+        (BusSend::MAIN, Bus::Main, Bus::Monitor),
+    ] {
+        let mut sim = Sim::new(spec_four_outputs(), mono(fingerprint));
+        let content = record_and_play(&mut sim, start, len, play_at);
+        sim.send(Command::SetTrackSend {
+            track: 0,
+            source: TrackSource::Loop,
+            send,
+        });
+        sim.run_to(play_at + 4 * BLOCK as u64);
+
+        let mut loud = 0usize;
+        for pos in play_at..play_at + 2 * BLOCK as u64 {
+            let expected = content[((pos - start) % len) as usize];
+            assert_eq!(
+                sim.bus(audible, pos),
+                Frame::mono(expected),
+                "{}: der Loop muss hier klingen, Position {pos}",
+                audible.label()
+            );
+            assert_eq!(
+                sim.bus(silent, pos),
+                Frame::SILENT,
+                "{}: hier darf nichts ankommen, Position {pos}",
+                silent.label()
+            );
+            if expected != 0.0 {
+                loud += 1;
+            }
+        }
+        assert!(loud > 100, "Testaufbau: der Loop war still");
+    }
+}
+
+/// The monitored live input follows **its own** assignment. This is the case a single effect chain
+/// per track could not serve: Main hears the loop alone, the headphones hear the loop and the
+/// musician over it.
+#[test]
+fn the_monitor_signal_follows_its_own_assignment_independently_of_the_loop() {
+    let start = 4_096u64;
+    let len = 20_000u64;
+    let play_at = start + len + R + 8_000;
+
+    let mut sim = Sim::new(
+        SimSpec {
+            tracks: vec![TrackSpec::on(0).monitoring()],
+            ..spec_four_outputs()
+        },
+        mono(fingerprint),
+    );
+    let content = record_and_play(&mut sim, start, len, play_at);
+    // Loop into the room, live input only into the headphones - the ordinary stage arrangement.
+    sim.send(Command::SetTrackSend {
+        track: 0,
+        source: TrackSource::Loop,
+        send: BusSend::BOTH,
+    });
+    sim.send(Command::SetTrackSend {
+        track: 0,
+        source: TrackSource::Monitor,
+        send: BusSend::MONITOR,
+    });
+    sim.run_to(play_at + 4 * BLOCK as u64);
+
+    for pos in play_at..play_at + 2 * BLOCK as u64 {
+        let loop_value = content[((pos - start) % len) as usize];
+        // Input and output run in lockstep in the simulation, so the live sample at output
+        // position `pos` is the one the musician is playing right now.
+        let live = fingerprint(pos);
+        assert_ne!(loop_value, live, "Testaufbau: die beiden sind unterscheidbar");
+        assert_eq!(
+            sim.bus(Bus::Main, pos),
+            Frame::mono(loop_value),
+            "Main hoert nur den Loop, Position {pos}"
+        );
+        assert_eq!(
+            sim.bus(Bus::Monitor, pos),
+            Frame::mono(loop_value + live),
+            "der Kopfhoerer hoert den Loop und den Musiker darueber, Position {pos}"
+        );
+    }
+}
+
+/// Two volumes, and they really are two: turning the headphones down leaves the room where it was.
+#[test]
+fn the_bus_volumes_work_independently_of_each_other() {
+    let start = 4_096u64;
+    let len = 20_000u64;
+    let play_at = start + len + R + 8_000;
+
+    let mut sim = Sim::new(spec_four_outputs(), mono(fingerprint));
+    let content = record_and_play(&mut sim, start, len, play_at);
+    sim.send(Command::SetBusGain {
+        bus: Bus::Monitor,
+        gain: 0.5,
+    });
+    sim.run_to(play_at + 4 * BLOCK as u64);
+
+    for pos in play_at..play_at + BLOCK as u64 {
+        let expected = content[((pos - start) % len) as usize];
+        assert_eq!(
+            sim.bus(Bus::Main, pos),
+            Frame::mono(expected),
+            "der Saal bleibt unveraendert"
+        );
+        assert_eq!(
+            sim.bus(Bus::Monitor, pos),
+            Frame::mono(expected * 0.5),
+            "der Kopfhoerer ist halb so laut"
+        );
+    }
+
+    // Now the other way round, and the first one must not move.
+    let from = play_at + 4 * BLOCK as u64;
+    sim.send(Command::SetBusGain {
+        bus: Bus::Main,
+        gain: 0.25,
+    });
+    sim.run_to(from + 4 * BLOCK as u64);
+    for pos in from + BLOCK as u64..from + 2 * BLOCK as u64 {
+        let expected = content[((pos - start) % len) as usize];
+        assert_eq!(sim.bus(Bus::Main, pos), Frame::mono(expected * 0.25));
+        assert_eq!(
+            sim.bus(Bus::Monitor, pos),
+            Frame::mono(expected * 0.5),
+            "der Kopfhoerer bleibt, wo er war"
+        );
+    }
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.bus_gain(Bus::Main), 0.25);
+    assert_eq!(status.bus_gain(Bus::Monitor), 0.5);
+}
+
+/// Four channels: the two buses lie on their own pairs and nothing bleeds across.
+#[test]
+fn four_output_channels_keep_the_two_buses_on_their_own_pairs() {
+    let start = 4_096u64;
+    let len = 20_000u64;
+    let play_at = start + len + R + 8_000;
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let metro = Metronome::new(RATE);
+
+    let mut sim = Sim::new(
+        SimSpec {
+            click: true,
+            ..spec_four_outputs()
+        },
+        mono(fingerprint),
+    );
+    let content = record_and_play(&mut sim, start, len, play_at);
+    // The loop into the room only; the click is on Monitor by construction.
+    sim.send(Command::SetTrackSend {
+        track: 0,
+        source: TrackSource::Loop,
+        send: BusSend::MAIN,
+    });
+    sim.run_to(play_at + 4 * BLOCK as u64);
+
+    for pos in play_at..play_at + 2 * BLOCK as u64 {
+        let loop_value = content[((pos - start) % len) as usize];
+        let click = metro.sample_at(&timeline, pos);
+        assert_eq!(sim.device(0, pos), loop_value, "Ausgang 1: nur der Loop");
+        assert_eq!(sim.device(1, pos), loop_value, "Ausgang 2: nur der Loop");
+        assert_eq!(sim.device(2, pos), click, "Ausgang 3: nur der Klick");
+        assert_eq!(sim.device(3, pos), click, "Ausgang 4: nur der Klick");
+    }
+    assert_eq!(sim.output_channels(), 4);
+    assert!(!sim.routing().overlaps(), "die Paare sind getrennt");
+}
+
+/// Two channels: there is one way out, so both buses land on it. Nothing is lost - the click *and*
+/// the loop arrive - and nothing is counted twice: a track assigned to both buses comes out at
+/// exactly the level it has on a four-output rig, not 6 dB over it.
+#[test]
+fn two_output_channels_carry_both_buses_without_losing_or_doubling_anything() {
+    let start = 4_096u64;
+    let len = 20_000u64;
+    let play_at = start + len + R + 8_000;
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let metro = Metronome::new(RATE);
+
+    let mut sim = Sim::new(
+        SimSpec {
+            click: true,
+            output_channels: 2,
+            loopback_channel: None,
+            ..spec_4_4()
+        },
+        mono(fingerprint),
+    );
+    assert!(sim.routing().collapsed(), "zwei Ausgaenge sind ein Weg hinaus");
+    let content = record_and_play(&mut sim, start, len, play_at);
+    // A whole beat, so the window really contains a click and not only the silence between two.
+    let window = timeline.samples_per_beat().round() as u64 + BLOCK as u64;
+    sim.run_to(play_at + window + 4 * BLOCK as u64);
+
+    let mut both_heard = 0usize;
+    for pos in play_at..play_at + window {
+        let loop_value = content[((pos - start) % len) as usize];
+        let click = metro.sample_at(&timeline, pos);
+        let want = (loop_value + click).clamp(-1.0, 1.0);
+        assert_eq!(sim.device(0, pos), want, "Ausgang 1 bei Position {pos}");
+        assert_eq!(sim.device(1, pos), want, "Ausgang 2 bei Position {pos}");
+        if loop_value != 0.0 && click != 0.0 {
+            both_heard += 1;
+        }
+    }
+    assert!(
+        both_heard > 0,
+        "Testaufbau: es muss Positionen geben, an denen beide klingen"
+    );
+}
+
+/// The stopgap on a two-output interface: the mix on the left, the click on the right, each folded
+/// to mono. Two buses, two sockets, no second pair needed.
+#[test]
+fn a_bus_per_channel_puts_the_mix_left_and_the_click_right() {
+    let start = 4_096u64;
+    let len = 20_000u64;
+    let play_at = start + len + R + 8_000;
+    let timeline = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4));
+    let metro = Metronome::new(RATE);
+
+    let mut sim = Sim::new(
+        SimSpec {
+            click: true,
+            output_channels: 2,
+            loopback_channel: None,
+            routing: Some(BusRouting::new(BusOutput::mono(0), BusOutput::mono(1))),
+            ..spec_4_4()
+        },
+        mono(fingerprint),
+    );
+    assert!(!sim.routing().overlaps());
+    let content = record_and_play(&mut sim, start, len, play_at);
+    sim.send(Command::SetTrackSend {
+        track: 0,
+        source: TrackSource::Loop,
+        send: BusSend::MAIN,
+    });
+    sim.run_to(play_at + 4 * BLOCK as u64);
+
+    for pos in play_at..play_at + 2 * BLOCK as u64 {
+        let loop_value = content[((pos - start) % len) as usize];
+        // A mono track sits at the same level on both sides, so folding it to mono at half level
+        // gives exactly the sample back.
+        assert_eq!(sim.device(0, pos), loop_value, "links der Mix");
+        assert_eq!(
+            sim.device(1, pos),
+            metro.sample_at(&timeline, pos),
+            "rechts der Klick"
+        );
+    }
+}
+
+/// **Buses are an output stage.** Whatever is switched, routed or turned down, the take is the same
+/// take: bit for bit the raw input, latency-compensated and nothing else.
+#[test]
+fn the_bus_routing_does_not_change_what_is_recorded() {
+    let start = 4_096u64;
+    let len = 20_000u64;
+
+    fn take(setup: fn(&mut Sim)) -> Vec<f32> {
+        let mut sim = Sim::new(
+            SimSpec {
+                click: true,
+                tracks: vec![TrackSpec::on(0).monitoring()],
+                ..spec_four_outputs()
+            },
+            mono(fingerprint),
+        );
+        setup(&mut sim);
+        sim.send(Command::StartRecord {
+            track: 0,
+            at: 4_096,
+        });
+        sim.send(Command::StopRecord {
+            track: 0,
+            at: 4_096 + 20_000,
+        });
+        sim.run_to(4_096 + 20_000 + R + 4 * BLOCK as u64);
+        layer_content(&sim, 0, 0)
+    }
+
+    let plain = take(|_| {});
+    let routed = take(|sim| {
+        sim.send(Command::SetTrackSend {
+            track: 0,
+            source: TrackSource::Loop,
+            send: BusSend::NONE,
+        });
+        sim.send(Command::SetTrackSend {
+            track: 0,
+            source: TrackSource::Monitor,
+            send: BusSend::MAIN,
+        });
+        sim.send(Command::SetBusGain {
+            bus: Bus::Main,
+            gain: 0.0,
+        });
+        sim.send(Command::SetBusGain {
+            bus: Bus::Monitor,
+            gain: 4.0,
+        });
+        sim.send(Command::SetBusOutput {
+            bus: Bus::Monitor,
+            out: BusOutput::mono(1),
+        });
+    });
+
+    assert_eq!(plain.len() as u64, len);
+    assert_eq!(
+        plain, routed,
+        "Busse sind Ausgang - sie duerfen an einem Take nichts aendern"
+    );
+    for (i, &got) in routed.iter().enumerate() {
+        assert_eq!(got, fingerprint(start + R + i as u64), "Sample {i}");
+    }
+}
+
+/// The routing a track was **started** with is part of the setup, not of the material: emptying
+/// everything puts it back where the stage was wired, not on some blanket value.
+#[test]
+fn clearing_everything_restores_the_bus_routing_a_track_was_started_with() {
+    let mut sim = Sim::new(
+        SimSpec {
+            tracks: vec![
+                TrackSpec::on(0)
+                    .sending(BusSend::MONITOR)
+                    .monitor_sending(BusSend::BOTH),
+            ],
+            ..spec_four_outputs()
+        },
+        silence(),
+    );
+    sim.run_blocks(2);
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.tracks()[0].loop_send, BusSend::MONITOR);
+    assert_eq!(status.tracks()[0].monitor_send, BusSend::BOTH);
+
+    sim.send(Command::SetTrackSend {
+        track: 0,
+        source: TrackSource::Loop,
+        send: BusSend::MAIN,
+    });
+    sim.run_blocks(2);
+    assert_eq!(
+        sim.latest_status().expect("Status").tracks()[0].loop_send,
+        BusSend::MAIN
+    );
+
+    sim.send(Command::ClearAll { at: sim.pos() });
+    sim.run_blocks(4);
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(
+        status.tracks()[0].loop_send,
+        BusSend::MONITOR,
+        "wieder so verkabelt, wie die Sitzung gestartet wurde"
+    );
+    assert_eq!(status.tracks()[0].monitor_send, BusSend::BOTH);
+}
+
+/// A routing that names channels the device does not have is brought back to what exists rather
+/// than leaving a bus inaudible - and the status says where it ended up.
+#[test]
+fn a_bus_output_the_device_does_not_have_is_brought_back_to_one_it_has() {
+    let mut sim = Sim::new(
+        SimSpec {
+            output_channels: 2,
+            loopback_channel: None,
+            ..spec_4_4()
+        },
+        silence(),
+    );
+    sim.send(Command::SetBusOutput {
+        bus: Bus::Monitor,
+        out: BusOutput::pair(6),
+    });
+    sim.run_blocks(4);
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(
+        status.bus_out.get(Bus::Monitor),
+        BusOutput::pair(0),
+        "auf ein Paar, das es gibt"
+    );
+    assert_eq!(status.output_channels, 2);
 }

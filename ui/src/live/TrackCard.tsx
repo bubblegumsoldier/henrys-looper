@@ -6,8 +6,15 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Meter } from "./Meter";
 import { FxRow, type FxActions } from "./FxRow";
-import { layerAddress, trackAddress } from "../midi/addresses";
-import { SCORE_STATE_LABEL, type LooperStatus, type LooperTrackStatus, type ScoreState } from "../types";
+import { layerAddress, sendAddress, trackAddress } from "../midi/addresses";
+import {
+  SCORE_STATE_LABEL,
+  type BusId,
+  type LooperStatus,
+  type LooperTrackStatus,
+  type ScoreState,
+  type TrackSourceId,
+} from "../types";
 
 /** The transport, the two settings rows, the layers - and the effect chain, which brings its own. */
 export interface TrackActions extends FxActions {
@@ -17,6 +24,7 @@ export interface TrackActions extends FxActions {
   play: (track: number) => void;
   clear: (track: number) => void;
   monitor: (track: number, on: boolean) => void;
+  bus: (track: number, source: TrackSourceId, bus: BusId, on: boolean) => void;
   pan: (track: number, pan: number) => void;
   latency: (track: number, measured: number | null, trim: number) => void;
   layerMute: (track: number, layer: number, muted: boolean) => void;
@@ -59,6 +67,59 @@ function panLabel(pan: number): string {
  *
  * Throttled exactly like the layer gain: a drag would otherwise be one command per pixel.
  */
+/**
+ * Which output buses this track goes to - four little switches in one row.
+ *
+ * Two rows of two rather than a select with four entries: "geht dieser Track in den Saal" is a
+ * question with a yes and a no, and it is asked of the loop and of the monitor signal separately.
+ * A select would make each of them a click, a menu and a reading exercise, mid-song.
+ *
+ * The two lines are deliberately not linked. The loop asks *where this recording belongs*; the
+ * monitor asks *where the musician needs to hear himself*, and on a stage whose PA already has the
+ * microphone the answers are "both" and "headphones only".
+ */
+function BusRow({
+  track,
+  status,
+  actions,
+}: {
+  track: number;
+  status: LooperTrackStatus;
+  actions: TrackActions;
+}) {
+  const cell = (source: TrackSourceId, bus: BusId, on: boolean, label: string) => (
+    <button
+      className={`btn btn-mini btn-bus${on ? " btn-on" : ""}`}
+      data-midi={sendAddress(track, source, bus)}
+      onClick={() => actions.bus(track, source, bus, !on)}
+      title={
+        source === "loop"
+          ? `Wiedergabe dieses Tracks auf ${label}`
+          : `Mithör-Signal dieses Tracks auf ${label}`
+      }
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="live-track-bus">
+      <span className="live-bus-label" title="Auf welche Ausgangsbusse die Wiedergabe geht">
+        Loop
+      </span>
+      {cell("loop", "main", status.bus_main, "Main")}
+      {cell("loop", "monitor", status.bus_monitor, "Monitor")}
+      <span
+        className="live-bus-label"
+        title="Auf welche Busse das Mithör-Signal geht — unabhängig von der Wiedergabe"
+      >
+        Mithören
+      </span>
+      {cell("monitor", "main", status.monitor_bus_main, "Main")}
+      {cell("monitor", "monitor", status.monitor_bus_monitor, "Monitor")}
+    </div>
+  );
+}
+
 function PanRow({ track, pan, actions }: { track: number; pan: number; actions: TrackActions }) {
   const [local, setLocal] = useState(pan);
   const dragging = useRef(false);
@@ -444,6 +505,7 @@ function TrackCardInner({ track, selected, onSelect, actions, defaultLatency, ta
       </div>
 
       <PanRow track={i} pan={track.pan} actions={actions} />
+      <BusRow track={i} status={track} actions={actions} />
       <LatencyRow track={track} actions={actions} defaultLatency={defaultLatency} />
 
       {/* Every button carries the address of the parameter tree it stands for, and the learn mode

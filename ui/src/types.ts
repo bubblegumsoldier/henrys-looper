@@ -127,6 +127,33 @@ export interface FxStatus {
   reverb_mix: number;
 }
 
+/** Which output bus something goes to. `main` is the room, `monitor` the headphones. */
+export type BusId = "main" | "monitor";
+
+/** Which of a track's two sources a bus assignment is about. */
+export type TrackSourceId = "loop" | "monitor";
+
+/** One output bus: where it goes, how loud it is, and what leaves on it. */
+export interface BusStatus {
+  id: BusId;
+  /** German label, ready to print. */
+  label: string;
+  /** First device output channel, one-based. */
+  channel: number;
+  /** 1 (folded to mono onto `channel`) or 2 (a stereo pair). */
+  width: number;
+  /** `1-2` or `3`, ready to print. */
+  channel_label: string;
+  /** Linear volume, 0 to 4. */
+  gain: number;
+  /** Louder side, measured after the volume - what actually leaves. */
+  peak: number;
+  dbfs: number | null;
+  peaks: number[];
+  /** True for the bus the click is on. Hard-wired, and the reason the buses exist. */
+  has_click: boolean;
+}
+
 export interface LooperTrackStatus {
   /** Zero-based; this is what a track command expects. */
   index: number;
@@ -141,6 +168,18 @@ export interface LooperTrackStatus {
   channels_label: string;
   /** Position between the speakers: -1 hard left, 0 centre, +1 hard right. */
   pan: number;
+
+  // --- output buses ---------------------------------------------------------
+  // Two switches per source rather than one word: "geht dieser Track in den Saal" is a question
+  // with a yes and a no, and a select with four entries would make it a reading exercise.
+  /** Loop playback of this track is heard on the main bus (to the PA). */
+  bus_main: boolean;
+  /** Loop playback of this track is heard on the monitor bus (to the headphones). */
+  bus_monitor: boolean;
+  /** The monitored live input of this track is heard on the main bus. */
+  monitor_bus_main: boolean;
+  /** The monitored live input of this track is heard on the monitor bus. */
+  monitor_bus_monitor: boolean;
 
   // --- latency compensation, in frames -------------------------------------
   // Four fields rather than one, because a display that shows only the effective value cannot say
@@ -212,12 +251,28 @@ export interface LooperStatus {
   sample_rate: number;
   /** The engine's **default** compensation in frames; a track with its own reports it itself. */
   latency_frames: number;
+  /** The metronome. It is on the monitor bus and reaches the main bus by no path at all. */
   click: boolean;
-  /** Louder side of the master bus. */
+  /** Louder side of the main bus, i.e. of what goes to the room. */
   output_peak: number;
   output_dbfs: number | null;
-  /** Left and right of the master bus, always two entries. */
+  /** Left and right of the main bus, always two entries. */
   output_peaks: number[];
+
+  // --- the two output buses -------------------------------------------------
+  /** One entry per bus, main first. */
+  buses: BusStatus[];
+  /** Output channels the device really has - what a routing selector may offer. */
+  output_channels: number;
+  /**
+   * True while both buses leave on exactly the same channels, which is what a two-output
+   * interface forces. There is then one mix: every source is heard once, the click included, and
+   * the monitor volume has nothing to regulate on its own.
+   */
+  buses_collapsed: boolean;
+  /** German sentence explaining an overlapping routing, or null when the buses are apart. */
+  bus_note: string | null;
+
   tracks: LooperTrackStatus[];
   /** What the runner is doing, or null while no score is loaded. */
   score: ScoreStatus | null;
@@ -254,6 +309,10 @@ export const IDLE_STATUS: LooperStatus = {
   output_peak: 0,
   output_dbfs: null,
   output_peaks: [0, 0],
+  buses: [],
+  output_channels: 0,
+  buses_collapsed: false,
+  bus_note: null,
   tracks: [],
   xruns: 0,
   fifo_underruns: 0,
@@ -324,6 +383,24 @@ export interface StartTrack {
    * an external plugin host. Survives every calibration.
    */
   latency_trim: number;
+  /**
+   * Which output buses the **loop playback** of this track is heard on: `main`, `monitor`,
+   * `main+monitor` (the default) or `none`.
+   */
+  bus: string;
+  /**
+   * Which output buses the **monitored live input** is heard on, independent of the loop. Default
+   * `monitor`: the room usually has the musician through the PA's own channel.
+   */
+  monitor_bus: string;
+}
+
+/** Where one bus leaves the machine, as the setup writes it. */
+export interface StartBusOut {
+  /** First device output channel, one-based. */
+  channel: number;
+  /** 1 folds the bus to mono onto that channel, 2 is a stereo pair. */
+  width: number;
 }
 
 export interface StartConfig {
@@ -349,6 +426,19 @@ export interface StartConfig {
   click_gain: number;
   click: boolean;
   monitor: boolean;
+  /** Where the main bus (to the PA) leaves. null means outputs 1-2. */
+  bus_out_main: StartBusOut | null;
+  /**
+   * Where the monitor bus (to the headphones, and the only bus the click is on) leaves. null means
+   * outputs 3-4 on a device that has four, and 1-2 on one that does not - where both buses are
+   * then folded into one mix, which the engine says out loud rather than quietly dropping the
+   * click.
+   */
+  bus_out_monitor: StartBusOut | null;
+  /** Volume of the main bus, linear. null means 1.0. */
+  bus_gain_main: number | null;
+  /** Volume of the monitor bus, linear. null means 1.0. */
+  bus_gain_monitor: number | null;
 }
 
 /** What the driver actually agreed to. Returned by `engine_start`. */

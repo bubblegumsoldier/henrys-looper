@@ -93,8 +93,9 @@ use super::command::{
 use super::frame::TrackInput;
 use super::live::{TrackDef, resolve_tracks};
 use super::metro::Metronome;
+use super::bus::{BUS_SAMPLES, place_buses};
 use super::process::{
-    EngineConfig, EngineCore, OUT_CHANNELS, check_loop, loop_capacity, spread_frame,
+    EngineConfig, EngineCore, check_loop, loop_capacity, measurement_routing,
 };
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{Track, TrackState};
@@ -574,6 +575,14 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         monitor_gain: 0.0,
         click: false,
         click_gain: opts.click_gain,
+        // Both buses at unity on the same output pair. The click lives on the monitor bus, and the
+        // loopback cable is in output 1 - with the ordinary four-output default the cable would
+        // hear nothing and the measurement would report an absence of signal as a latency. A bus
+        // volume other than 1.0 would likewise walk straight into the level dependency the onset
+        // detection has, which is the one thing this measurement already has to be careful about.
+        bus_gain: [1.0, 1.0],
+        routing: measurement_routing(out_channels),
+        output_channels: out_channels,
         status_interval: (rate / STATUS_HZ).max(1) as u64,
     });
 
@@ -624,7 +633,7 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     let sh_out_err = Arc::clone(&shared);
     let mut core = core;
     let mut in_scratch = vec![0.0f32; scratch_frames];
-    let mut out_scratch = vec![0.0f32; scratch_frames * OUT_CHANNELS];
+    let mut out_scratch = vec![0.0f32; scratch_frames * BUS_SAMPLES];
     let output = audio::build_output(
         &setup.output,
         &setup.out_plan,
@@ -646,13 +655,14 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
                 if got < n {
                     sh_out.underruns.fetch_add(1, Ordering::Relaxed);
                 }
-                core.process(&in_scratch[..got], &mut out_scratch[..n * OUT_CHANNELS]);
+                core.process(&in_scratch[..got], &mut out_scratch[..n * BUS_SAMPLES]);
+                let routing = core.routing();
                 let base = done * out_channels;
                 for (i, frame) in data[base..base + n * out_channels]
                     .chunks_exact_mut(out_channels)
                     .enumerate()
                 {
-                    spread_frame(&out_scratch[i * OUT_CHANNELS..i * OUT_CHANNELS + OUT_CHANNELS], frame);
+                    place_buses(&out_scratch[i * BUS_SAMPLES..(i + 1) * BUS_SAMPLES], frame, &routing);
                 }
                 done += n;
             }

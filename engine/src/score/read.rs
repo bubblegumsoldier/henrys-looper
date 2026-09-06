@@ -17,6 +17,7 @@ use super::model::{
     MidiBindingSource, MidiKind, ScoreSource, SectionSource, TrackSource, TrackState,
 };
 use super::yaml::{Entry, Node, NodeKind, Pos, parse_document};
+use crate::engine::bus::BusSend;
 use crate::engine::command::MAX_TRACKS;
 use crate::engine::schedule::Quantize;
 use crate::midi::{Binding, ButtonMode, Control, Takeover, Target, TrackRef};
@@ -30,7 +31,15 @@ const ROOT_FIELDS: [&str; 7] = [
     "midi",
     "sections",
 ];
-const TRACK_FIELDS: [&str; 5] = ["input", "pan", "monitor", "latency", "latency_trim"];
+const TRACK_FIELDS: [&str; 7] = [
+    "input",
+    "pan",
+    "monitor",
+    "latency",
+    "latency_trim",
+    "bus",
+    "monitor_bus",
+];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
 /// Fields one binding may carry. The *keys* of `midi:` are not a closed list any more - any address
 /// of the parameter tree does, and the two Ableton-era names `next_section` and `stop_all` are
@@ -523,6 +532,17 @@ impl Reader {
                 .map(|v| v as i32),
             None => Some(0),
         };
+        // Where this track is heard, and where its live input is heard. Two fields because they
+        // answer two questions: a guide figure belongs on the headphones while the singer over it
+        // belongs everywhere, and one field could not say that.
+        let bus = match fields.get("bus") {
+            Some(node) => self.read_bus_send(name, "bus", node),
+            None => Some(BusSend::BOTH),
+        };
+        let monitor_bus = match fields.get("monitor_bus") {
+            Some(node) => self.read_bus_send(name, "monitor_bus", node),
+            None => Some(BusSend::MONITOR),
+        };
         let (input, input_right) = input?;
         Some(TrackSource {
             input,
@@ -531,7 +551,30 @@ impl Reader {
             monitor: monitor?,
             latency: latency?,
             latency_trim: latency_trim?,
+            bus: bus?.name().to_string(),
+            monitor_bus: monitor_bus?.name().to_string(),
         })
+    }
+
+    /// `bus: monitor`, `bus: main+monitor`, `bus: none` - which output buses a source is heard on.
+    ///
+    /// Written as a word rather than a list, because that is how it is spoken: "der geht nur auf
+    /// den Monitor". The accepted words are exactly the ones `BusSend` writes back out, so a score
+    /// round-trips through the compiler unchanged.
+    fn read_bus_send(&mut self, name: &str, field: &str, node: &Node<'_>) -> Option<BusSend> {
+        let what = format!("'{field}' von Track '{name}'");
+        let text = self.as_str(node, &what)?.to_string();
+        match BusSend::parse(&text) {
+            Some(send) => Some(send),
+            None => {
+                self.error_with(
+                    Some(node.pos),
+                    format!("{what}: '{text}' ist keine Bus-Angabe."),
+                    "Erlaubt sind 'main' (nur in den Saal), 'monitor' (nur auf den Kopfhoerer),                      'main+monitor' und 'none'. Der Klick liegt immer und nur auf 'monitor'.",
+                );
+                None
+            }
+        }
     }
 
     /// `input: 1` for a mono track, `input: [3, 4]` for a stereo one.

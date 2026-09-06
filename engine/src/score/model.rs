@@ -24,6 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::map::OrderedMap;
+use crate::engine::bus::BusSend;
 use crate::engine::frame::TrackInput;
 use crate::engine::schedule::Quantize;
 use crate::engine::timeline::TimeSignature;
@@ -114,6 +115,7 @@ impl TrackState {
 ///   gitarre:   {input: 2, monitor: false}
 ///   klavier:   {input: [3, 4], pan: 0.2}
 ///   cantabile: {input: [5, 6], latency: 512, latency_trim: 96}
+///   klick_gtr: {input: 7, bus: monitor, monitor_bus: monitor}
 /// ```
 ///
 /// `input` is either one channel (the track records mono) or a pair (it records stereo). Which two
@@ -148,10 +150,28 @@ pub struct TrackSource {
     /// inside an external host. Never overwritten by a measurement. Default 0.
     #[serde(default)]
     pub latency_trim: i32,
+    /// Which output buses this track's **loop playback** goes to: `main`, `monitor`,
+    /// `main+monitor` (the default) or `none`. A guide track that only the musician needs - a
+    /// count-in figure, a cue - says `bus: monitor` and never reaches the room.
+    #[serde(default = "default_both_buses")]
+    pub bus: String,
+    /// Which output buses this track's **monitored live input** goes to, independent of the loop.
+    /// Default `monitor`: the room usually has the musician through the PA's own channel, and
+    /// hearing him twice is worse than not hearing him through the looper at all.
+    #[serde(default = "default_monitor_bus")]
+    pub monitor_bus: String,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_both_buses() -> String {
+    BusSend::BOTH.name().to_string()
+}
+
+fn default_monitor_bus() -> String {
+    BusSend::MONITOR.name().to_string()
 }
 
 /// A MIDI binding, before it is turned into an id.
@@ -289,9 +309,27 @@ pub struct CompiledTrack {
     /// Manual surcharge in frames, added to whichever of the two the track ends up using.
     #[serde(default)]
     pub latency_trim: i32,
+    /// Which output buses the loop playback of this track goes to, as written in the score.
+    #[serde(default = "default_both_buses")]
+    pub bus: String,
+    /// Which output buses the monitored live input of this track goes to.
+    #[serde(default = "default_monitor_bus")]
+    pub monitor_bus: String,
 }
 
 impl CompiledTrack {
+    /// The loop routing in the form the engine wants it. The compiler has already refused anything
+    /// that does not parse, so an unreadable value here can only mean a hand-edited compiled score
+    /// and falls back to "heard everywhere" rather than to silence.
+    pub fn loop_send(&self) -> BusSend {
+        BusSend::parse(&self.bus).unwrap_or(BusSend::BOTH)
+    }
+
+    /// The monitor routing in the form the engine wants it.
+    pub fn monitor_send(&self) -> BusSend {
+        BusSend::parse(&self.monitor_bus).unwrap_or(BusSend::MONITOR)
+    }
+
     /// The latency compensation in the form the engine wants it.
     pub fn track_latency(&self) -> TrackLatency {
         TrackLatency {

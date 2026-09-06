@@ -58,6 +58,7 @@
 
 use std::fmt;
 
+use crate::engine::bus::{Bus, MAX_BUS_GAIN, TrackSource};
 use crate::engine::fx::{EQ_BANDS, FxParam, FxPreset, FxSlot};
 use crate::engine::fx::{BandKind, DelayNote};
 use crate::engine::schedule::Quantize;
@@ -395,6 +396,9 @@ pub enum Target {
     ClearAll,
     Tempo,
     Quantize(Quantize),
+    /// Volume of one output bus. The obvious thing to put on a fader: turning the headphones down
+    /// mid-song without touching the room is half the reason there are two buses.
+    BusGain(Bus),
 
     // ---- per track -------------------------------------------------------------------------
     Record(TrackRef),
@@ -404,6 +408,10 @@ pub enum Target {
     ClearTrack(TrackRef),
     Monitor(TrackRef),
     Pan(TrackRef),
+    /// Whether one source of a track (its loop or its monitored input) is heard on one bus. One
+    /// address per source *and* per bus, rather than one address carrying a set: a pad is a
+    /// switch, and "geht dieser Track auf den Saal" is the question a musician actually presses.
+    Send(TrackRef, TrackSource, Bus),
     /// The *manual surcharge* of the latency compensation - the half a human sets by ear. The
     /// measured half belongs to `calibrate` and is never overwritten from here; see
     /// `docs/architektur.md` section 4.
@@ -446,6 +454,7 @@ impl Target {
             Target::Click
             | Target::Monitor(_)
             | Target::LayerMute(..)
+            | Target::Send(..)
             | Target::FxBypass(_)
             | Target::FxEnabled(..) => Control::Switch,
 
@@ -453,6 +462,8 @@ impl Target {
             Target::Pan(_) => Control::Range(Range::linear(-1.0, 1.0)),
             // The app refuses a layer gain outside 0..4; 1.0 sits at CC 32.
             Target::LayerGain(..) => Control::Range(Range::linear(0.0, 4.0)),
+            // `engine::bus::MAX_BUS_GAIN`, the same headroom a layer gain has.
+            Target::BusGain(_) => Control::Range(Range::linear(0.0, MAX_BUS_GAIN)),
             // The tempo the score compiler and `Timeline::validate` both accept.
             Target::Tempo => Control::Range(Range::linear(20.0, 400.0)),
             Target::LatencyTrim(_) => {
@@ -472,6 +483,7 @@ impl Target {
             | Target::ClearTrack(t)
             | Target::Monitor(t)
             | Target::Pan(t)
+            | Target::Send(t, ..)
             | Target::LatencyTrim(t)
             | Target::LayerMute(t, _)
             | Target::LayerRemove(t, _)
@@ -489,6 +501,7 @@ impl Target {
             | Target::Click
             | Target::ClearAll
             | Target::Tempo
+            | Target::BusGain(_)
             | Target::Quantize(_) => None,
         }
     }
@@ -537,8 +550,15 @@ impl Target {
             Target::Play(t) => format!("{}: Wiedergabe", track(t)),
             Target::StopTrack(t) => format!("{}: Stopp", track(t)),
             Target::ClearTrack(t) => format!("{}: leeren", track(t)),
+            Target::BusGain(bus) => format!("Lautstaerke {}", bus.label()),
             Target::Monitor(t) => format!("{}: Mithoeren", track(t)),
             Target::Pan(t) => format!("{}: Panorama", track(t)),
+            Target::Send(t, source, bus) => format!(
+                "{}: {} auf {}",
+                track(t),
+                source.label(),
+                bus.label()
+            ),
             Target::LatencyTrim(t) => format!("{}: Latenz-Zuschlag", track(t)),
             Target::LayerMute(t, l) => format!("{}: Ebene {} stumm", track(t), l + 1),
             Target::LayerRemove(t, l) => format!("{}: Ebene {} entfernen", track(t), l + 1),
@@ -580,6 +600,10 @@ impl Target {
             ["global", "tempo"] => Ok(Target::Tempo),
             ["global", "quantize", "bar"] => Ok(Target::Quantize(Quantize::Bar)),
             ["global", "quantize", "loop"] => Ok(Target::Quantize(Quantize::Loop)),
+            ["global", "bus", name, "gain"] => match Bus::parse(name) {
+                Some(bus) => Ok(Target::BusGain(bus)),
+                None => Err(bus_unknown(address, name)),
+            },
             ["track", track, rest @ ..] => {
                 let track = TrackRef::parse(track)?;
                 parse_track(track, rest, address)
@@ -598,6 +622,14 @@ fn parse_track(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, 
         ["clear"] => Ok(Target::ClearTrack(track)),
         ["monitor"] => Ok(Target::Monitor(track)),
         ["pan"] => Ok(Target::Pan(track)),
+        ["bus", name] => match Bus::parse(name) {
+            Some(bus) => Ok(Target::Send(track, TrackSource::Loop, bus)),
+            None => Err(bus_unknown(address, name)),
+        },
+        ["monitor_bus", name] => match Bus::parse(name) {
+            Some(bus) => Ok(Target::Send(track, TrackSource::Monitor, bus)),
+            None => Err(bus_unknown(address, name)),
+        },
         ["latency_trim"] => Ok(Target::LatencyTrim(track)),
         ["layer", n, what] => {
             let layer = one_based(n, "Ebene")?;
@@ -679,6 +711,10 @@ fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, Str
     }
 }
 
+fn bus_unknown(address: &str, name: &str) -> String {
+    format!("'{address}': den Bus '{name}' gibt es nicht. Es gibt main und monitor.")
+}
+
 fn slot_names() -> Vec<&'static str> {
     FxSlot::all().iter().map(|s| s.name()).collect()
 }
@@ -712,6 +748,7 @@ impl fmt::Display for Target {
             Target::Tempo => f.write_str("global.tempo"),
             Target::Quantize(Quantize::Bar) => f.write_str("global.quantize.bar"),
             Target::Quantize(Quantize::Loop) => f.write_str("global.quantize.loop"),
+            Target::BusGain(bus) => write!(f, "global.bus.{}.gain", bus.name()),
             Target::Record(t) => write!(f, "track.{t}.record"),
             Target::Overdub(t) => write!(f, "track.{t}.overdub"),
             Target::Play(t) => write!(f, "track.{t}.play"),
@@ -719,6 +756,10 @@ impl fmt::Display for Target {
             Target::ClearTrack(t) => write!(f, "track.{t}.clear"),
             Target::Monitor(t) => write!(f, "track.{t}.monitor"),
             Target::Pan(t) => write!(f, "track.{t}.pan"),
+            Target::Send(t, TrackSource::Loop, bus) => write!(f, "track.{t}.bus.{}", bus.name()),
+            Target::Send(t, TrackSource::Monitor, bus) => {
+                write!(f, "track.{t}.monitor_bus.{}", bus.name())
+            }
             Target::LatencyTrim(t) => write!(f, "track.{t}.latency_trim"),
             Target::LayerMute(t, l) => write!(f, "track.{t}.layer.{}.mute", l + 1),
             Target::LayerRemove(t, l) => write!(f, "track.{t}.layer.{}.remove", l + 1),
@@ -758,6 +799,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
         Target::Quantize(Quantize::Bar),
         Target::Quantize(Quantize::Loop),
     ]);
+    out.extend(Bus::ALL.into_iter().map(Target::BusGain));
     for track in 0..tracks {
         let t = || TrackRef::Index(track);
         out.extend([
@@ -770,6 +812,9 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
             Target::Pan(t()),
             Target::LatencyTrim(t()),
         ]);
+        for source in TrackSource::ALL {
+            out.extend(Bus::ALL.into_iter().map(|bus| Target::Send(t(), source, bus)));
+        }
         for layer in 0..layers {
             out.extend([
                 Target::LayerMute(t(), layer),

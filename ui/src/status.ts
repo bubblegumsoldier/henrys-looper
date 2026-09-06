@@ -121,6 +121,9 @@ export function structureSignature(status: LooperStatus): string {
     // The latency belongs here for the same reason the pan does: it is a setting, so it changes
     // when somebody types a number and never on its own.
     sig += `~${t.latency_frames}~${t.latency_measured ?? ""}~${t.latency_trim}`;
+    // The bus assignment is a setting like the pan: four switches that move when somebody presses
+    // one, never on their own.
+    sig += `~${t.bus_main ? 1 : 0}${t.bus_monitor ? 1 : 0}${t.monitor_bus_main ? 1 : 0}${t.monitor_bus_monitor ? 1 : 0}`;
     sig += fxSignature(t.fx);
     for (const l of t.layers) sig += `${l.index}${l.muted ? 1 : 0}${l.gain}`;
   }

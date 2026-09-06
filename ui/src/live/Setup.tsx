@@ -13,6 +13,7 @@ import type {
   DeviceInfo,
   DeviceReport,
   Quantize,
+  StartBusOut,
   StartConfig,
   StartTrack,
 } from "../types";
@@ -21,6 +22,14 @@ import { TapTempo } from "./TapTempo";
 const STORE_KEY = "looper.setup";
 
 const SAMPLE_RATES = [44100, 48000, 88200, 96000];
+
+/** The four ways a source can be routed, in the order they are actually used. */
+const BUS_CHOICES: { value: string; label: string }[] = [
+  { value: "main+monitor", label: "Main + Monitor" },
+  { value: "main", label: "nur Main (Saal)" },
+  { value: "monitor", label: "nur Monitor (Kopfhörer)" },
+  { value: "none", label: "nirgends" },
+];
 
 export const DEFAULT_SETUP: StartConfig = {
   host: "asio",
@@ -38,6 +47,8 @@ export const DEFAULT_SETUP: StartConfig = {
       pan: 0,
       latency_frames: null,
       latency_trim: 0,
+      bus: "main+monitor",
+      monitor_bus: "monitor",
     },
     {
       name: "gitarre",
@@ -46,6 +57,8 @@ export const DEFAULT_SETUP: StartConfig = {
       pan: 0,
       latency_frames: null,
       latency_trim: 0,
+      bus: "main+monitor",
+      monitor_bus: "monitor",
     },
   ],
   bpm: 100,
@@ -58,6 +71,12 @@ export const DEFAULT_SETUP: StartConfig = {
   click_gain: 1,
   click: true,
   monitor: false,
+  // Null on all four: the engine picks the split that fits the device (1-2 and 3-4 from four
+  // outputs on, both on 1-2 below that) and says so out loud when it has to fold them together.
+  bus_out_main: null,
+  bus_out_monitor: null,
+  bus_gain_main: null,
+  bus_gain_monitor: null,
 };
 
 function loadStored(): StartConfig {
@@ -79,6 +98,10 @@ function loadStored(): StartConfig {
             pan: stored.pan ?? 0,
             latency_frames: stored.latency_frames ?? null,
             latency_trim: stored.latency_trim ?? 0,
+            // A setup stored before the buses existed has neither field, and the defaults are the
+            // ones the engine would have used anyway.
+            bus: stored.bus ?? "main+monitor",
+            monitor_bus: stored.monitor_bus ?? "monitor",
           };
         })
       : DEFAULT_SETUP.tracks;
@@ -125,6 +148,31 @@ function covers(configs: ConfigInfo[], rate: number): boolean {
 function maxChannels(device: DeviceInfo | null): number {
   if (!device || device.input_configs.length === 0) return 8;
   return Math.max(...device.input_configs.map((c) => c.channels));
+}
+
+/** Output channels this device offers - what a bus may be routed to. */
+function maxOutChannels(device: DeviceInfo | null): number {
+  if (!device || device.output_configs.length === 0) return 2;
+  return Math.max(...device.output_configs.map((c) => c.channels));
+}
+
+/** Where a bus leaves, as a single string a select can carry: `1-2`, `3-4`, `1`, `2`. */
+function busOutValue(out: StartBusOut | null, fallback: StartBusOut): string {
+  const o = out ?? fallback;
+  return o.width >= 2 ? `${o.channel}-${o.channel + 1}` : `${o.channel}`;
+}
+
+function parseBusOut(value: string): StartBusOut {
+  const [first, second] = value.split("-");
+  return { channel: Number(first), width: second === undefined ? 1 : 2 };
+}
+
+/** Every routing a device with `outs` output channels can offer, pairs first. */
+function busOutChoices(outs: number): { value: string; label: string }[] {
+  const list: { value: string; label: string }[] = [];
+  for (let c = 1; c + 1 <= outs; c += 2) list.push({ value: `${c}-${c + 1}`, label: `Ausgang ${c}-${c + 1} (stereo)` });
+  for (let c = 1; c <= outs; c += 1) list.push({ value: `${c}`, label: `nur Ausgang ${c} (mono)` });
+  return list;
 }
 
 /** A frame count as milliseconds, which is the unit an ear has for it. */
@@ -240,6 +288,14 @@ export function Setup({ info, busy, onStart, onError }: Props) {
   );
   const range = useMemo(() => bufferRange(device), [device]);
   const channels = maxChannels(device);
+  const outs = maxOutChannels(device);
+  // What the engine would pick if nothing is said: separate pairs from four outputs on, one pair
+  // below that. Repeated here so the select shows the value instead of an empty field.
+  const defaultMain: StartBusOut = { channel: 1, width: 2 };
+  const defaultMonitor: StartBusOut = outs >= 4 ? { channel: 3, width: 2 } : { channel: 1, width: 2 };
+  const mainOut = busOutValue(config.bus_out_main, defaultMain);
+  const monitorOut = busOutValue(config.bus_out_monitor, defaultMonitor);
+  const busesCollapsed = mainOut === monitorOut;
 
   const rates = useMemo(() => {
     if (!device) return SAMPLE_RATES;
@@ -367,6 +423,54 @@ export function Setup({ info, busy, onStart, onError }: Props) {
         </section>
 
         <section className="panel">
+          <div className="panel-title">Ausgangsbusse</div>
+          <div className="panel-body">
+            <label className="field field-wide">
+              <span className="field-label">Main (Saal)</span>
+              <select
+                value={mainOut}
+                onChange={(e) => patch({ bus_out_main: parseBusOut(e.target.value) })}
+              >
+                {busOutChoices(outs).map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field field-wide">
+              <span className="field-label">Monitor (Kopfhörer, mit Klick)</span>
+              <select
+                value={monitorOut}
+                onChange={(e) => patch({ bus_out_monitor: parseBusOut(e.target.value) })}
+              >
+                {busOutChoices(outs).map((c) => (
+                  <option key={c.value} value={c.value}>
+                    {c.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {busesCollapsed ? (
+              <p className="setup-warn">
+                Beide Busse liegen auf demselben Ausgang. Das Gerät meldet {outs} Ausgangskanäle;
+                getrennte Busse brauchen vier. Es gibt dann einen Weg hinaus und damit eine
+                Mischung: jede Quelle klingt darin genau einmal, aber <b>der Klick geht mit in den
+                Saal</b>, und die Monitor-Lautstärke hat nichts, was sie getrennt regeln könnte.
+                Notbehelf mit zwei Ausgängen: Main auf „nur Ausgang 1“, Monitor auf „nur Ausgang 2“
+                — Mix links, Klick rechts, mit einem Y-Kabel aufzutrennen.
+              </p>
+            ) : (
+              <p className="field-hint">
+                Der Klick liegt auf dem Monitor-Bus und erreicht Main auf keinem Weg. Die
+                Lautstärken der beiden Busse stehen im Betrieb auf der Bus-Leiste und lassen sich
+                unabhängig voneinander regeln.
+              </p>
+            )}
+          </div>
+        </section>
+
+        <section className="panel">
           <div className="panel-title">Takt und Loop</div>
           <div className="panel-body">
             <NumberField label="Tempo (BPM)" value={config.bpm} onChange={(v) => patch({ bpm: v })} min={20} max={300} step={0.5} />
@@ -430,6 +534,8 @@ export function Setup({ info, busy, onStart, onError }: Props) {
                       // that by staying empty.
                       latency_frames: null,
                       latency_trim: 0,
+                      bus: "main+monitor",
+                      monitor_bus: "monitor",
                     },
                   ],
                 })
@@ -520,6 +626,34 @@ export function Setup({ info, busy, onStart, onError }: Props) {
                         setTrack(i, { latency_trim: Math.round(Number(e.target.value) || 0) })
                       }
                     />
+                  </label>
+                  <label className="setup-track-kind">
+                    <span>Loop-Bus</span>
+                    <select
+                      value={t.bus}
+                      onChange={(e) => setTrack(i, { bus: e.target.value })}
+                      title="Auf welche Ausgangsbusse die Wiedergabe dieses Tracks geht. Main geht in den Saal, Monitor auf den Kopfhörer."
+                    >
+                      {BUS_CHOICES.map((c) => (
+                        <option key={c.value} value={c.value}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="setup-track-kind">
+                    <span>Mithör-Bus</span>
+                    <select
+                      value={t.monitor_bus}
+                      onChange={(e) => setTrack(i, { monitor_bus: e.target.value })}
+                      title="Auf welche Busse das Mithör-Signal geht — unabhängig von der Wiedergabe. In der Regel nur der Kopfhörer: der Saal hört den Musiker über die PA."
+                    >
+                      {BUS_CHOICES.map((c) => (
+                        <option key={c.value} value={c.value}>
+                          {c.label}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <span className="setup-track-lat-sum mono" title="Was dieser Track beim Aufnehmen abzieht">
                     ={(t.latency_frames ?? config.latency_frames) + t.latency_trim} F ·{" "}

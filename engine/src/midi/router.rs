@@ -19,6 +19,7 @@
 //!    runner. A pad that says "Aufnahme" is refused with exactly the sentence a mouse click gets,
 //!    from exactly the same constant - see `docs/architektur.md` section 10.
 
+use crate::engine::bus::{Bus, BusSend, TrackSource};
 use crate::engine::command::Command;
 use crate::engine::fx::{FxParam, FxPreset, FxSlot};
 use crate::engine::runner::TRANSPORT_BELONGS_TO_SCORE;
@@ -68,6 +69,16 @@ pub enum MidiAction {
     ClearTrack { track: usize },
     Monitor { track: usize, on: bool },
     Pan { track: usize, pan: f32 },
+    /// One source of one track on or off one bus. The router carries the whole resulting send, not
+    /// just the bit, because a `BusSend` is what the engine takes - and the bit it changed was
+    /// computed against the state the engine reported, so no private copy can drift.
+    Send {
+        track: usize,
+        source: TrackSource,
+        send: BusSend,
+    },
+    /// Volume of one output bus, linear.
+    BusGain { bus: Bus, gain: f32 },
     /// The manual half of the latency compensation, in frames. The measured half belongs to
     /// `calibrate` and is not touched from here.
     LatencyTrim { track: usize, trim: i32 },
@@ -117,6 +128,16 @@ impl MidiAction {
             MidiAction::Click(on) => Command::SetClick { on },
             MidiAction::Monitor { track, on } => Command::SetMonitor { track, on },
             MidiAction::Pan { track, pan } => Command::SetPan { track, pan },
+            MidiAction::Send {
+                track,
+                source,
+                send,
+            } => Command::SetTrackSend {
+                track,
+                source,
+                send,
+            },
+            MidiAction::BusGain { bus, gain } => Command::SetBusGain { bus, gain },
             MidiAction::LayerMute {
                 track,
                 layer,
@@ -249,6 +270,16 @@ pub trait ParamState {
 
     /// Current state of a switch.
     fn switch(&self, _target: &Target) -> Option<bool> {
+        None
+    }
+
+    /// The whole bus assignment of one source of one track.
+    ///
+    /// A send switch changes **one bit of a set**, so the set has to be known before it is written
+    /// back. Without it, "Main aus" on a track that was on both buses would silently take it off
+    /// the headphones as well. `None` (before the first status snapshot) falls back to "heard
+    /// everywhere", which is the state a fresh track's loop is in.
+    fn send(&self, _track: usize, _source: TrackSource) -> Option<BusSend> {
         None
     }
 }
@@ -482,6 +513,16 @@ impl Router {
         Resolution::Action(match &binding.target {
             Target::Click => MidiAction::Click(on),
             Target::Monitor(_) => MidiAction::Monitor { track, on },
+            Target::Send(_, source, bus) => {
+                // The switch is one bus of a two-bus set, so the set has to be read back before the
+                // bit is flipped - otherwise switching Main off would also throw Monitor away.
+                let current = ctx.state.send(track, *source).unwrap_or(BusSend::BOTH);
+                MidiAction::Send {
+                    track,
+                    source: *source,
+                    send: current.with(*bus, on),
+                }
+            }
             Target::LayerMute(_, layer) => MidiAction::LayerMute {
                 track,
                 layer: *layer,
@@ -550,6 +591,7 @@ impl Router {
         let value = range.value_of(event.value7());
         Resolution::Action(match &binding.target {
             Target::Pan(_) => MidiAction::Pan { track, pan: value },
+            Target::BusGain(bus) => MidiAction::BusGain { bus: *bus, gain: value },
             Target::LayerGain(_, layer) => MidiAction::LayerGain {
                 track,
                 layer: *layer,
@@ -588,11 +630,18 @@ impl Router {
 pub struct StaticState {
     values: Vec<(String, f32)>,
     switches: Vec<(String, bool)>,
+    sends: Vec<(usize, TrackSource, BusSend)>,
 }
 
 impl StaticState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_send(mut self, track: usize, source: TrackSource, send: BusSend) -> Self {
+        self.sends.push((track, source, send));
+        self
     }
 
     #[must_use]
@@ -623,5 +672,12 @@ impl ParamState for StaticState {
             .iter()
             .find(|(name, _)| *name == key)
             .map(|(_, on)| *on)
+    }
+
+    fn send(&self, track: usize, source: TrackSource) -> Option<BusSend> {
+        self.sends
+            .iter()
+            .find(|(t, s, _)| *t == track && *s == source)
+            .map(|(_, _, send)| *send)
     }
 }

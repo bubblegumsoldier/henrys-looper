@@ -98,9 +98,9 @@
 //!  Eingang ─┬─────────────────────────────────────────────► Loop-Puffer   (trocken!)
 //!           │
 //!           └─► Mithoeren ─┐
-//!                          ├─► Effektkette ─► Panorama ─┐
-//!  Ebenen-Summe ───────────┘   (stereo)                 ├─► Mixbus (L/R) ─► Ausgang
-//!  Klick ───────────────────────────────────────────────┘   (mittig)
+//!                          ├─► Effektkette ─► Panorama ─┬─► Main-Bus    ─► Ausgangspaar A
+//!  Ebenen-Summe ───────────┘   (stereo)                 └─► Monitor-Bus ─► Ausgangspaar B
+//!  Klick ────────────────────────────────────────────────► Monitor-Bus   (mittig, nur dorthin)
 //! ```
 //!
 //! [`EngineCore::record_input`] reads the raw input slice and writes it into the layer buffer
@@ -109,11 +109,27 @@
 //! *"aufgenommen wird trocken"*. An effect baked into a take cannot be undone; one on playback can
 //! be re-dialled between two passes of the same loop.
 //!
+//! **The buses are an output stage and nothing else.** Nothing below the render loop reads a bus
+//! assignment or a bus volume, so no routing decision can reach a take. That is not a happy
+//! accident: it is why a musician may reach for those switches during a recording at all.
+//!
+//! # The click, and the one thing that is not a setting
+//!
 //! The click stays outside every chain and outside every panner. It is a reference, not music: it
-//! goes into both bus channels at the same level, so it sits in the middle of the head wherever the
-//! tracks have been placed, and a compressed metronome with reverb on it would be a worse
-//! reference.
+//! goes into both channels of the monitor bus at the same level, so it sits in the middle of the
+//! head wherever the tracks have been placed, and a compressed metronome with reverb on it would be
+//! a worse reference.
+//!
+//! And it goes to the **monitor bus only**. There is no switch that puts it on Main, because the
+//! entire reason the engine sums into two buses is that the room must not hear the metronome
+//! (`docs/architektur.md`, section 0). A switch for it would be a switch that gets pressed by
+//! accident on the one evening it matters. What the two buses end up on physically is another
+//! question, and on a two-output interface the honest answer is "the same socket" - see
+//! [`super::bus`], which says that out loud instead of quietly turning the click off.
 
+use super::bus::{
+    BUS_CHANNELS, BUS_COUNT, BUS_SAMPLES, Bus, BusOutput, BusRouting, MAX_BUS_GAIN, TrackSource,
+};
 use super::command::{
     BUFFER_KINDS, BufferEndpoint, Command, CommandReceiver, MAX_TRACKS, Refusal, Status,
     StatusSender, TrackStatus,
@@ -128,8 +144,11 @@ use super::track::{MAX_LAYERS, Track, TrackLatency};
 /// removes from it.
 const SCHEDULED_SLOTS: usize = 64;
 
-/// Channels in one output frame. The mix bus is stereo without exception, whatever the tracks are.
-pub const OUT_CHANNELS: usize = 2;
+/// Channels in one bus. Every bus is stereo without exception, whatever the tracks are.
+///
+/// Kept as an alias of [`super::bus::BUS_CHANNELS`] because it is the name the rest of the engine
+/// has always used for "left and right".
+pub const OUT_CHANNELS: usize = BUS_CHANNELS;
 
 /// Everything the engine needs to exist. Assembled by the control thread.
 pub struct EngineConfig {
@@ -154,6 +173,14 @@ pub struct EngineConfig {
     pub monitor_gain: f32,
     pub click: bool,
     pub click_gain: f32,
+    /// Volume of each output bus, linear. The point of having two: the headphones can be turned
+    /// down without the room changing.
+    pub bus_gain: [f32; BUS_COUNT],
+    /// Which device output channels each bus leaves on.
+    pub routing: BusRouting,
+    /// Channels in one device output frame - what the routing is clamped against, so a bus can
+    /// never be sent to a socket that does not exist.
+    pub output_channels: usize,
     /// How often a status snapshot is pushed, in samples.
     pub status_interval: u64,
 }
@@ -177,6 +204,9 @@ pub struct EngineCore {
     monitor_gain: f32,
     click: bool,
     click_gain: f32,
+    bus_gain: [f32; BUS_COUNT],
+    routing: BusRouting,
+    output_channels: usize,
     commands: CommandReceiver,
     /// Commands taken out of the queue but not executed yet, see [`EngineCore::next_due`].
     scheduled: Vec<Command>,
@@ -184,7 +214,9 @@ pub struct EngineCore {
     buffers: BufferEndpoint,
     status_interval: u64,
     since_status: u64,
-    output_peak: [f32; 2],
+    /// Peak of each bus, per channel, since the last snapshot - measured after the bus volume,
+    /// because that is what actually leaves the machine.
+    bus_peak: [[f32; BUS_CHANNELS]; BUS_COUNT],
     ignored_commands: u64,
     refusal: Refusal,
     buffers_taken: [u64; BUFFER_KINDS],
@@ -194,6 +226,8 @@ pub struct EngineCore {
 impl EngineCore {
     pub fn new(cfg: EngineConfig) -> Self {
         let spare_slots = [cfg.spares[0].capacity(), cfg.spares[1].capacity()];
+        let output_channels = cfg.output_channels.max(1);
+        let routing = cfg.routing.clamped(output_channels);
         let mut tracks = cfg.tracks;
         // The control thread builds the tracks and knows what each of them was configured with;
         // only here is the default known, so this is where the two are added up. From now on every
@@ -215,13 +249,19 @@ impl EngineCore {
             monitor_gain: cfg.monitor_gain,
             click: cfg.click,
             click_gain: cfg.click_gain,
+            bus_gain: [
+                cfg.bus_gain[0].clamp(0.0, MAX_BUS_GAIN),
+                cfg.bus_gain[1].clamp(0.0, MAX_BUS_GAIN),
+            ],
+            routing,
+            output_channels,
             commands: cfg.commands,
             scheduled: Vec::with_capacity(SCHEDULED_SLOTS),
             status: cfg.status,
             buffers: cfg.buffers,
             status_interval: cfg.status_interval.max(1),
             since_status: 0,
-            output_peak: [0.0; 2],
+            bus_peak: [[0.0; BUS_CHANNELS]; BUS_COUNT],
             ignored_commands: 0,
             refusal: Refusal::None,
             buffers_taken: [0; BUFFER_KINDS],
@@ -256,15 +296,18 @@ impl EngineCore {
     /// dry, and then simply fewer input frames are accounted for - the mapping `m = k - R` stays
     /// intact because `k` counts consumed frames, not elapsed time.
     ///
-    /// `output` is the **interleaved stereo** output block starting at `out_pos`, i.e. two samples
-    /// per frame. It is fully overwritten. Its length must be even; a stray odd sample at the end
-    /// is left untouched rather than half a frame being produced.
+    /// `output` is the **bus block** starting at `out_pos`: [`BUS_SAMPLES`] samples per frame,
+    /// interleaved as `[main_l, main_r, monitor_l, monitor_r]`. It is fully overwritten. A stray
+    /// partial frame at the end is left untouched rather than half a frame being produced. Which
+    /// device socket each bus ends up on is decided afterwards, by
+    /// [`super::bus::place_buses`] with [`EngineCore::routing`] - the engine mixes buses, the
+    /// callback wires them.
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) {
         self.refill_spares();
         self.collect_commands();
         self.publish_tempo();
         let in_frames = input.len() / self.input_channels;
-        let out_frames = output.len() / OUT_CHANNELS;
+        let out_frames = output.len() / BUS_SAMPLES;
 
         self.render_with_commands(input, in_frames, output, out_frames);
         self.clamp_and_meter(output);
@@ -352,7 +395,7 @@ impl EngineCore {
     fn publish_tempo(&mut self) {
         let quarter = self.timeline.samples_per_quarter();
         for track in &mut self.tracks {
-            track.fx_mut().set_quarter_samples(quarter);
+            track.set_quarter_samples(quarter);
         }
     }
 
@@ -386,7 +429,7 @@ impl EngineCore {
                 let start = self.out_pos + cursor as u64;
                 // Frame indices become sample offsets only here, on the way into the output slice.
                 self.render(
-                    &mut output[cursor * OUT_CHANNELS..boundary * OUT_CHANNELS],
+                    &mut output[cursor * BUS_SAMPLES..boundary * BUS_SAMPLES],
                     start,
                     input,
                     cursor,
@@ -431,17 +474,21 @@ impl EngineCore {
         }
     }
 
-    /// Click plus every track for one uninterrupted segment, summed into the stereo bus.
+    /// Click plus every track for one uninterrupted segment, summed into the two stereo buses.
     ///
     /// Per track, in this order: the sum of its audible layers, plus its monitored live input,
-    /// through its effect chain, through its panner. Monitoring is a straight pass-through of that
-    /// track's input channel or channel pair, switched independently of whether the track is
-    /// playing, so the musician can play live over his own loop. Its delay is the device roundtrip
-    /// and has nothing to do with loop alignment - the loop is aligned by position, not by when a
-    /// sample travels through the engine.
+    /// through its effect chain, through its panner, into whichever buses those two sources are
+    /// assigned to. Monitoring is a straight pass-through of that track's input channel or channel
+    /// pair, switched independently of whether the track is playing, so the musician can play live
+    /// over his own loop. Its delay is the device roundtrip and has nothing to do with loop
+    /// alignment - the loop is aligned by position, not by when a sample travels through the engine.
     ///
-    /// The click is added to both bus channels at the same level, so it stays in the middle
-    /// whatever the tracks are panned to - it is a reference, not part of the arrangement.
+    /// The click is added to both channels of the **monitor** bus at the same level, so it stays in
+    /// the middle whatever the tracks are panned to, and it reaches Main by no path at all.
+    ///
+    /// The bus volume is applied here, at the very end. It is not smoothed, exactly like the pan and
+    /// the layer gain: every one of them arrives as a stream of small steps from a knob, and a
+    /// smoother on top would be three different smoothers to keep honest.
     ///
     /// `in_base` is the index, inside this block, of the first output *frame* of this segment; it
     /// is what pairs an output frame with the device input frame that arrived with it. When the
@@ -460,19 +507,25 @@ impl EngineCore {
         let monitor_gain = self.monitor_gain;
         let click = self.click;
         let click_gain = self.click_gain;
+        let bus_gain = self.bus_gain;
+        // One way out is one mix. See `Track::render` and `super::bus::BusRouting::collapsed`.
+        let collapsed = self.routing.collapsed();
         // Disjoint field borrows: the sample loop needs `metro`/`timeline` read-only and `tracks`
         // mutably, and those are different fields of `self`.
         let metro = &self.metro;
         let timeline = &self.timeline;
         let tracks = &mut self.tracks;
 
-        for (i, slot) in out.chunks_exact_mut(OUT_CHANNELS).enumerate() {
+        for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
             let pos = start + i as u64;
-            let mut bus = if click {
-                Frame::mono(metro.sample_at(timeline, pos) * click_gain)
-            } else {
-                Frame::SILENT
-            };
+            let mut buses = [Frame::SILENT; BUS_COUNT];
+            if click {
+                // The one hard-wired routing decision in the engine, see the module comment. With
+                // both buses on the same socket there is only the one mix to put it in, and the
+                // click going to the room is exactly the thing that case is announced for.
+                let bus = if collapsed { Bus::Main } else { Bus::Monitor };
+                buses[bus.index()] = Frame::mono(metro.sample_at(timeline, pos) * click_gain);
+            }
             let frame = in_base + i;
             for track in tracks.iter_mut() {
                 // The live input of this track, already stereo: one channel fanned out on a mono
@@ -491,31 +544,46 @@ impl EngineCore {
                 } else {
                     Frame::SILENT
                 };
-                bus = bus.added(track.render(pos, monitor));
+                let sent = track.render(pos, monitor, collapsed);
+                for (bus, part) in buses.iter_mut().zip(sent) {
+                    *bus = bus.added(part);
+                }
             }
-            slot[0] = bus.l;
-            slot[1] = bus.r;
+            for (b, bus) in buses.iter().enumerate() {
+                slot[b * BUS_CHANNELS] = bus.l * bus_gain[b];
+                slot[b * BUS_CHANNELS + 1] = bus.r * bus_gain[b];
+            }
         }
     }
 
-    /// Clamp both bus channels into the usable range and meter each of them separately - a mix
-    /// that clips only on one side has to show that on the side it happens on.
+    /// Clamp every bus channel into the usable range and meter each of them separately - a mix that
+    /// clips only on one side, or only in the headphones, has to show that where it happens.
     #[inline]
     fn clamp_and_meter(&mut self, output: &mut [f32]) {
-        let mut peak = [0.0f32; 2];
-        for frame in output.chunks_exact_mut(OUT_CHANNELS) {
-            for (c, slot) in frame.iter_mut().enumerate() {
+        let mut peak = [[0.0f32; BUS_CHANNELS]; BUS_COUNT];
+        for frame in output.chunks_exact_mut(BUS_SAMPLES) {
+            for (i, slot) in frame.iter_mut().enumerate() {
                 let v = slot.clamp(-1.0, 1.0);
                 *slot = v;
                 let a = v.abs();
-                if a > peak[c] {
-                    peak[c] = a;
+                let cell = &mut peak[i / BUS_CHANNELS][i % BUS_CHANNELS];
+                if a > *cell {
+                    *cell = a;
                 }
             }
         }
-        for c in 0..OUT_CHANNELS {
-            self.output_peak[c] = self.output_peak[c].max(peak[c]);
+        for b in 0..BUS_COUNT {
+            for c in 0..BUS_CHANNELS {
+                self.bus_peak[b][c] = self.bus_peak[b][c].max(peak[b][c]);
+            }
         }
+    }
+
+    /// Where each bus leaves the machine. Read by the output callback right after [`Self::process`],
+    /// which is the only place a bus becomes a socket.
+    #[inline]
+    pub fn routing(&self) -> BusRouting {
+        self.routing
     }
 
     /// Write the consumed input frames into the running takes, latency-compensated, and meter every
@@ -684,6 +752,25 @@ impl EngineCore {
             }
             Command::SetMonitor { track, on } => self.tracks[track].set_monitor(on),
             Command::SetPan { track, pan } => self.tracks[track].set_pan(pan),
+            // The three bus commands are pure output-stage changes: a few bytes each, nothing
+            // allocated, and nothing that can reach a layer buffer. That is what makes them safe to
+            // press while a take is running.
+            Command::SetTrackSend {
+                track,
+                source,
+                send,
+            } => match source {
+                TrackSource::Loop => self.tracks[track].set_loop_send(send),
+                TrackSource::Monitor => self.tracks[track].set_monitor_send(send),
+            },
+            Command::SetBusGain { bus, gain } => {
+                self.bus_gain[bus.index()] = gain.clamp(0.0, MAX_BUS_GAIN);
+            }
+            Command::SetBusOutput { bus, out } => {
+                // Clamped against what the device really has, so a routing that names a socket
+                // nobody owns lands on one that exists instead of going silent.
+                self.routing.set(bus, out.clamped(self.output_channels));
+            }
             // Two integer additions and a store, on a track that already exists. Nothing is
             // allocated and nothing already recorded is moved: the new value decides where the
             // *next* input frame goes, which is the only honest way to change it while a loop is
@@ -759,14 +846,12 @@ impl EngineCore {
             // The effect commands are the cheapest kind there is: they change a few numbers on a
             // chain that already exists. Nothing is allocated, and the coefficient arithmetic
             // behind a preset is a few dozen transcendental operations, once.
-            Command::SetFxBypass { track, on } => self.tracks[track].fx_mut().set_bypass(on),
+            Command::SetFxBypass { track, on } => self.tracks[track].set_fx_bypass(on),
             Command::SetFxEnabled { track, slot, on } => {
-                self.tracks[track].fx_mut().set_enabled(slot, on)
+                self.tracks[track].set_fx_enabled(slot, on)
             }
-            Command::SetFxParam { track, param } => self.tracks[track].fx_mut().set_param(param),
-            Command::LoadFxPreset { track, preset } => {
-                self.tracks[track].fx_mut().load_preset(preset)
-            }
+            Command::SetFxParam { track, param } => self.tracks[track].set_fx_param(param),
+            Command::LoadFxPreset { track, preset } => self.tracks[track].load_fx_preset(preset),
             Command::Stop => {
                 for track in 0..self.tracks.len() {
                     self.cancel_takes(track);
@@ -881,9 +966,11 @@ impl EngineCore {
                 },
                 channels: track.channels().count() as u8,
                 pan: track.pan(),
+                loop_send: track.loop_send(),
+                monitor_send: track.monitor_send(),
                 latency: track.latency(),
                 latency_frames: track.latency_frames().min(u32::MAX as u64) as u32,
-                fx: track.fx_mut().status(),
+                fx: track.fx_status(),
             };
         }
         let status = Status {
@@ -894,7 +981,10 @@ impl EngineCore {
             samples_per_beat: self.timeline.samples_per_beat(),
             tracks,
             track_count: self.tracks.len() as u8,
-            output_peak: self.output_peak,
+            bus_peak: self.bus_peak,
+            bus_gain: self.bus_gain,
+            bus_out: self.routing,
+            output_channels: self.output_channels.min(u8::MAX as usize) as u8,
             click: self.click,
             bpm: self.timeline.bpm(),
             ignored_commands: self.ignored_commands,
@@ -903,7 +993,7 @@ impl EngineCore {
             buffers_taken: self.buffers_taken,
             stopped: self.stopped,
         };
-        self.output_peak = [0.0; 2];
+        self.bus_peak = [[0.0; BUS_CHANNELS]; BUS_COUNT];
         self.status.push(status);
     }
 }
@@ -918,25 +1008,15 @@ pub fn loop_capacity(timeline: &Timeline, bars: u32) -> u64 {
     timeline.span_bars(0, bars) + 64
 }
 
-/// Copy one stereo bus frame into one device output frame, whatever the device's channel count is.
+/// A routing that sends both buses to the same output pair - the one every measurement wants.
 ///
-/// * **Two or more channels**: channel 0 is left, channel 1 is right, and any further pair repeats
-///   them. That is what makes the loop audible on a four-output interface without a routing dialog,
-///   and it is what the loopback measurement expects - a cable in output 1 carries the left bus.
-/// * **One channel**: the two sides are summed at half level. A mono output that simply dropped the
-///   right channel would silence anything panned hard right, which is a far worse surprise than a
-///   fold-down; and half level keeps a centred track at the level it had in the mono engine.
-#[inline]
-pub fn spread_frame(bus: &[f32], out: &mut [f32]) {
-    let l = bus.first().copied().unwrap_or(0.0);
-    let r = bus.get(1).copied().unwrap_or(l);
-    if out.len() == 1 {
-        out[0] = (l + r) * 0.5;
-        return;
-    }
-    for (c, slot) in out.iter_mut().enumerate() {
-        *slot = if c % OUT_CHANNELS == 0 { l } else { r };
-    }
+/// `calibrate` records the engine's own click through a loopback cable plugged into output 1, and
+/// the click lives on the monitor bus. With the ordinary four-output default that bus would leave
+/// on outputs 3/4 and the cable would hear nothing at all, so the measurement would report a
+/// latency that is really an absence of signal. Measuring therefore always runs with both buses on
+/// the same pair, which is also exactly the two-output case the machine is calibrated on.
+pub fn measurement_routing(output_channels: usize) -> BusRouting {
+    BusRouting::new(BusOutput::pair(0), BusOutput::pair(0)).clamped(output_channels)
 }
 
 /// Validate a loop configuration before any buffer is allocated.

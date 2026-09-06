@@ -12,6 +12,9 @@ bpm: 141
 time_signature: 3/4
 
 tracks:
+  # bus / monitor_bus sagen, wo etwas zu hoeren ist: main geht in den Saal, monitor auf den
+  # Kopfhoerer. Ohne Angabe geht der Loop auf beide und das Mithoersignal nur auf den Kopfhoerer -
+  # der Saal hat den Musiker in aller Regel ueber die PA. Der Klick liegt immer nur auf monitor.
   gitarre: {input: 2}
   voice:   {input: 1}        # monitor: true ist Default - du hoerst dich durch die Engine
 

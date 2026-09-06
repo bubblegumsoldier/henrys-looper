@@ -49,20 +49,40 @@
 //!
 //! # Where the effect chain and the panner sit
 //!
-//! Every track owns one [`Chain`] (`engine::fx`), and it is used in exactly one place:
-//! [`Track::render`], which produces the **stereo** frame this track contributes to the mix bus:
+//! A track produces one stereo frame **per output bus** ([`super::bus`]), and [`Track::render`] is
+//! the only place that happens:
 //!
 //! ```text
-//! Ebenen-Summe + Mithoeren  ─►  (mono: auf beide Kanaele)  ─►  Kette  ─►  Panorama  ─►  Mixbus
+//! Ebenen-Summe + Mithoeren  ─►  (mono: auf beide Kanaele)  ─►  Kette  ─►  Panorama  ─►  Bus
 //! ```
 //!
-//! Layers and monitoring go through the same chain instance, so what the musician hears while
-//! singing is what the loop will sound like. The panner sits *after* the chain, the way a DAW
-//! channel strip is built: the reverb is generated in the middle of the field and then placed,
-//! rather than being fed a signal that is already lopsided.
+//! Layers and monitoring go through the same chain, so what the musician hears while singing is
+//! what the loop will sound like. The panner sits *after* the chain, the way a DAW channel strip is
+//! built: the reverb is generated in the middle of the field and then placed, rather than being fed
+//! a signal that is already lopsided.
 //!
 //! Recording never touches either of them: `process::record_input` writes the raw input samples
 //! into the layer buffer, exactly as it did before effects and before stereo existed.
+//!
+//! # Why there is one chain *per bus* and why that is not the thing the plan warned about
+//!
+//! Since the loop and the monitor signal may go to **different** buses, a bus that hears only one
+//! of them cannot be served by a chain that was fed both: a compressor and a reverb are not linear,
+//! so `Kette(a + b)` cannot be taken apart into `Kette(a)` and `Kette(b)` afterwards. Two different
+//! signals need two states, and no amount of arithmetic gets around it.
+//!
+//! So a track owns `BUS_COUNT` chains, one per bus, all carrying identical settings, and chain `b`
+//! processes exactly the sources bus `b` is meant to hear. `docs/architektur.md` section 9 warns
+//! that *"zwei parallele Ketten wuerden beim ersten Parameterwechsel auseinanderlaufen"* - that
+//! warning was about two chains on the **same** signal, which would be a way for the loop and the
+//! live voice to end up sounding different. Here the two carry genuinely different signals, so they
+//! *have* to have different states; that is what a second bus means.
+//!
+//! The cost is kept where it belongs: **when both buses see the same sources, only the first chain
+//! runs** and its output serves both, so the ordinary session pays exactly what it paid before.
+//! The second chain is fed silence then, which its idle detection answers in a single comparison
+//! per sample. The one audible consequence is that a chain waking up from silence starts without a
+//! reverb tail, which is what flipping a routing switch mid-song sounds like anyway.
 //!
 //! # Why the latency compensation lives here and not only in the engine
 //!
@@ -76,8 +96,9 @@
 //! So every track carries its own [`TrackLatency`], and the engine's value is only the **default**
 //! for tracks that do not. See that type for why it is two numbers rather than one.
 
+use super::bus::{BUS_COUNT, Bus, BusSend};
 use super::frame::{Channels, Frame, TrackInput, pan_gains};
-use super::fx::Chain;
+use super::fx::{Chain, FxParam, FxPreset, FxSlot, FxStatus};
 
 /// Hard ceiling of layers per track. Not a pre-allocation: layers are allocated one at a time in
 /// loop length. It exists so a runaway overdub hits a clear German message instead of the memory
@@ -295,9 +316,19 @@ pub struct Track {
     /// hard-panned track that showed the same level on both meters would simply be lying about
     /// where it sits. Monitoring is not part of it either; that path never touches a layer.
     output_peak: [f32; 2],
-    /// This track's effect chain. Playback and monitoring both run through it; see the module
-    /// comment.
-    fx: Chain,
+    /// Which buses this track's **loop playback** feeds.
+    loop_send: BusSend,
+    /// The loop routing a fresh start would have, restored by "alles loeschen".
+    loop_send_default: BusSend,
+    /// Which buses this track's **monitored live input** feeds, independent of the loop. As a rule
+    /// the headphones and not the room: the audience usually has the singer through the PA's own
+    /// channel, and hearing him twice is worse than not hearing him through the looper at all.
+    monitor_send: BusSend,
+    monitor_send_default: BusSend,
+    /// One effect chain per bus, all with identical settings; chain `b` processes what bus `b` is
+    /// meant to hear. See the module comment for why a single chain cannot serve two buses that see
+    /// different sources, and why only the first one runs when they see the same.
+    fx: [Chain; BUS_COUNT],
     /// Latency compensation of this track as it was configured - the two numbers a human sets.
     latency: TrackLatency,
     /// The same, resolved against the engine's default and added up: the `R` of `m = k - R` for
@@ -310,7 +341,7 @@ pub struct Track {
 }
 
 impl Track {
-    /// Built by the control thread - the layer vector and the chain's buffers (delay lines, reverb
+    /// Built by the control thread - the layer vector and the chains' buffers (delay lines, reverb
     /// combs) are the only allocations, and they happen here.
     pub fn new(input: TrackInput, monitor: bool, pan: f32, sample_rate: u32) -> Self {
         let pan = pan.clamp(-1.0, 1.0);
@@ -319,6 +350,10 @@ impl Track {
             channels: input.channels(),
             pan,
             pan_default: pan,
+            loop_send: BusSend::BOTH,
+            loop_send_default: BusSend::BOTH,
+            monitor_send: BusSend::MONITOR,
+            monitor_send_default: BusSend::MONITOR,
             layers: Vec::with_capacity(MAX_LAYERS),
             origin: 0,
             loop_len: 0,
@@ -330,7 +365,7 @@ impl Track {
             monitor_default: monitor,
             input_peak: [0.0; 2],
             output_peak: [0.0; 2],
-            fx: Chain::new(sample_rate),
+            fx: [Chain::new(sample_rate), Chain::new(sample_rate)],
             latency: TrackLatency::INHERITED,
             // Resolved by `EngineCore::new`, which is the only place that knows the default.
             latency_frames: 0,
@@ -375,24 +410,121 @@ impl Track {
         self.latency_frames = self.latency.resolve(default);
     }
 
+    /// The chain that answers for the settings. All of them carry the same ones; this is the one
+    /// that is read back.
     #[inline]
     pub fn fx(&self) -> &Chain {
-        &self.fx
+        &self.fx[0]
+    }
+
+    /// State of the chain for the status snapshot.
+    #[inline]
+    pub fn fx_status(&mut self) -> FxStatus {
+        self.fx[0].status()
+    }
+
+    /// Every chain of this track. Settings are applied to all of them, always, so a parameter can
+    /// never end up meaning two different things on two buses.
+    #[inline]
+    pub fn set_fx_bypass(&mut self, on: bool) {
+        for chain in self.fx.iter_mut() {
+            chain.set_bypass(on);
+        }
     }
 
     #[inline]
-    pub fn fx_mut(&mut self) -> &mut Chain {
-        &mut self.fx
+    pub fn set_fx_enabled(&mut self, slot: FxSlot, on: bool) {
+        for chain in self.fx.iter_mut() {
+            chain.set_enabled(slot, on);
+        }
     }
 
-    /// What this track contributes to the stereo mix bus at musical position `pos`.
+    #[inline]
+    pub fn set_fx_param(&mut self, param: FxParam) {
+        for chain in self.fx.iter_mut() {
+            chain.set_param(param);
+        }
+    }
+
+    #[inline]
+    pub fn load_fx_preset(&mut self, preset: FxPreset) {
+        for chain in self.fx.iter_mut() {
+            chain.load_preset(preset);
+        }
+    }
+
+    #[inline]
+    pub fn set_quarter_samples(&mut self, quarter: f64) {
+        for chain in self.fx.iter_mut() {
+            chain.set_quarter_samples(quarter);
+        }
+    }
+
+    /// Which buses this track's loop playback feeds.
+    #[inline]
+    pub fn loop_send(&self) -> BusSend {
+        self.loop_send
+    }
+
+    #[inline]
+    pub fn set_loop_send(&mut self, send: BusSend) {
+        self.loop_send = send;
+    }
+
+    /// Which buses this track's monitored live input feeds - independent of the loop, because the
+    /// two answer different questions: where the recording belongs, and where the musician needs to
+    /// hear himself.
+    #[inline]
+    pub fn monitor_send(&self) -> BusSend {
+        self.monitor_send
+    }
+
+    #[inline]
+    pub fn set_monitor_send(&mut self, send: BusSend) {
+        self.monitor_send = send;
+    }
+
+    /// The routing a track starts with, used when it is built from a configuration.
+    #[must_use]
+    pub fn with_sends(mut self, loop_send: BusSend, monitor_send: BusSend) -> Self {
+        self.loop_send = loop_send;
+        self.loop_send_default = loop_send;
+        self.monitor_send = monitor_send;
+        self.monitor_send_default = monitor_send;
+        self
+    }
+
+    /// Whether both buses see the same set of sources, so one chain run serves both.
+    ///
+    /// Monitoring that is switched off contributes silence to every bus, so its routing does not
+    /// split anything then - which is why a session where nobody is monitoring costs exactly what
+    /// it cost with a single bus.
+    #[inline(always)]
+    fn buses_share_sources(&self) -> bool {
+        let uniform = |send: BusSend| send.on(Bus::Main) == send.on(Bus::Monitor);
+        uniform(self.loop_send)
+            && (!self.monitor || self.monitor_send.is_silent() || uniform(self.monitor_send))
+    }
+
+    /// What this track contributes to each output bus at musical position `pos`.
     ///
     /// `monitor` is this track's live input, already fanned out to stereo and scaled by the monitor
-    /// gain, or silence when monitoring is off. Layers and monitoring are summed *before* the chain
-    /// on purpose - one chain, one state, so the loop and the live voice over it sound the same -
-    /// and the panner comes last, as in a DAW channel strip.
+    /// gain, or silence when monitoring is off. Per bus, the sources that bus is meant to hear are
+    /// summed *before* the chain - so a musician singing into a track that goes through a reverb
+    /// hears that reverb - and the panner comes last, as in a DAW channel strip.
+    ///
+    /// `collapsed` says that both buses leave on the same device channels, which is what a
+    /// two-output interface forces. There is then **one** way out and therefore one mix: every
+    /// source that is heard on either bus is summed exactly once, into the first bus, and the
+    /// second one stays silent. Rendering both and letting the placement add them up would put a
+    /// track assigned to both buses 6 dB over one assigned to a single bus, and plugging in a
+    /// second output pair would change the balance of the first.
+    ///
+    /// The output meter is unchanged by all of this: it still measures the audible layers, panned,
+    /// before the chain, and it does not care which bus they end up on. It answers "how loud is the
+    /// take", which is a property of the take.
     #[inline]
-    pub fn render(&mut self, pos: u64, monitor: Frame) -> Frame {
+    pub fn render(&mut self, pos: u64, monitor: Frame, collapsed: bool) -> [Frame; BUS_COUNT] {
         let dry = if self.playing {
             self.read(pos)
         } else {
@@ -400,8 +532,47 @@ impl Track {
         };
         let (gain_l, gain_r) = pan_gains(self.pan);
         self.note_output_peak(Frame::new(dry.l * gain_l, dry.r * gain_r));
-        let wet = self.fx.process(dry.added(monitor));
-        Frame::new(wet.l * gain_l, wet.r * gain_r)
+
+        let place = |wet: Frame| Frame::new(wet.l * gain_l, wet.r * gain_r);
+        let source = |bus: Bus, loop_send: BusSend, monitor_send: BusSend| {
+            let mut src = Frame::SILENT;
+            if loop_send.on(bus) {
+                src = src.added(dry);
+            }
+            if monitor_send.on(bus) {
+                src = src.added(monitor);
+            }
+            src
+        };
+
+        if collapsed {
+            let mut src = Frame::SILENT;
+            if !self.loop_send.is_silent() {
+                src = src.added(dry);
+            }
+            if !self.monitor_send.is_silent() {
+                src = src.added(monitor);
+            }
+            let wet = place(self.fx[0].process(src));
+            self.fx[1].process(Frame::SILENT);
+            return [wet, Frame::SILENT];
+        }
+
+        if self.buses_share_sources() {
+            let src = source(Bus::Main, self.loop_send, self.monitor_send);
+            let wet = place(self.fx[0].process(src));
+            // Keep the idle chain settled rather than frozen mid-tail; one comparison per sample
+            // once it has run dry.
+            self.fx[1].process(Frame::SILENT);
+            return [wet; BUS_COUNT];
+        }
+
+        let mut out = [Frame::SILENT; BUS_COUNT];
+        for bus in Bus::ALL {
+            let src = source(bus, self.loop_send, self.monitor_send);
+            out[bus.index()] = place(self.fx[bus.index()].process(src));
+        }
+        out
     }
 
     #[inline]
@@ -839,6 +1010,11 @@ impl Track {
         // It is restored to what the track was *started* with, which is what "wie frisch gestartet"
         // means everywhere else in this function.
         self.pan = self.pan_default;
+        // The bus routing is part of the setup in the same way: which bus a track belongs on was
+        // decided when the stage was wired, not by the material. It goes back to what the track was
+        // started with, not to some blanket value.
+        self.loop_send = self.loop_send_default;
+        self.monitor_send = self.monitor_send_default;
     }
 }
 
@@ -1057,27 +1233,27 @@ mod tests {
 
         assert_eq!(t.pan(), 0.0, "ein Track startet in der Mitte");
         assert_eq!(
-            t.render(1_000, Frame::SILENT),
+            t.render(1_000, Frame::SILENT, false)[0],
             Frame::new(0.5, 0.5),
             "Mitte: gleich laut auf beiden Seiten"
         );
 
         t.set_pan(-1.0);
         assert_eq!(
-            t.render(1_001, Frame::SILENT),
+            t.render(1_001, Frame::SILENT, false)[0],
             Frame::new(0.5, 0.0),
             "ganz links laesst rechts still"
         );
 
         t.set_pan(1.0);
         assert_eq!(
-            t.render(1_002, Frame::SILENT),
+            t.render(1_002, Frame::SILENT, false)[0],
             Frame::new(0.0, 0.5),
             "ganz rechts laesst links still"
         );
 
         t.set_pan(-0.5);
-        assert_eq!(t.render(1_003, Frame::SILENT), Frame::new(0.5, 0.25));
+        assert_eq!(t.render(1_003, Frame::SILENT, false)[0], Frame::new(0.5, 0.25));
 
         // Out of range is clamped, not wrapped.
         t.set_pan(-9.0);
@@ -1093,9 +1269,9 @@ mod tests {
         t.set_take_end(1_001);
         t.finish_take(1_001);
         t.set_playing(true);
-        assert_eq!(t.render(1_000, Frame::SILENT), Frame::new(0.4, 0.8));
+        assert_eq!(t.render(1_000, Frame::SILENT, false)[0], Frame::new(0.4, 0.8));
         t.set_pan(-1.0);
-        assert_eq!(t.render(1_000, Frame::SILENT), Frame::new(0.4, 0.0));
+        assert_eq!(t.render(1_000, Frame::SILENT, false)[0], Frame::new(0.4, 0.0));
     }
 
     /// The output meter is measured after the panner: a hard-panned track that showed level on
@@ -1108,7 +1284,7 @@ mod tests {
         t.finish_take(1_001);
         t.set_playing(true);
         t.set_pan(-1.0);
-        t.render(1_000, Frame::SILENT);
+        t.render(1_000, Frame::SILENT, false);
         assert_eq!(t.take_output_peak(), [0.5, 0.0]);
         assert_eq!(
             t.take_output_peak(),

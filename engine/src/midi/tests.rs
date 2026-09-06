@@ -1140,3 +1140,145 @@ fn each_of_the_five_effects_can_be_switched_by_name() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// 11. The output buses
+// ---------------------------------------------------------------------------------------------
+
+/// The new addresses read the way they are spoken, and they say which of the two sources they mean.
+#[test]
+fn the_bus_addresses_name_the_source_and_the_bus() {
+    use crate::engine::bus::{Bus, TrackSource};
+
+    assert_eq!(
+        Target::parse("global.bus.monitor.gain").unwrap(),
+        Target::BusGain(Bus::Monitor)
+    );
+    assert_eq!(
+        Target::parse("track.1.bus.main").unwrap(),
+        Target::Send(TrackRef::Index(0), TrackSource::Loop, Bus::Main)
+    );
+    assert_eq!(
+        Target::parse("track.stimme.monitor_bus.monitor").unwrap(),
+        Target::Send(
+            TrackRef::Name("stimme".to_string()),
+            TrackSource::Monitor,
+            Bus::Monitor
+        )
+    );
+    // A send is a switch, a bus volume is a knob over the range the engine itself clamps to.
+    assert!(matches!(
+        Target::parse("track.1.bus.main").unwrap().control(),
+        Control::Switch
+    ));
+    match Target::parse("global.bus.main.gain").unwrap().control() {
+        Control::Range(range) => {
+            assert_eq!(range.min, 0.0);
+            assert_eq!(range.max, crate::engine::bus::MAX_BUS_GAIN);
+        }
+        other => panic!("eine Bus-Lautstaerke ist ein Wert, gefunden {other:?}"),
+    }
+    // None of them moves the transport, so none of them is refused while a score plays.
+    for address in ["global.bus.main.gain", "track.1.bus.main", "track.1.monitor_bus.monitor"] {
+        assert!(!Target::parse(address).unwrap().moves_transport(), "{address}");
+    }
+
+    let err = Target::parse("track.1.bus.saal_hinten").expect_err("kein Bus");
+    assert!(err.contains("main und monitor"), "{err}");
+}
+
+/// A send switch changes **one bit of a set**. Switching a track off Main must leave it on the
+/// headphones, which is only possible if the router reads the whole set back first.
+#[test]
+fn a_send_switch_changes_one_bus_and_leaves_the_other_alone() {
+    use crate::engine::bus::{Bus, BusSend, TrackSource};
+
+    let target = Target::Send(TrackRef::Index(0), TrackSource::Loop, Bus::Main);
+    let mut router = router_with(vec![("ch1.note36", Binding::new(target.clone()))]);
+    let layout = layout();
+    // The engine says: this track is heard everywhere, and the switch for Main is therefore on.
+    let state = StaticState::new()
+        .with_switch(&target, true)
+        .with_send(0, TrackSource::Loop, BusSend::BOTH);
+    let ctx = Context {
+        layout: &layout,
+        state: &state,
+        score_is_playing: false,
+    };
+
+    let action = router.resolve(&press(36), &ctx).action().expect("Aktion");
+    assert_eq!(
+        action,
+        MidiAction::Send {
+            track: 0,
+            source: TrackSource::Loop,
+            send: BusSend::MONITOR,
+        },
+        "Main aus, Monitor bleibt"
+    );
+    assert_eq!(
+        action.command(),
+        Some(Command::SetTrackSend {
+            track: 0,
+            source: TrackSource::Loop,
+            send: BusSend::MONITOR,
+        })
+    );
+
+    // And the other way: the same pad on a track that is on neither bus switches Main back on.
+    let state = StaticState::new()
+        .with_switch(&target, false)
+        .with_send(0, TrackSource::Loop, BusSend::NONE);
+    let ctx = Context {
+        layout: &layout,
+        state: &state,
+        score_is_playing: false,
+    };
+    let mut router = router_with(vec![("ch1.note36", Binding::new(target))]);
+    assert_eq!(
+        router.resolve(&press(36), &ctx).action().expect("Aktion"),
+        MidiAction::Send {
+            track: 0,
+            source: TrackSource::Loop,
+            send: BusSend::MAIN,
+        }
+    );
+}
+
+/// A fader on the headphone volume, which is the reason a bus volume has an address at all.
+#[test]
+fn a_knob_on_the_monitor_volume_lands_on_the_engine_command() {
+    use crate::engine::bus::{Bus, MAX_BUS_GAIN};
+
+    let target = Target::BusGain(Bus::Monitor);
+    let mut router = router_with(vec![(
+        "ch1.cc7",
+        Binding::new(target).with_takeover(Takeover::Jump),
+    )]);
+    let layout = layout();
+    let ctx = Context::bare(&layout);
+
+    let action = router.resolve(&cc(7, 127), &ctx).action().expect("Aktion");
+    assert_eq!(
+        action,
+        MidiAction::BusGain {
+            bus: Bus::Monitor,
+            gain: MAX_BUS_GAIN
+        }
+    );
+    assert_eq!(
+        action.command(),
+        Some(Command::SetBusGain {
+            bus: Bus::Monitor,
+            gain: MAX_BUS_GAIN
+        })
+    );
+    // Silence at the bottom end, exactly, without arithmetic that could land a hair off.
+    assert_eq!(
+        router.resolve(&cc(7, 0), &ctx).action().expect("Aktion"),
+        MidiAction::BusGain {
+            bus: Bus::Monitor,
+            gain: 0.0
+        }
+    );
+}

@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
   BandKindName,
+  BusId,
   CalibrateOutcome,
   CompileOutcome,
   DelayNoteName,
@@ -20,6 +21,7 @@ import type {
   Quantize,
   ScoreLoaded,
   StartConfig,
+  TrackSourceId,
 } from "./types";
 import type { MidiPortView, MidiSaved, MidiView } from "./midi/types";
 
@@ -77,6 +79,16 @@ export const api = {
   /** Where the track sits between the speakers: -1 hard left, 0 centre, +1 hard right. */
   trackPan: (track: number, pan: number) => call<void>("track_pan", { track, pan }),
   /**
+   * Which output buses one source of a track is heard on.
+   *
+   * `source` is `loop` (the recorded layers) or `monitor` (the live input while monitoring is on).
+   * A bus assignment is an output decision - it cannot reach a layer buffer - so it stays available
+   * while a take is running and while a score is playing.
+   */
+  trackBus: (track: number, source: TrackSourceId, bus: BusId, on: boolean) =>
+    call<void>("track_bus", { track, source, bus, on }),
+
+  /**
    * What this track subtracts while recording, in frames.
    *
    * `measured` is the loopback value for this input, or null to follow the engine's default;
@@ -120,6 +132,18 @@ export const api = {
     call<void>("set_tempo", { bpm, beats_per_bar: beatsPerBar, beat_unit: beatUnit }),
   /** Grid a recording and an overdub snap to. Armed takes keep the position they already have. */
   setQuantize: (quantize: Quantize) => call<void>("set_quantize", { quantize }),
+  /**
+   * Volume of one output bus, 0 to 4. Half the reason there are two: the headphones can be turned
+   * down without the room changing.
+   */
+  busGain: (bus: BusId, gain: number) => call<void>("bus_gain", { bus, gain }),
+  /**
+   * Which device output channels one bus leaves on. `channel` is one-based; `width` is 2 for a
+   * stereo pair and 1 for a single channel - the stopgap on a two-output interface (main on 1,
+   * monitor on 2, split with a Y-cable).
+   */
+  busOutput: (bus: BusId, channel: number, width: number) =>
+    call<void>("bus_output", { bus, channel, width }),
   /** Makes sound and takes over the device. Only from a stopped engine. */
   calibrate: (config: Record<string, unknown>) => call<CalibrateOutcome>("calibrate", { config }),
 };

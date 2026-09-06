@@ -26,6 +26,7 @@ import { TrackCard, type TrackActions } from "./TrackCard";
 import { DELAY_NOTES, FX_PRESETS, FX_SLOT_ORDER } from "./FxRow";
 import { Warnings } from "./Warnings";
 import { Meter } from "./Meter";
+import { BusStrip } from "./BusStrip";
 import type { AppInfo, EngineInfo, LooperStatus, LooperTrackStatus, Quantize, StartConfig } from "../types";
 
 /**
@@ -104,7 +105,9 @@ function sameTempo(a: Tempo, b: Tempo): boolean {
   );
 }
 
-// The master, per side: a mix that clips only on the right has to say so on the right.
+// The main bus, per side: a mix that clips only on the right has to say so on the right. This is
+// what goes to the room; the monitor bus carries the click and has its own pair of meters on the
+// bus strip, where it belongs next to its own volume.
 const masterLeft = (s: LooperStatus) => s.output_peaks?.[0] ?? 0;
 const masterRight = (s: LooperStatus) => s.output_peaks?.[1] ?? 0;
 
@@ -190,6 +193,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
       play: (t) => run(() => api.trackPlay(t)),
       clear: (t) => run(() => api.trackClear(t)),
       monitor: (t, on) => run(() => api.trackMonitor(t, on)),
+      bus: (t, source, bus, on) => run(() => api.trackBus(t, source, bus, on)),
       pan: (t, pan) => run(() => api.trackPan(t, pan)),
       latency: (t, measured, trim) => run(() => api.trackLatency(t, measured, trim)),
       layerMute: (t, l, muted) => run(() => api.layerMute(t, l, muted)),
@@ -377,8 +381,8 @@ export function LiveView({ info }: { info: AppInfo | null }) {
         </div>
         <div className="spacer" />
         <div className="live-master-meters">
-          <Meter label="Summe L" kind="out" pick={masterLeft} />
-          <Meter label="Summe R" kind="out" pick={masterRight} />
+          <Meter label="Main L" kind="out" pick={masterLeft} />
+          <Meter label="Main R" kind="out" pick={masterRight} />
         </div>
         {/* `data-midi` carries the address of the parameter tree each control stands for, and the
             learn mode reads it off the DOM - see `midi/addresses.ts`. The grid is two separate
@@ -400,7 +404,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
           className={`btn btn-big${tempo.click ? " btn-on" : ""}`}
           data-midi={GLOBAL.click}
           onClick={() => run(() => api.setClick(!tempo.click))}
-          title="Taste K"
+          title="Taste K. Der Klick liegt auf dem Monitor-Bus und erreicht Main auf keinem Weg."
         >
           Klick {tempo.click ? "an" : "aus"} <kbd>K</kbd>
         </button>
@@ -426,6 +430,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
         />
       )}
 
+      <BusStrip run={run} />
       <Warnings />
       <Position />
       <Notes notes={notes} onClear={() => setNotes([])} />

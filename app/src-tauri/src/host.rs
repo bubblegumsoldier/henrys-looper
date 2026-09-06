@@ -35,6 +35,9 @@ use cpal::{InputCallbackInfo, OutputCallbackInfo, SupportedBufferSize};
 use tauri::{AppHandle, Emitter};
 
 use looper_engine::audio::{self, DeviceOpts};
+use looper_engine::engine::bus::{
+    Bus, BusOutput, BusSend, MAX_BUS_GAIN, TrackSource, place_buses, routing_note,
+};
 use looper_engine::engine::calibrate::{CalibrateOpts, cmd_calibrate};
 use looper_engine::engine::command::{
     Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, StatusReceiver, TrackStatus,
@@ -44,9 +47,10 @@ use looper_engine::engine::frame::{Channels, TrackInput};
 use looper_engine::engine::fx::{FxParam, FxPreset, FxSlot};
 use looper_engine::engine::live::MAX_LATENCY_FRAMES;
 use looper_engine::engine::live::TrackDef;
+use looper_engine::engine::bus::BUS_SAMPLES;
 use looper_engine::engine::process::{
-    EngineConfig, EngineCore, OUT_CHANNELS, loop_capacity, max_latency, max_memory_bytes,
-    spare_channels, spare_slots_for, spread_frame, total_channels,
+    EngineConfig, EngineCore, loop_capacity, max_latency, max_memory_bytes, spare_channels,
+    spare_slots_for, total_channels,
 };
 use looper_engine::engine::runner::{
     DEFAULT_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks,
@@ -63,7 +67,7 @@ use crate::midi::{MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView};
 use crate::proto::{
     AppInfo, CalibrateConfig, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
     DeviceReport, EngineInfo, HostInfo, QuantizeName, ScoreLoaded, StartConfig, StatusEvent,
-    TrackConfig, dbfs, score_event, track_event,
+    TrackConfig, bus_events, dbfs, score_event, track_event,
 };
 use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tracks};
 
@@ -109,6 +113,25 @@ pub enum Action {
     SetMonitor { track: usize, on: bool },
     /// Where a track sits between the speakers: -1.0 hard left, 0.0 centre, +1.0 hard right.
     SetPan { track: usize, pan: f32 },
+    /// Which output buses one source of a track (its loop or its monitored input) is heard on.
+    SetTrackSend {
+        track: usize,
+        source: TrackSource,
+        send: BusSend,
+    },
+    /// One bus of that set on or off, which is how it is operated: a switch per bus. The set it
+    /// belongs to is read from the newest engine snapshot before the bit is written back, so
+    /// switching a track off Main cannot take it off the headphones as well.
+    SetTrackBus {
+        track: usize,
+        source: TrackSource,
+        bus: Bus,
+        on: bool,
+    },
+    /// Volume of one output bus, linear.
+    SetBusGain { bus: Bus, gain: f32 },
+    /// Which device output channels one bus leaves on.
+    SetBusOutput { bus: Bus, out: BusOutput },
     /// What this track subtracts while recording, in frames. Takes effect for input arriving from
     /// now on; nothing already in a layer buffer moves.
     SetTrackLatency {
@@ -192,6 +215,8 @@ impl Action {
             | Action::ClearTrack { track }
             | Action::SetMonitor { track, .. }
             | Action::SetPan { track, .. }
+            | Action::SetTrackSend { track, .. }
+            | Action::SetTrackBus { track, .. }
             | Action::SetTrackLatency { track, .. }
             | Action::LayerMute { track, .. }
             | Action::LayerRemove { track, .. }
@@ -202,6 +227,8 @@ impl Action {
             | Action::FxPreset { track, .. } => Some(track),
             Action::ClearAll
             | Action::SetClick { .. }
+            | Action::SetBusGain { .. }
+            | Action::SetBusOutput { .. }
             | Action::SetTempo { .. }
             | Action::SetQuantize { .. } => None,
         }
@@ -587,6 +614,16 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
             MidiIntent::Session(Action::SetMonitor { track, on })
         }
         MidiAction::Pan { track, pan } => MidiIntent::Session(Action::SetPan { track, pan }),
+        MidiAction::Send {
+            track,
+            source,
+            send,
+        } => MidiIntent::Session(Action::SetTrackSend {
+            track,
+            source,
+            send,
+        }),
+        MidiAction::BusGain { bus, gain } => MidiIntent::Session(Action::SetBusGain { bus, gain }),
         MidiAction::LatencyTrim { track, trim } => {
             MidiIntent::Session(Action::SetTrackLatency {
                 track,
@@ -745,6 +782,15 @@ impl SessionState<'_> {
         let (status, _) = self.session.last?;
         status.tracks().get(index).map(|track| track.fx)
     }
+
+    /// The whole bus assignment of one source of a track, as the engine last reported it.
+    fn send_of(&self, index: usize, source: TrackSource) -> BusSend {
+        let status = self.session.status_of(index);
+        match source {
+            TrackSource::Loop => status.loop_send,
+            TrackSource::Monitor => status.monitor_send,
+        }
+    }
 }
 
 impl ParamState for SessionState<'_> {
@@ -766,6 +812,10 @@ impl ParamState for SessionState<'_> {
             Target::FxKnob(track, knob) => {
                 let fx = self.fx(track)?;
                 Some(knob_value(&fx.settings, *knob))
+            }
+            Target::BusGain(bus) => {
+                let (status, _) = self.session.last?;
+                Some(status.bus_gain(*bus))
             }
             _ => None,
         }
@@ -791,8 +841,17 @@ impl ParamState for SessionState<'_> {
                 let fx = self.fx(track)?;
                 Some(fx.settings.enabled[slot.index()])
             }
+            Target::Send(track, source, bus) => {
+                let index = self.index(track)?;
+                Some(self.send_of(index, *source).on(*bus))
+            }
             _ => None,
         }
+    }
+
+    fn send(&self, track: usize, source: TrackSource) -> Option<BusSend> {
+        self.session.last?;
+        Some(self.send_of(track, source))
     }
 }
 
@@ -1117,6 +1176,9 @@ struct Session {
     /// against it (`check_tracks`) and that check compares names *and* inputs, which the display
     /// mirror above does not carry.
     defs: Vec<TrackDef>,
+    /// Output channels the device really has, so a routing that names more can be answered with a
+    /// sentence instead of with silence.
+    output_channels: usize,
     /// The loaded score, or `None`. It owns the whole transport while it is there.
     runner: Option<Runner>,
     info: EngineInfo,
@@ -1186,9 +1248,15 @@ impl Session {
         // the pool only recycles.
         pool.service(None);
 
+        let routing = config.bus_routing(out_channels)?;
+        let bus_gain = config.bus_gain_pair()?;
         let tracks: Vec<Track> = defs
             .iter()
-            .map(|d| Track::new(d.input, config.monitor, d.pan, rate).with_latency(d.latency))
+            .map(|d| {
+                Track::new(d.input, config.monitor, d.pan, rate)
+                    .with_latency(d.latency)
+                    .with_sends(d.loop_send, d.monitor_send)
+            })
             .collect();
         let mut core = EngineCore::new(EngineConfig {
             timeline,
@@ -1203,6 +1271,9 @@ impl Session {
             monitor_gain: config.monitor_gain,
             click: config.click,
             click_gain: config.click_gain,
+            bus_gain,
+            routing,
+            output_channels: out_channels,
             status_interval: (rate / STATUS_HZ).max(1) as u64,
         });
 
@@ -1238,7 +1309,7 @@ impl Session {
         let stats_out = Arc::clone(&stats);
         let stats_out_err = Arc::clone(&stats);
         let mut in_scratch = vec![0.0f32; scratch_frames * in_channels];
-        let mut out_scratch = vec![0.0f32; scratch_frames * OUT_CHANNELS];
+        let mut out_scratch = vec![0.0f32; scratch_frames * BUS_SAMPLES];
         let output = audio::build_output(
             &setup.output,
             &setup.out_plan,
@@ -1262,15 +1333,18 @@ impl Session {
                     }
                     core.process(
                         &in_scratch[..got * in_channels],
-                        &mut out_scratch[..n * OUT_CHANNELS],
+                        &mut out_scratch[..n * BUS_SAMPLES],
                     );
+                    // The one place a bus becomes a socket. The routing comes from the engine, so
+                    // a `SetBusOutput` takes effect on the very next block.
+                    let routing = core.routing();
                     let base = done * out_channels;
                     for (i, frame) in data[base..base + n * out_channels]
                         .chunks_exact_mut(out_channels)
                         .enumerate()
                     {
-                        let bus = &out_scratch[i * OUT_CHANNELS..(i + 1) * OUT_CHANNELS];
-                        spread_frame(bus, frame);
+                        let buses = &out_scratch[i * BUS_SAMPLES..(i + 1) * BUS_SAMPLES];
+                        place_buses(buses, frame, &routing);
                     }
                     done += n;
                 }
@@ -1361,6 +1435,7 @@ impl Session {
                 })
                 .collect(),
             defs,
+            output_channels: out_channels,
             runner: None,
             info,
             last: None,
@@ -1468,7 +1543,11 @@ impl Session {
             click: status.click,
             output_peak: status.output_peak_max(),
             output_dbfs: dbfs(status.output_peak_max()),
-            output_peaks: status.output_peak.to_vec(),
+            output_peaks: status.output_peak().to_vec(),
+            buses: bus_events(status),
+            output_channels: u32::from(status.output_channels),
+            buses_collapsed: status.bus_out.collapsed(),
+            bus_note: routing_note(&status.bus_out, status.output_channels as usize),
             tracks: self
                 .tracks
                 .iter()
@@ -1765,6 +1844,70 @@ impl Session {
                 self.cmd.send(Command::SetPan { track, pan })?;
                 // No message: a knob being turned is not news, and a sentence per mouse move would
                 // make the status line flicker. The new value comes back in the status.
+                Ok(())
+            }
+            // The three bus actions stay available while a score runs: they are mix decisions, and
+            // nothing they touch can move a take (see `Action::moves_transport`).
+            Action::SetTrackSend {
+                track,
+                source,
+                send,
+            } => {
+                self.cmd.send(Command::SetTrackSend {
+                    track,
+                    source,
+                    send,
+                })?;
+                self.message = Some(format!(
+                    "\"{}\": {} -> {}.",
+                    self.tracks[track].name,
+                    source.label(),
+                    send.label()
+                ));
+                Ok(())
+            }
+            Action::SetTrackBus {
+                track,
+                source,
+                bus,
+                on,
+            } => {
+                let current = match source {
+                    TrackSource::Loop => self.status_of(track).loop_send,
+                    TrackSource::Monitor => self.status_of(track).monitor_send,
+                };
+                self.apply(Action::SetTrackSend {
+                    track,
+                    source,
+                    send: current.with(bus, on),
+                })
+            }
+            Action::SetBusGain { bus, gain } => {
+                if !(0.0..=MAX_BUS_GAIN).contains(&gain) {
+                    return Err(format!(
+                        "Die Bus-Lautstaerke muss zwischen 0.0 und {MAX_BUS_GAIN} liegen."
+                    ));
+                }
+                self.cmd.send(Command::SetBusGain { bus, gain })?;
+                // No message, for the same reason a pan produces none: a fader being ridden is not
+                // news, and the new value comes back in the status anyway.
+                Ok(())
+            }
+            Action::SetBusOutput { bus, out } => {
+                if out.width == 0 || out.width > 2 {
+                    return Err("Ein Bus liegt auf einem Kanal oder auf einem Paar.".to_string());
+                }
+                self.cmd.send(Command::SetBusOutput { bus, out })?;
+                self.message = Some(format!(
+                    "{} liegt auf Ausgang {}.{}",
+                    bus.label(),
+                    out.label(),
+                    if out.first + out.width > self.output_channels {
+                        " Das Geraet hat so viele Kanaele nicht - der Bus landet auf dem naechsten                          Paar, das es gibt."
+                    } else {
+                        ""
+                    }
+                ));
                 Ok(())
             }
             Action::SetTrackLatency { track, latency } => self.set_track_latency(track, latency),

@@ -30,7 +30,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use looper_engine::engine::command::TrackStatus;
+use looper_engine::engine::bus::{
+    BUS_COUNT, Bus, BusOutput, BusRouting, BusSend, MAX_BUS_GAIN,
+};
+use looper_engine::engine::command::{Status, TrackStatus};
 use looper_engine::engine::fx::{
     BandKind, DelayNote, EQ_BANDS, FxParam, FxPreset, FxSlot, FxStatus,
 };
@@ -133,6 +136,15 @@ pub struct TrackConfig {
     /// an external plugin host has inside itself. Never touched by a calibration.
     #[serde(default)]
     pub latency_trim: i32,
+    /// Which output buses this track's **loop playback** is heard on: `main`, `monitor`,
+    /// `main+monitor` (the default) or `none`.
+    #[serde(default)]
+    pub bus: Option<String>,
+    /// Which output buses this track's **monitored live input** is heard on, independent of the
+    /// loop. Absent means `monitor`: the room usually has the musician through the PA's own
+    /// channel, and hearing him twice is worse than not hearing him through the looper at all.
+    #[serde(default)]
+    pub monitor_bus: Option<String>,
 }
 
 impl TrackConfig {
@@ -146,7 +158,25 @@ impl TrackConfig {
             pan: 0.0,
             latency_frames: None,
             latency_trim: 0,
+            bus: None,
+            monitor_bus: None,
         }
+    }
+
+    /// Which buses this track's loop is heard on, with a German error rather than a silent default
+    /// when the word is not a bus.
+    pub fn loop_send(&self, name: &str) -> Result<BusSend, String> {
+        parse_send(self.bus.as_deref(), BusSend::BOTH, name, "bus")
+    }
+
+    /// The same for the monitored live input.
+    pub fn monitor_send(&self, name: &str) -> Result<BusSend, String> {
+        parse_send(
+            self.monitor_bus.as_deref(),
+            BusSend::MONITOR,
+            name,
+            "monitor_bus",
+        )
     }
 
     /// 1 for a mono track, 2 for a stereo one.
@@ -161,6 +191,63 @@ impl TrackConfig {
             trim: self.latency_trim,
         }
     }
+}
+
+/// One bus assignment as the frontend writes it, or the given default when it says nothing.
+fn parse_send(
+    text: Option<&str>,
+    fallback: BusSend,
+    track: &str,
+    field: &str,
+) -> Result<BusSend, String> {
+    match text {
+        None => Ok(fallback),
+        Some(text) => BusSend::parse(text).ok_or_else(|| {
+            format!(
+                "Track \"{track}\": \"{text}\" ist keine Bus-Angabe fuer \"{field}\". Erlaubt sind \
+                 main, monitor, main+monitor und none."
+            )
+        }),
+    }
+}
+
+/// Where one bus leaves, as the frontend writes it: the **one-based** first channel and how wide it
+/// is. Width 1 folds the bus to mono onto that one channel - the stopgap on a two-output interface.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct BusOutConfig {
+    /// One-based, as printed on the interface.
+    pub channel: u32,
+    /// 1 or 2. Absent means a stereo pair.
+    #[serde(default = "default_width")]
+    pub width: u32,
+}
+
+fn default_width() -> u32 {
+    2
+}
+
+impl BusOutConfig {
+    pub fn to_output(self, bus: Bus) -> Result<BusOutput, String> {
+        if self.channel == 0 {
+            return Err(format!(
+                "{}: Ausgaenge werden ab 1 gezaehlt, wie am Geraet beschriftet.",
+                bus.label()
+            ));
+        }
+        if self.width == 0 || self.width > 2 {
+            return Err(format!(
+                "{}: ein Bus liegt auf einem Kanal oder auf einem Paar, nicht auf {}.",
+                bus.label(),
+                self.width
+            ));
+        }
+        Ok(BusOutput {
+            first: self.channel as usize - 1,
+            width: self.width as usize,
+        })
+    }
+
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -281,6 +368,69 @@ pub struct StartConfig {
     /// Start with input monitoring switched on, for every track.
     #[serde(default)]
     pub monitor: bool,
+    /// Which device output channels the **main** bus (to the PA) leaves on. Absent means outputs
+    /// 1-2.
+    #[serde(default)]
+    pub bus_out_main: Option<BusOutConfig>,
+    /// Which device output channels the **monitor** bus (to the headphones, and the only bus the
+    /// click is on) leaves on. Absent means outputs 3-4 on a device that has four or more, and
+    /// outputs 1-2 on one that does not - where both buses are then folded into one mix, which the
+    /// engine says out loud rather than quietly switching the click off.
+    #[serde(default)]
+    pub bus_out_monitor: Option<BusOutConfig>,
+    /// Volume of the main bus, linear. Absent means 1.0.
+    #[serde(default)]
+    pub bus_gain_main: Option<f32>,
+    /// Volume of the monitor bus, linear. The point of having two: the headphones can be turned
+    /// down without the room changing.
+    #[serde(default)]
+    pub bus_gain_monitor: Option<f32>,
+}
+
+impl StartConfig {
+    /// Where the two buses leave, clamped to what a device with `output_channels` outputs can
+    /// actually carry.
+    pub fn bus_routing(&self, output_channels: usize) -> Result<BusRouting, String> {
+        let mut routing = BusRouting::default_for(output_channels);
+        for (bus, config) in [
+            (Bus::Main, self.bus_out_main),
+            (Bus::Monitor, self.bus_out_monitor),
+        ] {
+            if let Some(config) = config {
+                let out = config.to_output(bus)?;
+                if out.first + out.width > output_channels {
+                    return Err(format!(
+                        "{}: das Geraet hat {output_channels} Ausgangskanaele, Kanal {} gibt es \
+                         nicht.",
+                        bus.label(),
+                        out.first + out.width
+                    ));
+                }
+                routing.set(bus, out);
+            }
+        }
+        Ok(routing.clamped(output_channels))
+    }
+
+    /// The volume of each bus, in engine order.
+    pub fn bus_gain_pair(&self) -> Result<[f32; BUS_COUNT], String> {
+        let mut gains = [1.0f32; BUS_COUNT];
+        for (bus, value) in [
+            (Bus::Main, self.bus_gain_main),
+            (Bus::Monitor, self.bus_gain_monitor),
+        ] {
+            if let Some(value) = value {
+                if !(0.0..=MAX_BUS_GAIN).contains(&value) {
+                    return Err(format!(
+                        "{}: die Lautstaerke muss zwischen 0.0 und {MAX_BUS_GAIN} liegen.",
+                        bus.label()
+                    ));
+                }
+                gains[bus.index()] = value;
+            }
+        }
+        Ok(gains)
+    }
 }
 
 fn default_host() -> String {
@@ -421,6 +571,19 @@ pub struct TrackStatusEvent {
     /// Position in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
     pub pan: f32,
 
+    // --- output buses -------------------------------------------------------------------------
+    // Two switches per source rather than one word, because that is how they are operated: "geht
+    // dieser Track in den Saal" is a question with a yes and a no, and a select with four entries
+    // would make it two clicks and a reading exercise.
+    /// Loop playback of this track is heard on the main bus (to the PA).
+    pub bus_main: bool,
+    /// Loop playback of this track is heard on the monitor bus (to the headphones).
+    pub bus_monitor: bool,
+    /// The monitored live input of this track is heard on the main bus.
+    pub monitor_bus_main: bool,
+    /// The monitored live input of this track is heard on the monitor bus.
+    pub monitor_bus_monitor: bool,
+
     // --- latency compensation ----------------------------------------------------------------
     // Four fields rather than one number, because a display that shows only the effective value
     // cannot say whether it is a setting or something this track happens to have inherited - and
@@ -511,12 +674,28 @@ pub struct StatusEvent {
     /// The engine's **default** compensation in frames. A track that brings its own reports it in
     /// its own entry; this is what the others follow.
     pub latency_frames: u64,
+    /// The metronome. It is on the **monitor** bus and reaches the main bus by no path at all -
+    /// unless the two share a socket, in which case `buses_collapsed` says so.
     pub click: bool,
-    /// Louder side of the produced output block.
+    /// Louder side of the main bus, i.e. of what goes to the room. The monitor bus carries the
+    /// click, so a single "output level" that included it would be useless for setting a mix.
     pub output_peak: f32,
     pub output_dbfs: Option<f64>,
-    /// Left and right of the master bus, always two entries.
+    /// Left and right of the main bus, always two entries.
     pub output_peaks: Vec<f32>,
+
+    // --- the two output buses ------------------------------------------------------------------
+    /// One entry per bus, main first. Everything a mixer strip for the bus needs.
+    pub buses: Vec<BusStatusEvent>,
+    /// How many output channels the device really has - what a routing selector may offer.
+    pub output_channels: u32,
+    /// True while both buses leave on exactly the same channels, which is what a two-output
+    /// interface forces. There is then one mix: every source is heard once, the click included, and
+    /// the monitor volume has nothing to regulate on its own.
+    pub buses_collapsed: bool,
+    /// The German sentence explaining an overlapping routing, or `null` when the buses are apart.
+    pub bus_note: Option<String>,
+
     pub tracks: Vec<TrackStatusEvent>,
 
     /// What the runner is doing, or `null` while no score is loaded. It rides along in the ordinary
@@ -570,6 +749,10 @@ impl StatusEvent {
             output_peak: 0.0,
             output_dbfs: None,
             output_peaks: vec![0.0, 0.0],
+            buses: Vec::new(),
+            output_channels: 0,
+            buses_collapsed: false,
+            bus_note: None,
             tracks: Vec::new(),
             score: None,
             xruns: 0,
@@ -582,6 +765,57 @@ impl StatusEvent {
             message: None,
         }
     }
+}
+
+/// One output bus in the status event: where it goes, how loud it is, and what leaves on it.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct BusStatusEvent {
+    /// `main` or `monitor` - what a command names it.
+    pub id: String,
+    /// German label, ready to print.
+    pub label: String,
+    /// First device output channel, **one-based**.
+    pub channel: u32,
+    /// 1 (folded to mono onto `channel`) or 2 (a stereo pair).
+    pub width: u32,
+    /// `1-2` or `3`, ready to print.
+    pub channel_label: String,
+    /// Linear volume.
+    pub gain: f32,
+    /// Louder side, and both sides, measured after the volume - what actually leaves.
+    pub peak: f32,
+    pub dbfs: Option<f64>,
+    pub peaks: Vec<f32>,
+    /// True for the bus the click is on. Hard-wired, and the reason the buses exist.
+    pub has_click: bool,
+}
+
+/// Both buses, from the engine snapshot.
+pub fn bus_events(status: &Status) -> Vec<BusStatusEvent> {
+    let collapsed = status.bus_out.collapsed();
+    Bus::ALL
+        .into_iter()
+        .map(|bus| {
+            let out = status.bus_out.get(bus);
+            let peaks = status.bus_peak(bus);
+            let peak = status.bus_peak_max(bus);
+            BusStatusEvent {
+                id: bus.name().to_string(),
+                label: bus.label().to_string(),
+                channel: out.first as u32 + 1,
+                width: out.width as u32,
+                channel_label: out.label(),
+                gain: status.bus_gain(bus),
+                peak,
+                dbfs: dbfs(peak),
+                peaks: peaks.to_vec(),
+                // With one way out there is one mix, and the click is in it - which is exactly the
+                // thing the note underneath says out loud.
+                has_click: bus == Bus::Monitor || (collapsed && bus == Bus::Main),
+            }
+        })
+        .collect()
 }
 
 /// Build the per-track part of a status event from the engine snapshot plus the control-side
@@ -617,6 +851,10 @@ pub fn track_event(
         channels: ts.channels as u32,
         channels_label: if ts.channels >= 2 { "stereo" } else { "mono" }.to_string(),
         pan: ts.pan,
+        bus_main: ts.loop_send.on(Bus::Main),
+        bus_monitor: ts.loop_send.on(Bus::Monitor),
+        monitor_bus_main: ts.monitor_send.on(Bus::Main),
+        monitor_bus_monitor: ts.monitor_send.on(Bus::Monitor),
         latency_frames: u64::from(ts.latency_frames),
         latency_ms: f64::from(ts.latency_frames) * 1000.0 / rate,
         latency_measured: ts.latency.measured,
@@ -1275,6 +1513,10 @@ mod tests {
             input_channels: [1, 0],
             channels: 1,
             pan: 0.0,
+            // Heard in the room and in the headphones; the live input is a cue and stays in the
+            // headphones until somebody says otherwise.
+            loop_send: BusSend::BOTH,
+            monitor_send: BusSend::MONITOR,
             // Follows the engine's default, which the engine has already resolved to 827.
             latency: TrackLatency::INHERITED,
             latency_frames: 827,
@@ -1491,6 +1733,9 @@ mod tests {
                 "beat_unit",
                 "beats_per_bar",
                 "bpm",
+                "bus_note",
+                "buses",
+                "buses_collapsed",
                 "click",
                 "fifo_overruns",
                 "fifo_underruns",
@@ -1501,6 +1746,7 @@ mod tests {
                 "max_callback_ms",
                 "message",
                 "other_errors",
+                "output_channels",
                 "output_dbfs",
                 "output_peak",
                 "output_peaks",
@@ -1547,6 +1793,8 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "bus_main",
+                "bus_monitor",
                 "channels",
                 "channels_label",
                 "filled_samples",
@@ -1566,6 +1814,8 @@ mod tests {
                 "loop_samples",
                 "loop_seconds",
                 "monitor",
+                "monitor_bus_main",
+                "monitor_bus_monitor",
                 "name",
                 "output_dbfs",
                 "output_peak",
@@ -2138,5 +2388,135 @@ mod tests {
             serde_json::to_value(unknown).unwrap()["min_buffer_frames"],
             Value::Null
         );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The output buses
+    // ------------------------------------------------------------------------------------------
+
+    fn start_config(tracks: Vec<TrackConfig>) -> StartConfig {
+        serde_json::from_value(json!({ "tracks": tracks })).expect("StartConfig")
+    }
+
+    /// Four outputs: the two buses lie apart, and the click badge sits on the monitor bus alone.
+    #[test]
+    fn the_bus_events_say_where_each_bus_goes_and_which_one_has_the_click() {
+        let status = Status {
+            bus_out: BusRouting::default_for(4),
+            bus_gain: [1.0, 0.5],
+            bus_peak: [[0.5, 0.25], [1.0, 1.0]],
+            output_channels: 4,
+            ..Default::default()
+        };
+        let buses = bus_events(&status);
+        assert_eq!(buses.len(), 2);
+
+        let main = &buses[0];
+        assert_eq!(main.id, "main");
+        assert_eq!(main.channel_label, "1-2");
+        assert_eq!((main.channel, main.width), (1, 2));
+        assert_eq!(main.gain, 1.0);
+        assert_eq!(main.peaks, vec![0.5, 0.25]);
+        assert_eq!(main.peak, 0.5);
+        assert!(!main.has_click, "der Klick erreicht Main auf keinem Weg");
+
+        let monitor = &buses[1];
+        assert_eq!(monitor.id, "monitor");
+        assert_eq!(monitor.channel_label, "3-4");
+        assert_eq!(monitor.gain, 0.5);
+        assert!(monitor.has_click);
+    }
+
+    /// Two outputs: one way out, one mix - and the display has to say that the room gets the click,
+    /// rather than showing a main bus that looks clean.
+    #[test]
+    fn a_collapsed_routing_marks_the_click_on_both_buses() {
+        let status = Status {
+            bus_out: BusRouting::default_for(2),
+            bus_gain: [1.0, 1.0],
+            output_channels: 2,
+            ..Default::default()
+        };
+        let buses = bus_events(&status);
+        assert!(buses.iter().all(|b| b.has_click));
+        assert!(status.bus_out.collapsed());
+    }
+
+    /// What the setup screen sends, and what happens when it names a socket the device has not got.
+    #[test]
+    fn the_start_config_resolves_the_bus_routing_against_the_device() {
+        // Nothing said: the engine picks the split that fits.
+        let config = start_config(vec![TrackConfig::mono("stimme", 1)]);
+        let four = config.bus_routing(4).expect("vier Ausgaenge");
+        assert_eq!(four.get(Bus::Monitor), BusOutput::pair(2));
+        assert!(!four.overlaps());
+        let two = config.bus_routing(2).expect("zwei Ausgaenge");
+        assert!(two.collapsed(), "zwei Ausgaenge sind ein Weg hinaus");
+        assert_eq!(config.bus_gain_pair().expect("Lautstaerken"), [1.0, 1.0]);
+
+        // The stopgap: mix left, click right, both folded to mono.
+        let split: StartConfig = serde_json::from_value(json!({
+            "tracks": [TrackConfig::mono("stimme", 1)],
+            "bus_out_main": {"channel": 1, "width": 1},
+            "bus_out_monitor": {"channel": 2, "width": 1},
+            "bus_gain_monitor": 0.5,
+        }))
+        .expect("StartConfig");
+        let routing = split.bus_routing(2).expect("zwei Ausgaenge");
+        assert_eq!(routing.get(Bus::Main), BusOutput::mono(0));
+        assert_eq!(routing.get(Bus::Monitor), BusOutput::mono(1));
+        assert!(!routing.overlaps());
+        assert_eq!(split.bus_gain_pair().expect("Lautstaerken"), [1.0, 0.5]);
+
+        // A socket the device has not got is a German sentence, not a silent bus.
+        let err = split.bus_routing(1).expect_err("Kanal 2 gibt es nicht");
+        assert!(err.contains("Ausgangskanaele"), "{err}");
+
+        let too_loud: StartConfig = serde_json::from_value(json!({
+            "tracks": [TrackConfig::mono("stimme", 1)],
+            "bus_gain_main": 9.0,
+        }))
+        .expect("StartConfig");
+        let err = too_loud.bus_gain_pair().expect_err("zu laut");
+        assert!(err.contains("Lautstaerke"), "{err}");
+    }
+
+    /// A track says where it is heard in words, and a word that is not a bus is refused by name.
+    #[test]
+    fn a_track_config_reads_its_bus_assignment_or_says_why_not() {
+        let plain = TrackConfig::mono("stimme", 1);
+        assert_eq!(plain.loop_send("stimme").unwrap(), BusSend::BOTH);
+        assert_eq!(plain.monitor_send("stimme").unwrap(), BusSend::MONITOR);
+
+        let cue = TrackConfig {
+            bus: Some("monitor".to_string()),
+            monitor_bus: Some("main+monitor".to_string()),
+            ..TrackConfig::mono("klick_gtr", 2)
+        };
+        assert_eq!(cue.loop_send("klick_gtr").unwrap(), BusSend::MONITOR);
+        assert_eq!(cue.monitor_send("klick_gtr").unwrap(), BusSend::BOTH);
+
+        let wrong = TrackConfig {
+            bus: Some("saal_hinten".to_string()),
+            ..TrackConfig::mono("stimme", 1)
+        };
+        let err = wrong.loop_send("stimme").expect_err("kein Bus");
+        assert!(err.contains("saal_hinten"), "{err}");
+        assert!(err.contains("main+monitor"), "die Liste steht dabei: {err}");
+    }
+
+    /// The four per-track flags in the status event follow the two sends the engine reports.
+    #[test]
+    fn a_track_entry_carries_both_bus_assignments_separately() {
+        let ts = TrackStatus {
+            loop_send: BusSend::MAIN,
+            monitor_send: BusSend::MONITOR,
+            ..sample_status()
+        };
+        let event = track_event(0, "stimme", &ts, &[], RATE, Lead::default());
+        assert!(event.bus_main);
+        assert!(!event.bus_monitor);
+        assert!(!event.monitor_bus_main);
+        assert!(event.monitor_bus_monitor);
     }
 }

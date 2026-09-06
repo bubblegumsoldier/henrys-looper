@@ -64,11 +64,15 @@ use super::command::{
     Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, StatusReceiver, TrackStatus,
     buffer_channel, command_channel, status_channel,
 };
+use super::bus::{
+    BUS_COUNT, BUS_SAMPLES, Bus, BusOutput, BusRouting, BusSend, MAX_BUS_GAIN, TrackSource,
+    place_buses, routing_note,
+};
 use super::frame::{Channels, TrackInput};
 use super::fx::{DelayNote, FxParam, FxPreset, FxSlot, FxStatus};
 use super::process::{
-    EngineConfig, EngineCore, OUT_CHANNELS, check_loop, limits_line, loop_capacity, max_latency,
-    spare_channels, spare_slots_for, spread_frame, total_channels,
+    EngineConfig, EngineCore, check_loop, limits_line, loop_capacity, max_latency, spare_channels,
+    spare_slots_for, total_channels,
 };
 use super::schedule::{Lead, Quantize, Scheduled, Scheduler};
 use super::timeline::{TimeSignature, Timeline};
@@ -132,6 +136,30 @@ pub struct LiveOpts {
     #[arg(long = "track-latency", value_name = "NAME:FRAMES[+ZUSCHLAG]")]
     pub track_latencies: Vec<String>,
 
+    /// Ausgangspaar eines Busses, mehrfach angebbar: BUS:KANAL[-KANAL] mit BUS = main oder
+    /// monitor. Der Klick liegt immer und nur auf dem Monitor-Bus.
+    /// Voreinstellung: ab vier Ausgaengen main:1-2 und monitor:3-4, sonst beide auf 1-2 (dann
+    /// summiert, der Klick geht mit in den Saal).
+    /// Notbehelf mit zwei Ausgaengen: --bus-out main:1 --bus-out monitor:2 (Mix links, Klick
+    /// rechts, mit einem Y-Kabel aufzutrennen).
+    #[arg(long = "bus-out", value_name = "BUS:KANAL[-KANAL]")]
+    pub bus_outs: Vec<String>,
+
+    /// Lautstaerke eines Busses, mehrfach angebbar: BUS:WERT, z.B. --bus-gain monitor:0.8.
+    /// Damit laesst sich der Kopfhoerer regeln, ohne den Saal zu veraendern.
+    #[arg(long = "bus-gain", value_name = "BUS:WERT")]
+    pub bus_gains: Vec<String>,
+
+    /// Auf welche Busse die Loop-Wiedergabe eines Tracks geht, mehrfach angebbar:
+    /// NAME:main | monitor | main+monitor | none. Voreinstellung main+monitor.
+    #[arg(long = "track-bus", value_name = "NAME:BUS")]
+    pub track_buses: Vec<String>,
+
+    /// Auf welche Busse das Mithoer-Signal eines Tracks geht, unabhaengig von der Wiedergabe.
+    /// Voreinstellung monitor - der Saal hoert den Musiker in der Regel ueber die PA.
+    #[arg(long = "track-monitor-bus", value_name = "NAME:BUS")]
+    pub track_monitor_buses: Vec<String>,
+
     /// Verstaerkung des mitgehoerten Eingangssignals
     #[arg(long, default_value_t = 1.0)]
     pub monitor_gain: f32,
@@ -165,6 +193,12 @@ pub struct TrackDef {
     /// Latency compensation of this track. Follows the global default unless `--track-latency`
     /// (or the app, or the score) said otherwise.
     pub latency: TrackLatency,
+    /// Which output buses this track's loop playback feeds. Both by default: a loop belongs in the
+    /// room *and* in the headphones.
+    pub loop_send: BusSend,
+    /// Which output buses this track's monitored live input feeds. The headphones by default; see
+    /// [`super::bus::TrackSource`].
+    pub monitor_send: BusSend,
 }
 
 impl TrackDef {
@@ -180,6 +214,8 @@ impl TrackDef {
             input: TrackInput::Mono(channel),
             pan: 0.0,
             latency: TrackLatency::INHERITED,
+            loop_send: BusSend::BOTH,
+            monitor_send: BusSend::MONITOR,
         }
     }
 }
@@ -381,7 +417,188 @@ pub fn parse_track_arg(spec: &str) -> Result<TrackDef, String> {
         // The compensation is a separate argument: it is set once per interface and cabling, while
         // the channel and the pan are set per song.
         latency: TrackLatency::INHERITED,
+        // The bus routing is a separate argument for the same reason, and because cramming a third
+        // suffix onto `NAME:KANAL@PAN` would make the one argument nobody could read.
+        loop_send: BusSend::BOTH,
+        monitor_send: BusSend::MONITOR,
     })
+}
+
+/// Parse one `--track-bus` / `--track-monitor-bus` argument into a track name and its routing.
+///
+/// ```text
+/// stimme:main            nur in den Saal
+/// stimme:monitor         nur auf den Kopfhoerer
+/// klick_track:main+monitor
+/// alt:none               vorerst nirgends
+/// ```
+pub fn parse_track_send_arg(flag: &str, spec: &str) -> Result<(String, BusSend), String> {
+    let spec = spec.trim();
+    let Some((name, value)) = spec.rsplit_once(':') else {
+        return Err(format!(
+            "{flag} \"{spec}\" ist unvollstaendig. Erwartet wird NAME:BUS, z.B. \
+             {flag} stimme:main+monitor"
+        ));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!(
+            "{flag} \"{spec}\": vor dem Doppelpunkt fehlt der Trackname."
+        ));
+    }
+    let Some(send) = BusSend::parse(value) else {
+        return Err(format!(
+            "{flag} \"{spec}\": \"{}\" ist keine Bus-Angabe. Erlaubt sind main, monitor, \
+             main+monitor und none.",
+            value.trim()
+        ));
+    };
+    Ok((name.to_string(), send))
+}
+
+/// Apply every `--track-bus` / `--track-monitor-bus` argument to the track it names.
+///
+/// An unknown name is an error for the same reason `--track-latency` refuses one: a typo would
+/// leave the track it was meant for on a bus the musician thinks he changed, and he would find out
+/// on stage.
+pub fn apply_track_sends(
+    defs: &mut [TrackDef],
+    source: TrackSource,
+    specs: &[String],
+) -> Result<(), String> {
+    let flag = match source {
+        TrackSource::Loop => "--track-bus",
+        TrackSource::Monitor => "--track-monitor-bus",
+    };
+    for spec in specs {
+        let (name, send) = parse_track_send_arg(flag, spec)?;
+        match defs.iter_mut().find(|d| d.name == name) {
+            Some(def) => match source {
+                TrackSource::Loop => def.loop_send = send,
+                TrackSource::Monitor => def.monitor_send = send,
+            },
+            None => {
+                let known: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+                return Err(format!(
+                    "{flag} \"{spec}\": den Track \"{name}\" gibt es nicht. Vorhanden: {}.",
+                    known.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse one `--bus-out` argument: `main:1-2`, `monitor:3-4`, `monitor:2`.
+///
+/// A single channel is not a mistake, it is the stopgap for a two-output interface: `--bus-out
+/// main:1 --bus-out monitor:2` puts the mix on the left and the click on the right.
+pub fn parse_bus_out_arg(spec: &str) -> Result<(Bus, BusOutput), String> {
+    let spec = spec.trim();
+    let Some((bus, channels)) = spec.rsplit_once(':') else {
+        return Err(format!(
+            "--bus-out \"{spec}\" ist unvollstaendig. Erwartet wird BUS:KANAL[-KANAL], z.B. \
+             --bus-out monitor:3-4"
+        ));
+    };
+    let Some(bus) = Bus::parse(bus) else {
+        return Err(format!(
+            "--bus-out \"{spec}\": \"{}\" ist kein Bus. Es gibt main und monitor.",
+            bus.trim()
+        ));
+    };
+    let number = |text: &str| -> Result<usize, String> {
+        let text = text.trim();
+        let value: usize = text.parse().map_err(|_| {
+            format!("--bus-out \"{spec}\": \"{text}\" ist keine Kanalnummer (ganze Zahl ab 1).")
+        })?;
+        if value == 0 {
+            return Err(format!(
+                "--bus-out \"{spec}\": Kanaele werden ab 1 gezaehlt, wie am Geraet beschriftet."
+            ));
+        }
+        Ok(value - 1)
+    };
+    let out = match channels.trim().split_once('-') {
+        Some((left, right)) => {
+            let left = number(left)?;
+            let right = number(right)?;
+            if right != left + 1 {
+                return Err(format!(
+                    "--bus-out \"{spec}\": ein Bus liegt auf einem benachbarten Kanalpaar, also \
+                     z.B. {}-{}. Fuer einen einzelnen Kanal reicht {}:{}.",
+                    left + 1,
+                    left + 2,
+                    bus.name(),
+                    left + 1
+                ));
+            }
+            BusOutput::pair(left)
+        }
+        None => BusOutput::mono(number(channels)?),
+    };
+    Ok((bus, out))
+}
+
+/// Parse one `--bus-gain` argument: `monitor:0.8`.
+pub fn parse_bus_gain_arg(spec: &str) -> Result<(Bus, f32), String> {
+    let spec = spec.trim();
+    let Some((bus, value)) = spec.rsplit_once(':') else {
+        return Err(format!(
+            "--bus-gain \"{spec}\" ist unvollstaendig. Erwartet wird BUS:WERT, z.B. \
+             --bus-gain monitor:0.8"
+        ));
+    };
+    let Some(bus) = Bus::parse(bus) else {
+        return Err(format!(
+            "--bus-gain \"{spec}\": \"{}\" ist kein Bus. Es gibt main und monitor.",
+            bus.trim()
+        ));
+    };
+    let gain: f32 = value.trim().parse().map_err(|_| {
+        format!(
+            "--bus-gain \"{spec}\": \"{}\" ist keine Zahl.",
+            value.trim()
+        )
+    })?;
+    if !(0.0..=MAX_BUS_GAIN).contains(&gain) {
+        return Err(format!(
+            "--bus-gain \"{spec}\": die Lautstaerke muss zwischen 0.0 und {MAX_BUS_GAIN} liegen."
+        ));
+    }
+    Ok((bus, gain))
+}
+
+/// Turn the `--bus-out` arguments into a routing, starting from the default for this device.
+pub fn resolve_routing(specs: &[String], out_channels: usize) -> Result<BusRouting, String> {
+    let mut routing = BusRouting::default_for(out_channels);
+    for spec in specs {
+        let (bus, out) = parse_bus_out_arg(spec)?;
+        if out.first + out.width > out_channels {
+            return Err(format!(
+                "--bus-out \"{}\": das Geraet hat {} Ausgangskanaele, Kanal {} gibt es nicht.\n\
+                 \x20 - anderes Paar waehlen: --bus-out {}:1-2\n\
+                 \x20 - oder mehr Kanaele oeffnen: --out-channels {}",
+                spec.trim(),
+                out_channels,
+                out.first + out.width,
+                bus.name(),
+                out.first + out.width
+            ));
+        }
+        routing.set(bus, out);
+    }
+    Ok(routing.clamped(out_channels))
+}
+
+/// Turn the `--bus-gain` arguments into a volume per bus.
+pub fn resolve_bus_gains(specs: &[String]) -> Result<[f32; BUS_COUNT], String> {
+    let mut gains = [1.0f32; BUS_COUNT];
+    for spec in specs {
+        let (bus, gain) = parse_bus_gain_arg(spec)?;
+        gains[bus.index()] = gain;
+    }
+    Ok(gains)
 }
 
 /// Turn the `--track` arguments into track definitions, or produce a German error.
@@ -596,6 +813,9 @@ impl Control {
                 self.message = format!("Klick {}.", if on { "an" } else { "aus" });
             }
             "n" => self.set_pan(parts.next()),
+            "b" => self.set_track_send(parts.next(), parts.next()),
+            "g" => self.set_bus_gain(parts.next(), parts.next(), last),
+            "u" => self.set_bus_out(parts.next(), parts.next()),
             "i" => self.set_latency(parts.next(), parts.next(), ts),
             "f" => self.fx_bypass(ts),
             "x" => self.fx_slot(parts.next(), ts),
@@ -612,7 +832,7 @@ impl Control {
             }
             other => {
                 self.message = format!(
-                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m n i k e w l t f x v d q",
+                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m n b g u i k e w l t f x v d q",
                     self.tracks.len()
                 );
             }
@@ -637,6 +857,95 @@ impl Control {
             self.tracks[track].name,
             pan_label(pan)
         );
+    }
+
+    /// `b <loop|mon> <busse>` - which buses this track's loop or its monitor signal goes to.
+    ///
+    /// Two sources under one key: they are the same kind of decision and belong next to each other,
+    /// and a second letter for the second half would be a letter spent on nothing.
+    fn set_track_send(&mut self, source: Option<&str>, value: Option<&str>) {
+        let usage =
+            "b <loop|mon> <main|monitor|main+monitor|none>  (auf welche Busse dieser Track geht)";
+        let source = match source {
+            Some("loop") | Some("l") => TrackSource::Loop,
+            Some("mon") | Some("monitor") | Some("m") => TrackSource::Monitor,
+            _ => {
+                self.message = format!("Aufruf: {usage}");
+                return;
+            }
+        };
+        let Some(send) = value.and_then(BusSend::parse) else {
+            self.message = format!("Aufruf: {usage}");
+            return;
+        };
+        let track = self.active;
+        self.send(Command::SetTrackSend {
+            track,
+            source,
+            send,
+        });
+        self.message = format!(
+            "\"{}\": {} -> {}.",
+            self.tracks[track].name,
+            source.label(),
+            send.label()
+        );
+    }
+
+    /// `g <main|monitor> <wert>` - the volume of one bus, and half the reason there are two of
+    /// them: the headphones move and the room stays where it was.
+    fn set_bus_gain(
+        &mut self,
+        bus: Option<&str>,
+        value: Option<&str>,
+        last: Option<(Status, Instant)>,
+    ) {
+        let usage = "g <main|monitor> <0.0-4.0>  (Lautstaerke eines Busses)";
+        let Some(bus) = bus.and_then(Bus::parse) else {
+            self.message = format!("Aufruf: {usage}");
+            return;
+        };
+        let Some(Ok(gain)) = value.map(str::parse::<f32>) else {
+            self.message = format!("Aufruf: {usage}");
+            return;
+        };
+        if !(0.0..=MAX_BUS_GAIN).contains(&gain) {
+            self.message =
+                format!("Die Bus-Lautstaerke muss zwischen 0.0 und {MAX_BUS_GAIN} liegen.");
+            return;
+        }
+        self.send(Command::SetBusGain { bus, gain });
+        let other = match bus {
+            Bus::Main => Bus::Monitor,
+            Bus::Monitor => Bus::Main,
+        };
+        let untouched = last.map(|(s, _)| s.bus_gain(other)).unwrap_or(1.0);
+        self.message = format!(
+            "{} auf {gain:.2}. {} bleibt bei {untouched:.2}.",
+            bus.label(),
+            other.label()
+        );
+    }
+
+    /// `u <main|monitor> <kanal[-kanal]>` - which socket a bus leaves on.
+    fn set_bus_out(&mut self, bus: Option<&str>, value: Option<&str>) {
+        let usage = "u <main|monitor> <kanal[-kanal]>  (Ausgangspaar eines Busses, 1-basiert)";
+        let (Some(bus), Some(value)) = (bus.and_then(Bus::parse), value) else {
+            self.message = format!("Aufruf: {usage}");
+            return;
+        };
+        match parse_bus_out_arg(&format!("{}:{value}", bus.name())) {
+            Ok((bus, out)) => {
+                self.send(Command::SetBusOutput { bus, out });
+                self.message = format!(
+                    "{} liegt auf Ausgang {}. Was das Geraet nicht hat, wird auf das naechste \
+                     vorhandene Paar gelegt.",
+                    bus.label(),
+                    out.label()
+                );
+            }
+            Err(e) => self.message = e.replace("--bus-out", "u"),
+        }
     }
 
     /// `i <frames|-> [zuschlag]` - what this track subtracts while recording.
@@ -944,6 +1253,11 @@ pub struct EngineSpec<'a> {
     pub monitor_gain: f32,
     pub click: bool,
     pub click_gain: f32,
+    /// Volume of each output bus, linear.
+    pub bus_gain: [f32; BUS_COUNT],
+    /// Which device output pair each bus leaves on. Clamped by the engine against what the device
+    /// really has.
+    pub routing: BusRouting,
 }
 
 /// A running engine: two live cpal streams plus the control thread's ends of every channel.
@@ -1015,7 +1329,11 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
     let tracks: Vec<Track> = spec
         .defs
         .iter()
-        .map(|d| Track::new(d.input, spec.monitor, d.pan, rate).with_latency(d.latency))
+        .map(|d| {
+            Track::new(d.input, spec.monitor, d.pan, rate)
+                .with_latency(d.latency)
+                .with_sends(d.loop_send, d.monitor_send)
+        })
         .collect();
     let mut core = EngineCore::new(EngineConfig {
         timeline: spec.timeline,
@@ -1030,6 +1348,9 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
         monitor_gain: spec.monitor_gain,
         click: spec.click,
         click_gain: spec.click_gain,
+        bus_gain: spec.bus_gain,
+        routing: spec.routing,
+        output_channels: out_channels,
         status_interval: (rate / STATUS_HZ).max(1) as u64,
     });
 
@@ -1065,7 +1386,7 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
     let stats_out = Arc::clone(&stats);
     let stats_out_err = Arc::clone(&stats);
     let mut in_scratch = vec![0.0f32; scratch_frames * in_channels];
-    let mut out_scratch = vec![0.0f32; scratch_frames * OUT_CHANNELS];
+    let mut out_scratch = vec![0.0f32; scratch_frames * BUS_SAMPLES];
     let output = audio::build_output(
         &setup.output,
         &setup.out_plan,
@@ -1089,15 +1410,18 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
                 }
                 core.process(
                     &in_scratch[..got * in_channels],
-                    &mut out_scratch[..n * OUT_CHANNELS],
+                    &mut out_scratch[..n * BUS_SAMPLES],
                 );
+                // The one place a bus becomes a socket. The routing is read from the engine, which
+                // owns it, so a `SetBusOutput` takes effect on the very next block.
+                let routing = core.routing();
                 let base = done * out_channels;
                 for (i, frame) in data[base..base + n * out_channels]
                     .chunks_exact_mut(out_channels)
                     .enumerate()
                 {
-                    let bus = &out_scratch[i * OUT_CHANNELS..(i + 1) * OUT_CHANNELS];
-                    spread_frame(bus, frame);
+                    let buses = &out_scratch[i * BUS_SAMPLES..(i + 1) * BUS_SAMPLES];
+                    place_buses(buses, frame, &routing);
                 }
                 done += n;
             }
@@ -1238,6 +1562,27 @@ pub(crate) fn fx_text(fx: &FxStatus) -> String {
     text
 }
 
+/// `Main 1-2 L -12.3 R -12.1 x1.00` - where a bus goes, what leaves on it, and how loud.
+pub(crate) fn bus_text(s: &Status, bus: Bus) -> String {
+    let peak = s.bus_peak(bus);
+    format!(
+        "{} {} L {} R {} x{:.2}",
+        match bus {
+            Bus::Main => "Main",
+            Bus::Monitor => "Mon ",
+        },
+        s.bus_out.get(bus).label(),
+        fmt_dbfs(peak[0]),
+        fmt_dbfs(peak[1]),
+        s.bus_gain(bus),
+    )
+}
+
+/// `MK/-K` - which buses the loop goes to, and which the monitor signal goes to.
+pub(crate) fn send_text(ts: &TrackStatus) -> String {
+    format!("{}/{}", ts.loop_send.short(), ts.monitor_send.short())
+}
+
 /// The global line: bar, beat, loop length, tempo, click, and which grid takes snap to.
 fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
     let tl = &sched.timeline;
@@ -1254,7 +1599,7 @@ fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
     let loop_len = tl.span_bars(0, bars);
 
     let mut line = format!(
-        "Takt {:>4} Schlag {}/{} [{}] | Loop {} Takte = {} Frames = {:.2} s | {:.1} BPM | Raster {} | Klick {} | Aus {}",
+        "Takt {:>4} Schlag {}/{} [{}] | Loop {} Takte = {} Frames = {:.2} s | {:.1} BPM | Raster {} | Klick {} | {} | {}",
         s.bar + 1,
         s.beat + 1,
         beats_per_bar,
@@ -1265,12 +1610,10 @@ fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
         s.bpm,
         sched.quantize.label(),
         on_off(s.click),
-        // Both bus channels, because a mix that clips only on one side has to say which.
-        format!(
-            "L {} R {}",
-            fmt_dbfs(s.output_peak[0]),
-            fmt_dbfs(s.output_peak[1])
-        ),
+        // One block per bus, each with both channels: a mix that clips only on one side, or only
+        // in the headphones, has to say where.
+        bus_text(s, Bus::Main),
+        bus_text(s, Bus::Monitor),
     );
     let xruns = stats.xruns.load(Ordering::Relaxed);
     let underruns = stats.underruns.load(Ordering::Relaxed);
@@ -1312,7 +1655,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
         _ => format!("{}      ", fmt_dbfs(ts.input_peak[0])),
     };
     format!(
-        "{} {:<10} {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Pan {:<5} | Lat {:<14} | Mithoeren {} | FX {:<22}",
+        "{} {:<10} {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Pan {:<5} | Bus {:<5} | Lat {:<14} | Mithoeren {} | FX {:<22}",
         if active { '>' } else { ' ' },
         ui.name,
         input_text(ui.input),
@@ -1322,6 +1665,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
         layer_list(ts, &ui.gains),
         level,
         pan_label(ts.pan),
+        send_text(ts),
         latency_text(ts),
         on_off(ts.monitor),
         fx_text(&ts.fx),
@@ -1358,8 +1702,13 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     let timeline = Timeline::new(rate, opts.bpm, signature);
 
     let in_channels = setup.in_plan.config.channels as usize;
+    let out_channels = setup.out_plan.config.channels as usize;
     let mut defs = resolve_tracks(&opts.tracks, in_channels)?;
     apply_track_latencies(&mut defs, &opts.track_latencies)?;
+    apply_track_sends(&mut defs, TrackSource::Loop, &opts.track_buses)?;
+    apply_track_sends(&mut defs, TrackSource::Monitor, &opts.track_monitor_buses)?;
+    let routing = resolve_routing(&opts.bus_outs, out_channels)?;
+    let bus_gain = resolve_bus_gains(&opts.bus_gains)?;
     // The loop has to be longer than the *largest* compensation any track uses, not than the
     // default: a track whose value is bigger is the one that would write into a loop it has
     // already played past.
@@ -1405,7 +1754,7 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     for (i, def) in defs.iter().enumerate() {
         let effective = def.latency.resolve(opts.latency_frames);
         println!(
-            "  {} {:<10} Eingang {} ({}, von {} Kanaelen), Panorama {}, Latenz {} Frames ({:.2} ms, {})",
+            "  {} {:<10} Eingang {} ({}, von {} Kanaelen), Panorama {}, Latenz {} Frames ({:.2} ms, {}), Loop -> {}, Mithoeren -> {}",
             i + 1,
             def.name,
             def.input.label(),
@@ -1415,7 +1764,21 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
             effective,
             effective as f64 * 1000.0 / rate as f64,
             latency_origin(def.latency, opts.latency_frames),
+            def.loop_send.label(),
+            def.monitor_send.label(),
         );
+    }
+    println!(
+        "Busse:    Main -> Ausgang {} (Lautstaerke {:.2}), Monitor -> Ausgang {} (Lautstaerke {:.2}), 
+                   von {} Ausgangskanaelen. Der Klick liegt auf Monitor und nie auf Main.",
+        routing.get(Bus::Main).label(),
+        bus_gain[Bus::Main.index()],
+        routing.get(Bus::Monitor).label(),
+        bus_gain[Bus::Monitor.index()],
+        out_channels
+    );
+    if let Some(note) = routing_note(&routing, out_channels) {
+        println!("ACHTUNG:  {note}");
     }
     println!(
         "Latenz:   Vorgabe {} Frames ({:.2} ms) - sie gilt fuer jeden Track, der nichts eigenes sagt",
@@ -1447,6 +1810,8 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         monitor_gain: opts.monitor_gain,
         click: !opts.no_click,
         click_gain: opts.click_gain,
+        bus_gain,
+        routing,
     })?;
 
     let grid = match opts.quantize {
@@ -1469,7 +1834,11 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
          \x20 n <wert>      Panorama: -1 ganz links, 0 Mitte, 1 ganz rechts\n\
          \x20 i <frames|-> [zuschlag]  Latenzkompensation dieses Tracks; - nimmt die globale Vorgabe.\n\
          \x20               Wirkt auf kommende Aufnahmen, nicht auf schon Aufgenommenes.\n\
-         \x20 k   Klick an/aus\n\
+         Busse - Main geht in den Saal, Monitor auf den Kopfhoerer, der Klick nur auf Monitor:\n\
+         \x20 b <loop|mon> <main|monitor|main+monitor|none>  Bus-Zuordnung dieses Tracks\n\
+         \x20 g <main|monitor> <wert>  Lautstaerke eines Busses (der andere bleibt, wie er ist)\n\
+         \x20 u <main|monitor> <kanal[-kanal]>  Ausgangspaar eines Busses\n\
+         \x20 k   Klick an/aus (er liegt auf dem Monitor-Bus)\n\
          \x20 t   Tempo aendern, z.B. \"t 120\" oder \"t 120 7 8\" (nur wenn alles leer ist)\n\
          Effekte - wirken auf Wiedergabe und Mithoeren, die Aufnahme bleibt immer trocken:\n\
          \x20 v <name>      Preset laden: stimme | gitarre | trocken\n\
@@ -1807,5 +2176,127 @@ mod tests {
         };
         assert_eq!(layer_list(&ts, &[1.0, 1.0, 0.5]), "[1 2* 3(0.50)]");
         assert_eq!(layer_list(&TrackStatus::default(), &[]), "-");
+    }
+
+    /// The routing arguments, in every shape - including the single channel that makes "Mix links,
+    /// Klick rechts" possible without a mode of its own.
+    #[test]
+    fn a_bus_out_argument_names_a_pair_or_a_single_channel() {
+        assert_eq!(
+            parse_bus_out_arg("main:1-2").unwrap(),
+            (Bus::Main, BusOutput::pair(0))
+        );
+        assert_eq!(
+            parse_bus_out_arg(" monitor : 3 - 4 ").unwrap(),
+            (Bus::Monitor, BusOutput::pair(2))
+        );
+        assert_eq!(
+            parse_bus_out_arg("monitor:2").unwrap(),
+            (Bus::Monitor, BusOutput::mono(1))
+        );
+
+        for (bad, needle) in [
+            ("main", "unvollstaendig"),
+            ("buehne:1-2", "kein Bus"),
+            ("main:0", "ab 1"),
+            ("main:x", "Kanalnummer"),
+            // A pair is adjacent; anything else would be a routing nobody could wire.
+            ("main:1-3", "benachbarten"),
+        ] {
+            let err = parse_bus_out_arg(bad).expect_err(bad);
+            assert!(err.contains(needle), "\"{bad}\" meldet: {err}");
+        }
+    }
+
+    /// The default routing follows the device, an explicit one overrides it, and one that names a
+    /// socket the device has not got is refused with a way out rather than going silent.
+    #[test]
+    fn the_routing_follows_the_device_unless_the_command_line_says_otherwise() {
+        let four = resolve_routing(&[], 4).unwrap();
+        assert_eq!(four.get(Bus::Monitor), BusOutput::pair(2));
+        assert!(!four.overlaps());
+
+        let two = resolve_routing(&[], 2).unwrap();
+        assert!(two.collapsed(), "zwei Ausgaenge sind ein Weg hinaus");
+        let note = routing_note(&two, 2).expect("das wird erklaert");
+        assert!(note.contains("Klick"), "{note}");
+
+        let split = resolve_routing(&specs(&["main:1", "monitor:2"]), 2).unwrap();
+        assert_eq!(split.get(Bus::Main), BusOutput::mono(0));
+        assert_eq!(split.get(Bus::Monitor), BusOutput::mono(1));
+        assert!(!split.overlaps(), "Mix links, Klick rechts");
+        assert!(routing_note(&split, 2).is_none());
+
+        let err = resolve_routing(&specs(&["monitor:3-4"]), 2).expect_err("Kanal 4 gibt es nicht");
+        assert!(err.contains("Ausgangskanaele"), "{err}");
+        assert!(err.contains("--out-channels"), "der Ausweg fehlt: {err}");
+    }
+
+    #[test]
+    fn a_bus_gain_argument_is_a_bus_and_a_number_in_range() {
+        assert_eq!(parse_bus_gain_arg("monitor:0.8").unwrap(), (Bus::Monitor, 0.8));
+        assert_eq!(
+            resolve_bus_gains(&specs(&["monitor:0.5"])).unwrap(),
+            [1.0, 0.5],
+            "was nicht genannt wird, bleibt auf 1.0"
+        );
+        for (bad, needle) in [
+            ("monitor", "unvollstaendig"),
+            ("buehne:1", "kein Bus"),
+            ("monitor:laut", "keine Zahl"),
+            ("monitor:9", "zwischen"),
+        ] {
+            let err = parse_bus_gain_arg(bad).expect_err(bad);
+            assert!(err.contains(needle), "\"{bad}\" meldet: {err}");
+        }
+    }
+
+    /// Per-track routing is matched by name, and an unknown name is refused for the same reason
+    /// `--track-latency` refuses one: the track it was meant for would silently stay where it was.
+    #[test]
+    fn track_bus_arguments_are_applied_by_name() {
+        let mut defs = resolve_tracks(&specs(&["stimme:1", "klick_gtr:2"]), 2).unwrap();
+        assert!(defs.iter().all(|d| d.loop_send == BusSend::BOTH));
+        assert!(defs.iter().all(|d| d.monitor_send == BusSend::MONITOR));
+
+        apply_track_sends(&mut defs, TrackSource::Loop, &specs(&["klick_gtr:monitor"])).unwrap();
+        apply_track_sends(
+            &mut defs,
+            TrackSource::Monitor,
+            &specs(&["stimme:main+monitor"]),
+        )
+        .unwrap();
+        assert_eq!(defs[0].monitor_send, BusSend::BOTH);
+        assert_eq!(defs[0].loop_send, BusSend::BOTH, "unangetastet");
+        assert_eq!(defs[1].loop_send, BusSend::MONITOR);
+        assert_eq!(defs[1].monitor_send, BusSend::MONITOR, "unangetastet");
+
+        let err = apply_track_sends(&mut defs, TrackSource::Loop, &specs(&["klavier:main"]))
+            .expect_err("kein Track");
+        assert!(err.contains("klavier"), "{err}");
+        assert!(err.contains("stimme"), "die Meldung zaehlt auf, was es gibt: {err}");
+
+        let err = apply_track_sends(&mut defs, TrackSource::Loop, &specs(&["stimme:buehne"]))
+            .expect_err("kein Bus");
+        assert!(err.contains("main+monitor"), "{err}");
+    }
+
+    /// The track line says where a track goes in five characters, because a stage screen has no
+    /// room for a sentence per track.
+    #[test]
+    fn the_bus_column_is_the_loop_and_the_monitor_signal_side_by_side() {
+        let ts = TrackStatus {
+            loop_send: BusSend::BOTH,
+            monitor_send: BusSend::MONITOR,
+            ..Default::default()
+        };
+        assert_eq!(send_text(&ts), "MK/-K");
+
+        let cue = TrackStatus {
+            loop_send: BusSend::MONITOR,
+            monitor_send: BusSend::NONE,
+            ..Default::default()
+        };
+        assert_eq!(send_text(&cue), "-K/--");
     }
 }

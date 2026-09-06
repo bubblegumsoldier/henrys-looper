@@ -31,7 +31,7 @@ Diese Präzisierung ist folgenreich, weil sie mehrere frühere Entscheidungen um
 | Tracks | mono, „Gitarre und Stimme brauchen kein Stereo" | **Stereo ist Pflicht — gebaut.** Loop-Puffer sind mono *oder* stereo, je nach Quelle; Effektkette, Panorama und Mixbus sind immer stereo. Siehe Abschnitt 6 |
 | VST-Hosting | ausdrücklich kein Ziel | **zentral.** Ohne fremde Instrumente und Effekte gibt es keinen Studio-Standard |
 | Stems | „kein eigenes Export-Feature in v1" | **Pflicht.** Wer produziert, muss aus dem Programm herauskommen |
-| Ausgänge | ein Ausgang für alles | **getrennte Busse**, Klick nur auf den Monitorweg |
+| Ausgänge | ein Ausgang für alles | **getrennte Busse — gebaut**, Klick nur auf den Monitorweg. Siehe Abschnitt 12 |
 | Maßstab | „klingt gut genug für die Bühne" | **Es muss aufnahmetauglich sein.** Der Vergleich ist eine DAW, nicht ein Hardware-Looper |
 
 Der Unterschied in einem Satz: Ein Bühnen-Looper darf Kompromisse machen, die man live nicht
@@ -56,6 +56,7 @@ andere ist die Eintrittskarte.
 | 6 | Effekte | DSP, Kommandos und CLI gebaut, Abnahme am Instrument offen. UI folgt |
 | 7 | Stereo | **gebaut**, Abnahme am Instrument offen. Aufnahme mono oder stereo je Quelle, Kette und Mixbus stereo, Panorama je Track |
 | 8 | Latenzkompensation je Track | **gebaut**, 252 Tests grün, Abnahme am Instrument offen. Globaler Wert als Vorgabe, eigener Wert je Track aus Messwert plus Zuschlag, `calibrate --for-track`. Siehe Abschnitt 4 |
+| 9 | Getrennte Ausgangsbusse | **gebaut**, 379 Tests grün, ohne Gerät geprüft. Zwei Stereo-Busse (Main in den Saal, Monitor auf den Kopfhörer), je Track schaltbar für Loop *und* Mithörsignal getrennt, Lautstärke je Bus, freie Zuordnung zu Ausgangspaaren, **der Klick nur auf Monitor**. Abnahme am Instrument offen. Siehe Abschnitt 12 |
 
 Der Python- und React-Code des Ableton-Prototypen liegt unangetastet im Repo
 (`backend/`, `looper/`, `spike/`, `ui/`). Er wird ersetzt, nicht angebunden.
@@ -299,12 +300,12 @@ er einen macht.
   stereo bearbeiten.
 - **Signalweg je Track**:
   ```text
-  Ebenen-Summe + Mithören ─► (mono: auf beide Kanäle) ─► Kette ─► Panorama ─► Mixbus (L/R)
+  Ebenen-Summe + Mithören ─► (mono: auf beide Kanäle) ─► Kette ─► Panorama ─► Bus (L/R)
   ```
   Der Panner sitzt **nach** der Kette, wie in einem DAW-Kanalzug: der Hall entsteht mittig und wird
   dann platziert, statt ein schon einseitiges Signal zu bekommen. Der Klick geht an Kette und
-  Panner vorbei und mit gleichem Pegel in beide Buskanäle — er ist Referenz, kein Teil des
-  Arrangements.
+  Panner vorbei und mit gleichem Pegel in beide Kanäle des **Monitor-Busses** — er ist Referenz,
+  kein Teil des Arrangements, und er erreicht den Saal auf keinem Weg (Abschnitt 12).
 - **Layer**: interleavter `Vec<f32>` in Loop-Länge mal Kanalzahl. Overdub legt einen weiteren an,
   alle werden summiert. Der Puffer-Pool im Steuer-Thread hält **zwei Vorräte**, einen je Kanalzahl;
   eine Session aus lauter Mono-Tracks legt nie einen Stereo-Puffer an.
@@ -503,6 +504,17 @@ Delays.
 anders; und zwei parallele Ketten würden beim ersten Parameterwechsel auseinanderlaufen. Deshalb
 werden Ebenensumme und Mithörsignal *vor* der Kette summiert (`Track::render`). Der Klick bleibt
 außen vor - er ist Referenz, keine Musik.
+
+**Seit den getrennten Bussen gibt es eine Kette je Bus, und das widerspricht dem Satz darüber
+nicht.** Wenn Loop und Mithörsignal auf *verschiedene* Busse gelegt werden, führen die beiden Busse
+verschiedene Signale, und ein Kompressor oder ein Hall lässt sich nachträglich nicht wieder
+auseinandernehmen: `Kette(a + b)` ist nicht `Kette(a)` plus `Kette(b)`. Zwei verschiedene Signale
+brauchen zwei Zustände. Die alte Warnung galt zwei Ketten auf *demselben* Signal — die wären ein Weg,
+Loop und Livestimme verschieden klingen zu lassen; hier ist es umgekehrt. **Solange beide Busse
+dieselben Quellen sehen, rechnet nur die erste Kette** und ihr Ergebnis bedient beide; die zweite
+bekommt Stille und kostet den Leerlaufpreis aus der Tabelle unten. Eine gewöhnliche Sitzung zahlt
+also genau das, was sie vorher gezahlt hat. Der Speicher verdoppelt sich auf rund 1,8 MB je Track,
+was neben den Ebenen-Puffern nicht ins Gewicht fällt.
 
 ### Reihenfolge und Presets
 
@@ -732,7 +744,9 @@ speichern. Deshalb bekommt jede bedienbare Sache einen gepunkteten Pfad:
 ```text
 transport.start | transport.next | transport.stop_all | transport.goto.<n>
 global.click | global.clear_all | global.tempo | global.quantize.bar|loop
+global.bus.<main|monitor>.gain
 track.<ref>.record | overdub | play | stop | clear | monitor | pan | latency_trim
+track.<ref>.bus.<main|monitor>          · monitor_bus.<main|monitor>
 track.<ref>.layer.<n>.mute | remove | gain
 track.<ref>.fx.bypass
 track.<ref>.fx.<high_pass|eq|comp|delay|reverb>.on
@@ -1047,7 +1061,163 @@ UI kein Element, an dem ein Klick eindeutig wäre: das Tempo wird vor dem Start 
 ohnehin nur bei leerer Sitzung erlaubt, und die Bandart ist ein Auswahlfeld mit drei Zielen an einer
 Stelle. Beide sind über die Partitur oder von Hand im Profil erreichbar.
 
-## 12. Arbeitsweise
+## 12. Getrennte Ausgangsbusse (Phase 5, „Klick nur auf den Monitorweg")
+
+Der Musiker steht auf der Bühne und braucht den Klick auf dem Kopfhörer. Im Saal darf nur ankommen,
+was er gemacht hat. Mit einem einzigen Ausgang ist das keine Einstellung, sondern ein Widerspruch:
+alles, was die Engine erzeugt, geht durch dieselbe Buchse. **Die Summierung auf zwei Busse ist,
+was den Satz aus Abschnitt 0 überhaupt aussprechbar macht.**
+
+```text
+                       ┌──────────────────────► Main    ─► Ausgangspaar A  (Saal)
+ Loop je Track      ───┤
+ Mithören je Track  ───┤
+ Klick ────────────────┴─(nur hierhin)────────► Monitor ─► Ausgangspaar B  (Kopfhörer)
+```
+
+| Quelle | Main (Saal) | Monitor (Kopfhörer) |
+|---|---|---|
+| Loop-Wiedergabe je Track | ja, schaltbar (Vorgabe: an) | ja, schaltbar (Vorgabe: an) |
+| Mithörsignal je Track | ja, schaltbar (Vorgabe: **aus**) | ja, schaltbar (Vorgabe: an) |
+| **Klick** | **nie, auf keinem Weg** | ja, mit dem gewohnten Klick-Schalter |
+
+Jeder Bus ist stereo und hat eine eigene Lautstärke. Das ist der halbe Sinn der Sache: den
+Kopfhörer leiser drehen, ohne den Saal zu verändern.
+
+### Die eine Zuordnung, die keine Einstellung ist
+
+Für den Klick gibt es **keinen** Schalter auf Main. Er ist der Grund, warum es zwei Busse gibt, und
+ein Schalter dafür wäre ein Schalter, der an genau dem einen Abend versehentlich gedrückt wird, an
+dem er zählt. Was die beiden Busse *physisch* bekommen, ist eine andere Frage — siehe unten.
+
+**Die Vorgabe des Mithörsignals ist „nur Kopfhörer", und das ist kein Versehen.** Der Saal hat den
+Sänger in aller Regel über den eigenen Kanal der PA; ihn zusätzlich durch den Looper zu schicken
+heißt, ihn doppelt zu hören. Wer den Looper als ganze Kette benutzt, legt das Mithörsignal mit einem
+Klick auch auf Main.
+
+### Zuordnung zu physischen Ausgängen
+
+Jeder Bus liegt auf einem **Kanalpaar** oder auf einem **einzelnen Kanal**, frei wählbar im Rahmen
+dessen, was das Gerät hat. Bei einem einzelnen Kanal wird der Bus mit halbem Pegel auf mono gefaltet
+— einen Kanal wegzulassen würde alles verstummen lassen, was hart dorthin gepannt ist.
+
+| Ausgangskanäle | Vorgabe |
+|---|---|
+| 4 und mehr | Main auf 1-2, Monitor auf 3-4 — getrennt, wofür das Ganze gebaut ist |
+| 2 oder 3 | beide auf 1-2 — es gibt nur den einen Weg |
+| 1 | beide auf Kanal 1, mono gefaltet |
+
+`engine/src/engine/bus.rs::place_buses` ist die **einzige** Stelle, an der aus einem Bus eine Buchse
+wird; sie hat `process::spread_frame` abgelöst, das L/R auf jedes Kanalpaar des Geräts legte.
+Überschneiden sich zwei Busse teilweise, wird auf dem gemeinsamen Kanal **summiert** und nichts
+verworfen.
+
+### Was bei zwei Ausgängen passiert, und wie es erklärt wird
+
+Henrys Gerät ist ein Focusrite Scarlett 2i2, dessen Kopfhörerausgang eine Kopie von Ausgang 1/2 ist:
+**zwei Ausgangskanäle, getrennte Busse brauchen vier.** Das ist kein Fehler und wird nicht heimlich
+repariert.
+
+**Legen beide Busse auf exakt demselben Ausgang, mischt die Engine sie zu einem.** Jede Quelle
+klingt dann genau **einmal**, gleichgültig auf wie viele Busse sie gelegt ist. Das ist keine
+Kosmetik: Zwei Busse übereinanderzulegen würde einen Track, der auf beide geht, 6 dB über einen
+legen, der auf einen geht — und das Einstecken eines zweiten Ausgangspaares würde die Balance des
+ersten verändern. Ein Weg hinaus ist eine Mischung; so verhält sich die Engine auf dem 2i2
+**exakt wie vor dem Umbau**, den Klick eingeschlossen.
+
+Der Preis steht in einem deutschen Satz, einmal beim Start, einmal im Einrichtungsfeld und einmal
+auf der Bus-Leiste (`bus::routing_note`) — nicht bei jeder Statusaktualisierung, denn eine Meldung,
+die nervt, erzieht dazu, Meldungen nicht mehr zu lesen:
+
+> Das Gerät hat 2 Ausgangskanäle. Getrennte Busse brauchen vier. Main und Monitor liegen deshalb
+> beide auf Ausgang 1-2: es gibt einen Weg hinaus und damit eine Mischung. Jede Quelle klingt darin
+> genau einmal, die Lautstärken bleiben also, wie sie wären — aber der Klick geht mit in den Saal,
+> und die Monitor-Lautstärke hat nichts, was sie getrennt regeln könnte.
+
+**Der Notbehelf, den erfahrene Musiker mit zwei Ausgängen benutzen**, braucht dafür keinen eigenen
+Modus: weil ein Bus auch auf einem einzelnen Kanal liegen darf, ist „Mix links, Klick rechts" schon
+möglich — `--bus-out main:1 --bus-out monitor:2`, mit einem Y-Kabel aufzutrennen. Ein eigener
+Schalter dafür wäre eine dritte Sache zu erklären für etwas, das der allgemeine Mechanismus ohnehin
+kann.
+
+### Warum es eine Effektkette je Bus gibt
+
+Siehe Abschnitt 9. Kurz: Wenn Loop und Mithörsignal auf verschiedenen Bussen liegen, führen die
+Busse verschiedene Signale, und eine nichtlineare Kette lässt sich nachträglich nicht auftrennen.
+Solange beide Busse dieselben Quellen sehen — der Normalfall —, rechnet nur eine Kette.
+
+### Busse sind Ausgang, und das ist eine harte Zusage
+
+Kein Schalter, kein Regler und keine Zuordnung dieses Abschnitts kann einen Take verändern.
+`record_input` sieht weder einen Bus noch eine Bus-Lautstärke, genauso wenig wie es eine Effektkette
+sieht (Abschnitt 9). Genau deshalb darf der Musiker diese Schalter *während* einer Aufnahme anfassen
+und deshalb bleiben sie auch erreichbar, während eine Partitur läuft (Abschnitt 10: der Transport
+gehört dem Runner, der Mix dem Menschen). Ein Test hält es fest.
+
+### Echtzeit
+
+Die Busse sind vorab alloziert: der Ausgabepuffer der Engine ist ein Block mit vier Samples je Frame
+(`[main_l, main_r, mon_l, mon_r]`), im Steuer-Thread angelegt wie bisher. Im Callback wird nichts
+alloziert, gesperrt oder geloggt. Die drei neuen Kommandos (`SetTrackSend`, `SetBusGain`,
+`SetBusOutput`) sind `Copy` und ändern je ein paar Bytes. Die Bus-Lautstärke wird **nicht**
+geglättet — wie das Panorama und die Ebenenlautstärke auch nicht: alle drei kommen als Strom kleiner
+Schritte von einem Regler, und ein Glätter obendrauf wären drei Glätter, die ehrlich gehalten werden
+müssten.
+
+### Wo es konfiguriert wird
+
+| Ort | Bus auf Ausgang | Bus-Lautstärke | je Track |
+|---|---|---|---|
+| CLI (`live`, `score`) | `--bus-out main:1-2`, `--bus-out monitor:3-4`, `--bus-out monitor:2` | `--bus-gain monitor:0.8` | `--track-bus stimme:monitor`, `--track-monitor-bus stimme:main+monitor` |
+| CLI zur Laufzeit | `u <main\|monitor> <kanal[-kanal]>` | `g <main\|monitor> <wert>` | `b <loop\|mon> <busse>` |
+| Partitur | — | — | `stimme: {input: 1, bus: monitor, monitor_bus: main+monitor}` |
+| App | `StartConfig.bus_out_main` / `bus_out_monitor`, Kommando `bus_output` | `bus_gain_main` / `bus_gain_monitor`, Kommando `bus_gain` | `TrackConfig.bus` / `monitor_bus`, Kommando `track_bus` |
+
+Die Wörter sind überall dieselben: `main`, `monitor`, `main+monitor`, `none`.
+
+### Was im Status mitfährt
+
+Global: `buses` (je Bus Kennung, Beschriftung, Ausgangskanal, Breite, Lautstärke, Pegel je Seite,
+und ob der Klick darauf liegt), `output_channels`, `buses_collapsed` und `bus_note` — der deutsche
+Satz von oben, oder `null`, wenn die Busse sauber getrennt sind. Je Track vier Schalter:
+`bus_main`, `bus_monitor`, `monitor_bus_main`, `monitor_bus_monitor`. `output_peak` meint jetzt
+ausdrücklich den **Main-Bus**; eine Zahl, die den Klick enthielte, wäre zum Pegeleinstellen wertlos.
+
+### Was das UI zeigt
+
+* **Bus-Leiste** unter dem Kopf, im Betrieb: je Bus das Ausgangspaar (umschaltbar), die Lautstärke
+  als Regler, zwei Pegelbalken, und ein Abzeichen „Klick" auf dem Bus, der ihn führt. Darunter,
+  falls nötig, der eine Satz.
+* **Track-Karte**: eine Reihe mit vier kleinen Schaltern — `Loop: Main | Monitor` und
+  `Mithören: Main | Monitor`. Zwei beschriftete Paare statt eines Auswahlfelds mit vier Einträgen:
+  „geht dieser Track in den Saal" ist eine Frage mit Ja und Nein, und ein Menü mitten im Stück ist
+  eine Leseaufgabe.
+* **Einrichtung**: ein Feld „Ausgangsbusse" mit der Zuordnung beider Busse und dem Hinweis, was bei
+  zwei Ausgängen passiert; je Track zwei Auswahlfelder für die Voreinstellung.
+
+### MIDI
+
+`global.bus.<main|monitor>.gain` ist ein Regler über 0 bis 4 — dieselbe Spanne, die die Engine selbst
+klemmt. `track.<ref>.bus.<main|monitor>` und `track.<ref>.monitor_bus.<main|monitor>` sind Schalter.
+Ein Schalter ändert **ein Bit einer Menge**: der Router liest die ganze Zuordnung aus dem Status
+zurück, bevor er das Bit schreibt, sonst nähme „Main aus" den Track auch vom Kopfhörer. Keine der
+neuen Adressen verschiebt den Transport, alle bleiben also bedienbar, während eine Partitur läuft.
+
+### Wo der Code liegt
+
+| Datei | Inhalt |
+|---|---|
+| `engine/src/engine/bus.rs` | `Bus`, `BusSend`, `BusOutput`, `BusRouting`, `place_buses`, `routing_note` |
+| `engine/src/engine/track.rs` | eine Kette je Bus, die zwei Zuordnungen je Track, `render` |
+| `engine/src/engine/process.rs` | Summierung auf zwei Busse, Bus-Lautstärken, Klick auf Monitor |
+| `engine/src/engine/live.rs` | `--bus-out`, `--bus-gain`, `--track-bus`, `--track-monitor-bus`, Tasten `b g u` |
+| `engine/src/score/read.rs` | `bus:` und `monitor_bus:` in der Partitur |
+| `engine/src/midi/target.rs` | die neuen Adressen |
+| `app/src-tauri/src/proto.rs` | `BusOutConfig`, `BusStatusEvent`, die vier Track-Schalter |
+| `ui/src/live/BusStrip.tsx` | die Bus-Leiste |
+| `ui/src/live/TrackCard.tsx` | `BusRow`, die vier Schalter je Track |
+
+## 13. Arbeitsweise
 
 - Henry bedient Hardware selbst; Audio-Tests laufen nur mit seiner Zustimmung.
 - **Nie gleichzeitig an derselben Sache arbeiten.** Das hat schon Schaden angerichtet.

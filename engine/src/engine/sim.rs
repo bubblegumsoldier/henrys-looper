@@ -20,10 +20,11 @@ use super::command::{
     Command, CommandSender, LayerPool, Status, StatusReceiver, buffer_channel, command_channel,
     status_channel,
 };
-use super::frame::{Channels, Frame, TrackInput};
-use super::process::{
-    EngineConfig, EngineCore, OUT_CHANNELS, loop_capacity, spare_slots_for,
+use super::bus::{
+    BUS_CHANNELS, BUS_COUNT, BUS_SAMPLES, Bus, BusRouting, BusSend, place_buses,
 };
+use super::frame::{Channels, Frame, TrackInput};
+use super::process::{EngineConfig, EngineCore, loop_capacity, spare_slots_for};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{MAX_LAYERS, Track, TrackLatency};
 
@@ -37,6 +38,10 @@ pub struct TrackSpec {
     /// Latency compensation of this track. The default follows the engine's global value, which is
     /// what every test written before the per-track value expects.
     pub latency: TrackLatency,
+    /// Which buses the loop playback of this track feeds.
+    pub loop_send: BusSend,
+    /// Which buses the monitored live input of this track feeds.
+    pub monitor_send: BusSend,
 }
 
 impl TrackSpec {
@@ -47,6 +52,11 @@ impl TrackSpec {
             monitor: false,
             pan: 0.0,
             latency: TrackLatency::INHERITED,
+            loop_send: BusSend::BOTH,
+            // Both by default, unlike the engine's own default: every test written before the buses
+            // existed expects the monitor signal wherever the loop is, and the two-output device
+            // these tests simulate sums the buses anyway.
+            monitor_send: BusSend::BOTH,
         }
     }
 
@@ -57,6 +67,8 @@ impl TrackSpec {
             monitor: false,
             pan: 0.0,
             latency: TrackLatency::INHERITED,
+            loop_send: BusSend::BOTH,
+            monitor_send: BusSend::BOTH,
         }
     }
 
@@ -79,6 +91,18 @@ impl TrackSpec {
 
     pub fn panned(mut self, pan: f32) -> Self {
         self.pan = pan;
+        self
+    }
+
+    /// Which buses this track's loop playback goes to.
+    pub fn sending(mut self, send: BusSend) -> Self {
+        self.loop_send = send;
+        self
+    }
+
+    /// Which buses this track's monitored live input goes to.
+    pub fn monitor_sending(mut self, send: BusSend) -> Self {
+        self.monitor_send = send;
         self
     }
 
@@ -112,6 +136,13 @@ pub struct SimSpec {
     pub layer_frames: Option<u64>,
     /// Prepared buffers the control thread keeps in flight, per kind that is actually used.
     pub spare_slots: usize,
+    /// Channels the simulated device's output has. Two by default - the Scarlett this was written
+    /// on - so both buses land on the same pair and `out_l`/`out_r` mean what they always meant.
+    pub output_channels: usize,
+    /// Where the buses leave. `None` takes the default for `output_channels`.
+    pub routing: Option<BusRouting>,
+    /// Volume of each bus.
+    pub bus_gain: [f32; BUS_COUNT],
 }
 
 impl Default for SimSpec {
@@ -130,6 +161,9 @@ impl Default for SimSpec {
             loopback_channel: Some(0),
             layer_frames: None,
             spare_slots: 3,
+            output_channels: 2,
+            routing: None,
+            bus_gain: [1.0; BUS_COUNT],
         }
     }
 }
@@ -161,10 +195,21 @@ pub struct Sim {
     pos: u64,
     in_buf: Vec<f32>,
     out_buf: Vec<f32>,
-    /// Everything the engine has written to the left bus channel, indexed by output position.
+    /// Everything the simulated **device** put out on channel 1, indexed by output position. On
+    /// the two-output device these tests default to, both buses land here summed - which is why
+    /// every test written before the buses existed still reads what it always read.
     pub out_l: Vec<f32>,
-    /// The same for the right one.
+    /// The same for device channel 2.
     pub out_r: Vec<f32>,
+    /// Every device output channel, `out_l`/`out_r` being the first two of them. This is what a
+    /// four-output test reads to show that nothing bleeds onto the other pair.
+    pub dev: Vec<Vec<f32>>,
+    /// Each bus on its own, before it is placed on a socket: `buses[bus][channel]`. What a test
+    /// asks when the question is "is the click on Main", not "what comes out of socket 3".
+    pub buses: [[Vec<f32>; BUS_CHANNELS]; BUS_COUNT],
+    routing: BusRouting,
+    output_channels: usize,
+    dev_frame: Vec<f32>,
 }
 
 impl Sim {
@@ -182,6 +227,11 @@ impl Sim {
             slots[0] + slots[1] + 8,
             track_count * MAX_LAYERS + slots[0] + slots[1] + 8,
         );
+        let output_channels = spec.output_channels.max(1);
+        let routing = spec
+            .routing
+            .unwrap_or_else(|| BusRouting::default_for(output_channels))
+            .clamped(output_channels);
         let mut pool = LayerPool::new(channel, layer_frames as usize, slots);
         // Fill the stock before the engine exists, the way the control thread does at startup.
         pool.service(None);
@@ -190,7 +240,9 @@ impl Sim {
             .tracks
             .iter()
             .map(|t| {
-                Track::new(t.input, t.monitor, t.pan, spec.sample_rate).with_latency(t.latency)
+                Track::new(t.input, t.monitor, t.pan, spec.sample_rate)
+                    .with_latency(t.latency)
+                    .with_sends(t.loop_send, t.monitor_send)
             })
             .collect();
         let core = EngineCore::new(EngineConfig {
@@ -209,6 +261,9 @@ impl Sim {
             monitor_gain: 1.0,
             click: spec.click,
             click_gain: 1.0,
+            bus_gain: spec.bus_gain,
+            routing,
+            output_channels,
             status_interval: spec.block as u64,
         });
         Self {
@@ -224,9 +279,14 @@ impl Sim {
             block: spec.block,
             pos: 0,
             in_buf: vec![0.0; spec.block * spec.input_channels],
-            out_buf: vec![0.0; spec.block * OUT_CHANNELS],
+            out_buf: vec![0.0; spec.block * BUS_SAMPLES],
             out_l: Vec::new(),
             out_r: Vec::new(),
+            dev: vec![Vec::new(); output_channels],
+            buses: Default::default(),
+            routing,
+            output_channels,
+            dev_frame: vec![0.0; output_channels],
         }
     }
 
@@ -266,9 +326,30 @@ impl Sim {
         self.pool.set_layer_frames(layer_frames);
     }
 
-    /// Both bus channels at one output position.
+    /// Both device channels at one output position.
     pub fn out(&self, pos: u64) -> Frame {
         Frame::new(self.out_l[pos as usize], self.out_r[pos as usize])
+    }
+
+    /// One bus at one output position, before it is placed on a socket.
+    pub fn bus(&self, bus: Bus, pos: u64) -> Frame {
+        let b = bus.index();
+        Frame::new(self.buses[b][0][pos as usize], self.buses[b][1][pos as usize])
+    }
+
+    /// One device output channel at one output position, zero-based.
+    pub fn device(&self, channel: usize, pos: u64) -> f32 {
+        self.dev[channel][pos as usize]
+    }
+
+    /// How many output channels the simulated device has.
+    pub fn output_channels(&self) -> usize {
+        self.output_channels
+    }
+
+    /// The routing the simulation started with, for a test that wants to state it back.
+    pub fn routing(&self) -> BusRouting {
+        self.routing
     }
 
     /// One driver callback, preceded by one turn of the control thread.
@@ -294,9 +375,22 @@ impl Sim {
             }
         }
         self.core.process(&self.in_buf, &mut self.out_buf);
-        for frame in self.out_buf.chunks_exact(OUT_CHANNELS) {
-            self.out_l.push(frame[0]);
-            self.out_r.push(frame[1]);
+        let routing = self.core.routing();
+        for frame in self.out_buf.chunks_exact(BUS_SAMPLES) {
+            for bus in Bus::ALL {
+                for c in 0..BUS_CHANNELS {
+                    self.buses[bus.index()][c].push(frame[bus.index() * BUS_CHANNELS + c]);
+                }
+            }
+            // The same step the real output callback takes, so what a test reads out of `dev` is
+            // what the driver would have been handed.
+            place_buses(frame, &mut self.dev_frame, &routing);
+            for (c, value) in self.dev_frame.iter().enumerate() {
+                self.dev[c].push(*value);
+            }
+            self.out_l.push(self.dev_frame[0]);
+            self.out_r
+                .push(self.dev_frame.get(1).copied().unwrap_or(self.dev_frame[0]));
         }
         self.pos += self.block as u64;
     }

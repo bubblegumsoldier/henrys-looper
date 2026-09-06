@@ -876,3 +876,50 @@ fn the_source_score_round_trips_through_serde() {
     let back: super::ScoreSource = serde_json::from_str(&json).unwrap();
     assert_eq!(back, source);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The output buses
+// ---------------------------------------------------------------------------------------------
+
+/// A score can say where a track is heard: in the room, on the headphones, or both. The two fields
+/// are separate because they answer separate questions - a guide figure belongs on the headphones
+/// while the singer over it belongs everywhere.
+#[test]
+fn a_track_can_say_which_output_buses_it_is_heard_on() {
+    use crate::engine::bus::BusSend;
+
+    let score = compiled(
+        "bpm: 120\n\
+         tracks:\n\
+        \x20 stimme:  {input: 1}\n\
+        \x20 klick_gtr: {input: 2, bus: monitor}\n\
+        \x20 ansage:  {input: 3, bus: main, monitor_bus: main+monitor}\n\
+        \x20 spaeter: {input: 4, bus: none}\n\
+         sections: [{id: a, bars: 1}]\n",
+    );
+
+    // Nothing said: heard everywhere, and the live input in the headphones only.
+    let stimme = score.track("stimme").unwrap();
+    assert_eq!(stimme.loop_send(), BusSend::BOTH);
+    assert_eq!(stimme.monitor_send(), BusSend::MONITOR);
+
+    // A cue track: the musician gets it, the room never does.
+    assert_eq!(score.track("klick_gtr").unwrap().loop_send(), BusSend::MONITOR);
+
+    let ansage = score.track("ansage").unwrap();
+    assert_eq!(ansage.loop_send(), BusSend::MAIN);
+    assert_eq!(ansage.monitor_send(), BusSend::BOTH);
+
+    assert_eq!(score.track("spaeter").unwrap().loop_send(), BusSend::NONE);
+}
+
+/// A bus that does not exist is a positioned German sentence, not a track that is quietly silent.
+#[test]
+fn an_unknown_bus_in_a_score_is_refused_in_german() {
+    let err = compile_score("bpm: 120\ntracks: {a: {input: 1, bus: saal_hinten}}\nsections: [{id: x, bars: 1}]\n")
+        .expect_err("muss scheitern");
+    assert!(err.issues[0].message.contains("saal_hinten"), "{err}");
+    let suggestion = err.issues[0].suggestion.clone().unwrap_or_default();
+    assert!(suggestion.contains("monitor"), "{suggestion}");
+    assert!(suggestion.contains("Klick"), "der Grund steht dabei: {suggestion}");
+}
