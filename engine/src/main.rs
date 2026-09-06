@@ -20,6 +20,7 @@ use clap::{Parser, Subcommand};
 
 use audio::DeviceOpts;
 use click::ClickOpts;
+use engine::calibrate::CalibrateOpts;
 use engine::live::LiveOpts;
 
 #[derive(Parser, Debug)]
@@ -89,6 +90,16 @@ enum Command {
         #[command(flatten)]
         live: LiveOpts,
     },
+
+    /// Latenzkompensation pruefen: die Engine nimmt per Loopback-Kabel ihren eigenen Klick auf
+    /// und misst, wie weit er vom Schlagraster abweicht
+    Calibrate {
+        #[command(flatten)]
+        dev: DeviceOpts,
+
+        #[command(flatten)]
+        calibrate: CalibrateOpts,
+    },
 }
 
 /// Non-blocking "press Enter to stop": a helper thread owns stdin, the main loop polls the
@@ -125,6 +136,9 @@ fn main() -> ExitCode {
         Command::Latency { dev, runs } => latency::cmd_latency(dev, *runs),
         Command::Soak { dev, minutes, gain } => soak::cmd_soak(dev, *minutes, *gain),
         Command::Live { dev, live } => engine::live::cmd_live(dev, live),
+        Command::Calibrate { dev, calibrate } => {
+            engine::calibrate::cmd_calibrate(dev, calibrate)
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

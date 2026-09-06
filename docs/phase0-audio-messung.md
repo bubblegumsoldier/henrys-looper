@@ -270,6 +270,43 @@ Vier Festlegungen ergeben sich unmittelbar aus den Messungen:
   Treiber, größere Interfaces sind also nicht ausgeschlossen — nur ungetestet.
 - **Andere Hardware.** Alle Zahlen gelten für ein Scarlett 2i2 an dieser Maschine.
 
+### Nachtrag: 827 Samples am echten Signalweg bestätigt
+
+Nach Phase 1 wurde der Wert mit dem Subcommand `calibrate` gegengeprüft: Die Engine nimmt
+ihren eigenen Klick über das Loopback-Kabel auf, und die Abweichung der aufgenommenen Klicks
+von den Schlaggrenzen wird ausgerechnet statt gehört.
+
+| Loop-Peak | mittlere Abweichung | Streuung innerhalb eines Laufs |
+|---:|---:|---:|
+| −27,4 dBFS | 32,0 Samples | 7,2 (Min 20, Max 36) |
+| −18,4 dBFS | **7,2 Samples** | 1,3 (Min 5, Max 8) |
+
+**Die Abweichung hängt vom Pegel ab, Latenz tut das nicht.** Neun Dezibel mehr Pegel senken
+sie von 32 auf 7,2 Samples. Ebenso schrumpft die Spreizung zwischen Downbeat (1600 Hz) und
+Offbeat (800 Hz) von 16 auf 3 Samples — auch das kann keine Latenz sein, die ist
+frequenzunabhängig. Gemessen wurde also die Schwellenerkennung, nicht die Engine: Der Klick
+hat eine Hüllkurve mit 1 ms Anstieg und reißt die Schwelle systematisch zu spät, bei leisem
+Signal später als bei lautem. Der Offline-Test sagt dafür +4,75 Samples vorher.
+
+**Ergebnis: Die 827 Samples stimmen für diesen Signalweg.** Die Standardabweichung zwischen
+den Läufen war in beiden Messungen exakt 0,0 — die Engine arbeitet unabhängig davon, in
+welchem Takt die Aufnahme beginnt, auf das Sample reproduzierbar.
+
+Für künftige Kalibrierungen wäre eine Kreuzkorrelation gegen den erwarteten Klick der
+sauberere Weg, weil sie pegel- und frequenzunabhängig ist. Solange man den Klick laut genug
+einpegelt, reicht das Schwellenverfahren.
+
+### Bekannter Drift der Loop-Länge
+
+Die Loop-Länge ist eine feste Sample-Zahl, das ideale Taktraster im Allgemeinen gebrochen.
+Bei 100 BPM entsteht dadurch kein Fehler (ein Schlag ist exakt 28.800 Samples). Bei krummen
+Tempi läuft ein Rest auf: bei 137 BPM 0,365 Samples pro Durchlauf, also rund 0,65 ms nach
+zehn Minuten und 3,9 ms nach einer Stunde.
+
+Entscheidend ist, wogegen gedriftet wird: **Alle Layer teilen dieselbe Loop-Länge und driften
+nicht gegeneinander.** Weg läuft der Loop nur gegen den Klick. Als bewusst akzeptiert
+eingestuft; die Bindung der Wiedergabe ans Taktraster gehört in Phase 2.
+
 ### Portabilität
 
 cpal bringt CoreAudio, ALSA, JACK und PipeWire gleichberechtigt neben ASIO mit. Eine spätere

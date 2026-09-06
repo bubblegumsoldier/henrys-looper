@@ -19,8 +19,10 @@
 //! * [`metro`] - the click, as a pure function of position.
 //! * [`process`] - the audio-thread brain, including the latency-compensation derivation.
 //! * [`live`] - cpal wiring, keyboard and terminal display.
+//! * [`calibrate`] - checks the compensation value against real hardware via a loopback cable.
 //! * `sim` / `tests` (test builds only) - the offline audio run and the accuracy proofs.
 
+pub mod calibrate;
 pub mod command;
 pub mod live;
 pub mod metro;

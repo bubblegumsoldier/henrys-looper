@@ -38,6 +38,15 @@ impl Metronome {
         }
     }
 
+    /// Length of one click tone in samples, envelope included.
+    ///
+    /// The calibration uses it to size the blanking time of its onset detection, so that the decay
+    /// of one click cannot be counted as a second one.
+    #[inline]
+    pub fn tone_len(&self) -> u64 {
+        self.env_len
+    }
+
     /// Value of the click signal at absolute sample position `pos`.
     ///
     /// Callback-safe: no allocation, no locking, no branching on shared state.
