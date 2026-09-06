@@ -1,0 +1,61 @@
+# Henrys 3/4-Song mit einem Gruppen-Track: Gitarre 8 Takte, dann Voice-Layer stapeln.
+#
+# Ableton-Set (von Hand vorbereiten, siehe README „Gruppen-Setup"):
+#   0  gitarre        Audiospur, Ext. In 2
+#   1  voice          GRUPPENSPUR (Spuren markieren → Strg+G), hier liegen die Effekte
+#   2    voice LIVE     Kindspur, Ext. In 1 — reiner Live-Monitor, nimmt nie auf
+#   3    voice L1       Kindspur, Ext. In 1 — erste Layer-Spur, nackt (keine Geräte)
+# Alles weitere (voice L2, L3, …) legt die App beim Laden der Partitur selbst an.
+title: Henry 3/4 (Gruppen-Layer)
+bpm: 141
+time_signature: 3/4
+
+tracks:
+  gitarre: {ableton_track: 0}                            # Einzelspur wie bisher
+  voice:   {group: voice, layers: 4, reserve: 2}         # Gruppe + Pool: 4 + 2 = 6 Layer-Spuren
+                                                         # monitor: true ist Default → 'voice LIVE'
+
+sections:
+  - id: gitarre_rec           # 8 Takte Gitarre aufnehmen; Voice nur hörbar (Monitor-Kindspur)
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: record
+      voice: hear_through
+
+  - id: voice_1               # Gitarre loopt, erster Voice-Layer auf 'voice L1'
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: play
+      voice: record
+
+  - id: voice_2               # Layer 1 läuft weiter, Layer 2 auf 'voice L2'
+    bars: 8
+    autorelease: true
+    tracks:
+      gitarre: play
+      voice: overdub
+
+  - id: voice_3               # noch ein Layer; loopt, bis du Release drückst
+    bars: 8
+    autorelease: false
+    quantize: bar
+    tracks:
+      gitarre: play
+      voice: overdub
+
+  - id: alles                 # alle aufgenommenen Layer spielen gleichzeitig, live singen
+    bars: 8
+    autorelease: false
+    quantize: bar
+    tracks:
+      gitarre: play
+      voice: play
+
+  - id: ende                  # alles stoppen
+    bars: 1
+    autorelease: false
+    tracks:
+      gitarre: stop
+      voice: stop

@@ -17,10 +17,13 @@
       "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["ableton_track"],
         "properties": {
           "ableton_track": {"type": "integer", "minimum": 0},
-          "type": {"type": "string", "enum": ["single", "group"]}
+          "type": {"type": "string", "enum": ["single", "group"]},
+          "group": {"type": "string", "minLength": 1},
+          "layers": {"type": "integer", "minimum": 1, "maximum": 32},
+          "reserve": {"type": "integer", "minimum": 0, "maximum": 32},
+          "monitor": {"type": "boolean"}
         }
       }
     },

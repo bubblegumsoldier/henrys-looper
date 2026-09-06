@@ -9,17 +9,38 @@ Semantics (contract v0):
   * stop_track / stop_all are quantized to the next bar line as well (like Ableton);
   * has_clip changes are reported via on_slot_has_clip; set_clip() is a test hook that
     emulates a clip being created/deleted manually in Live.
+
+Group layer (M4): pass `tracks=[...]` to simulate a real set layout with group tracks and
+child tracks. create_track_in_group() / duplicate_track() then behave like Live does:
+the new track is INSERTED, every index behind it shifts (slots, arm and monitoring shift
+with it) and default names (`3-Audio`) are renumbered silently. Only that makes a test
+against the simulation meaningful - code that remembers indices or default names breaks
+here exactly as it would in Live.
 """
 
 from __future__ import annotations
 
+import re
 import threading
 import time
+from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from .base import CLIP_STATES, MONITORING_MODES, Engine, EngineError
+from .base import (CLIP_STATES, MONITORING_MODES, Engine, EngineError, SessionStructure,
+                   TrackInfo)
 
 DEFAULT_TRACK_COUNT = 32    # generous: a simulated set never blocks a score by missing tracks
+DEFAULT_TRACK_NAME_RE = re.compile(r"^\d+-(Audio|MIDI)$")
+
+
+@dataclass
+class _SimTrack:
+    name: str
+    is_group: bool = False
+    group_index: int | None = None
+    num_devices: int = 0
+    input_type: str | None = None
+    input_channel: str | None = None
 
 
 class _Slot:
@@ -29,18 +50,32 @@ class _Slot:
         self.has_clip = False
         self.state = "stopped"
 
+    def copy(self) -> "_Slot":
+        other = _Slot()
+        other.has_clip = self.has_clip
+        other.state = self.state
+        return other
+
 
 class SimEngine(Engine):
     name = "sim"
 
     def __init__(self, bpm: float = 100.0, beats_per_bar: int = 4, speed: float = 1.0,
-                 track_count: int | None = None, track_names: list[str] | None = None) -> None:
+                 track_count: int | None = None, track_names: list[str] | None = None,
+                 tracks: list[dict] | None = None) -> None:
         if bpm <= 0 or beats_per_bar <= 0 or speed <= 0:
             raise ValueError("bpm, beats_per_bar und speed müssen > 0 sein")
         super().__init__()
         # simulated set layout: generous by default so any score just runs; tests narrow it down.
         # Names are unknown (None) unless given - the simulation must not invent a naming scheme
         # that the Runner would then report as a mismatch with the score.
+        # `tracks=[{name, is_group, group_index, num_devices, input_type, input_channel}, ...]`
+        # additionally simulates the structure (groups, children, index shifts).
+        self._structure: list[_SimTrack] | None = None
+        if tracks is not None:
+            self._structure = [_SimTrack(**dict(t)) for t in tracks]
+            track_names = [t.name for t in self._structure]
+            track_count = len(self._structure)
         self.track_names: list[str] = list(track_names) if track_names else []
         if track_count is None:
             track_count = len(self.track_names) if self.track_names else DEFAULT_TRACK_COUNT
@@ -160,6 +195,135 @@ class SimEngine(Engine):
             raise EngineError(f"Ungültiger Monitoring-Modus: {mode!r}")
         with self._lock:
             self._monitoring[int(track)] = mode
+
+    # ------------------------------------------------------- group layer (M4)
+    def _structure_list(self) -> list[_SimTrack]:
+        """Lazily promote the flat name/count model to a structure (all tracks top-level)."""
+        if self._structure is None:
+            self._structure = [
+                _SimTrack(self.track_names[i] if i < len(self.track_names) else f"{i + 1}-Audio")
+                for i in range(self.track_count)
+            ]
+        return self._structure
+
+    def _sync_track_lists(self) -> None:
+        structure = self._structure or []
+        self.track_names = [t.name for t in structure]
+        self.track_count = len(structure)
+
+    def _renumber_default_names(self) -> None:
+        """Live silently renumbers default names when indices move (3-Audio -> 4-Audio)."""
+        for i, track in enumerate(self._structure or []):
+            match = DEFAULT_TRACK_NAME_RE.match(track.name)
+            if match:
+                track.name = f"{i + 1}-{match.group(1)}"
+
+    @staticmethod
+    def _shift_key(key: int, at: int) -> int:
+        return key + 1 if key >= at else key
+
+    def _insert_track(self, index: int, track: _SimTrack) -> None:
+        """Insert like Live does: everything at/behind `index` shifts by one. Caller holds lock."""
+        structure = self._structure_list()
+        index = max(0, min(int(index), len(structure)))
+        structure.insert(index, track)
+        for i, t in enumerate(structure):
+            if i != index and t.group_index is not None and t.group_index >= index:
+                t.group_index += 1
+        self._slots = {(self._shift_key(t, index), s): slot for (t, s), slot in self._slots.items()}
+        self._armed = {self._shift_key(k, index): v for k, v in self._armed.items()}
+        self._monitoring = {self._shift_key(k, index): v for k, v in self._monitoring.items()}
+        self._pending = [self._shift_action(a, index) for a in self._pending]
+        self._renumber_default_names()
+        self._sync_track_lists()
+
+    def _shift_action(self, action: tuple, index: int) -> tuple:
+        if action[0] == "fire":
+            return ("fire", self._shift_key(action[1], index), action[2])
+        if action[0] == "stop_track":
+            return ("stop_track", self._shift_key(action[1], index))
+        return action
+
+    def get_session_structure(self) -> SessionStructure:
+        with self._lock:
+            clips: dict[int, int] = {}
+            for (track, _scene), slot in self._slots.items():
+                if slot.has_clip:
+                    clips[track] = clips.get(track, 0) + 1
+            return SessionStructure([
+                TrackInfo(i, t.name, t.is_group, t.group_index, t.num_devices,
+                          t.input_type, t.input_channel, clips.get(i, 0))
+                for i, t in enumerate(self._structure_list())
+            ])
+
+    def create_track_in_group(self, group_index: int, after_index: int) -> int:
+        with self._lock:
+            structure = self._structure_list()
+            group_index = int(group_index)
+            if not 0 <= group_index < len(structure) or not structure[group_index].is_group:
+                raise EngineError(f"Spur {group_index} ist keine Gruppenspur — es kann keine "
+                                  f"Kindspur darin angelegt werden.")
+            children = [i for i, t in enumerate(structure) if t.group_index == group_index]
+            if not children:
+                raise EngineError(f"Gruppe '{structure[group_index].name}' hat keine Kindspur — "
+                                  f"Ableton kann in eine leere Gruppe nichts einfügen.")
+            # spike: the first child slot is not addressable, the track lands ON the asked index
+            index = max(int(after_index) + 1, group_index + 2)
+            index = min(index, max(children) + 1)
+            self._insert_track(index, _SimTrack(f"{index + 1}-Audio", False, group_index))
+            self._renumber_default_names()
+            self._sync_track_lists()
+            return index
+
+    def duplicate_track(self, index: int) -> int:
+        with self._lock:
+            structure = self._structure_list()
+            index = int(index)
+            if not 0 <= index < len(structure):
+                raise EngineError(f"Spur {index} gibt es nicht — sie kann nicht dupliziert werden.")
+            source = structure[index]
+            if source.is_group:
+                raise EngineError(f"Spur {index} ('{source.name}') ist eine Gruppenspur — für den "
+                                  f"Layer-Pool wird eine Kindspur dupliziert, keine Gruppe.")
+            copy = _SimTrack(source.name, False, source.group_index, source.num_devices,
+                             source.input_type, source.input_channel)
+            armed, monitoring = self._armed.get(index, False), self._monitoring.get(index)
+            clips = {s: slot.copy() for (t, s), slot in self._slots.items() if t == index}
+            self._insert_track(index + 1, copy)
+            for scene, slot in clips.items():          # a duplicate inherits arm, input and clips
+                self._slots[(index + 1, scene)] = slot
+            self._armed[index + 1] = armed
+            if monitoring is not None:
+                self._monitoring[index + 1] = monitoring
+            return index + 1
+
+    def set_track_name(self, index: int, name: str) -> None:
+        with self._lock:
+            structure = self._structure_list()
+            if not 0 <= int(index) < len(structure):
+                raise EngineError(f"Spur {index} gibt es nicht — sie kann nicht umbenannt werden.")
+            structure[int(index)].name = str(name)
+            self._sync_track_lists()
+
+    def get_input_routing(self, index: int) -> tuple[str | None, str | None]:
+        with self._lock:
+            structure = self._structure_list()
+            if not 0 <= int(index) < len(structure):
+                return None, None
+            track = structure[int(index)]
+            return track.input_type, track.input_channel
+
+    def set_input_routing(self, index: int, type_name: str | None,
+                          channel: str | None = None) -> None:
+        with self._lock:
+            structure = self._structure_list()
+            if not 0 <= int(index) < len(structure):
+                raise EngineError(f"Spur {index} gibt es nicht — Eingang nicht setzbar.")
+            track = structure[int(index)]
+            if type_name:
+                track.input_type = str(type_name)
+            if channel:
+                track.input_channel = str(channel)
 
     def get_monitoring(self, track: int) -> str:
         return self._monitoring.get(int(track), "auto")

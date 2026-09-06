@@ -724,3 +724,32 @@ body {
     font-size: 60px;
   }
 }
+
+/* --- group tracks (M4): layer pool of an Ableton group track ---------------- */
+.pool-summary {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.pool-summary .pool-new {
+  color: var(--accent-2);
+}
+.track-group-tag {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent-2);
+}
+.track-layers {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  white-space: nowrap;
+}

@@ -89,6 +89,15 @@ def _load_looper() -> tuple[Any, bool]:
     ns["EngineConnectionError"] = getattr(engine_base, "EngineConnectionError", Exception)
     ns["EngineError"] = getattr(engine_base, "EngineError", Exception)
     try:
+        # M4 group layer: only the real package has it (the stub has no session module)
+        session = importlib.import_module(f"{base}.session")
+        ns["ensure_pool"] = session.ensure_pool
+        ns["simulated_set"] = session.simulated_set
+    except Exception as e:  # noqa: BLE001 — group tracks simply stay unavailable then
+        log.warning("ensure_pool nicht verfügbar: %s", e)
+        ns["ensure_pool"] = None
+        ns["simulated_set"] = None
+    try:
         ns["MidiInput"] = importlib.import_module(f"{base}.midi").MidiInput
     except Exception as e:  # noqa: BLE001 — MIDI is optional (mido / rtmidi may be missing)
         log.warning("MidiInput nicht verfügbar: %s", e)
@@ -206,6 +215,11 @@ class Hub:
             try:
                 bpm = float(self.score_json["bpm"]) if self.score_json else 100.0
                 bpb = int(self.score_json.get("beats_per_bar", 4)) if self.score_json else 4
+                # a score with group tracks needs a simulated group layout, otherwise the
+                # runner cannot resolve it and Henry could not rehearse without Ableton
+                tracks = L.simulated_set(self.score) if (L.simulated_set and self.score) else None
+                if tracks:
+                    return L.SimEngine(bpm=bpm, beats_per_bar=bpb, tracks=tracks)
                 return L.SimEngine(bpm=bpm, beats_per_bar=bpb)
             except TypeError:
                 return L.SimEngine()
@@ -280,8 +294,41 @@ class Hub:
             self.yaml_text = yaml_text
             self._build_runner()
             self.log("info", f"Partitur '{self.score_json.get('title')}' geladen ({len(self.score_json.get('sections', []))} Sektionen).")
+            pool = self.ensure_pool()
+            if pool is not None:
+                result["pool"] = pool
             result["state"] = self.state()
             return result
+
+    def ensure_pool(self) -> dict | None:
+        """Prepare the child tracks of every group track (M4). Ableton engine only.
+
+        Returns the PoolReport as JSON, or None when there is nothing to do (sim engine,
+        no group tracks). A missing group is a 400 with the German instruction for Henry.
+        """
+        if self.engine_name != "ableton" or L.ensure_pool is None or self.score is None:
+            return None
+        if not any(getattr(t, "is_group", False) for t in getattr(self.score, "tracks", [])):
+            return None
+        try:
+            if not getattr(self.engine, "connected", False):
+                self.engine.connect()
+            report = L.ensure_pool(self.engine, self.score)
+        except L.EngineConnectionError as e:
+            msg = f"Engine nicht erreichbar: {e}"
+            self.log("error", msg)
+            raise HTTPException(503, msg)
+        except L.EngineError as e:
+            self.log("error", str(e))
+            raise HTTPException(400, str(e))
+        except Exception as e:  # noqa: BLE001
+            log.exception("ensure_pool fehlgeschlagen")
+            msg = f"Gruppen-Spuren konnten nicht vorbereitet werden: {e}"
+            self.log("error", msg)
+            raise HTTPException(400, msg)
+        for message in report.messages:
+            self.log("info", message)
+        return to_jsonable(report.to_dict())
 
     def transport(self, action: str) -> dict:
         with self.lock:

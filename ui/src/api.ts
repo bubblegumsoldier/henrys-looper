@@ -1,4 +1,4 @@
-import type { CompileResult, StateEvent } from "./types";
+import type { CompileResult, LoadResult, StateEvent } from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -37,8 +37,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   compile: (yaml: string) => request<CompileResult>("/api/compile", { method: "POST", body: JSON.stringify({ yaml }) }),
-  load: (yaml: string) =>
-    request<CompileResult & { state?: StateEvent }>("/api/load", { method: "POST", body: JSON.stringify({ yaml }) }),
+  load: (yaml: string) => request<LoadResult>("/api/load", { method: "POST", body: JSON.stringify({ yaml }) }),
   transport: (action: "start" | "stop_all" | "next") =>
     request<{ ok: boolean; state: StateEvent }>(`/api/transport/${action}`, { method: "POST" }),
   state: () => request<StateEvent>("/api/state"),

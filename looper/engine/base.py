@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass, field
 from typing import Callable, Iterable
 
 
@@ -22,6 +23,71 @@ class EngineConnectionError(EngineError):
 
 MONITORING_MODES = ("in", "auto", "off")
 CLIP_STATES = ("recording", "playing", "stopped")
+
+
+# --------------------------------------------------------------------- session structure
+@dataclass
+class TrackInfo:
+    """One track of the Ableton set as seen from outside (M4 group layer).
+
+    `group_index` is the index of the enclosing group track, or None for a top-level track
+    (AbletonOSC's `/live/song/export/structure` calls this field `group_track`).
+    """
+
+    index: int
+    name: str
+    is_group: bool = False
+    group_index: int | None = None
+    num_devices: int = 0
+    input_type: str | None = None
+    input_channel: str | None = None
+    num_clips: int = 0      # a duplicated track inherits its clips - only copy bare tracks
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class SessionStructure:
+    """Snapshot of the set's track layout. Indices are only valid until the set changes."""
+
+    tracks: list[TrackInfo] = field(default_factory=list)
+
+    def __iter__(self):
+        return iter(self.tracks)
+
+    def __len__(self) -> int:
+        return len(self.tracks)
+
+    def __getitem__(self, index: int) -> TrackInfo:
+        return self.tracks[index]
+
+    def at(self, index: int) -> TrackInfo | None:
+        for t in self.tracks:
+            if t.index == index:
+                return t
+        return None
+
+    def by_name(self, name: str) -> TrackInfo | None:
+        """Exact match first, then case/space-insensitive (Live keeps the user's spelling)."""
+        for t in self.tracks:
+            if t.name == name:
+                return t
+        folded = name.strip().casefold()
+        for t in self.tracks:
+            if t.name.strip().casefold() == folded:
+                return t
+        return None
+
+    def group(self, name: str) -> TrackInfo | None:
+        track = self.by_name(name)
+        return track if track is not None and track.is_group else None
+
+    def children(self, group_index: int) -> list[TrackInfo]:
+        return [t for t in self.tracks if t.group_index == group_index]
+
+    def to_dict(self) -> dict:
+        return {"tracks": [t.to_dict() for t in self.tracks]}
 
 
 class Engine(ABC):
@@ -103,6 +169,43 @@ class Engine(ABC):
     @abstractmethod
     def on_clip_state(self, cb: Callable[[int, int, str], None]) -> None:
         """Register callback (track, scene, "recording"|"playing"|"stopped")."""
+
+    # ------------------------------------------------------------- group layer (M4)
+    # Structure handling is optional for an engine: the default implementations refuse with a
+    # German message so a score without group tracks keeps working on a minimal engine.
+
+    def _unsupported(self, what: str) -> EngineError:
+        return EngineError(f"Diese Engine ({type(self).__name__}) kann {what} nicht — "
+                           f"Gruppen-Tracks brauchen die Ableton-Engine.")
+
+    def get_session_structure(self) -> SessionStructure:
+        """Current track layout of the set (groups, children, devices, input routing)."""
+        raise self._unsupported("die Spurstruktur nicht lesen")
+
+    def create_track_in_group(self, group_index: int, after_index: int) -> int:
+        """Create an audio track inside group `group_index`, behind `after_index`.
+
+        Returns the *verified* index of the new track; raises EngineError when the set did
+        not change as expected (indices shift, Live renames default names silently).
+        """
+        raise self._unsupported("keine Spuren anlegen")
+
+    def duplicate_track(self, index: int) -> int:
+        """Duplicate track `index` (copy lands at index+1, same group); returns its verified index."""
+        raise self._unsupported("keine Spuren duplizieren")
+
+    def set_track_name(self, index: int, name: str) -> None:
+        """Rename a track and verify by readback."""
+        raise self._unsupported("Spuren nicht umbenennen")
+
+    def get_input_routing(self, index: int) -> tuple[str | None, str | None]:
+        """(input_routing_type, input_routing_channel) of a track, None where unknown."""
+        raise self._unsupported("das Eingangsrouting nicht lesen")
+
+    def set_input_routing(self, index: int, type_name: str | None,
+                          channel: str | None = None) -> None:
+        """Set input routing type (and channel) by display name; verified by readback."""
+        raise self._unsupported("das Eingangsrouting nicht setzen")
 
     # ---------------------------------------------------------------- slot occupancy
     # Non-blocking slot bookkeeping for the Runner: the only blocking call is prime_slots(),

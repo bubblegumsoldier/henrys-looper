@@ -35,8 +35,17 @@ recording track, then kept current via on_slot_has_clip / on_clip_state callback
 fired for recording is marked occupied immediately. The slots for the *next* section are
 pre-planned when the current section starts and re-checked (cache lookups only) at
 dispatch time. `overdub` on a single track therefore means "new layer replaces the playing
-clip" - Ableton plays one clip per track; a real multi-layer overdub needs a group track
-with several child tracks (see report / handover 7).
+clip" - Ableton plays one clip per track.
+
+Group tracks (M4): a score track with `group:` maps onto an Ableton group track whose child
+tracks are the layers (`<group> L1`, `L2`, ... - see looper/session.py). Each layer track
+holds exactly ONE clip, in slot 0, so every recorded layer keeps sounding while the next one
+is being recorded. `record`/`overdub` take the next free layer track (and finish a layer that
+is still recording), `play` keeps every occupied layer looping, `stop` stops all of them,
+`hear_through` leaves only the monitor child audible. When the pool runs low the Runner adds
+layer tracks from a worker thread BETWEEN sections - never inside the beat callback and never
+within TOPUP_GUARD_BEATS of a boundary, because creating a track blocks for ~150 ms and shifts
+every track index behind it.
 """
 
 from __future__ import annotations
@@ -47,8 +56,11 @@ from typing import Callable
 
 from .engine.base import Engine, EngineError
 from .score.compile import CompiledScore, Section
+from .session import GroupPool, add_layer, resolve_pools
 
 LEAD_BEATS = 2              # like the spike: fire inside the last bar, ~2 beats before the bar line
+TOPUP_GUARD_BEATS = 2       # no structural change this close to a boundary (M4)
+TOPUP_POLL_S = 0.05         # worker thread only - never musical timing
 MAX_SCENES = 64             # safety bound when searching the next free slot
 SLOT_SCAN_SCENES = 16       # slots per recording track primed in start()
 SLOT_SCAN_TIMEOUT_S = 1.5   # blocking only in start(), before the count-in
@@ -98,12 +110,22 @@ class Runner:
         self._last_section_notice = False
 
         names = [t.name for t in score.tracks]
+        self._score_tracks = {t.name: t for t in score.tracks}
         self._track_state: dict[str, str] = {n: "stop" for n in names}
         self._track_scene: dict[str, int | None] = {n: None for n in names}
         self._next_free: dict[str, int] = {n: 0 for n in names}
-        self._ableton: dict[str, int] = {t.name: t.ableton_track for t in score.tracks}
-        self._rec_tracks = [n for n in names
-                            if any(sec.tracks.get(n) in ("record", "overdub") for sec in score.sections)]
+        self._ableton: dict[str, int] = {t.name: t.ableton_track for t in score.tracks
+                                         if not t.is_group}
+        self._rec_tracks = [n for n in names if n in self._ableton
+                            and any(sec.tracks.get(n) in ("record", "overdub") for sec in score.sections)]
+
+        # group tracks: pool of child (layer) tracks, resolved by name in start()
+        self._group_names = [t.name for t in score.tracks if t.is_group]
+        self._pools: dict[str, GroupPool] = {}
+        self._layer_used: dict[str, list[int]] = {n: [] for n in self._group_names}
+        self._layer_recording: dict[str, int | None] = {n: None for n in self._group_names}
+        self._topup_thread: threading.Thread | None = None
+        self._topup_stop = threading.Event()
 
         # slot occupancy cache (track index, scene) -> has_clip; see module docstring
         self._slot_occupied: dict[tuple[int, int], bool] = {}
@@ -131,6 +153,7 @@ class Runner:
             # Before anything is touched in Live: does the set have every referenced track?
             # (raises EngineError; nothing started, transport untouched, runner stays idle)
             track_warnings = self._check_tracks()
+            track_warnings.extend(self._resolve_groups())   # raises EngineError if a group is missing
             if not self._callbacks_registered:
                 self.engine.on_beat(self._on_beat)
                 self.engine.on_clip_state(self._on_clip_state)
@@ -151,6 +174,9 @@ class Runner:
             self._last_section_notice = False
             self._slow_flush = None
             self._next_free = {n: 0 for n in self._next_free}
+            self._layer_used = {n: [] for n in self._group_names}
+            self._layer_recording = {n: None for n in self._group_names}
+            self._topup_stop.clear()
             events = [self._log("info", f"Start: {self.score.bpm} BPM, {self._bpb} Beats/Takt, "
                                         f"Einzähler 1 Takt, dann Sektion 1 '{self.score.sections[0].id}'.")]
             events.extend(track_warnings)
@@ -240,6 +266,7 @@ class Runner:
             "connected": self._connected,
             "engine": self.engine_name,
             "countin": self._countin,
+            "groups": self._group_state(),
         }
 
     @staticmethod
@@ -275,12 +302,16 @@ class Runner:
         self._planned = None
         self._dispatched_boundary = None
         self._preplanned = {}
+        self._topup_stop.set()
         for name in self._track_state:
             self._track_state[name] = "stop"
+        for name in self._group_names:
+            self._layer_recording[name] = None
         events = []
         if self._connected:
             cmds: list[tuple] = [(self.engine.stop_all,)] if send_stop_all else []
-            cmds += [(self.engine.arm, idx, False) for idx in self._ableton.values()]
+            cmds += [(self.engine.arm, idx, False)
+                     for idx in list(self._ableton.values()) + self._group_layers()]
             cmds.append((self.engine.stop_transport,))
             events.extend(self._run(cmds))
         if was_running:
@@ -333,10 +364,77 @@ class Runner:
                                                 f"Partitur '{name}' — Nummerierung prüfen."))
         return events
 
+    # --------------------------------------------------------- group pools
+    def _resolve_groups(self) -> list[dict]:
+        """Bind every group track of the score to its Ableton child tracks (caller holds the lock).
+
+        Raises EngineError (German) when the group or its children are missing - the pool is
+        prepared by looper.session.ensure_pool() when the score is loaded, so a failure here
+        means the set was changed in between.
+        """
+        if not self._group_names:
+            return []
+        self._pools = resolve_pools(self.engine, self.score)   # EngineError bubbles up
+        events: list[dict] = []
+        for name in self._group_names:
+            pool = self._pools[name]
+            track = self._score_tracks[name]
+            if not pool.layers:
+                raise EngineError(f"Gruppe '{pool.group}' hat keine Layer-Spur nach der Konvention "
+                                  f"'{pool.group} L1', '{pool.group} L2', … Partitur laden legt "
+                                  f"sie an; bitte erneut laden.")
+            events.append(self._log("info", f"Gruppe '{pool.group}' (Spur {pool.group_index}): "
+                                            f"{len(pool.layers)} Layer-Spuren "
+                                            f"({', '.join(pool.layer_names)})"
+                                            + (f", Monitor auf Spur {pool.monitor_index}"
+                                               if pool.monitor_index is not None else
+                                               ", ohne Monitor-Spur")))
+            if track.monitor and pool.monitor_index is None:
+                events.append(self._log("warn", f"Gruppe '{pool.group}': Monitor-Spur "
+                                                f"'{pool.group} LIVE' fehlt — hear_through bleibt "
+                                                f"ohne Wirkung."))
+            if pool.strays:
+                events.append(self._log("info", f"Gruppe '{pool.group}': ignoriere Kindspuren ohne "
+                                                f"Konventionsnamen ({', '.join(pool.strays)})."))
+            if len(pool.layers) < track.pool_size:
+                events.append(self._log("warn", f"Gruppe '{pool.group}': nur {len(pool.layers)} von "
+                                                f"{track.pool_size} Layer-Spuren — der Runner legt "
+                                                f"während des Stücks zwischen den Sektionen nach."))
+        return events
+
+    def _group_layers(self) -> list[int]:
+        return [idx for pool in self._pools.values() for idx in pool.layer_indices]
+
+    def _free_layers(self, name: str) -> list[int]:
+        pool = self._pools.get(name)
+        if pool is None:
+            return []
+        used = self._layer_used.get(name, [])
+        return [idx for idx in pool.layer_indices if idx not in used]
+
+    def _group_state(self) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        for name in self._group_names:
+            pool = self._pools.get(name)
+            if pool is None:
+                out[name] = {"layers_used": 0, "layers_free": 0}
+                continue
+            used = len([i for i in pool.layer_indices if i in self._layer_used.get(name, [])])
+            out[name] = {"layers_used": used, "layers_free": len(pool.layer_indices) - used}
+        return out
+
     # ---------------------------------------------------------- slot cache
     def _slot_label(self, track: int, scene: int) -> str:
-        name = next((n for n, idx in self._ableton.items() if idx == track), f"track{track}")
-        return f"{name}/Slot {scene}"
+        name = next((n for n, idx in self._ableton.items() if idx == track), None)
+        if name is None:
+            for gname, pool in self._pools.items():
+                for number, index in pool.layers:
+                    if index == track:
+                        name = f"{gname}/{pool.group} L{number}"
+                        break
+                if pool.monitor_index == track:
+                    name = f"{gname}/{pool.group} LIVE"
+        return f"{name or f'track{track}'}/Slot {scene}"
 
     def _prime_slots(self) -> list[dict]:
         """Fill the occupancy cache once (blocking, only in start() before the count-in)."""
@@ -344,6 +442,8 @@ class Runner:
         self._slot_occupied = {}
         self._slot_unknown_warned = set()
         slots = [(self._ableton[n], s) for n in self._rec_tracks for s in range(SLOT_SCAN_SCENES)]
+        # group layers carry exactly one clip, in slot 0 - that is the whole scan for them
+        slots += [(idx, 0) for idx in self._group_layers()]
         if not slots:
             return events
         t0 = time.perf_counter()
@@ -368,6 +468,17 @@ class Runner:
             events.append(self._log("warn", f"{unknown} von {len(slots)} Slots ohne Antwort (Timeout "
                                             f"{SLOT_SCAN_TIMEOUT_S:.1f} s) — sie werden als frei angenommen; "
                                             f"ein dort vorhandener Clip würde abgespielt statt neu aufgenommen."))
+        # a layer track that still holds a clip from an earlier run counts as used
+        for name in self._group_names:
+            pool = self._pools.get(name)
+            if pool is None:
+                continue
+            self._layer_used[name] = [idx for idx in pool.layer_indices
+                                      if self._slot_occupied.get((idx, 0), False)]
+            if self._layer_used[name]:
+                events.append(self._log("info", f"Gruppe '{pool.group}': "
+                                                f"{len(self._layer_used[name])} Layer-Spur(en) haben "
+                                                f"schon einen Clip und bleiben belegt."))
         return events
 
     def _find_free_scene(self, name: str) -> tuple[int, list[dict]]:
@@ -393,11 +504,17 @@ class Runner:
         target = self.score.sections[idx]
         parts = []
         for name, st in target.tracks.items():
-            if st in ("record", "overdub"):
-                scene, ev = self._find_free_scene(name)
-                events.extend(ev)
-                plan[name] = scene
-                parts.append(f"{name} → Slot {scene}")
+            if st not in ("record", "overdub"):
+                continue
+            if name in self._pools:
+                free = self._free_layers(name)
+                parts.append(f"{name} → Layer-Spur {free[0]}" if free
+                             else f"{name} → keine freie Layer-Spur!")
+                continue
+            scene, ev = self._find_free_scene(name)
+            events.extend(ev)
+            plan[name] = scene
+            parts.append(f"{name} → Slot {scene}")
         if parts:
             events.append(self._log("info", f"Vorausplanung Sektion {idx + 1} '{target.id}': "
                                             + ", ".join(parts)))
@@ -410,6 +527,9 @@ class Runner:
         events: list[dict] = []
         for name, new in target.tracks.items():
             prev = self._track_state[name]
+            if name in self._pools:
+                cmds.extend(self._plan_group_quantized(name, prev, new, events))
+                continue
             t = self._ableton[name]
             if new in ("record", "overdub"):
                 scene, ev = self._find_free_scene(name)
@@ -446,11 +566,85 @@ class Runner:
                 events.append(self._log("info", f"  {name}: Hear-Through (Monitoring In)"))
         return cmds, events
 
+    def _plan_group_quantized(self, name: str, prev: str, new: str,
+                              events: list[dict]) -> list[tuple]:
+        """Quantized commands for one group track (one clip per layer track, always slot 0)."""
+        pool = self._pools[name]
+        cmds: list[tuple] = []
+        recording = self._layer_recording.get(name)
+        if new in ("record", "overdub"):
+            if recording is not None:
+                # a layer that is still recording is closed first -> it keeps looping
+                cmds.append((self.engine.fire_slot, recording, 0))
+                events.append(self._log("info", f"  {name}: Layer auf Spur {recording} beenden → Loop"))
+                self._layer_recording[name] = None
+            free = self._free_layers(name)
+            if not free:
+                events.append(self._log("error", f"  {name}: keine freie Layer-Spur mehr in Gruppe "
+                                                 f"'{pool.group}' — diese Aufnahme entfällt. Erhöhe "
+                                                 f"'layers'/'reserve' in der Partitur."))
+                return cmds
+            layer = free[0]
+            number = next((n for n, i in pool.layers if i == layer), "?")
+            cmds += [(self.engine.arm, layer, True), (self.engine.set_monitoring, layer, "auto"),
+                     (self.engine.fire_slot, layer, 0)]
+            self._layer_used.setdefault(name, []).append(layer)
+            self._layer_recording[name] = layer
+            self._slot_occupied[(layer, 0)] = True
+            what = "Overdub-Layer" if new == "overdub" else "Record"
+            events.append(self._log("info", f"  {name}: {what} → '{pool.group} L{number}' "
+                                            f"(Spur {layer}, ab Taktgrenze); "
+                                            f"{len(self._free_layers(name))} Layer frei"))
+        elif new == "play":
+            if recording is not None:
+                cmds.append((self.engine.fire_slot, recording, 0))
+                events.append(self._log("info", f"  {name}: Aufnahme beenden → Loop (Spur {recording})"))
+                self._layer_recording[name] = None
+            if prev in ("stop", "hear_through"):
+                used = list(self._layer_used.get(name, []))
+                if used:
+                    cmds += [(self.engine.fire_slot, idx, 0) for idx in used]
+                    events.append(self._log("info", f"  {name}: Play — {len(used)} Layer "
+                                                    f"(Spuren {', '.join(map(str, used))})"))
+                else:
+                    events.append(self._log("warn", f"  {name}: 'play', aber noch kein Layer "
+                                                    f"aufgenommen."))
+        elif new == "stop":
+            if prev != "stop":
+                cmds += [(self.engine.stop_track, idx) for idx in pool.layer_indices]
+                events.append(self._log("info", f"  {name}: Stop (alle Layer der Gruppe "
+                                                f"'{pool.group}')"))
+        elif new == "hear_through":
+            if prev in ("record", "overdub", "play"):
+                cmds += [(self.engine.stop_track, idx) for idx in pool.layer_indices]
+            events.append(self._log("info", f"  {name}: Hear-Through über "
+                                            + (f"'{pool.group} LIVE' (Spur {pool.monitor_index})"
+                                               if pool.monitor_index is not None
+                                               else "— keine Monitor-Spur vorhanden")))
+        return cmds
+
+    def _plan_group_immediate(self, name: str, new: str) -> list[tuple]:
+        """Arm/monitoring for one group track, sent exactly on the bar line."""
+        pool = self._pools[name]
+        cmds: list[tuple] = []
+        recording = self._layer_recording.get(name)
+        for idx in pool.layer_indices:
+            if idx != recording:
+                cmds.append((self.engine.arm, idx, False))
+        if pool.monitor_index is not None:
+            # the monitor child is always the live ear of the group; hear_through makes it explicit
+            cmds += [(self.engine.arm, pool.monitor_index, False),
+                     (self.engine.set_monitoring, pool.monitor_index, "in")]
+        return cmds
+
     def _plan_immediate(self, target: Section) -> list[tuple]:
         """Commands to send exactly on the bar line (disarm / monitoring)."""
         cmds: list[tuple] = []
         for name, new in target.tracks.items():
             prev = self._track_state[name]
+            if name in self._pools:
+                cmds.extend(self._plan_group_immediate(name, new))
+                continue
             t = self._ableton[name]
             if new in ("play", "stop"):
                 cmds.append((self.engine.arm, t, False))
@@ -614,8 +808,101 @@ class Runner:
                                         f"quantize={target.quantize})"))
         self._preplanned, ev = self._preplan(idx + 1)     # look ahead while there is time
         events.extend(ev)
+        events.extend(self._maybe_topup())                # between sections only, on a worker thread
         events.append(self._state_dict())
         return events
+
+    # -------------------------------------------------------- layer top-up
+    def _safe_for_structure(self) -> bool:
+        """True while a blocking structure change cannot collide with a boundary.
+
+        Caller holds the lock. Requires: running, past the count-in, no armed switch, and more
+        than TOPUP_GUARD_BEATS + lead beats left before the next boundary.
+        """
+        if not self._running or self._countin or self._last_beat is None or self._pending:
+            return False
+        sec = self._current()
+        boundary = self._section_start + sec.bars * self._bpb
+        if self._planned is not None:
+            boundary = min(boundary, self._planned[1])
+        return boundary - self._last_beat > TOPUP_GUARD_BEATS + self._lead
+
+    def _maybe_topup(self) -> list[dict]:
+        """Start the worker if any group has fewer free layers than its `reserve`."""
+        if self._topup_thread is not None and self._topup_thread.is_alive():
+            return []
+        short = [n for n in self._group_names
+                 if len(self._free_layers(n)) < int(self._score_tracks[n].reserve or 0)]
+        if not short:
+            return []
+        self._topup_stop.clear()
+        self._topup_thread = threading.Thread(target=self._topup_worker, args=(short,),
+                                              name="looper-topup", daemon=True)
+        self._topup_thread.start()
+        return [self._log("info", f"Layer-Pool wird nachgelegt: {', '.join(short)} "
+                                  f"(zwischen den Sektionen, nicht im Beat-Callback).")]
+
+    def _topup_worker(self, names: list[str]) -> None:
+        """Blocking engine work off the beat path: add layer tracks until `reserve` is free again."""
+        for name in names:
+            while not self._topup_stop.is_set():
+                with self._lock:
+                    if not self._running or name not in self._pools:
+                        break
+                    track = self._score_tracks[name]
+                    if len(self._free_layers(name)) >= int(track.reserve or 0):
+                        break
+                    safe = self._safe_for_structure()
+                if not safe:
+                    if self._topup_stop.wait(TOPUP_POLL_S):
+                        return
+                    continue
+                try:
+                    layer, index, warnings = add_layer(self.engine, track)
+                except EngineError as exc:
+                    self._flush([self._log("error", f"Layer-Pool von '{name}' konnte nicht "
+                                                    f"erweitert werden: {exc}")])
+                    break
+                except Exception as exc:  # pragma: no cover - defensive, must never kill the run
+                    self._flush([self._log("error", f"Layer-Pool von '{name}': {exc!r}")])
+                    break
+                events, ok = self._absorb_new_layer(name, layer, index)
+                events.extend(self._log("warn", w) for w in warnings)
+                self._flush(events)
+                if not ok:
+                    break        # the structure is unclear now - do not keep hammering it
+
+    def _absorb_new_layer(self, name: str, layer: str, index: int) -> tuple[list[dict], bool]:
+        """Adopt a freshly created layer track: shift every index behind it, re-resolve by name.
+
+        The (blocking) structure read happens WITHOUT the runner lock - holding it would stall
+        the beat callback for as long as AbletonOSC needs to answer. Returns (events, ok).
+        """
+        try:
+            pools = resolve_pools(self.engine, self.score)
+        except EngineError as exc:
+            return [self._log("error", f"Struktur nach dem Anlegen von '{layer}' nicht "
+                                       f"lesbar: {exc}")], False
+        with self._lock:
+            self._shift_indices(index)
+            self._pools = pools
+            free = len(self._free_layers(name))
+            events = [self._log("info", f"Layer-Spur '{layer}' angelegt (Spur {index}) — "
+                                        f"{free} Layer frei in Gruppe '{self._pools[name].group}'.")]
+            events.append(self._state_dict())
+            return events, True
+
+    def _shift_indices(self, at: int) -> None:
+        """A track was inserted at `at`: every remembered index >= at moves up by one."""
+        def shift(i: int) -> int:
+            return i + 1 if i >= at else i
+
+        self._ableton = {n: shift(i) for n, i in self._ableton.items()}
+        self._slot_occupied = {(shift(t), s): v for (t, s), v in self._slot_occupied.items()}
+        self._slot_unknown_warned = {(shift(t), s) for t, s in self._slot_unknown_warned}
+        self._layer_used = {n: [shift(i) for i in v] for n, v in self._layer_used.items()}
+        self._layer_recording = {n: (None if i is None else shift(i))
+                                 for n, i in self._layer_recording.items()}
 
     def _finish(self, boundary: int) -> list[dict]:
         """Boundary of a pending 'stop' in the last section: clips were stopped (quantized), go idle."""

@@ -152,6 +152,11 @@ def cmd_run(args) -> int:
     out("Tasten: Enter/n = nächste Sektion, s = Stop All, q = Beenden (Ctrl+C geht auch)")
     code = EXIT_OK
     try:
+        if args.engine == "ableton" and any(t.is_group for t in score.tracks):
+            from .session import ensure_pool
+            engine.connect()
+            for message in ensure_pool(engine, score).messages:
+                out(message)
         runner.start()
         while True:
             for key in keys.poll():

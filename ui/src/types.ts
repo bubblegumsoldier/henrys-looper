@@ -4,8 +4,42 @@ export type TrackState = "record" | "overdub" | "play" | "stop" | "hear_through"
 
 export interface ScoreTrack {
   name: string;
-  ableton_track: number;
   type: "single" | "group";
+  /** single tracks only: 0-based index in the Ableton set. */
+  ableton_track?: number | null;
+  /** group tracks only: name of the Ableton group track plus the size of its layer pool. */
+  group?: string | null;
+  layers?: number | null;
+  reserve?: number | null;
+  monitor?: boolean | null;
+}
+
+/** Live occupancy of a group track's layer child tracks (from the runner's state event). */
+export interface GroupLayers {
+  layers_used: number;
+  layers_free: number;
+}
+
+/** What ensure_pool() prepared in Ableton when a score with group tracks was loaded. */
+export interface PoolGroupResult {
+  track: string;
+  group: string;
+  group_index: number;
+  existing_layers: string[];
+  created_layers: string[];
+  monitor: string | null;
+  monitor_created: boolean;
+  layer_indices: number[];
+  monitor_index: number | null;
+  strays: string[];
+  warnings: string[];
+  message: string;
+}
+
+export interface PoolReport {
+  changed: boolean;
+  groups: PoolGroupResult[];
+  messages: string[];
 }
 
 export interface ScoreSection {
@@ -48,6 +82,8 @@ export interface StateEvent {
   engine: "sim" | "ableton" | string;
   /** Set by the real runner while waiting for the first bar boundary (not in the v0 contract). */
   countin?: boolean;
+  /** Group tracks report how many of their layer child tracks are taken (M4). */
+  groups?: Record<string, GroupLayers>;
 }
 
 /** True while the transport runs but the first section has not started yet. */
@@ -91,6 +127,9 @@ export interface LogRow extends LogEvent {
 }
 
 export type CompileResult = { ok: true; score: Score } | { ok: false; errors: ScoreErr[] };
+
+/** POST /api/load additionally reports what was prepared in Ableton (group tracks only). */
+export type LoadResult = CompileResult & { state?: StateEvent; pool?: PoolReport };
 
 export const IDLE_STATE: StateEvent = {
   type: "state",

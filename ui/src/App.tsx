@@ -5,7 +5,7 @@ import { Transport } from "./components/Transport";
 import { Blocks } from "./components/Blocks";
 import { MidiMonitor } from "./components/MidiMonitor";
 import { useWebSocket } from "./useWebSocket";
-import { IDLE_STATE, type LogRow, type LooperEvent, type MidiRow, type Score, type ScoreErr, type StateEvent } from "./types";
+import { IDLE_STATE, type LogRow, type LooperEvent, type MidiRow, type PoolReport, type Score, type ScoreErr, type StateEvent } from "./types";
 
 const LS_KEY = "looper.yaml";
 const MAX_ROWS = 200;
@@ -30,6 +30,7 @@ export default function App() {
   const [engineBusy, setEngineBusy] = useState(false);
   const [midiRows, setMidiRows] = useState<MidiRow[]>([]);
   const [logs, setLogs] = useState<LogRow[]>([]);
+  const [pool, setPool] = useState<PoolReport | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const bannerTimer = useRef<number | undefined>(undefined);
@@ -112,6 +113,14 @@ export default function App() {
         setCompiled(res.score);
         setLoadedJson(JSON.stringify(res.score));
         if (res.state) setState(res.state);
+        // Group tracks: say what was prepared in Ableton ("Gruppe voice: 2 vorhanden, 3 angelegt").
+        if (res.pool) {
+          for (const g of res.pool.groups) pushLog("info", g.message);
+          for (const g of res.pool.groups) for (const w of g.warnings) pushLog("warn", w);
+          setPool(res.pool);
+        } else {
+          setPool(null);
+        }
       } else {
         setErrors(res.errors);
         pushLog("warn", `Laden abgebrochen: ${res.errors.length} Fehler.`);
@@ -257,7 +266,7 @@ export default function App() {
             )}
           </div>
         </section>
-        <Blocks score={compiled} state={state} stale={stale} />
+        <Blocks score={compiled} state={state} stale={stale} pool={pool} />
         <MidiMonitor rows={midiRows} logs={logs} onClear={() => setMidiRows([])} />
       </main>
     </div>

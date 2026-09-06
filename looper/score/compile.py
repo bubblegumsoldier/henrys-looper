@@ -27,6 +27,9 @@ DEFAULT_QUANTIZE = "loop"
 DEFAULT_AUTORELEASE = False
 DEFAULT_BEATS_PER_BAR = 4
 DEFAULT_TIME_SIGNATURE = "4/4"
+DEFAULT_GROUP_LAYERS = 4      # minimum number of layer child tracks a group track needs
+DEFAULT_GROUP_RESERVE = 2     # spare layer tracks kept free on top of `layers`
+GROUP_ONLY_KEYS = ("layers", "reserve", "monitor")
 TIME_SIGNATURE_DENOMINATORS = (1, 2, 4, 8, 16, 32)
 SECTION_KEYS = ("id", "repeat", "bars", "autorelease", "quantize", "tracks")
 
@@ -46,9 +49,41 @@ _TYPE_NAMES = {
 # --------------------------------------------------------------------------- #
 @dataclass
 class Track:
+    """A logical track of the score.
+
+    Two kinds, distinguished by which Ableton object they point at:
+      * ``single`` - one Ableton track, addressed by its 0-based ``ableton_track`` index;
+      * ``group``  - an Ableton *group* track addressed by its ``group`` name, holding one
+        child track per overdub layer (``<group> L1``, ``L2``, ...) plus an optional live
+        monitor child (``<group> LIVE``). ``layers``/``reserve``/``monitor`` size that pool.
+
+    ``type`` stays the discriminator of contract v0; ``is_group`` is what code should test,
+    because a legacy ``type: group`` without a ``group:`` name has no group semantics.
+    """
+
     name: str
-    ableton_track: int
+    ableton_track: int | None = None
     type: str = "single"
+    group: str | None = None
+    layers: int | None = None
+    reserve: int | None = None
+    monitor: bool | None = None
+
+    @property
+    def is_group(self) -> bool:
+        return self.group is not None
+
+    @property
+    def pool_size(self) -> int:
+        """Layer child tracks the group needs: `layers` minimum plus `reserve` always-free ones."""
+        return int(self.layers or DEFAULT_GROUP_LAYERS) + int(
+            DEFAULT_GROUP_RESERVE if self.reserve is None else self.reserve)
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.is_group:
+            return {"name": self.name, "type": "group", "group": self.group,
+                    "layers": self.layers, "reserve": self.reserve, "monitor": self.monitor}
+        return {"name": self.name, "ableton_track": self.ableton_track, "type": self.type}
 
 
 @dataclass
@@ -84,7 +119,7 @@ class CompiledScore:
             "bpm": self.bpm,
             "beats_per_bar": self.beats_per_bar,
             "time_signature": self.time_signature,
-            "tracks": [asdict(t) for t in self.tracks],
+            "tracks": [t.to_dict() for t in self.tracks],
             "midi": {k: dict(v) for k, v in self.midi.items()},
             "sections": [asdict(s) for s in self.sections],
         }
@@ -269,6 +304,83 @@ def _short(value, limit: int = 40) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _int_or(value, default: int) -> int:
+    """Schema already reported wrong types; fall back to the default so one error stays one error."""
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+def _parse_track(name: str, spec: CommentedMap, tracks_node: CommentedMap,
+                 issues: list[ScoreIssue], seen_idx: dict[int, str],
+                 seen_group: dict[str, str]) -> Track | None:
+    """One entry of the `tracks:` mapping -> Track, or None if it was rejected (issue appended)."""
+    raw_idx = spec.get("ableton_track")
+    has_index = isinstance(raw_idx, int) and not isinstance(raw_idx, bool)
+    raw_group = spec.get("group")
+    has_group = isinstance(raw_group, str) and raw_group.strip() != ""
+
+    if has_group and "ableton_track" in spec:
+        line, col = _pos(spec, "group")
+        issues.append(ScoreIssue(line, col,
+                                 f"Track '{name}': 'group' und 'ableton_track' schließen sich aus.",
+                                 "Ein Gruppen-Track nennt nur die Ableton-Gruppenspur "
+                                 "(group: <Name>), eine Einzelspur nur ihren Index "
+                                 "(ableton_track: <Nummer>)."))
+        return None
+
+    if has_group:
+        group = raw_group.strip()
+        key = group.casefold()
+        if key in seen_group:
+            line, col = _pos(spec, "group")
+            issues.append(ScoreIssue(line, col,
+                                     f"Track '{name}' nutzt die Gruppe '{group}', die bereits "
+                                     f"'{seen_group[key]}' belegt.",
+                                     "Jede Ableton-Gruppenspur darf nur einem Partitur-Track "
+                                     "zugeordnet sein."))
+            return None
+        seen_group[key] = name
+        layers = _int_or(spec.get("layers"), DEFAULT_GROUP_LAYERS)
+        reserve = _int_or(spec.get("reserve"), DEFAULT_GROUP_RESERVE)
+        monitor = spec["monitor"] if isinstance(spec.get("monitor"), bool) else True
+        if isinstance(spec.get("type"), str) and spec["type"] != "group":
+            line, col = _pos(spec, "type")
+            issues.append(ScoreIssue(line, col,
+                                     f"Track '{name}': 'group' bedeutet type 'group', "
+                                     f"nicht '{spec['type']}'.",
+                                     "'type' bei einem Gruppen-Track weglassen."))
+            return None
+        return Track(name, None, "group", group, layers, reserve, bool(monitor))
+
+    # single track
+    for key in GROUP_ONLY_KEYS:
+        if key in spec:
+            line, col = _pos(spec, key)
+            issues.append(ScoreIssue(line, col,
+                                     f"Track '{name}': '{key}' gilt nur für Gruppen-Tracks.",
+                                     "Ergänze 'group: <Name der Ableton-Gruppenspur>' oder "
+                                     f"entferne '{key}'."))
+            return None
+    if not has_index:
+        if "ableton_track" in spec:
+            return None                # wrong type - already reported by the schema
+        line, col = _pos(tracks_node, name)
+        issues.append(ScoreIssue(line, col,
+                                 f"Track '{name}' hat weder 'ableton_track' noch 'group'.",
+                                 "Einzelspur: 'ableton_track: <0-basierter Index>'. "
+                                 "Gruppen-Track: 'group: <Name der Ableton-Gruppenspur>'."))
+        return None
+    idx = int(raw_idx)
+    if idx in seen_idx:
+        line, col = _pos(spec, "ableton_track")
+        issues.append(ScoreIssue(line, col,
+                                 f"Track '{name}' nutzt ableton_track {idx}, den bereits "
+                                 f"'{seen_idx[idx]}' belegt.",
+                                 "Jeder Ableton-Track darf nur einem Partitur-Track zugeordnet sein."))
+        return None
+    seen_idx[idx] = name
+    return Track(name, idx, str(spec.get("type", "single")))
+
+
 # --------------------------------------------------------------------------- #
 # Compiler
 # --------------------------------------------------------------------------- #
@@ -324,21 +436,14 @@ def compile_score(yaml_text: str) -> CompiledScore:
     tracks: list[Track] = []
     if isinstance(tracks_node, CommentedMap):
         seen_idx: dict[int, str] = {}
+        seen_group: dict[str, str] = {}
         for name, spec in tracks_node.items():
-            if not isinstance(spec, CommentedMap) or not isinstance(spec.get("ableton_track"), int) \
-                    or isinstance(spec.get("ableton_track"), bool):
+            if not isinstance(spec, CommentedMap):
                 continue
-            idx = int(spec["ableton_track"])
-            if idx in seen_idx:
-                line, col = _pos(spec, "ableton_track")
-                issues.append(ScoreIssue(line, col,
-                                         f"Track '{name}' nutzt ableton_track {idx}, den bereits "
-                                         f"'{seen_idx[idx]}' belegt.",
-                                         "Jeder Ableton-Track darf nur einem Partitur-Track zugeordnet sein."))
-                continue
-            seen_idx[idx] = str(name)
-            track_names.append(str(name))
-            tracks.append(Track(str(name), idx, str(spec.get("type", "single"))))
+            track = _parse_track(str(name), spec, tracks_node, issues, seen_idx, seen_group)
+            if track is not None:
+                track_names.append(track.name)
+                tracks.append(track)
 
     midi: dict[str, dict[str, Any]] = {}
     midi_node = data.get("midi")

@@ -84,7 +84,7 @@ sections:
 ```
 
 - `bpm`, `time_signature`: Tempo und Taktart, werden beim Start in Ableton gesetzt. Es läuft immer mit Klick (Abletons Metronom).
-- `tracks`: Name → `ableton_track` (0-basiert). `type: single|group` wird vom Schema akzeptiert, `group` hat aber noch keine eigene Semantik.
+- `tracks`: Entweder eine Einzelspur (`{ableton_track: 0}`, 0-basierter Index) oder ein Gruppen-Track (`{group: voice}`, Name der Ableton-Gruppenspur) — siehe „Gruppen-Setup" weiter unten.
 - `sections`: Jede Sektion beschreibt den kompletten Soll-Zustand aller Spuren (keine Deltas). Nicht genannte Spuren werden zu `stop`.
   - `bars`: Länge in Takten, auch ungerade.
   - `autorelease`: `true` = nach `bars` Takten automatisch weiter. `false` = Sektion loopt, bis `next_section` kommt; der Wechsel ist dann „armiert" (sichtbar im UI) und passiert quantisiert.
@@ -95,9 +95,40 @@ sections:
 
 Die letzte Sektion loopt endlos; `next_section` dort wird ignoriert. Vor Sektion 1 kommt ein Einzähl-Takt.
 
-Ehrlicher Hinweis zu `overdub` und `hear_through`: Ableton spielt pro Spur genau einen Clip. `overdub` auf einer Einzelspur bedeutet deshalb „neuer Layer ersetzt den laufenden Clip", nicht „Layer obendrauf". Für echte Schichten brauchst du pro Layer eine eigene Ableton-Spur, und für durchgehendes Monitoring eine eigene Spur, die nie aufnimmt. `examples/henry-3-4.yaml` zeigt genau das (`voice`, `voice2`, `voice_live` auf demselben Input).
+Ehrlicher Hinweis zu `overdub` und `hear_through`: Ableton spielt pro Spur genau einen Clip. `overdub` auf einer **Einzelspur** bedeutet deshalb „neuer Layer ersetzt den laufenden Clip", nicht „Layer obendrauf". Für echte Schichten nimmst du einen Gruppen-Track (siehe unten); `examples/henry-3-4.yaml` zeigt die alte Variante von Hand (`voice`, `voice2`, `voice_live` auf demselben Input).
 
 Fehlermeldungen des Compilers kommen mit Zeilennummer und Tippfehler-Vorschlag („Sektion 'bridge' referenziert Track 'bss' — meintest du 'bass'?").
+
+## Gruppen-Setup (echte Overdub-Layer)
+
+Ein Gruppen-Track bildet **eine Ableton-Gruppenspur** ab: Die Effekte liegen auf der Gruppe, jeder Overdub-Layer bekommt eine eigene nackte Kindspur, und eine Kindspur ist reiner Live-Monitor. Dadurch stapelst du beliebig viele Layer, und alle klingen gleichzeitig.
+
+```yaml
+tracks:
+  gitarre: {ableton_track: 0}                          # Einzelspur wie bisher
+  voice:   {group: voice, layers: 4, reserve: 2}       # Ableton-Gruppenspur namens 'voice'
+```
+
+- `group`: Name der Gruppenspur in Ableton (schließt `ableton_track` aus).
+- `layers`: Mindestzahl an Layer-Spuren (Default 4).
+- `reserve`: wie viele Layer-Spuren darüber hinaus immer frei bleiben (Default 2). Beim Laden legt die App also `layers + reserve` Layer-Spuren an; geht der Vorrat während des Stücks zur Neige, legt der Runner **zwischen** Sektionen nach (nie mitten im Takt).
+- `monitor`: Default `true` — die Monitor-Kindspur `<gruppe> LIVE`.
+
+**Namenskonvention (verbindlich):** Layer-Spuren heißen `voice L1`, `voice L2`, … · die Monitor-Spur `voice LIVE`. Nur so findet die App die Spuren wieder — Ableton benennt Default-Namen (`3-Audio`) beim Verschieben still um. Kindspuren mit anderen Namen lässt die App in Ruhe.
+
+**Das machst du einmal von Hand in Ableton** (OSC kann keine Gruppen anlegen):
+
+1. Eine Audiospur anlegen, Input zuweisen (z. B. Ext. In 1), Monitoring sinnvoll setzen.
+2. Spur markieren → **Strg+G** → die entstandene Gruppenspur exakt `voice` nennen (identisch zu `group:` in der Partitur).
+3. Deine Effekte (Reverb, EQ, Kompressor …) auf die **Gruppenspur** ziehen, nicht auf die Kindspur.
+4. Die erste Kindspur `voice L1` nennen — nackt lassen, also keine Geräte darauf.
+5. Optional, aber empfohlen: eine zweite Kindspur `voice LIVE` mit demselben Input; sie nimmt nie auf und ist dein durchgehender Live-Monitor. Fehlt sie, legt die App sie beim Laden an.
+
+Alles Weitere (`voice L2`, `voice L3`, …) legt die App beim **Laden** der Partitur selbst an: sie dupliziert eine nackte Kindspur (oder legt eine neue Audiospur in der Gruppe an), benennt sie sofort, übernimmt das Eingangsrouting und schaltet Arm aus. Sie **löscht und verkleinert nie** — das letzte Kind zu löschen würde die Gruppe in Ableton auflösen. Was vorbereitet wurde, steht danach im UI-Log („Gruppe voice: 2 Layer-Spuren vorhanden, 3 angelegt (voice L2, voice L3, voice L4)").
+
+Fehlt die Gruppe, bricht das Laden mit einer klaren Meldung ab: „Gruppe 'voice' existiert nicht im Ableton-Set. Lege sie in Ableton an (Spuren markieren, Strg+G) und benenne sie 'voice'."
+
+Vollständiges Beispiel: `examples/henry-3-4-group.yaml`.
 
 ## CLI
 
@@ -114,7 +145,7 @@ Tasten während `run`: `Enter`/`n`/Leertaste = nächste Sektion, `s` = Stop All,
 ## Projektstruktur
 
 ```
-looper/          Python-Bibliothek: score/ (Schema + Compiler), engine/ (base, ableton_osc, sim), runner.py, midi.py, __main__.py (CLI)
+looper/          Python-Bibliothek: score/ (Schema + Compiler), engine/ (base, ableton_osc, sim), session.py (Gruppen-Pool), runner.py, midi.py, __main__.py (CLI)
 backend/         FastAPI-App (REST + WebSocket), bindet looper/ ein; _stub_looper/ als Fallback ohne echtes Paket
 ui/              React + Vite + CodeMirror 6: Editor, Block-Vorschau, MIDI-Monitor, Transport
 examples/        Beispiel-Partituren
@@ -128,10 +159,10 @@ docs/            Übergabedokument und Schnittstellen-Vertrag v0
 - Nur Windows getestet. Auf Windows sind MIDI-Geräte meist exklusiv: ein Controller kann entweder in dieser App oder in Ableton aktiv sein, nicht in beiden.
 - MIDI-Controller-Steuerung ist implementiert, aber noch nicht mit echter Hardware getestet (Tag 1 gab es keinen Controller).
 - Kein Smart-Start per Audio-Threshold (geht über OSC nicht); Record startet quantisiert an der Taktgrenze.
-- Keine echten Gruppen-Layer (`type: group` ohne Wirkung); Layer laufen über separate Spuren.
+- Gruppen-Layer sind implementiert, aber noch nicht mit echtem Ableton-Set getestet (Stand M4). Die Gruppenspur selbst musst du von Hand anlegen — OSC kann das nicht.
 - Keine Sprünge/Szenarien zur Laufzeit (`goto` ist nicht implementiert), keine Variablen oder Laufzeitlogik im YAML.
 - Kein Stem-Export; die Aufnahmen liegen als Clips in deinem Ableton-Set.
-- Später geplant: Gruppen-Layer, Smart-Start, Szenarien/Sprünge, eine eigene Audio-Engine hinter demselben `Engine`-Interface (damit YAML-Format und UI unverändert bleiben).
+- Später geplant: Smart-Start, Szenarien/Sprünge, eine eigene Audio-Engine hinter demselben `Engine`-Interface (damit YAML-Format und UI unverändert bleiben).
 
 ## Lizenz
 

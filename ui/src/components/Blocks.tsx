@@ -1,9 +1,19 @@
-import { isCountIn, type Score, type ScoreSection, type StateEvent, type TrackState } from "../types";
+import {
+  isCountIn,
+  type GroupLayers,
+  type PoolReport,
+  type Score,
+  type ScoreSection,
+  type ScoreTrack,
+  type StateEvent,
+  type TrackState,
+} from "../types";
 
 interface Props {
   score: Score | null;
   state: StateEvent;
   stale: boolean;
+  pool?: PoolReport | null;
 }
 
 const STATE_LABEL: Record<TrackState, string> = {
@@ -14,7 +24,14 @@ const STATE_LABEL: Record<TrackState, string> = {
   hear_through: "hear",
 };
 
-export function Blocks({ score, state, stale }: Props) {
+/** Layer pool of a group track: live numbers from the runner, otherwise the score's plan. */
+function layersOf(track: ScoreTrack, live: GroupLayers | undefined): GroupLayers {
+  if (live) return live;
+  const planned = (track.layers ?? 4) + (track.reserve ?? 2);
+  return { layers_used: 0, layers_free: planned };
+}
+
+export function Blocks({ score, state, stale, pool }: Props) {
   if (!score) {
     return (
       <section className="blocks">
@@ -27,6 +44,7 @@ export function Blocks({ score, state, stale }: Props) {
   const active = state.running && !countIn ? state.section_index : null;
   const pendingIdx = state.running && state.pending === "next" && active !== null ? active + 1 : null;
   const bpb = score.beats_per_bar || 4;
+  const groups = new Map(score.tracks.filter((t) => t.type === "group").map((t) => [t.name, t]));
 
   return (
     <section className="blocks">
@@ -38,6 +56,16 @@ export function Blocks({ score, state, stale }: Props) {
         {stale && <span className="badge badge-warn">nicht geladen</span>}
         {countIn && <span className="badge badge-countin">Einzähler…</span>}
       </div>
+      {pool && pool.groups.length > 0 && (
+        <ul className="pool-summary">
+          {pool.groups.map((g) => (
+            <li key={g.track} className={g.created_layers.length || g.monitor_created ? "pool-new" : ""}>
+              Gruppe {g.group}: {g.existing_layers.length} vorhanden, {g.created_layers.length} angelegt
+              {g.monitor_created ? ` + Monitor-Spur ${g.monitor}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="blocks-row">
         {score.sections.map((sec) => {
           const isActive = active === sec.index;
@@ -52,6 +80,7 @@ export function Blocks({ score, state, stale }: Props) {
               isPending={isPending}
               isPendingEnd={isPendingEnd}
               state={state}
+              groups={groups}
               isNext={countIn && sec.index === Math.max(0, state.section_index ?? 0)}
             />
           );
@@ -69,9 +98,10 @@ interface CardProps {
   isPendingEnd: boolean;
   isNext: boolean;
   state: StateEvent;
+  groups: Map<string, ScoreTrack>;
 }
 
-function SectionCard({ sec, bpb, isActive, isPending, isPendingEnd, isNext, state }: CardProps) {
+function SectionCard({ sec, bpb, isActive, isPending, isPendingEnd, isNext, state, groups }: CardProps) {
   const bar = isActive ? state.bar : 0;
   const beat = isActive ? state.beat : 0;
   const progress = isActive && sec.bars > 0 ? Math.min(1, ((bar - 1) * bpb + beat) / (sec.bars * bpb)) : 0;
@@ -94,9 +124,19 @@ function SectionCard({ sec, bpb, isActive, isPending, isPendingEnd, isNext, stat
       <ul className="card-tracks">
         {Object.entries(sec.tracks).map(([name, st]) => {
           const live = (tracks as Record<string, TrackState>)[name] ?? st;
+          const group = groups.get(name);
+          const layers = group ? layersOf(group, isActive ? state.groups?.[name] : undefined) : null;
           return (
             <li key={name}>
-              <span className="track-name">{name}</span>
+              <span className="track-name" title={group ? `Ableton-Gruppe '${group.group}'` : undefined}>
+                {name}
+                {group && <span className="track-group-tag">Gruppe</span>}
+              </span>
+              {layers && (
+                <span className="track-layers" title="belegte / freie Layer-Spuren">
+                  {layers.layers_used}▮ {layers.layers_free}▯
+                </span>
+              )}
               <span className={`state state-${live}`}>{STATE_LABEL[live] ?? live}</span>
             </li>
           );
