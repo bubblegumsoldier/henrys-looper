@@ -8,6 +8,7 @@
 mod audio;
 mod click;
 mod duplex;
+mod engine;
 mod latency;
 mod meter;
 mod soak;
@@ -19,6 +20,7 @@ use clap::{Parser, Subcommand};
 
 use audio::DeviceOpts;
 use click::ClickOpts;
+use engine::live::LiveOpts;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -78,6 +80,15 @@ enum Command {
         #[arg(long, default_value_t = 1.0)]
         gain: f32,
     },
+
+    /// Looper (Phase 1): ein Track, Aufnahme auf Taktgrenze, Latenzkompensation, Tastatursteuerung
+    Live {
+        #[command(flatten)]
+        dev: DeviceOpts,
+
+        #[command(flatten)]
+        live: LiveOpts,
+    },
 }
 
 /// Non-blocking "press Enter to stop": a helper thread owns stdin, the main loop polls the
@@ -92,6 +103,19 @@ pub fn wait_for_enter() -> Receiver<()> {
     rx
 }
 
+#[cfg(test)]
+mod cli_tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    /// clap builds the command at runtime, so flag collisions between flattened option structs
+    /// only surface when the program starts. This turns that into a compile-and-test check.
+    #[test]
+    fn cli_is_well_formed() {
+        Cli::command().debug_assert();
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match &cli.command {
@@ -100,6 +124,7 @@ fn main() -> ExitCode {
         Command::Click { dev, click } => click::cmd_click(dev, click),
         Command::Latency { dev, runs } => latency::cmd_latency(dev, *runs),
         Command::Soak { dev, minutes, gain } => soak::cmd_soak(dev, *minutes, *gain),
+        Command::Live { dev, live } => engine::live::cmd_live(dev, live),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
