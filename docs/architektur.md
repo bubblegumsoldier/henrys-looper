@@ -251,7 +251,14 @@ und die Live-Ansicht liest die Taktart von dort statt aus der kompilierten Parti
 
 ## 8. Was ausdrücklich nicht gemacht wird
 
-- **VST-Hosting.** Kein Ziel dieses Plans.
+- **VST-Hosting: als Fernziel revidiert (2026-09-06).** Der Plan schließt es aus, Henry hält es
+  langfristig für unvermeidlich. Kurzfristig ändert das nichts — eigene Effekte kommen zuerst.
+  Wenn es ernst wird, ist die Vorentscheidung zu treffen, ob **CLAP** (offen, moderne API,
+  brauchbare Rust-Anbindung) oder **VST3** (verbreiteter, C++-lastig, eigene Lizenzfragen). CLAP
+  wäre für dieses Projekt der naheliegendere Weg. Zu bedenken ist außerdem: Ein fremdes Plugin
+  darf im Audio-Callback tun, was es will — allozieren, sperren, abstürzen. Die
+  Echtzeit-Garantien dieses Projekts enden an dieser Grenze, und ein Absturz reißt ohne
+  Prozesstrennung die ganze Engine mit.
 - **WASAPI als Rückfallebene.** Siehe Abschnitt 2.
 - **Anbindung des Python-Codes.** Er wird ersetzt. Prozessgrenzen waren das Problem.
 - **Stereo-Tracks.** Mono ist die Entscheidung.
