@@ -70,7 +70,7 @@ use super::command::{
 use super::metro::Metronome;
 use super::process::{EngineConfig, EngineCore, check_loop, loop_capacity};
 use super::timeline::{TimeSignature, Timeline};
-use super::track::TrackState;
+use super::track::{Track, TrackState};
 
 /// Input FIFO size in units of the audio buffer size, as in `live.rs`.
 const INPUT_FIFO_BUFFERS: u32 = 64;
@@ -425,18 +425,29 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         rtrb::RingBuffer::<f32>::new((buffer_frames * INPUT_FIFO_BUFFERS) as usize);
     let (mut cmd_tx, cmd_rx) = command_channel(256);
     let (status_tx, mut status_rx) = status_channel(1024);
-    let (mut buffers, buffer_endpoint) = buffer_channel(4);
+    let (mut buffers, buffer_endpoint) = buffer_channel(4, 8);
 
-    // The click starts switched off: the noise floor has to be measured in silence. It is switched
-    // on by command as soon as the threshold is known.
+    // Two prepared layer buffers, allocated here in the main thread: one for the running take, one
+    // ready for the next run while the recorded one is being analysed.
+    for _ in 0..2 {
+        buffers.install(vec![0.0f32; capacity])?;
+    }
+
+    // One track on input channel 1, the channel the loopback cable feeds. The click starts
+    // switched off: the noise floor has to be measured in silence, and it is switched on by command
+    // as soon as the threshold is known.
     let core = EngineCore::new(EngineConfig {
         timeline,
         latency_samples: opts.latency_samples,
-        buffer: vec![0.0f32; capacity],
+        // The input callback below feeds the FIFO with channel 1 only, so the engine sees one
+        // channel per frame.
+        input_channels: 1,
+        tracks: vec![Track::new(0, false)],
+        spares: Vec::with_capacity(2),
+        layer_capacity: capacity as u64,
         commands: cmd_rx,
         status: status_tx,
         buffers: buffer_endpoint,
-        monitor: false,
         monitor_gain: 0.0,
         click: false,
         click_gain: opts.click_gain,
@@ -614,29 +625,32 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         let end = timeline.position_of(bar + opts.bars as u64, 0);
         let loop_len = end - start;
 
-        cmd_tx.send(Command::StartRecord { at: start })?;
-        cmd_tx.send(Command::StopRecord { at: end })?;
+        cmd_tx.send(Command::StartRecord { track: 0, at: start })?;
+        cmd_tx.send(Command::StopRecord { track: 0, at: end })?;
 
         let ahead = (end + opts.latency_samples).saturating_sub(est);
         let timeout = Duration::from_secs_f64(timeline.samples_to_secs(ahead) + RUN_SLACK);
         let done = poll_until(&mut status_rx, &mut last, timeout, |s| {
-            s.track == TrackState::Ready && s.loop_len == loop_len
+            let t = s.tracks()[0];
+            t.state == TrackState::Ready && t.loop_len == loop_len
         })?;
+        let done_loop_len = done.tracks()[0].loop_len;
 
-        // Hand the engine a fresh buffer; it swaps and gives the recorded one back. That is how
-        // the loop content reaches the main thread without the audio thread ever allocating.
-        buffers.install(vec![0.0f32; capacity])?;
-        let recorded = take_retired(&mut buffers, Duration::from_secs(2))?;
-        if (recorded.len() as u64) < done.loop_len {
+        // Remove the recorded layer: the engine hands its buffer back through the return queue.
+        // That is how the loop content reaches the main thread without the audio thread ever
+        // allocating or freeing anything.
+        cmd_tx.send(Command::RemoveLayer { track: 0, layer: 0 })?;
+        let mut recorded = take_retired(&mut buffers, Duration::from_secs(2))?;
+        if (recorded.len() as u64) < done_loop_len {
             return Err(format!(
                 "Der zurueckgegebene Puffer ist mit {} Samples kuerzer als der Loop ({} Samples).",
                 recorded.len(),
-                done.loop_len
+                done_loop_len
             ));
         }
 
         let analysis = analyse_loop(
-            &recorded[..done.loop_len as usize],
+            &recorded[..done_loop_len as usize],
             start,
             &timeline,
             threshold,
@@ -677,6 +691,11 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
             run_means.push(mean);
         }
         all_deviations.extend_from_slice(&analysis.deviations);
+
+        // Zeroed here in the main thread and handed back, so the next run finds a prepared buffer
+        // waiting instead of allocating one.
+        recorded.fill(0.0);
+        buffers.install(recorded)?;
     }
 
     drop(input);

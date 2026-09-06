@@ -1,11 +1,13 @@
-//! `live` subcommand: the phase 1 looper on real hardware.
+//! `live` subcommand: the looper on real hardware. Phase 2 - several tracks, unlimited layers.
 //!
 //! Thread layout, following the plan:
 //!
-//! * **Input callback** - copies channel 1 into a lock-free FIFO and counts. Nothing else.
+//! * **Input callback** - copies whole input frames (all device channels, interleaved) into a
+//!   lock-free FIFO and counts. Nothing else.
 //! * **Output callback** - takes the FIFO content and drives [`EngineCore`], which owns the whole
 //!   musical state. This callback is the engine clock.
-//! * **Main thread** - allocates, schedules commands, prints. Never touches engine state directly.
+//! * **Main thread** - allocates, zeroes, schedules commands, prints. Never touches engine state
+//!   directly, and is the only place a `Vec` is ever created or dropped.
 //!
 //! # Why the input goes through a FIFO, and why that does not disturb the compensation
 //!
@@ -16,29 +18,30 @@
 //!
 //! * `EngineCore` starts counting `out_pos` at 0 on the first output callback, so `out_pos` is the
 //!   output stream's own frame index.
-//! * The FIFO never drops a sample, so the `k`-th sample the engine consumes is the input stream's
+//! * The FIFO never drops a sample, so the `k`-th frame the engine consumes is the input stream's
 //!   own frame number `k`, no matter how long it sat in the FIFO. `in_index` is that number.
 //! * Phase 0 measured the roundtrip between exactly these two counters: what the output writes at
 //!   frame `P` is seen by the input at frame `P + R`, R = 827 at 128 frames / 48 kHz.
 //!
 //! So the compensation `m = k - R` works on stream frame numbers, not on arrival times, and the
 //! FIFO transit cancels out. It only decides *when* the engine gets to write a sample, not *where*
-//! - which is why a FIFO underrun (fewer samples available than the block needs) costs nothing but
-//! a little delay: the engine simply consumes fewer samples this round and picks them up next time,
+//! - which is why a FIFO underrun (fewer frames available than the block needs) costs nothing but
+//! a little delay: the engine simply consumes fewer frames this round and picks them up next time,
 //! and `in_index` still counts input frames.
 //!
 //! Two conditions this rests on, both of them cheap to keep:
 //!
-//! 1. **Nothing may be dropped from the FIFO.** An overrun loses input samples and shifts every
-//!    later recording permanently, so overruns are counted and shown as a warning. The FIFO holds
-//!    64 buffers and is drained on every output callback, so it cannot fill in normal operation.
+//! 1. **Nothing may be dropped from the FIFO, and never half a frame.** An overrun loses input
+//!    samples and shifts every later recording permanently, so overruns are counted and shown as a
+//!    warning, and both sides move whole frames only. The FIFO holds 64 buffers and is drained on
+//!    every output callback, so it cannot fill in normal operation.
 //! 2. **The streams are started in the same order as in the phase 0 measurement**, input first,
 //!    then output, so that both frame counters start on the same driver callback and share the
 //!    origin the 827 samples were measured against.
 //!
 //! `--latency-samples` still deserves one check against the real path: record the click through a
-//! loopback cable and look at where it lands. That is the honest way to confirm the number for a
-//! different device, sample rate or buffer size.
+//! loopback cable and look at where it lands (subcommand `calibrate`). That is the honest way to
+//! confirm the number for a different device, sample rate or buffer size.
 
 use std::io::Write;
 use std::sync::Arc;
@@ -54,22 +57,34 @@ use crate::audio::{self, DeviceOpts};
 use crate::meter::fmt_dbfs;
 
 use super::command::{
-    BufferChannel, Command, CommandSender, Status, buffer_channel, command_channel, status_channel,
+    Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, TrackStatus, buffer_channel,
+    command_channel, status_channel,
 };
-use super::process::{EngineConfig, EngineCore, check_loop, loop_capacity};
+use super::process::{EngineConfig, EngineCore, check_loop, limits_line, loop_capacity};
 use super::timeline::{TimeSignature, Timeline};
-use super::track::TrackState;
+use super::track::{MAX_LAYERS, Track, TrackState};
 
-/// Input FIFO size in units of the audio buffer size. Generous on purpose: it costs 32 kB and it
-/// is the difference between a hiccup and a permanently misaligned recording.
+/// Input FIFO size in units of the audio buffer size. Generous on purpose: it costs a few dozen kB
+/// and it is the difference between a hiccup and a permanently misaligned recording.
 const INPUT_FIFO_BUFFERS: u32 = 64;
 /// Status snapshots per second the audio thread produces. The display consumes 10 of them.
 const STATUS_HZ: u32 = 200;
 /// Terminal refresh rate, as required: no more than ten updates per second.
 const DISPLAY_INTERVAL: Duration = Duration::from_millis(100);
+/// Prepared layer buffers the control thread keeps in the engine, so an overdub never waits for an
+/// allocation. Three is one for the take that is starting, one for a second track starting at the
+/// same bar, and one in reserve.
+const SPARE_SLOTS: usize = 3;
+/// Width the status block is padded to, so remains of a longer previous line are erased.
+const LINE_WIDTH: usize = 150;
 
 #[derive(Args, Debug, Clone)]
 pub struct LiveOpts {
+    /// Track als NAME:KANAL, mehrfach angebbar. KANAL ist die Eingangsnummer wie am Geraet
+    /// beschriftet (1-basiert), z.B. --track stimme:1 --track gitarre:2
+    #[arg(long = "track", value_name = "NAME:KANAL")]
+    pub tracks: Vec<String>,
+
     /// Tempo in Schlaegen pro Minute (bezogen auf Viertel)
     #[arg(long, default_value_t = 100.0)]
     pub bpm: f64,
@@ -99,13 +114,114 @@ pub struct LiveOpts {
     #[arg(long, default_value_t = 1.0)]
     pub click_gain: f32,
 
-    /// Mit eingeschaltetem Mithoeren starten
+    /// Mit eingeschaltetem Mithoeren starten (fuer alle Tracks)
     #[arg(long)]
     pub monitor: bool,
 
     /// Ohne Klick starten
     #[arg(long)]
     pub no_click: bool,
+
+    /// Anzeige ohne Cursor-Steuerung: jede Aktualisierung wird angehaengt statt ueberschrieben.
+    /// Noetig nur in Terminals, die ANSI-Steuerzeichen nicht koennen.
+    #[arg(long)]
+    pub simple_display: bool,
+}
+
+/// One track as the user asked for it on the command line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackDef {
+    pub name: String,
+    /// Zero-based channel index inside an input frame.
+    pub channel: usize,
+}
+
+/// Parse one `--track name:channel` argument. The channel is 1-based here, as printed on the
+/// interface, and zero-based everywhere inside the engine.
+pub fn parse_track_arg(spec: &str) -> Result<TrackDef, String> {
+    let spec = spec.trim();
+    let Some((name, channel)) = spec.rsplit_once(':') else {
+        return Err(format!(
+            "--track \"{spec}\" ist unvollstaendig. Erwartet wird NAME:KANAL, z.B. --track stimme:1"
+        ));
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(format!("--track \"{spec}\": vor dem Doppelpunkt fehlt der Name."));
+    }
+    let channel: usize = channel.trim().parse().map_err(|_| {
+        format!(
+            "--track \"{spec}\": \"{}\" ist keine Kanalnummer. Erwartet wird eine ganze Zahl ab 1.",
+            channel.trim()
+        )
+    })?;
+    if channel == 0 {
+        return Err(format!(
+            "--track \"{spec}\": Kanaele werden ab 1 gezaehlt, wie am Geraet beschriftet."
+        ));
+    }
+    Ok(TrackDef {
+        name: name.to_string(),
+        channel: channel - 1,
+    })
+}
+
+/// Turn the `--track` arguments into track definitions, or produce a German error.
+///
+/// Without any argument the setup this looper was built for is assumed: voice on input 1, guitar on
+/// input 2 - reduced to what the device can actually deliver.
+pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackDef>, String> {
+    if in_channels == 0 {
+        return Err("Das Geraet meldet keinen einzigen Eingangskanal.".to_string());
+    }
+    let defs: Vec<TrackDef> = if specs.is_empty() {
+        ["stimme", "gitarre"]
+            .iter()
+            .take(in_channels.min(2))
+            .enumerate()
+            .map(|(i, name)| TrackDef {
+                name: name.to_string(),
+                channel: i,
+            })
+            .collect()
+    } else {
+        specs
+            .iter()
+            .map(|s| parse_track_arg(s))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    if defs.len() > MAX_TRACKS {
+        return Err(format!(
+            "{} Tracks angefragt, moeglich sind hoechstens {MAX_TRACKS}.",
+            defs.len()
+        ));
+    }
+    for def in &defs {
+        if def.channel >= in_channels {
+            return Err(format!(
+                "Track \"{}\" soll auf Eingang {} hoeren, das Geraet liefert aber nur {} Eingangskanaele \
+                 (also Eingang 1 bis {}).\n\
+                 \x20 - anderen Kanal waehlen: --track {}:1\n\
+                 \x20 - oder mehr Kanaele oeffnen: --in-channels {}",
+                def.name,
+                def.channel + 1,
+                in_channels,
+                in_channels,
+                def.name,
+                def.channel + 1
+            ));
+        }
+    }
+    for (i, def) in defs.iter().enumerate() {
+        if let Some(other) = defs[..i].iter().find(|d| d.name == def.name) {
+            return Err(format!(
+                "Der Trackname \"{}\" kommt zweimal vor. Namen muessen eindeutig sein.",
+                other.name
+            ));
+        }
+    }
+    Ok(defs)
 }
 
 #[derive(Default)]
@@ -114,7 +230,7 @@ struct LiveStats {
     other_errors: AtomicU64,
     /// Output callbacks that found the input FIFO short.
     underruns: AtomicU64,
-    /// Input callbacks that could not push - samples lost, alignment gone.
+    /// Input callbacks that could not push - frames lost, alignment gone.
     overruns: AtomicU64,
     cb_nanos_max: AtomicU64,
 }
@@ -135,15 +251,27 @@ impl LiveStats {
     }
 }
 
+/// The control thread's view of one track: what the user calls it, and the layer gains it set.
+///
+/// The engine is the authority on how many layers exist; the gains are mirrored here because they
+/// are the one piece of layer state the status snapshot does not carry.
+struct TrackUi {
+    name: String,
+    channel: usize,
+    gains: Vec<f32>,
+}
+
 /// Everything the main thread needs to schedule commands.
 struct Control {
     cmd: CommandSender,
-    buffers: BufferChannel,
+    pool: LayerPool,
     timeline: Timeline,
     bars: u32,
     latency: u64,
     /// Head start every scheduled command gets, so it can never arrive after its own time.
     guard: u64,
+    tracks: Vec<TrackUi>,
+    active: usize,
     message: String,
     running: bool,
 }
@@ -161,77 +289,238 @@ impl Control {
         self.timeline.bar_start_at_or_after(est + self.guard)
     }
 
+    fn status_of(&self, last: Option<(Status, Instant)>, track: usize) -> TrackStatus {
+        last.and_then(|(s, _)| s.tracks().get(track).copied())
+            .unwrap_or_default()
+    }
+
     fn handle(&mut self, line: &str, last: Option<(Status, Instant)>) {
         let lowered = line.trim().to_lowercase();
         let mut parts = lowered.split_whitespace();
         let key = parts.next().unwrap_or("");
         let est = self.estimated_pos(last);
-        let state = last.map(|(s, _)| s.track).unwrap_or_default();
+        let track = self.active;
+        let ts = self.status_of(last, track);
 
         match key {
             "" => {}
+            d if d.len() == 1 && d.chars().all(|c| c.is_ascii_digit()) => {
+                let n: usize = d.parse().unwrap_or(0);
+                if n >= 1 && n <= self.tracks.len() {
+                    self.active = n - 1;
+                    self.message = format!("Track {} \"{}\" gewaehlt.", n, self.tracks[n - 1].name);
+                } else {
+                    self.message = format!(
+                        "Track {n} gibt es nicht. Vorhanden: 1 bis {}.",
+                        self.tracks.len()
+                    );
+                }
+            }
             "r" => {
                 let start = self.next_bar(est);
                 let bar = self.timeline.bar_index_at(start);
                 let end = self.timeline.position_of(bar + self.bars as u64, 0);
-                self.send(Command::StartRecord { at: start });
-                self.send(Command::StopRecord { at: end });
-                self.send(Command::StartPlay { at: end });
+                self.send(Command::StartRecord { track, at: start });
+                self.send(Command::StopRecord { track, at: end });
+                self.send(Command::StartPlay { track, at: end });
+                self.tracks[track].gains.clear();
                 self.message = format!(
-                    "Aufnahme ab Takt {} ueber {} Takte, danach laeuft der Loop.",
+                    "\"{}\": neuer Loop ab Takt {} ueber {} Takte.",
+                    self.tracks[track].name,
                     bar + 1,
                     self.bars
                 );
             }
-            "s" => match state {
+            "o" => {
+                let start = self.next_bar(est);
+                let bar = self.timeline.bar_index_at(start);
+                // An overdub covers exactly one pass of the existing loop; on an empty track it is
+                // the first take and gets the configured number of bars.
+                let end = if ts.loop_len > 0 {
+                    start + ts.loop_len
+                } else {
+                    self.timeline.position_of(bar + self.bars as u64, 0)
+                };
+                self.send(Command::StartOverdub { track, at: start });
+                self.send(Command::StopRecord { track, at: end });
+                self.send(Command::StartPlay { track, at: end });
+                self.message = format!(
+                    "\"{}\": Ebene {} ab Takt {}.",
+                    self.tracks[track].name,
+                    ts.layers as usize + 1,
+                    bar + 1
+                );
+            }
+            "s" => match ts.state {
                 TrackState::Armed => {
-                    self.send(Command::ClearTrack { at: est + self.guard });
+                    self.send(Command::ClearTrack {
+                        track,
+                        at: est + self.guard,
+                    });
                     self.message = "Geplante Aufnahme abgebrochen.".to_string();
                 }
-                TrackState::Recording => {
+                TrackState::Recording | TrackState::Overdub => {
                     let end = self.next_bar(est);
-                    self.send(Command::StopRecord { at: end });
-                    self.send(Command::StartPlay { at: end });
+                    self.send(Command::StopRecord { track, at: end });
+                    self.send(Command::StartPlay { track, at: end });
                     let bar = self.timeline.bar_index_at(end);
-                    self.message = format!("Aufnahme endet mit Takt {}.", bar);
+                    self.message = format!("Aufnahme endet mit Takt {bar}.");
                 }
                 _ => {
-                    self.send(Command::StopPlay { at: est + self.guard });
-                    self.message = "Wiedergabe gestoppt.".to_string();
+                    self.send(Command::StopPlay {
+                        track,
+                        at: est + self.guard,
+                    });
+                    self.message = format!("\"{}\": Wiedergabe gestoppt.", self.tracks[track].name);
                 }
             },
             "p" => {
                 let at = self.next_bar(est);
-                self.send(Command::StartPlay { at });
+                self.send(Command::StartPlay { track, at });
                 self.message = format!(
-                    "Wiedergabe ab Takt {}.",
+                    "\"{}\": Wiedergabe ab Takt {}.",
+                    self.tracks[track].name,
                     self.timeline.bar_index_at(at) + 1
                 );
             }
             "c" => {
-                self.send(Command::ClearTrack { at: est + self.guard });
-                self.message = "Loop geleert.".to_string();
+                self.send(Command::ClearTrack {
+                    track,
+                    at: est + self.guard,
+                });
+                self.tracks[track].gains.clear();
+                self.message = format!("\"{}\" geleert.", self.tracks[track].name);
+            }
+            "a" => {
+                self.send(Command::ClearAll {
+                    at: est + self.guard,
+                });
+                for t in self.tracks.iter_mut() {
+                    t.gains.clear();
+                }
+                self.active = 0;
+                self.message = "Alles geleert - Zustand wie frisch gestartet.".to_string();
             }
             "m" => {
-                let on = !last.map(|(s, _)| s.monitor).unwrap_or(false);
-                self.send(Command::SetMonitor { on });
-                self.message = format!("Mithoeren {}.", if on { "an" } else { "aus" });
+                let on = !ts.monitor;
+                self.send(Command::SetMonitor { track, on });
+                self.message = format!(
+                    "\"{}\": Mithoeren {}.",
+                    self.tracks[track].name,
+                    if on { "an" } else { "aus" }
+                );
             }
             "k" => {
                 let on = !last.map(|(s, _)| s.click).unwrap_or(true);
                 self.send(Command::SetClick { on });
                 self.message = format!("Klick {}.", if on { "an" } else { "aus" });
             }
-            "t" => self.set_tempo(parts.next(), parts.next(), parts.next(), state),
+            "e" => self.layer_mute(parts.next(), ts),
+            "w" => self.layer_remove(parts.next(), ts),
+            "l" => self.layer_gain(parts.next(), parts.next(), ts),
+            "t" => self.set_tempo(parts.next(), parts.next(), parts.next(), last),
             "q" => {
                 self.send(Command::Stop);
                 self.running = false;
                 self.message = "Beende.".to_string();
             }
             other => {
-                self.message = format!("Unbekannte Eingabe \"{other}\". Tasten: r s p c m k t q");
+                self.message = format!(
+                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m k e w l t q",
+                    self.tracks.len()
+                );
             }
         }
+    }
+
+    /// Parse a 1-based layer number against what the engine says exists.
+    fn layer_index(&mut self, arg: Option<&str>, ts: TrackStatus, usage: &str) -> Option<usize> {
+        let Some(Ok(n)) = arg.map(str::parse::<usize>) else {
+            self.message = format!("Aufruf: {usage}");
+            return None;
+        };
+        if n == 0 || n > ts.layers as usize {
+            self.message = if ts.layers == 0 {
+                format!("\"{}\" hat keine Ebenen.", self.tracks[self.active].name)
+            } else {
+                format!(
+                    "\"{}\" hat die Ebenen 1 bis {}.",
+                    self.tracks[self.active].name, ts.layers
+                )
+            };
+            return None;
+        }
+        Some(n - 1)
+    }
+
+    fn layer_mute(&mut self, arg: Option<&str>, ts: TrackStatus) {
+        let Some(index) = self.layer_index(arg, ts, "e <nr>  (Ebene stumm/laut)") else {
+            return;
+        };
+        let muted = ts.muted_mask & (1 << index) == 0;
+        let track = self.active;
+        self.send(Command::SetLayerMute {
+            track,
+            layer: index,
+            muted,
+        });
+        self.message = format!(
+            "\"{}\": Ebene {} {}.",
+            self.tracks[track].name,
+            index + 1,
+            if muted { "stumm" } else { "wieder hoerbar" }
+        );
+    }
+
+    fn layer_remove(&mut self, arg: Option<&str>, ts: TrackStatus) {
+        let Some(index) = self.layer_index(arg, ts, "w <nr>  (Ebene weg)") else {
+            return;
+        };
+        let track = self.active;
+        self.send(Command::RemoveLayer {
+            track,
+            layer: index,
+        });
+        if index < self.tracks[track].gains.len() {
+            self.tracks[track].gains.remove(index);
+        }
+        self.message = format!(
+            "\"{}\": Ebene {} entfernt.",
+            self.tracks[track].name,
+            index + 1
+        );
+    }
+
+    fn layer_gain(&mut self, nr: Option<&str>, value: Option<&str>, ts: TrackStatus) {
+        let usage = "l <nr> <wert>  (Lautstaerke einer Ebene, 0.0 bis 4.0)";
+        let Some(index) = self.layer_index(nr, ts, usage) else {
+            return;
+        };
+        let Some(Ok(gain)) = value.map(str::parse::<f32>) else {
+            self.message = format!("Aufruf: {usage}");
+            return;
+        };
+        if !(0.0..=4.0).contains(&gain) {
+            self.message = "Die Lautstaerke muss zwischen 0.0 und 4.0 liegen.".to_string();
+            return;
+        }
+        let track = self.active;
+        self.send(Command::SetLayerGain {
+            track,
+            layer: index,
+            gain,
+        });
+        let gains = &mut self.tracks[track].gains;
+        while gains.len() <= index {
+            gains.push(1.0);
+        }
+        gains[index] = gain;
+        self.message = format!(
+            "\"{}\": Ebene {} auf {:.2}.",
+            self.tracks[track].name,
+            index + 1,
+            gain
+        );
     }
 
     /// `t <bpm> [schlaege_pro_takt] [zaehlzeit]` - only while nothing is recorded, because a new
@@ -241,11 +530,14 @@ impl Control {
         bpm: Option<&str>,
         beats: Option<&str>,
         unit: Option<&str>,
-        state: TrackState,
+        last: Option<(Status, Instant)>,
     ) {
-        if state != TrackState::Empty {
+        let busy = last
+            .map(|(s, _)| s.tracks().iter().any(|t| t.state != TrackState::Empty))
+            .unwrap_or(false);
+        if busy {
             self.message =
-                "Tempo laesst sich nur bei leerem Loop aendern (erst mit c leeren).".to_string();
+                "Tempo laesst sich nur aendern, wenn alle Tracks leer sind (erst a).".to_string();
             return;
         }
         let Some(Ok(bpm)) = bpm.map(str::parse::<f64>) else {
@@ -280,13 +572,15 @@ impl Control {
             self.message = e;
             return;
         }
-        // Allocation happens here, in the control thread, and the finished buffer is handed over.
-        let buffer = vec![0.0f32; loop_capacity(&timeline, self.bars) as usize];
-        if let Err(e) = self.buffers.install(buffer) {
-            self.message = e;
-            return;
-        }
-        self.send(Command::SetTempo { bpm, signature });
+        let layer_capacity = loop_capacity(&timeline, self.bars);
+        self.send(Command::SetTempo {
+            bpm,
+            signature,
+            layer_capacity,
+        });
+        // Every allocation of a new layer length happens here, in the control thread; the old stock
+        // is dropped and the engine hands back what it still holds.
+        self.pool.set_layer_len(layer_capacity as usize);
         self.timeline = timeline;
         self.message = format!("Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}.");
     }
@@ -334,7 +628,29 @@ fn on_off(v: bool) -> &'static str {
     if v { "an " } else { "aus" }
 }
 
-fn status_line(s: &Status, tl: &Timeline, stats: &LiveStats) -> String {
+/// `[1 2* 3]`, with `*` for muted and the gain appended where it is not 1.
+fn layer_list(ts: &TrackStatus, gains: &[f32]) -> String {
+    if ts.layers == 0 {
+        return "-".to_string();
+    }
+    let mut parts = Vec::with_capacity(ts.layers as usize);
+    for i in 0..ts.layers as usize {
+        let muted = ts.muted_mask & (1 << i) != 0;
+        let gain = gains.get(i).copied().unwrap_or(1.0);
+        let mut part = format!("{}", i + 1);
+        if muted {
+            part.push('*');
+        }
+        if (gain - 1.0).abs() > 0.001 {
+            part.push_str(&format!("({gain:.2})"));
+        }
+        parts.push(part);
+    }
+    format!("[{}]", parts.join(" "))
+}
+
+/// The global line: bar, beat, loop length, tempo, click.
+fn global_line(s: &Status, tl: &Timeline, bars: u32, stats: &LiveStats) -> String {
     let beats_per_bar = tl.signature().beats_per_bar;
     let progress = if s.samples_per_beat > 0.0 {
         (s.beat_offset as f64 / s.samples_per_beat * 8.0) as usize
@@ -344,32 +660,20 @@ fn status_line(s: &Status, tl: &Timeline, stats: &LiveStats) -> String {
     let bar_gfx: String = (0..8)
         .map(|i| if i <= progress { '#' } else { '.' })
         .collect();
-
-    let loop_text = if s.loop_len > 0 {
-        format!(
-            "{} Samples / {:.2} s",
-            s.loop_len,
-            tl.samples_to_secs(s.loop_len)
-        )
-    } else if s.track == TrackState::Recording {
-        format!("laeuft, {:.2} s", tl.samples_to_secs(s.filled))
-    } else {
-        "-".to_string()
-    };
+    let loop_len = tl.span_bars(0, bars);
 
     let mut line = format!(
-        "Takt {:>4} Schlag {}/{} [{}] | {:<10} | Loop {:<24} | Ein {} | Aus {} | Mithoeren {} | Klick {} | {:.1} BPM",
+        "Takt {:>4} Schlag {}/{} [{}] | Loop {} Takte = {} Samples = {:.2} s | {:.1} BPM | Klick {} | Aus {}",
         s.bar + 1,
         s.beat + 1,
         beats_per_bar,
         bar_gfx,
-        s.track.label(),
-        loop_text,
-        fmt_dbfs(s.input_peak),
-        fmt_dbfs(s.output_peak),
-        on_off(s.monitor),
-        on_off(s.click),
+        bars,
+        loop_len,
+        tl.samples_to_secs(loop_len),
         s.bpm,
+        on_off(s.click),
+        fmt_dbfs(s.output_peak),
     );
     let xruns = stats.xruns.load(Ordering::Relaxed);
     let underruns = stats.underruns.load(Ordering::Relaxed);
@@ -382,10 +686,45 @@ fn status_line(s: &Status, tl: &Timeline, stats: &LiveStats) -> String {
             " | ACHTUNG {overruns} FIFO-Ueberlaeufe: Eingangssamples verloren, Aufnahme verschoben"
         ));
     }
-    if s.ignored_commands > 0 {
-        line.push_str(&format!(" | {} Kommandos abgelehnt", s.ignored_commands));
-    }
     line
+}
+
+/// One line per track: name, input channel, state, layers, level, monitoring.
+fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, active: bool) -> String {
+    let loop_text = if ts.loop_len > 0 {
+        format!("{:.2} s", tl.samples_to_secs(ts.loop_len))
+    } else if ts.state == TrackState::Recording {
+        format!("laeuft, {:.2} s", tl.samples_to_secs(ts.filled))
+    } else {
+        "-".to_string()
+    };
+    format!(
+        "{} {:<10} Ein {} | {:<10} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Mithoeren {}",
+        if active { '>' } else { ' ' },
+        ui.name,
+        ui.channel + 1,
+        ts.state.label(),
+        loop_text,
+        ts.layers,
+        layer_list(ts, &ui.gains),
+        fmt_dbfs(ts.input_peak),
+        on_off(ts.monitor),
+    )
+}
+
+/// Draw the block in place. Without cursor control every update is simply appended.
+fn draw(lines: &[String], previous_lines: usize, simple: bool) {
+    let mut out = String::new();
+    if !simple && previous_lines > 0 {
+        out.push_str(&format!("\x1b[{previous_lines}A"));
+    }
+    for line in lines {
+        out.push('\r');
+        out.push_str(&format!("{line:<LINE_WIDTH$}"));
+        out.push('\n');
+    }
+    print!("{out}");
+    let _ = std::io::stdout().flush();
 }
 
 pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
@@ -403,6 +742,10 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     let timeline = Timeline::new(rate, opts.bpm, signature);
     check_loop(&timeline, opts.bars, opts.latency_samples)?;
 
+    let in_channels = setup.in_plan.config.channels as usize;
+    let out_channels = setup.out_plan.config.channels as usize;
+    let defs = resolve_tracks(&opts.tracks, in_channels)?;
+
     audio::print_setup(&setup);
     let loop_len = timeline.span_bars(0, opts.bars);
     println!(
@@ -418,6 +761,19 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         loop_len,
         timeline.samples_to_secs(loop_len)
     );
+    let capacity = loop_capacity(&timeline, opts.bars);
+    println!("{}", limits_line(capacity, defs.len(), SPARE_SLOTS));
+    println!("Tracks:");
+    for (i, def) in defs.iter().enumerate() {
+        println!(
+            "  {} {:<10} Eingang {} (Kanal {} von {})",
+            i + 1,
+            def.name,
+            def.channel + 1,
+            def.channel + 1,
+            in_channels
+        );
+    }
     println!(
         "Latenz:   {} Samples ({:.2} ms) werden beim Aufnehmen herausgerechnet",
         opts.latency_samples,
@@ -425,11 +781,9 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     );
     println!(
         "          Der Wert stammt aus der Loopback-Messung. Nach jeder Aenderung von Geraet,\n\
-         \x20         Samplerate oder Puffergroesse neu messen (Subcommand latency)."
+         \x20         Samplerate oder Puffergroesse neu messen (Subcommand calibrate)."
     );
 
-    let in_channels = setup.in_plan.config.channels as usize;
-    let out_channels = setup.out_plan.config.channels as usize;
     let buffer_frames = setup.buffer_frames().max(1);
     // Same reasoning as in audio.rs: room for a driver block far larger than requested, so the
     // callback never has to allocate even if the driver ignores the request.
@@ -437,28 +791,41 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
 
     let stats = Arc::new(LiveStats::default());
     let (mut producer, mut consumer) =
-        rtrb::RingBuffer::<f32>::new((buffer_frames * INPUT_FIFO_BUFFERS) as usize);
+        rtrb::RingBuffer::<f32>::new((buffer_frames * INPUT_FIFO_BUFFERS) as usize * in_channels);
     let (cmd_tx, cmd_rx) = command_channel(256);
     let (status_tx, mut status_rx) = status_channel(1024);
-    let (buffers, buffer_endpoint) = buffer_channel(4);
+    // The return queue has room for every buffer that can be inside the engine at once, so the
+    // audio thread can always hand one back instead of leaking it.
+    let (channel, buffer_endpoint) = buffer_channel(
+        SPARE_SLOTS + 4,
+        defs.len() * MAX_LAYERS + SPARE_SLOTS + 8,
+    );
+    let mut pool = LayerPool::new(channel, capacity as usize, SPARE_SLOTS);
+    // Every layer buffer of the session is born here, in the control thread, before any stream
+    // exists; from now on the pool only recycles.
+    pool.service(None);
 
-    // The one and only loop-buffer allocation of a normal session, done here in the control
-    // thread before any stream exists.
+    let tracks: Vec<Track> = defs
+        .iter()
+        .map(|d| Track::new(d.channel, opts.monitor))
+        .collect();
     let core = EngineCore::new(EngineConfig {
         timeline,
         latency_samples: opts.latency_samples,
-        buffer: vec![0.0f32; loop_capacity(&timeline, opts.bars) as usize],
+        input_channels: in_channels,
+        tracks,
+        spares: Vec::with_capacity(SPARE_SLOTS),
+        layer_capacity: capacity,
         commands: cmd_rx,
         status: status_tx,
         buffers: buffer_endpoint,
-        monitor: opts.monitor,
         monitor_gain: opts.monitor_gain,
         click: !opts.no_click,
         click_gain: opts.click_gain,
         status_interval: (rate / STATUS_HZ).max(1) as u64,
     });
 
-    // ---- input stream: copy channel 1 into the FIFO, nothing else ------------------------
+    // ---- input stream: whole frames into the FIFO, nothing else --------------------------
     let stats_in = Arc::clone(&stats);
     let stats_in_err = Arc::clone(&stats);
     let input = audio::build_input(
@@ -468,8 +835,14 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
             let t0 = Instant::now();
             let mut overrun = false;
             for frame in data.chunks_exact(in_channels) {
-                if producer.push(frame[0]).is_err() {
+                // Whole frames only: half a frame in the FIFO would shift every channel of every
+                // later recording against each other.
+                if producer.slots() < in_channels {
                     overrun = true;
+                    break;
+                }
+                for &sample in frame {
+                    let _ = producer.push(sample);
                 }
             }
             if overrun {
@@ -484,7 +857,7 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     let stats_out = Arc::clone(&stats);
     let stats_out_err = Arc::clone(&stats);
     let mut core = core;
-    let mut in_scratch = vec![0.0f32; scratch_frames];
+    let mut in_scratch = vec![0.0f32; scratch_frames * in_channels];
     let mut out_scratch = vec![0.0f32; scratch_frames];
     let output = audio::build_output(
         &setup.output,
@@ -496,19 +869,18 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
             while done < frames {
                 let n = (frames - done).min(scratch_frames);
                 let mut got = 0usize;
-                while got < n {
-                    match consumer.pop() {
-                        Ok(v) => {
-                            in_scratch[got] = v;
-                            got += 1;
+                while got < n && consumer.slots() >= in_channels {
+                    for c in 0..in_channels {
+                        if let Ok(v) = consumer.pop() {
+                            in_scratch[got * in_channels + c] = v;
                         }
-                        Err(_) => break,
                     }
+                    got += 1;
                 }
                 if got < n {
                     stats_out.underruns.fetch_add(1, Ordering::Relaxed);
                 }
-                core.process(&in_scratch[..got], &mut out_scratch[..n]);
+                core.process(&in_scratch[..got * in_channels], &mut out_scratch[..n]);
                 let base = done * out_channels;
                 for (i, frame) in data[base..base + n * out_channels]
                     .chunks_exact_mut(out_channels)
@@ -544,42 +916,68 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
 
     println!(
-        "\nTasten (jeweils mit Enter bestaetigen):\n\
-         \x20 r  Aufnahme ab der naechsten Taktgrenze, {} Takte, danach laeuft der Loop\n\
-         \x20 s  Stopp: laufende Aufnahme auf der naechsten Taktgrenze beenden, sonst Wiedergabe aus\n\
-         \x20 p  Wiedergabe ab der naechsten Taktgrenze\n\
-         \x20 c  Loop leeren\n\
-         \x20 m  Mithoeren an/aus\n\
-         \x20 k  Klick an/aus\n\
-         \x20 t  Tempo aendern, z.B. \"t 120\" oder \"t 120 7 8\" (nur bei leerem Loop)\n\
-         \x20 q  Beenden\n",
+        "\nTasten (jeweils mit Enter bestaetigen). Alles ausser 1-{} wirkt auf den gewaehlten Track:\n\
+         \x20 1-{}  Track waehlen\n\
+         \x20 r   neuer Loop ab der naechsten Taktgrenze, {} Takte (ersetzt vorhandene Ebenen)\n\
+         \x20 o   Overdub: weitere Ebene ab der naechsten Taktgrenze, eine Loop-Laenge lang\n\
+         \x20 s   Stopp: laufende Aufnahme auf der naechsten Taktgrenze beenden, sonst Wiedergabe aus\n\
+         \x20 p   Wiedergabe ab der naechsten Taktgrenze\n\
+         \x20 c   diesen Track leeren\n\
+         \x20 a   alles leeren (alle Tracks, Zustand wie frisch gestartet)\n\
+         \x20 m   Mithoeren an/aus (unabhaengig von der Wiedergabe)\n\
+         \x20 e <nr>        Ebene stumm/laut\n\
+         \x20 w <nr>        Ebene weg\n\
+         \x20 l <nr> <wert> Lautstaerke einer Ebene (0.0 bis 4.0)\n\
+         \x20 k   Klick an/aus\n\
+         \x20 t   Tempo aendern, z.B. \"t 120\" oder \"t 120 7 8\" (nur wenn alles leer ist)\n\
+         \x20 q   Beenden\n",
+        defs.len(),
+        defs.len(),
         opts.bars
     );
 
     let keys = spawn_keyboard();
     let mut control = Control {
         cmd: cmd_tx,
-        buffers,
+        pool,
         timeline,
         bars: opts.bars,
         latency: opts.latency_samples,
         // Four buffers plus 20 ms: comfortably more than one round through the callbacks, so a
         // scheduled command always reaches the audio thread before its own timestamp.
         guard: (buffer_frames * 4 + rate / 50) as u64,
+        tracks: defs
+            .iter()
+            .map(|d| TrackUi {
+                name: d.name.clone(),
+                channel: d.channel,
+                gains: Vec::new(),
+            })
+            .collect(),
+        active: 0,
         message: String::new(),
         running: true,
     };
     let mut last: Option<(Status, Instant)> = None;
     let mut last_print = Instant::now() - DISPLAY_INTERVAL;
+    let mut printed_lines = 0usize;
+    let mut last_refusal = (0u64, Refusal::None);
 
     while control.running {
         if let Some(s) = status_rx.latest() {
             if s.stopped {
                 control.running = false;
             }
+            if s.ignored_commands > last_refusal.0 || s.refusal != last_refusal.1 {
+                if let Some(text) = s.refusal.message() {
+                    control.message = text.to_string();
+                }
+                last_refusal = (s.ignored_commands, s.refusal);
+            }
             last = Some((s, Instant::now()));
         }
-        control.buffers.drain_retired();
+        // The only place buffers are allocated, zeroed and dropped.
+        control.pool.service(last.as_ref().map(|(s, _)| s));
 
         match keys.recv_timeout(Duration::from_millis(20)) {
             Ok(line) => control.handle(&line, last),
@@ -590,21 +988,26 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         if last_print.elapsed() >= DISPLAY_INTERVAL {
             last_print = Instant::now();
             if let Some((s, _)) = last {
-                let mut line = status_line(&s, &control.timeline, &stats);
-                if !control.message.is_empty() {
-                    line.push_str(" | ");
-                    line.push_str(&control.message);
+                let mut lines = vec![global_line(&s, &control.timeline, control.bars, &stats)];
+                for (i, ui) in control.tracks.iter_mut().enumerate() {
+                    let ts = s.tracks().get(i).copied().unwrap_or_default();
+                    // Keep the gain mirror the same length the engine reports.
+                    while ui.gains.len() < ts.layers as usize {
+                        ui.gains.push(1.0);
+                    }
+                    ui.gains.truncate(ts.layers as usize);
+                    lines.push(track_line(&ts, ui, &control.timeline, i == control.active));
                 }
-                // Pad so the remains of a longer previous line are erased.
-                print!("\r{line:<200}");
-                let _ = std::io::stdout().flush();
+                lines.push(format!("  {}", control.message));
+                draw(&lines, printed_lines, opts.simple_display);
+                printed_lines = lines.len();
             }
         }
     }
 
     drop(input);
     drop(output);
-    control.buffers.drain_retired();
+    control.pool.drain();
 
     println!("\n");
     println!("Xruns (cpal):        {}", stats.xruns.load(Ordering::Relaxed));
@@ -625,4 +1028,67 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         stats.cb_nanos_max.load(Ordering::Relaxed) as f64 / 1e6
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn specs(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn track_arguments_are_parsed_one_based() {
+        assert_eq!(
+            parse_track_arg("stimme:1").unwrap(),
+            TrackDef {
+                name: "stimme".to_string(),
+                channel: 0
+            }
+        );
+        assert_eq!(parse_track_arg(" gitarre : 2 ").unwrap().channel, 1);
+        for bad in ["stimme", "stimme:", ":1", "stimme:0", "stimme:x"] {
+            let err = parse_track_arg(bad).expect_err(bad);
+            assert!(err.contains("--track"), "deutsche Meldung fehlt: {err}");
+        }
+    }
+
+    #[test]
+    fn the_default_setup_is_voice_and_guitar_on_the_first_two_inputs() {
+        let two = resolve_tracks(&[], 2).unwrap();
+        assert_eq!(two.len(), 2);
+        assert_eq!(two[0].name, "stimme");
+        assert_eq!(two[0].channel, 0);
+        assert_eq!(two[1].name, "gitarre");
+        assert_eq!(two[1].channel, 1);
+        // A mono device gets one track instead of an error.
+        assert_eq!(resolve_tracks(&[], 1).unwrap().len(), 1);
+        assert!(resolve_tracks(&[], 0).is_err());
+    }
+
+    #[test]
+    fn a_channel_the_device_does_not_have_is_refused_in_german() {
+        let err = resolve_tracks(&specs(&["stimme:1", "gitarre:4"]), 2).expect_err("muss scheitern");
+        assert!(err.contains("gitarre"), "{err}");
+        assert!(err.contains("Eingang 4"), "{err}");
+        assert!(err.contains("--in-channels"), "Hinweis fehlt: {err}");
+
+        let err = resolve_tracks(&specs(&["a:1", "a:2"]), 4).expect_err("doppelter Name");
+        assert!(err.contains("eindeutig"), "{err}");
+
+        let many: Vec<String> = (1..=MAX_TRACKS + 1).map(|i| format!("t{i}:1")).collect();
+        assert!(resolve_tracks(&many, 8).is_err(), "Obergrenze greift");
+    }
+
+    #[test]
+    fn the_layer_list_shows_mute_and_gain() {
+        let ts = TrackStatus {
+            layers: 3,
+            muted_mask: 0b010,
+            ..Default::default()
+        };
+        assert_eq!(layer_list(&ts, &[1.0, 1.0, 0.5]), "[1 2* 3(0.50)]");
+        assert_eq!(layer_list(&TrackStatus::default(), &[]), "-");
+    }
 }

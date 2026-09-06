@@ -6,6 +6,8 @@
 //!
 //! Real-time rules that hold for every line below: no allocation, no locking, no logging, no
 //! formatting, no file access. Only pre-allocated buffers, `Copy` values and lock-free queues.
+//! Layer buffers arrive ready-made from the control thread and go back the same way; nothing here
+//! ever creates or drops a `Vec`.
 //!
 //! # The two axes
 //!
@@ -14,9 +16,10 @@
 //!
 //! * `out_pos` - the musical timeline. Advanced by one per produced output sample. Bars, beats,
 //!   the click and every command timestamp live on this axis.
-//! * `in_index` - how many input samples the engine has consumed so far. Because the input
+//! * `in_index` - how many input *frames* the engine has consumed so far. Because the input
 //!   callback pushes into a FIFO that starts empty and nothing is ever dropped from it, consumed
-//!   sample number `k` *is* input sample number `k` of the session.
+//!   frame number `k` *is* input frame number `k` of the session. A frame holds one sample per
+//!   device input channel; which of them a track records is that track's business.
 //!
 //! # Latency compensation - the derivation
 //!
@@ -46,6 +49,11 @@
 //! instead would push every recorded layer 827 samples (17 ms) behind the click, and a second
 //! layer recorded against the first would sit another 17 ms further back.
 //!
+//! This is unchanged by phase 2 and it is what keeps *layers* aligned as well: whatever the
+//! musician hears - click, first layer, third layer - travels the same `L_out`, and whatever he
+//! plays travels the same `L_in`. Every take, in every bar, on every track, is therefore stored on
+//! the same grid. The per-layer arithmetic that follows from it lives in `track.rs`.
+//!
 //! Playback needs no correction at all. The loop is written to the output at position `p`, and
 //! reaches the ears through exactly the same `L_out` as the click at `p` - so click and loop line
 //! up for the listener by construction. Only the recording path is asymmetric, and only it is
@@ -60,33 +68,37 @@
 //! One consequence worth knowing: while recording, the write pointer trails the play pointer by
 //! `R` samples. The loop must therefore be longer than `R` - a 17 ms loop cannot work - and the
 //! last `R` samples of a fresh take are still being written while the head of the loop is already
-//! playing. `LoopTrack::filled` covers that gap with silence instead of stale memory.
+//! playing. The zeroed layer buffer covers that gap with silence instead of stale memory.
 
-use super::command::{BufferEndpoint, Command, CommandReceiver, Status, StatusSender};
+use super::command::{
+    BufferEndpoint, Command, CommandReceiver, MAX_TRACKS, Refusal, Status, StatusSender,
+    TrackStatus,
+};
 use super::metro::Metronome;
 use super::timeline::Timeline;
-use super::track::{LoopTrack, TrackState};
+use super::track::{MAX_LAYERS, Track};
 
-/// Open recording window in musical coordinates.
-#[derive(Clone, Copy, Debug)]
-struct RecordWindow {
-    /// First musical sample that goes into the loop.
-    start: u64,
-    /// One past the last musical sample, once `StopRecord` has been received.
-    end: Option<u64>,
-}
+/// Size of the waiting room for commands that have been taken out of the queue but are not due
+/// yet. Allocated once, in the control thread; the audio thread only ever pushes into it and
+/// removes from it.
+const SCHEDULED_SLOTS: usize = 64;
 
 /// Everything the engine needs to exist. Assembled by the control thread.
 pub struct EngineConfig {
     pub timeline: Timeline,
     /// Roundtrip latency in samples, see the module comment.
     pub latency_samples: u64,
-    /// Pre-allocated loop buffer. Its length is the maximum loop length.
-    pub buffer: Vec<f32>,
+    /// Number of channels in one interleaved input frame.
+    pub input_channels: usize,
+    /// The tracks, with their input channels. Built by the control thread, never resized here.
+    pub tracks: Vec<Track>,
+    /// Empty vector with room for the buffer stock. Its capacity is the stock size.
+    pub spares: Vec<Vec<f32>>,
+    /// Length a layer buffer must have to be usable.
+    pub layer_capacity: u64,
     pub commands: CommandReceiver,
     pub status: StatusSender,
     pub buffers: BufferEndpoint,
-    pub monitor: bool,
     pub monitor_gain: f32,
     pub click: bool,
     pub click_gain: f32,
@@ -100,75 +112,98 @@ pub struct EngineCore {
     latency: u64,
     /// Musical timeline position of the next output sample.
     out_pos: u64,
-    /// Number of input samples consumed so far; also the absolute index of the next one.
+    /// Number of input frames consumed so far; also the absolute index of the next one.
     in_index: u64,
-    track: LoopTrack,
-    record: Option<RecordWindow>,
-    playing: bool,
-    monitor: bool,
+    input_channels: usize,
+    tracks: Vec<Track>,
+    /// Prepared, zeroed buffers waiting to become layers. Never grows past its capacity, so
+    /// pushing into it cannot allocate.
+    spares: Vec<Vec<f32>>,
+    spare_slots: usize,
+    layer_capacity: u64,
     monitor_gain: f32,
     click: bool,
     click_gain: f32,
     commands: CommandReceiver,
+    /// Commands taken out of the queue but not executed yet, see [`EngineCore::next_due`].
+    scheduled: Vec<Command>,
     status: StatusSender,
     buffers: BufferEndpoint,
     status_interval: u64,
     since_status: u64,
-    input_peak: f32,
     output_peak: f32,
     ignored_commands: u64,
+    refusal: Refusal,
+    buffers_taken: u64,
     stopped: bool,
 }
 
 impl EngineCore {
     pub fn new(cfg: EngineConfig) -> Self {
+        let spare_slots = cfg.spares.capacity();
         Self {
             timeline: cfg.timeline,
             metro: Metronome::new(cfg.timeline.sample_rate()),
             latency: cfg.latency_samples,
             out_pos: 0,
             in_index: 0,
-            track: LoopTrack::from_buffer(cfg.buffer),
-            record: None,
-            playing: false,
-            monitor: cfg.monitor,
+            input_channels: cfg.input_channels.max(1),
+            tracks: cfg.tracks,
+            spares: cfg.spares,
+            spare_slots,
+            layer_capacity: cfg.layer_capacity,
             monitor_gain: cfg.monitor_gain,
             click: cfg.click,
             click_gain: cfg.click_gain,
             commands: cfg.commands,
+            scheduled: Vec::with_capacity(SCHEDULED_SLOTS),
             status: cfg.status,
             buffers: cfg.buffers,
             status_interval: cfg.status_interval.max(1),
             since_status: 0,
-            input_peak: 0.0,
             output_peak: 0.0,
             ignored_commands: 0,
+            refusal: Refusal::None,
+            buffers_taken: 0,
             stopped: false,
         }
     }
 
     #[cfg(test)]
-    pub fn track(&self) -> &LoopTrack {
-        &self.track
+    pub fn track(&self, index: usize) -> &Track {
+        &self.tracks[index]
+    }
+
+    #[cfg(test)]
+    pub fn track_count(&self) -> usize {
+        self.tracks.len()
+    }
+
+    #[cfg(test)]
+    pub fn spare_count(&self) -> usize {
+        self.spares.len()
     }
 
     /// One audio block.
     ///
-    /// `input` holds the input samples consumed for this block, starting at absolute input index
-    /// `in_index`; it may be shorter than `output` when the input FIFO ran dry, and then simply
-    /// fewer input samples are accounted for - the mapping `m = k - R` stays intact because `k`
-    /// counts consumed samples, not elapsed time.
+    /// `input` holds the interleaved input frames consumed for this block, starting at absolute
+    /// input index `in_index`; it may be shorter than `output` when the input FIFO ran dry, and
+    /// then simply fewer input frames are accounted for - the mapping `m = k - R` stays intact
+    /// because `k` counts consumed frames, not elapsed time.
     ///
     /// `output` is the mono output block starting at `out_pos`. It is fully overwritten.
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) {
-        self.install_pending_buffer();
+        self.refill_spares();
+        self.collect_commands();
+        let frames = input.len() / self.input_channels;
+
         self.render_with_commands(output);
-        self.mix_monitor(input, output);
+        self.mix_monitor(input, frames, output);
         self.clamp_and_meter(output);
-        self.record_input(input);
+        self.record_input(input, frames);
 
         self.out_pos += output.len() as u64;
-        self.in_index += input.len() as u64;
+        self.in_index += frames as u64;
         self.since_status += output.len() as u64;
         if self.since_status >= self.status_interval {
             self.since_status = 0;
@@ -176,16 +211,39 @@ impl EngineCore {
         }
     }
 
-    /// A loop buffer handed over by the control thread replaces the current one - but never in the
-    /// middle of a take, because that would throw away what is being recorded right now.
-    fn install_pending_buffer(&mut self) {
-        if self.record.is_some() {
-            return;
+    /// Collect prepared buffers from the control thread. Bounded work: at most `spare_slots` pops.
+    fn refill_spares(&mut self) {
+        while self.spares.len() < self.spare_slots {
+            match self.buffers.take_new() {
+                Some(buffer) => {
+                    self.buffers_taken += 1;
+                    self.spares.push(buffer);
+                }
+                None => break,
+            }
         }
-        if let Some(new_buffer) = self.buffers.take_new() {
-            self.playing = false;
-            let old = self.track.swap_buffer(new_buffer);
-            self.buffers.retire(old);
+    }
+
+    /// One prepared buffer, or `None` if the stock ran dry. Buffers of the wrong length (left over
+    /// from a tempo change) are sent back instead of being used.
+    fn take_spare(&mut self) -> Option<Vec<f32>> {
+        while let Some(buffer) = self.spares.pop() {
+            if buffer.len() as u64 >= self.layer_capacity {
+                return Some(buffer);
+            }
+            self.buffers.retire(buffer);
+        }
+        None
+    }
+
+    /// Move everything the control thread sent into the waiting room. Bounded work: at most
+    /// `SCHEDULED_SLOTS` pops, and nothing is lost - what does not fit stays in the queue.
+    fn collect_commands(&mut self) {
+        while self.scheduled.len() < SCHEDULED_SLOTS {
+            match self.commands.pop() {
+                Some(cmd) => self.scheduled.push(cmd),
+                None => break,
+            }
         }
     }
 
@@ -203,7 +261,7 @@ impl EngineCore {
             // has already passed (control thread was late) acts right here rather than in the past.
             let due = self.next_due(block_end, self.out_pos + cursor as u64);
             let boundary = match due {
-                Some(at) => ((at - self.out_pos) as usize).min(len),
+                Some((_, at)) => ((at - self.out_pos) as usize).min(len),
                 None => len,
             };
             if boundary > cursor {
@@ -212,11 +270,9 @@ impl EngineCore {
                 cursor = boundary;
             }
             match due {
-                Some(_) => {
-                    let cmd = self
-                        .commands
-                        .pop()
-                        .expect("peek meldete ein Kommando, pop muss es liefern");
+                Some((index, _)) => {
+                    // `remove` on a `Vec` of `Copy` commands is a memmove of a few dozen bytes.
+                    let cmd = self.scheduled.remove(index);
                     self.apply(cmd);
                 }
                 None => break,
@@ -224,19 +280,33 @@ impl EngineCore {
         }
     }
 
-    /// Position of the next command that must act inside this block, or `None`.
+    /// The next command that must act inside this block: its slot in the waiting room and the
+    /// position it acts at.
+    ///
+    /// The waiting room is scanned rather than worked through front to back, because commands for
+    /// different tracks arrive interleaved and their timestamps are therefore *not* in order: a
+    /// stop scheduled for bar 9 on the voice must not hold back a record scheduled for bar 2 on the
+    /// guitar. Among commands due at the same position the one that was sent first wins, so the
+    /// order inside one track is preserved exactly.
     #[inline]
-    fn next_due(&self, block_end: u64, not_before: u64) -> Option<u64> {
-        let cmd = self.commands.peek()?;
-        match cmd.at() {
-            // Untimed commands act at the next opportunity.
-            None => Some(not_before),
-            Some(at) if at < block_end => Some(at.max(not_before)),
-            Some(_) => None,
+    fn next_due(&self, block_end: u64, not_before: u64) -> Option<(usize, u64)> {
+        let mut best: Option<(usize, u64)> = None;
+        for (i, cmd) in self.scheduled.iter().enumerate() {
+            // Untimed commands carry no musical meaning and act at the next opportunity.
+            let at = cmd.at().unwrap_or(0);
+            if best.map(|(_, b)| at < b).unwrap_or(true) {
+                best = Some((i, at));
+            }
+        }
+        let (index, at) = best?;
+        if at < block_end {
+            Some((index, at.max(not_before)))
+        } else {
+            None
         }
     }
 
-    /// Click plus loop playback for one uninterrupted segment.
+    /// Click plus every playing track for one uninterrupted segment.
     #[inline]
     fn render(&mut self, out: &mut [f32], start: u64) {
         for (i, slot) in out.iter_mut().enumerate() {
@@ -245,24 +315,31 @@ impl EngineCore {
             if self.click {
                 value += self.metro.sample_at(&self.timeline, pos) * self.click_gain;
             }
-            if self.playing {
-                value += self.track.read(pos);
+            for track in &self.tracks {
+                if track.playing() {
+                    value += track.read(pos);
+                }
             }
             *slot = value;
         }
     }
 
-    /// Input monitoring is a straight pass-through of the block that was just consumed. Its delay
-    /// is the device roundtrip and has nothing to do with loop alignment - the loop is aligned by
-    /// position, not by when a sample happens to travel through the engine.
+    /// Input monitoring per track: a straight pass-through of that track's input channel, switched
+    /// independently of whether the track is playing, so the musician can play live over his own
+    /// loop. Its delay is the device roundtrip and has nothing to do with loop alignment - the loop
+    /// is aligned by position, not by when a sample happens to travel through the engine.
     #[inline]
-    fn mix_monitor(&mut self, input: &[f32], output: &mut [f32]) {
-        if !self.monitor {
-            return;
-        }
-        let n = input.len().min(output.len());
-        for i in 0..n {
-            output[i] += input[i] * self.monitor_gain;
+    fn mix_monitor(&mut self, input: &[f32], frames: usize, output: &mut [f32]) {
+        let n = frames.min(output.len());
+        let ch = self.input_channels;
+        for track in &self.tracks {
+            if !track.monitor() {
+                continue;
+            }
+            let c = track.input_channel();
+            for (i, slot) in output.iter_mut().take(n).enumerate() {
+                *slot += input[i * ch + c] * self.monitor_gain;
+            }
         }
     }
 
@@ -280,140 +357,312 @@ impl EngineCore {
         self.output_peak = self.output_peak.max(peak);
     }
 
-    /// Write the consumed input block into the loop, latency-compensated.
+    /// Write the consumed input frames into the running takes, latency-compensated, and meter every
+    /// track's input channel on the way.
     #[inline]
-    fn record_input(&mut self, input: &[f32]) {
-        let mut peak = 0.0f32;
-        for (j, &sample) in input.iter().enumerate() {
-            let a = sample.abs();
-            if a > peak {
-                peak = a;
-            }
-            let Some(window) = self.record else {
-                continue;
-            };
+    fn record_input(&mut self, input: &[f32], frames: usize) {
+        let ch = self.input_channels;
+        for j in 0..frames {
             let k = self.in_index + j as u64;
-            if k < self.latency {
-                // Nothing that arrives in the first R samples of the session was played after
-                // position 0, so there is no musical position to store it at.
-                continue;
-            }
+            let base = j * ch;
+            // Nothing that arrives in the first R frames of the session was played after position
+            // 0, so there is no musical position to store it at.
+            let recordable = k >= self.latency;
             // The one line the whole compensation comes down to. See the module comment.
-            let pos = k - self.latency;
-            if pos < window.start {
-                continue;
+            let pos = k.wrapping_sub(self.latency);
+            for t in 0..self.tracks.len() {
+                let c = self.tracks[t].input_channel();
+                let sample = match input.get(base + c) {
+                    Some(&s) => s,
+                    None => continue,
+                };
+                self.tracks[t].note_input_peak(sample.abs());
+                if !recordable {
+                    continue;
+                }
+                let Some(take) = self.tracks[t].take() else {
+                    continue;
+                };
+                if pos < take.start {
+                    continue;
+                }
+                // Two ways a take ends: at the position it was stopped at, or - if it was never
+                // stopped - at the buffer length (first layer) respectively after one pass through
+                // the loop (overdub), instead of overwriting what it just recorded.
+                let ended = match take.end {
+                    Some(end) if pos >= end => Some(end),
+                    _ => match self.tracks[t].take_limit() {
+                        Some(limit) if pos >= limit => Some(limit),
+                        _ => None,
+                    },
+                };
+                if let Some(end) = ended {
+                    self.finish_take(t, end);
+                    // This very sample is the first one *after* the old take - and therefore the
+                    // first one of a take queued behind it, if the two are back to back.
+                    self.write_into_take(t, pos, sample);
+                    continue;
+                }
+                self.tracks[t].write(pos, sample);
             }
-            if let Some(end) = window.end
-                && pos >= end
-            {
-                self.finish_take(end);
-                continue;
-            }
-            if pos - window.start >= self.track.capacity() {
-                // Never scheduled to stop and the buffer is full: close the take at the buffer
-                // length rather than silently dropping samples.
-                self.finish_take(window.start + self.track.capacity());
-                continue;
-            }
-            self.track.write(pos, sample);
         }
-        self.input_peak = self.input_peak.max(peak);
     }
 
-    fn finish_take(&mut self, end: u64) {
-        self.track.finish_take(end);
-        self.record = None;
+    /// Write one sample into whatever take is open on this track, if the position belongs to it.
+    #[inline]
+    fn write_into_take(&mut self, track: usize, pos: u64, sample: f32) {
+        let Some(take) = self.tracks[track].take() else {
+            return;
+        };
+        if pos < take.start {
+            return;
+        }
+        if take.end.map(|end| pos >= end).unwrap_or(false) {
+            return;
+        }
+        if self.tracks[track]
+            .take_limit()
+            .map(|limit| pos >= limit)
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.tracks[track].write(pos, sample);
     }
 
     fn apply(&mut self, cmd: Command) {
+        // Every track-scoped command is checked once, here, so nothing below can index out of range.
+        if let Some(track) = cmd.track()
+            && track >= self.tracks.len()
+        {
+            self.refuse(Refusal::NoSuchTarget);
+            return;
+        }
         match cmd {
-            Command::StartRecord { at } => {
-                // The past cannot be recorded: input samples older than the current musical input
+            Command::StartRecord { track, at } => {
+                // The past cannot be recorded: input frames older than the current musical input
                 // position are already gone, so a late command starts here instead. This also
-                // guarantees the loop buffer is written strictly sequentially.
+                // guarantees the first layer is written strictly sequentially.
                 let start = at.max(self.musical_input_pos());
-                self.track.begin_take(start);
-                self.record = Some(RecordWindow { start, end: None });
-                self.playing = false;
-            }
-            Command::StopRecord { at } => {
-                if let Some(window) = self.record.as_mut() {
-                    let end = at.max(window.start);
-                    window.end = Some(end);
-                    // The loop length is known now, even though the last R samples of the take are
-                    // still travelling in from the interface. Publishing it here is what makes the
-                    // switch from recording to playing seamless at the loop boundary.
-                    self.track.set_length(end - window.start);
+                if self.tracks[track].take_is_finishing() {
+                    // The running take is only waiting for its tail; queue this one behind it.
+                    self.schedule_take(track, start, true);
+                } else {
+                    self.clear_track(track);
+                    self.begin_take(track, start, true);
                 }
             }
-            Command::StartPlay { .. } => self.playing = true,
-            Command::StopPlay { .. } => self.playing = false,
-            Command::ClearTrack { .. } => {
-                self.record = None;
-                self.playing = false;
-                self.track.clear();
+            Command::StartOverdub { track, at } => {
+                let start = at.max(self.musical_input_pos());
+                let finishing = self.tracks[track].take_is_finishing();
+                if self.tracks[track].take().is_some() && !finishing {
+                    self.refuse(Refusal::Busy);
+                    return;
+                }
+                // An overdub on an empty track is simply the first take - the musician should not
+                // have to know which key defines the loop. A take that is finishing has already
+                // published its loop length, so `has_content` covers that case too.
+                let defines_loop = !self.tracks[track].has_content();
+                if !defines_loop && self.tracks[track].layer_count() >= MAX_LAYERS {
+                    self.refuse(Refusal::LayerLimit);
+                    return;
+                }
+                if finishing {
+                    self.schedule_take(track, start, defines_loop);
+                } else {
+                    if defines_loop {
+                        self.clear_track(track);
+                    }
+                    self.begin_take(track, start, defines_loop);
+                }
             }
-            Command::SetMonitor { on } => self.monitor = on,
+            Command::StopRecord { track, at } => {
+                // The loop length is known now, even though the last R samples of the take are
+                // still travelling in from the interface. Publishing it here is what makes the
+                // switch from recording to playing seamless at the loop boundary.
+                self.tracks[track].set_take_end(at);
+            }
+            Command::StartPlay { track, .. } => self.tracks[track].set_playing(true),
+            Command::StopPlay { track, .. } => self.tracks[track].set_playing(false),
+            Command::ClearTrack { track, .. } => self.clear_track(track),
+            Command::ClearAll { .. } => {
+                for track in 0..self.tracks.len() {
+                    self.clear_track(track);
+                    self.tracks[track].restore_defaults();
+                }
+            }
+            Command::SetMonitor { track, on } => self.tracks[track].set_monitor(on),
+            Command::SetLayerMute {
+                track,
+                layer,
+                muted,
+            } => {
+                if !self.tracks[track].set_layer_muted(layer, muted) {
+                    self.refuse(Refusal::NoSuchTarget);
+                }
+            }
+            Command::SetLayerGain { track, layer, gain } => {
+                if !self.tracks[track].set_layer_gain(layer, gain) {
+                    self.refuse(Refusal::NoSuchTarget);
+                }
+            }
+            Command::RemoveLayer { track, layer } => {
+                // Removing while a take runs would renumber the layer that take writes into.
+                if self.tracks[track].take().is_some() {
+                    self.refuse(Refusal::Busy);
+                    return;
+                }
+                match self.tracks[track].remove_layer(layer) {
+                    Some(buffer) => self.buffers.retire(buffer),
+                    None => self.refuse(Refusal::NoSuchTarget),
+                }
+            }
             Command::SetClick { on } => self.click = on,
-            Command::SetTempo { bpm, signature } => {
+            Command::SetTempo {
+                bpm,
+                signature,
+                layer_capacity,
+            } => {
                 // A tempo change redefines what every sample position means, so it is only safe
                 // while nothing is recorded, recording or playing.
-                if self.track.has_content() || self.record.is_some() || self.playing {
-                    self.ignored_commands += 1;
+                if self.tracks.iter().any(|t| {
+                    t.layer_count() > 0 || t.take().is_some() || t.playing()
+                }) {
+                    self.refuse(Refusal::Tempo);
                 } else {
                     self.timeline = Timeline::new(self.timeline.sample_rate(), bpm, signature);
+                    self.layer_capacity = layer_capacity;
+                    // The stock is the wrong length now; hand it back and let the control thread
+                    // send buffers that fit.
+                    while let Some(buffer) = self.spares.pop() {
+                        self.buffers.retire(buffer);
+                    }
                 }
             }
             Command::Stop => {
-                self.record = None;
-                self.playing = false;
+                for track in 0..self.tracks.len() {
+                    self.cancel_takes(track);
+                    self.tracks[track].set_playing(false);
+                }
                 self.stopped = true;
             }
         }
     }
 
-    /// Musical position of the next input sample to be consumed.
+    /// Close a take and immediately start whatever was queued behind it.
+    fn finish_take(&mut self, track: usize, end: u64) {
+        self.tracks[track].finish_take(end);
+        if self.tracks[track].pending_defines_loop() {
+            // What was queued is a completely new loop, so the old layers go back first.
+            self.tracks[track].set_playing(false);
+            while let Some(buffer) = self.tracks[track].pop_layer() {
+                self.buffers.retire(buffer);
+            }
+        }
+        if let Some(buffer) = self.tracks[track].promote_pending() {
+            self.buffers.retire(buffer);
+            self.refuse(Refusal::LayerLimit);
+        }
+    }
+
+    /// Queue a take behind the one that is currently finishing.
+    fn schedule_take(&mut self, track: usize, start: u64, defines_loop: bool) {
+        let Some(buffer) = self.take_spare() else {
+            self.refuse(Refusal::NoBuffer);
+            return;
+        };
+        if let Some(previous) = self.tracks[track].set_pending(start, defines_loop, buffer) {
+            self.buffers.retire(previous);
+        }
+    }
+
+    /// Take a prepared buffer and open a take with it, or report why that failed.
+    fn begin_take(&mut self, track: usize, start: u64, defines_loop: bool) {
+        if self.tracks[track].layer_count() >= MAX_LAYERS {
+            self.refuse(Refusal::LayerLimit);
+            return;
+        }
+        let Some(buffer) = self.take_spare() else {
+            self.refuse(Refusal::NoBuffer);
+            return;
+        };
+        if defines_loop {
+            self.tracks[track].begin_loop_take(start, buffer);
+        } else {
+            self.tracks[track].begin_overdub_take(start, buffer);
+        }
+    }
+
+    /// Cancel whatever this track is doing and give every one of its buffers back.
+    fn clear_track(&mut self, track: usize) {
+        self.cancel_takes(track);
+        self.tracks[track].set_playing(false);
+        while let Some(buffer) = self.tracks[track].pop_layer() {
+            self.buffers.retire(buffer);
+        }
+    }
+
+    /// Drop the running and the queued take of one track, returning the queued take's buffer.
+    fn cancel_takes(&mut self, track: usize) {
+        self.tracks[track].cancel_take();
+        if let Some(buffer) = self.tracks[track].take_pending_buffer() {
+            self.buffers.retire(buffer);
+        }
+    }
+
+    fn refuse(&mut self, reason: Refusal) {
+        self.ignored_commands += 1;
+        self.refusal = reason;
+    }
+
+    /// Musical position of the next input frame to be consumed.
     #[inline]
     fn musical_input_pos(&self) -> u64 {
         self.in_index.saturating_sub(self.latency)
     }
 
-    fn state(&self) -> TrackState {
-        match self.record {
-            Some(window) if self.musical_input_pos() < window.start => TrackState::Armed,
-            Some(_) => TrackState::Recording,
-            None if !self.track.has_content() => TrackState::Empty,
-            None if self.playing => TrackState::Playing,
-            None => TrackState::Ready,
-        }
-    }
-
     fn publish_status(&mut self) {
         let here = self.timeline.locate(self.out_pos);
+        let musical_input = self.musical_input_pos();
+        let mut tracks = [TrackStatus::default(); MAX_TRACKS];
+        for (i, slot) in tracks.iter_mut().enumerate().take(self.tracks.len()) {
+            let track = &mut self.tracks[i];
+            *slot = TrackStatus {
+                state: track.state(musical_input),
+                layers: track.layer_count() as u8,
+                muted_mask: track.muted_mask(),
+                loop_len: track.loop_len(),
+                filled: track.filled(),
+                input_peak: track.take_input_peak(),
+                monitor: track.monitor(),
+                playing: track.playing(),
+                input_channel: track.input_channel() as u8,
+            };
+        }
         let status = Status {
             pos: self.out_pos,
             bar: here.bar,
             beat: here.beat,
             beat_offset: here.offset,
             samples_per_beat: self.timeline.samples_per_beat(),
-            track: self.state(),
-            loop_len: self.track.loop_len(),
-            filled: self.track.filled(),
-            input_peak: self.input_peak,
+            tracks,
+            track_count: self.tracks.len() as u8,
             output_peak: self.output_peak,
-            monitor: self.monitor,
             click: self.click,
             bpm: self.timeline.bpm(),
             ignored_commands: self.ignored_commands,
+            refusal: self.refusal,
+            spares: self.spares.len() as u32,
+            buffers_taken: self.buffers_taken,
             stopped: self.stopped,
         };
-        self.input_peak = 0.0;
         self.output_peak = 0.0;
         self.status.push(status);
     }
 }
 
-/// Number of samples the maximum loop needs, plus a small margin.
+/// Number of samples the maximum loop needs, plus a small margin. Also the length of one layer
+/// buffer - layers are allocated in loop length, never in some blanket maximum.
 ///
 /// Bar boundaries are rounded individually, so `bars` bars are not always the same number of
 /// samples; the margin covers that without a second allocation.
@@ -434,4 +683,33 @@ pub fn check_loop(timeline: &Timeline, bars: u32, latency: u64) -> Result<(), St
         ));
     }
     Ok(())
+}
+
+/// Memory one full session can occupy at most, in bytes - the number behind the layer ceiling.
+pub fn max_memory_bytes(layer_capacity: u64, tracks: usize, spares: usize) -> u64 {
+    layer_capacity * 4 * (tracks as u64 * MAX_LAYERS as u64 + spares as u64)
+}
+
+/// German summary of the layer limits, for the startup banner.
+pub fn limits_line(layer_capacity: u64, tracks: usize, spares: usize) -> String {
+    format!(
+        "Ebenen:   bis zu {} je Track, {:.1} MB je Ebene, hoechstens {:.0} MB fuer {} Tracks",
+        MAX_LAYERS,
+        layer_capacity as f64 * 4.0 / 1_048_576.0,
+        max_memory_bytes(layer_capacity, tracks, spares) as f64 / 1_048_576.0,
+        tracks
+    )
+}
+
+/// Sanity-check a state that is meant to look like a fresh start.
+#[cfg(test)]
+pub fn is_fresh(status: &Status) -> bool {
+    status.tracks().iter().all(|t| {
+        t.state == super::track::TrackState::Empty
+            && t.layers == 0
+            && t.loop_len == 0
+            && t.filled == 0
+            && t.muted_mask == 0
+            && !t.playing
+    })
 }

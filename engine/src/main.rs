@@ -82,7 +82,8 @@ enum Command {
         gain: f32,
     },
 
-    /// Looper (Phase 1): ein Track, Aufnahme auf Taktgrenze, Latenzkompensation, Tastatursteuerung
+    /// Looper (Phase 2): mehrere Tracks mit eigenen Eingangskanaelen, unbegrenzte Overdub-Ebenen,
+    /// Mithoeren je Track, Aufnahme auf Taktgrenze, Latenzkompensation, Tastatursteuerung
     Live {
         #[command(flatten)]
         dev: DeviceOpts,

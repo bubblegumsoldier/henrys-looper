@@ -1,21 +1,23 @@
-//! Phase 1: the loop core.
+//! Phase 2: the loop core - several tracks, unlimited layers.
 //!
 //! ```text
 //!  Steuer-Thread (main)                       Audio-Thread (Ausgabe-Callback)
 //!  ┌───────────────────────┐  Kommandos    ┌────────────────────────────────────┐
 //!  │ Tastatur, Anzeige,    │ ────────────► │ EngineCore::process                │
-//!  │ Allokation, Planung   │ ◄──────────── │  Zeitachse · Klick · Loop · Aufnahme│
+//!  │ Allokation, Planung   │ ◄──────────── │  Zeitachse · Klick · Tracks · Ebenen│
 //!  └───────────────────────┘  Status       └────────────────────────────────────┘
-//!            │  Loop-Puffer (Vec<f32>)              ▲ Eingangs-FIFO
-//!            └─────────────────────────────►        │
+//!            │  leere Ebenen-Puffer (Vec<f32>)      ▲ Eingangs-FIFO
+//!            ├─────────────────────────────►        │ (ganze Frames)
+//!            └◄──── gebrauchte Puffer ──────        │
 //!                                          Eingangs-Callback
 //! ```
 //!
 //! Module map:
 //!
 //! * [`timeline`] - sample position <-> bar/beat, rounding-error free. Pure arithmetic.
-//! * [`command`] - timestamped commands and the lock-free channels in both directions.
-//! * [`track`] - the loop buffer and its geometry.
+//! * [`command`] - timestamped commands, the status snapshot, the lock-free channels in both
+//!   directions and the control thread's stock of empty layer buffers.
+//! * [`track`] - tracks, their layers, and the grid all layers of a track share.
 //! * [`metro`] - the click, as a pure function of position.
 //! * [`process`] - the audio-thread brain, including the latency-compensation derivation.
 //! * [`live`] - cpal wiring, keyboard and terminal display.
