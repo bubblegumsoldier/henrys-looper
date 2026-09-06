@@ -15,7 +15,7 @@
 //! event apart from what a selector asks for.
 
 import { useEffect, useRef, useState } from "react";
-import { IDLE_STATUS, type LooperStatus } from "./types";
+import { IDLE_STATUS, type FxStatus, type LooperStatus } from "./types";
 
 type Listener = (status: LooperStatus) => void;
 
@@ -121,7 +121,33 @@ export function structureSignature(status: LooperStatus): string {
     // The latency belongs here for the same reason the pan does: it is a setting, so it changes
     // when somebody types a number and never on its own.
     sig += `~${t.latency_frames}~${t.latency_measured ?? ""}~${t.latency_trim}`;
+    sig += fxSignature(t.fx);
     for (const l of t.layers) sig += `${l.index}${l.muted ? 1 : 0}${l.gain}`;
   }
+  return sig;
+}
+
+/**
+ * The effect chain, in the signature for the same reason the pan and the latency are: every value
+ * below is a *setting*. It changes when somebody presses a button or lets go of a slider, never on
+ * its own, so it costs a render per action and nothing at all between two of them.
+ *
+ * The one field of a chain that does move by itself - `comp_reduction_db`, the gain-reduction meter
+ * - is deliberately missing. It differs in every single event, and a card that re-renders twenty
+ * times a second is exactly what this module exists to prevent. `FxRow` draws that meter straight
+ * into the DOM through `useStatusEffect`, the same way the level meters do.
+ */
+function fxSignature(fx: FxStatus | undefined): string {
+  // A status from before the chain existed (or a hand-made one from the console) has no `fx`.
+  if (!fx) return "";
+  let sig = `~${fx.bypass ? 1 : 0}${fx.preset}${fx.letters}~${fx.high_pass_hz}`;
+  for (const b of fx.bands) sig += `~${b.kind}:${b.hz}:${b.q}:${b.gain_db}`;
+  sig +=
+    `~${fx.comp_threshold_db}:${fx.comp_ratio}:${fx.comp_attack_ms}` +
+    `:${fx.comp_release_ms}:${fx.comp_knee_db}:${fx.comp_makeup_db}`;
+  // `delay_samples` follows the tempo, which is a setting as well - and a note value on its own
+  // does not say how long the echo actually is.
+  sig += `~${fx.delay_note}:${fx.delay_samples}:${fx.delay_feedback}:${fx.delay_mix}`;
+  sig += `~${fx.reverb_size}:${fx.reverb_damping}:${fx.reverb_mix}`;
   return sig;
 }

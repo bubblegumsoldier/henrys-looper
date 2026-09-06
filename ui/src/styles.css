@@ -1397,6 +1397,360 @@ body {
   color: #fff;
 }
 
+/* ---------- effect chain ---------- */
+/* Two ways of using this contradict each other, and the layout is the answer: presets, the panic
+   switch and the five effect switches are always there and big enough to hit with a guitar in your
+   hands; everything with a unit on it sits behind `Details` and is folded away. Collapsed the whole
+   block is three rows high, so a card is not noticeably longer than it was without it. */
+.live-fx {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+/* A bypassed chain is a bit-identical pass-through, so everything that describes it is dimmed -
+   everything except the switch that brings it back. */
+.live-fx-bypassed .live-fx-slots,
+.live-fx-bypassed .live-fx-readout,
+.live-fx-bypassed .live-fx-details {
+  opacity: 0.45;
+}
+
+.live-fx-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.live-fx-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--fg-muted);
+  min-width: 68px;
+}
+.live-fx-presets {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.live-fx-preset {
+  min-height: 40px;
+  min-width: 84px;
+  font-size: 15px;
+  font-weight: 700;
+}
+.live-fx-custom {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: 6px;
+  padding: 2px 6px;
+}
+/* The panic switch. Both states are loud, because "is the chain in or out" has to be answerable
+   from three metres away and never by reading a word. */
+.live-fx-bypass {
+  margin-left: auto;
+  min-height: 40px;
+  min-width: 118px;
+  font-size: 15px;
+  font-weight: 800;
+}
+.live-fx-bypass-in {
+  background: #1c5c33;
+  border-color: var(--ok);
+  color: #d8ffe6;
+}
+.live-fx-bypass-out {
+  border-color: #8a2b2b;
+  color: #ffb8b8;
+}
+.live-fx-bypass kbd,
+.live-chord kbd {
+  display: inline-block;
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+/* The five effects, in signal order - so the position of a switch is the position in the chain,
+   and the digit of the `X` chord is that position too. */
+.live-fx-slots {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.live-fx-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 44px;
+  padding: 5px 2px;
+}
+.live-fx-slot-letter {
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--fg-muted);
+}
+.live-fx-slot-name {
+  font-size: 10px;
+  line-height: 1;
+  color: var(--fg-muted);
+}
+.live-fx-slot-on {
+  background: var(--bg-3);
+  border-color: var(--accent);
+}
+.live-fx-slot-on .live-fx-slot-letter {
+  color: var(--accent-2);
+}
+.live-fx-slot-on .live-fx-slot-name {
+  color: var(--fg);
+}
+
+.live-fx-readout {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.live-fx-letters {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  color: var(--accent-2);
+}
+.live-fx-delay {
+  font-size: 12px;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+/* Dimmed with the rest of a bypassed chain everywhere except here: folding the parameters out is
+   exactly what somebody does while the chain is off, so the affordance stays at full contrast. */
+.live-fx-more {
+  margin-left: auto;
+  opacity: 1;
+}
+.live-fx-bypassed .live-fx-readout {
+  /* Undo the group dimming for the one child that must stay crisp. */
+  opacity: 1;
+}
+.live-fx-bypassed .live-fx-letters,
+.live-fx-bypassed .live-fx-delay,
+.live-fx-bypassed .live-fx-comp {
+  opacity: 0.45;
+}
+
+/* The gain reduction. The one part of a chain that moves on its own, so it is drawn straight into
+   the DOM - and it hangs on the right edge and grows to the left, because a reduction is something
+   taken off the top of the signal. */
+.live-fx-comp {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 130px;
+}
+.live-fx-comp-off {
+  opacity: 0.4;
+}
+.live-fx-comp-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--fg-muted);
+}
+.live-fx-comp-bar {
+  position: relative;
+  flex: 1;
+  min-width: 60px;
+  height: 10px;
+  background: var(--bg-3);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.live-fx-comp-fill {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  background: var(--accent);
+}
+.live-fx-comp-deep {
+  background: var(--warn);
+}
+.live-fx-comp-value {
+  font-size: 11px;
+  color: var(--fg-muted);
+  min-width: 56px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- effect details, folded out ---------- */
+.live-fx-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+}
+.live-fx-block {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.live-fx-block-off {
+  opacity: 0.55;
+}
+.live-fx-block-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+.live-fx-block-letter {
+  width: 16px;
+  font-size: 13px;
+  font-weight: 800;
+  color: var(--accent-2);
+}
+.live-fx-block-title {
+  font-size: 12px;
+  font-weight: 700;
+}
+.live-fx-block-tag {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+.live-fx-knob {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.live-fx-knob-label {
+  min-width: 88px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.live-fx-knob-slider {
+  flex: 1;
+  min-width: 60px;
+  accent-color: var(--accent);
+  height: 20px;
+}
+.live-fx-knob-value {
+  min-width: 64px;
+  font-size: 11px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.live-fx-band {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-top: 1px solid var(--border);
+  padding-top: 5px;
+  margin-top: 2px;
+}
+.live-fx-band:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+  margin-top: 0;
+}
+.live-fx-band-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.live-fx-band-name {
+  min-width: 88px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--fg-muted);
+}
+.live-fx-band-kind {
+  background: var(--bg-2);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.live-fx-band-flat {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--fg-muted);
+}
+.live-fx-notes {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.live-fx-note {
+  min-width: 46px;
+}
+
+/* The half-typed chord. On screen only while one is armed, and while it is there it says what
+   every digit would do - so `X 3` never has to be remembered. */
+.live-chord {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--bg-2);
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+.live-chord-key {
+  margin-left: 0 !important;
+  font-size: 16px !important;
+  font-weight: 800;
+  border-color: var(--accent-2) !important;
+}
+.live-chord-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+.live-chord-track {
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+.live-chord-options {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 14px;
+}
+.live-chord-esc {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
 /* ---------- layers ---------- */
 .live-track-layers {
   border-top: 1px solid var(--border);

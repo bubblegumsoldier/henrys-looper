@@ -1,13 +1,15 @@
-//! One track: what it is doing, how loud it is, six big buttons, and its layers.
+//! One track: what it is doing, how loud it is, six big buttons, its effect chain, and its layers.
 //!
 //! The card only re-renders when the structure signature changes (see `status.ts`) - a peak moving
 //! does not reach it, the meters draw themselves.
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Meter } from "./Meter";
+import { FxRow, type FxActions } from "./FxRow";
 import type { LooperStatus, LooperTrackStatus } from "../types";
 
-export interface TrackActions {
+/** The transport, the two settings rows, the layers - and the effect chain, which brings its own. */
+export interface TrackActions extends FxActions {
   record: (track: number) => void;
   overdub: (track: number) => void;
   stop: (track: number) => void;
@@ -447,6 +449,8 @@ function TrackCardInner({ track, selected, onSelect, actions, defaultLatency }: 
           Leeren
         </button>
       </div>
+
+      {track.fx && <FxRow track={i} fx={track.fx} actions={actions} />}
 
       <div className="live-track-layers">
         <div className="live-layers-head">

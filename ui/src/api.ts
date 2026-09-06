@@ -8,10 +8,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
+  BandKindName,
   CalibrateOutcome,
   CompileResult,
+  DelayNoteName,
   DeviceReport,
   EngineInfo,
+  FxParamName,
+  FxPresetName,
+  FxSlotName,
   LoadResult,
   Quantize,
   StartConfig,
@@ -81,6 +86,25 @@ export const api = {
    */
   trackLatency: (track: number, measured: number | null, trim: number) =>
     call<void>("track_latency", { track, measured, trim }),
+
+  // --- effects (same zero-based track index) --------------------------------
+  // Values are clamped by the engine to a range that makes sense, so a slider cannot produce
+  // something unusable; only a missing or out-of-range band is refused.
+  /** Whole chain in or out of the signal path. Out is a bit-identical pass-through. */
+  fxBypass: (track: number, on: boolean) => call<void>("fx_bypass", { track, on }),
+  /** One effect on or off. */
+  fxEnable: (track: number, effect: FxSlotName, on: boolean) =>
+    call<void>("fx_enable", { track, effect, on }),
+  /** Load a ready-made chain. The one command that matters on stage. */
+  fxPreset: (track: number, preset: FxPresetName) => call<void>("fx_preset", { track, preset }),
+  /** One numeric knob by name; the three band-scoped names additionally need `band`, zero-based. */
+  fxSet: (track: number, param: FxParamName, value: number, band?: number) =>
+    call<void>("fx_set", { track, param, value, band: band ?? null }),
+  /** What one EQ band does. `band` is zero-based. */
+  fxBandKind: (track: number, band: number, kind: BandKindName) =>
+    call<void>("fx_band_kind", { track, band, kind }),
+  /** The delay is tempo-synchronous, so what it takes is a note value, not a millisecond count. */
+  fxDelayNote: (track: number, note: DelayNoteName) => call<void>("fx_delay_note", { track, note }),
 
   // --- per layer -----------------------------------------------------------
   layerMute: (track: number, layer: number, muted: boolean) =>

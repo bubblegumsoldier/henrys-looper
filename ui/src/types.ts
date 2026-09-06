@@ -36,6 +36,97 @@ export interface LayerStatus {
   gain: number;
 }
 
+// --- effects ---------------------------------------------------------------
+// Mirrors the effect half of proto.rs. Every enum travels as a snake_case string and goes straight
+// back into the command that changes it, so nothing here has to know a number's meaning.
+
+/** One switchable position in the chain, in signal order. */
+export type FxSlotName = "high_pass" | "eq" | "comp" | "delay" | "reverb";
+
+/** A ready-made chain. `custom` is reported, never sent - it means a knob has been moved. */
+export type FxPresetName = "dry" | "voice" | "piezo_guitar" | "custom";
+
+/** What one EQ band does. */
+export type BandKindName = "peak" | "low_shelf" | "high_shelf";
+
+/** Note value of the tempo-synchronous delay. There is deliberately no millisecond setting. */
+export type DelayNoteName = "quarter" | "dotted_eighth" | "eighth" | "triplet_eighth";
+
+/** Every numeric knob of a chain, by the name `fx_set` expects. */
+export type FxParamName =
+  | "high_pass_hz"
+  | "band_hz"
+  | "band_q"
+  | "band_gain_db"
+  | "comp_threshold_db"
+  | "comp_ratio"
+  | "comp_attack_ms"
+  | "comp_release_ms"
+  | "comp_knee_db"
+  | "comp_makeup_db"
+  | "delay_feedback"
+  | "delay_mix"
+  | "reverb_size"
+  | "reverb_damping"
+  | "reverb_mix";
+
+export interface FxBandStatus {
+  /** Zero-based; this is what `fx_set` expects as `band`. */
+  index: number;
+  /** One-based, for display. */
+  number: number;
+  kind: BandKindName;
+  hz: number;
+  q: number;
+  gain_db: number;
+}
+
+export interface FxEffectStatus {
+  /** Pass this back as `effect` in `fx_enable`. */
+  name: FxSlotName;
+  /** German word, ready to print. */
+  label: string;
+  on: boolean;
+}
+
+/** State of one track's effect chain. Effects act on playback and monitoring, never on a take. */
+export interface FxStatus {
+  /** Whole chain out of the signal path - a bit-identical pass-through, i.e. the panic switch. */
+  bypass: boolean;
+  preset: FxPresetName;
+  /** German word for the preset, ready to print. */
+  preset_label: string;
+  /** `HEK-R`: one letter per effect that is on, a dash for one that is off. Always five characters. */
+  letters: string;
+  /** On/off per effect, in signal order. */
+  effects: FxEffectStatus[];
+
+  high_pass_hz: number;
+  bands: FxBandStatus[];
+
+  comp_threshold_db: number;
+  comp_ratio: number;
+  comp_attack_ms: number;
+  comp_release_ms: number;
+  comp_knee_db: number;
+  comp_makeup_db: number;
+  /** Deepest gain reduction since the last status event, in dB and never positive. A meter. */
+  comp_reduction_db: number;
+
+  delay_note: DelayNoteName;
+  /** The note value as it is written on paper: `1/4`, `1/8.`, `1/8`, `1/8T`. */
+  delay_note_label: string;
+  /** What the note value works out to at the current tempo. Dictated by the engine's timeline. */
+  delay_samples: number;
+  delay_ms: number;
+  delay_feedback: number;
+  delay_mix: number;
+
+  reverb_size: number;
+  reverb_damping: number;
+  reverb_mix: number;
+}
+
 export interface LooperTrackStatus {
   /** Zero-based; this is what a track command expects. */
   index: number;
@@ -95,6 +186,8 @@ export interface LooperTrackStatus {
   pending_bars: number;
   /** Beats on top of that; inside the last bar `pending_bars` is 0 and this counts down. */
   pending_beats: number;
+  /** This track's effect chain. It sits in the playback path; what is recorded is always dry. */
+  fx: FxStatus;
 }
 
 /** Event `looper://status`, pushed about twenty times a second while the engine runs. */

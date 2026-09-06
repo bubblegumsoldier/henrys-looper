@@ -9,8 +9,11 @@
 //! * peaks and the pulse inside a beat are written into the DOM by `Meter` and `Position` without
 //!   any render at all.
 //!
-//! Keyboard: a digit picks a track, then R O S P M act on it, K toggles the click. No Enter, no
-//! modifier - the hands are on an instrument. Anything typed into a field is left alone.
+//! Keyboard: a digit picks a track, then R O S P M act on it, K toggles the click and F takes the
+//! selected track's effect chain in or out. X, V and D are the three effect commands that need an
+//! argument, so they wait for one more digit - `X 3` switches the compressor, `V 1` loads "Stimme",
+//! `D 2` sets the delay to a dotted eighth, exactly as in the CLI. No Enter, no modifier - the
+//! hands are on an instrument. Anything typed into a field is left alone.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
@@ -18,9 +21,45 @@ import { currentStatus, structureSignature, useStatusSlice } from "../status";
 import { Position } from "./Position";
 import { Setup } from "./Setup";
 import { TrackCard, type TrackActions } from "./TrackCard";
+import { DELAY_NOTES, FX_PRESETS, FX_SLOT_ORDER } from "./FxRow";
 import { Warnings } from "./Warnings";
 import { Meter } from "./Meter";
-import type { AppInfo, EngineInfo, LooperStatus, Quantize, StartConfig } from "../types";
+import type { AppInfo, EngineInfo, LooperStatus, LooperTrackStatus, Quantize, StartConfig } from "../types";
+
+/**
+ * A letter that waits for a digit, exactly like the CLI's `x 3`, `v stimme` and `d 1/8.`.
+ *
+ * The single letters are taken (R O S P M K F), and a digit on its own already picks a track, so
+ * the three effect commands that need an argument became two-key chords. The banner below the head
+ * says which digit means what while one is half typed, so nothing has to be remembered.
+ */
+type Chord = "x" | "v" | "d";
+
+const CHORDS: Record<Chord, { title: string; options: string[] }> = {
+  x: { title: "Effekt umschalten", options: ["Hochpass", "EQ", "Kompressor", "Delay", "Hall"] },
+  v: { title: "Preset laden", options: FX_PRESETS.map((p) => p.label) },
+  d: { title: "Delay-Notenwert", options: DELAY_NOTES.map((n) => n.label) },
+};
+
+/** How long a half-typed chord waits for its digit before it is forgotten again. */
+const CHORD_TIMEOUT_MS = 3000;
+
+/** The second half of a chord: the digit, acting on the selected track. */
+function runChord(key: Chord, digit: number, track: LooperTrackStatus, act: TrackActions): void {
+  if (key === "x") {
+    const name = FX_SLOT_ORDER[digit - 1];
+    const effect = track.fx?.effects.find((e) => e.name === name);
+    if (name && effect) act.fxEnable(track.index, name, !effect.on);
+    return;
+  }
+  if (key === "v") {
+    const preset = FX_PRESETS[digit - 1];
+    if (preset) act.fxPreset(track.index, preset.name);
+    return;
+  }
+  const note = DELAY_NOTES[digit - 1];
+  if (note) act.fxDelayNote(track.index, note.name);
+}
 
 interface Tempo {
   bpm: number;
@@ -154,6 +193,12 @@ export function LiveView({ info }: { info: AppInfo | null }) {
       layerMute: (t, l, muted) => run(() => api.layerMute(t, l, muted)),
       layerRemove: (t, l) => run(() => api.layerRemove(t, l)),
       layerGain: (t, l, gain) => run(() => api.layerGain(t, l, gain)),
+      fxBypass: (t, on) => run(() => api.fxBypass(t, on)),
+      fxEnable: (t, effect, on) => run(() => api.fxEnable(t, effect, on)),
+      fxPreset: (t, preset) => run(() => api.fxPreset(t, preset)),
+      fxSet: (t, param, value, band) => run(() => api.fxSet(t, param, value, band)),
+      fxBandKind: (t, band, kind) => run(() => api.fxBandKind(t, band, kind)),
+      fxDelayNote: (t, note) => run(() => api.fxDelayNote(t, note)),
     }),
     [run],
   );
@@ -164,6 +209,31 @@ export function LiveView({ info }: { info: AppInfo | null }) {
   // Kept in refs so the listener is installed once and never sees a stale track list.
   const state = useRef({ tracks, selected, actions, click: tempo.click });
   state.current = { tracks, selected, actions, click: tempo.click };
+
+  // A half-typed chord. The ref is what the listener reads, the state is what the banner draws -
+  // one render when a chord is armed and one when it is spent, not one per event.
+  const chord = useRef<Chord | null>(null);
+  const chordTimer = useRef<number | undefined>(undefined);
+  const [chordShown, setChordShown] = useState<Chord | null>(null);
+
+  const clearChord = useCallback(() => {
+    window.clearTimeout(chordTimer.current);
+    chordTimer.current = undefined;
+    chord.current = null;
+    setChordShown(null);
+  }, []);
+
+  const armChord = useCallback(
+    (key: Chord) => {
+      window.clearTimeout(chordTimer.current);
+      chord.current = key;
+      setChordShown(key);
+      chordTimer.current = window.setTimeout(clearChord, CHORD_TIMEOUT_MS);
+    },
+    [clearChord],
+  );
+
+  useEffect(() => () => window.clearTimeout(chordTimer.current), []);
 
   useEffect(() => {
     if (!running) return;
@@ -177,7 +247,26 @@ export function LiveView({ info }: { info: AppInfo | null }) {
       }
       const { tracks: list, selected: current, actions: act, click } = state.current;
 
+      if (e.key === "Escape" && chord.current) {
+        e.preventDefault();
+        clearChord();
+        return;
+      }
+
+      // Anything that is not a digit ends a half-typed chord, and then acts as it normally would.
+      // Without this an abandoned `X` would still be waiting when the next digit picks a track.
+      if (chord.current && !(e.key >= "1" && e.key <= "9")) clearChord();
+
       if (e.key >= "1" && e.key <= "9") {
+        // A digit closes a half-typed chord; only an unclaimed digit picks a track.
+        const pending = chord.current;
+        if (pending) {
+          e.preventDefault();
+          clearChord();
+          const track = list[current];
+          if (track) runChord(pending, Number(e.key), track, act);
+          return;
+        }
         const index = Number(e.key) - 1;
         if (index < list.length) {
           e.preventDefault();
@@ -214,11 +303,22 @@ export function LiveView({ info }: { info: AppInfo | null }) {
           e.preventDefault();
           act.monitor(track.index, !track.monitor);
           break;
+        // --- the effect chain, the same four keys the CLI has --------------
+        case "f":
+          e.preventDefault();
+          if (track.fx) act.fxBypass(track.index, !track.fx.bypass);
+          break;
+        case "x":
+        case "v":
+        case "d":
+          e.preventDefault();
+          armChord(key);
+          break;
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [running, run]);
+  }, [running, run, armChord, clearChord]);
 
   // --- render --------------------------------------------------------------
   if (!running) {
@@ -284,6 +384,27 @@ export function LiveView({ info }: { info: AppInfo | null }) {
       <Warnings />
       <Position />
       <Notes notes={notes} onClear={() => setNotes([])} />
+
+      {chordShown && (
+        <div className="live-chord" aria-live="polite">
+          <kbd className="live-chord-key">{chordShown.toUpperCase()}</kbd>
+          <span className="live-chord-title">{CHORDS[chordShown].title}</span>
+          <span className="live-chord-track">
+            Track {selected + 1}
+            {tracks[selected] ? ` · ${tracks[selected].name}` : ""}
+          </span>
+          <ol className="live-chord-options">
+            {CHORDS[chordShown].options.map((option, n) => (
+              <li key={option}>
+                <kbd>{n + 1}</kbd> {option}
+              </li>
+            ))}
+          </ol>
+          <span className="live-chord-esc">
+            <kbd>Esc</kbd> abbrechen
+          </span>
+        </div>
+      )}
 
       <div className="live-tracks">
         {tracks.map((t) => (
