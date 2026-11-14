@@ -15,11 +15,11 @@ import type { MidiEventReport, MidiOutcome } from "./types";
 
 /** German word for each outcome, and the class that colours the row. */
 const OUTCOME: Record<MidiOutcome, { label: string; className: string }> = {
-  unbound: { label: "nicht belegt", className: "midi-out-unbound" },
-  absorbed: { label: "geschluckt", className: "midi-out-absorbed" },
-  action: { label: "ausgeführt", className: "midi-out-action" },
-  refused: { label: "abgelehnt", className: "midi-out-refused" },
-  learned: { label: "gelernt", className: "midi-out-learned" },
+  unbound: { label: "unmapped", className: "midi-out-unbound" },
+  absorbed: { label: "absorbed", className: "midi-out-absorbed" },
+  action: { label: "done", className: "midi-out-action" },
+  refused: { label: "refused", className: "midi-out-refused" },
+  learned: { label: "learned", className: "midi-out-learned" },
 };
 
 function Row({ event }: { event: MidiEventReport }) {
@@ -28,11 +28,12 @@ function Row({ event }: { event: MidiEventReport }) {
     <li className={`midi-event ${outcome.className}`}>
       <span className="midi-event-key mono">{event.short}</span>
       <span className="midi-event-what">{event.what}</span>
-      <span className="midi-event-channel mono" title="MIDI-Kanal">
-        K{event.channel}
+      <span className="midi-event-channel mono" title={`MIDI channel ${event.channel}${event.device ? ` · ${event.device}` : ""}`}>
+        ch{event.channel}
       </span>
       <span className="midi-event-value mono">{event.value}</span>
       <span className="midi-event-target">
+        {event.device && <span className="midi-event-device muted">{event.device} · </span>}
         {event.target_label ?? <span className="muted">—</span>}
         {event.note && <span className="midi-event-note">{event.note}</span>}
       </span>
@@ -47,15 +48,15 @@ export function MidiMonitor() {
   return (
     <section className="midi-monitor">
       <div className="midi-monitor-head">
-        <h3>Eingehend</h3>
+        <h3>Incoming</h3>
         <span className="muted">
           {events.length === 0
-            ? "Ein Pad drücken oder einen Regler drehen — hier steht, was ankommt."
-            : `${events.length} zuletzt`}
+            ? "Press a pad or turn a knob — what arrives shows up here."
+            : `${events.length} recent`}
         </span>
         <div className="spacer" />
         <button className="btn btn-mini" onClick={clearMidiEvents} disabled={events.length === 0}>
-          Leeren
+          Clear
         </button>
       </div>
       {events.length > 0 && (

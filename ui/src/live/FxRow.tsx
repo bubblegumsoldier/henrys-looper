@@ -21,6 +21,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import {
   fxAddress,
   fxBandAddress,
+  fxBandKindAddress,
   fxDelayNoteAddress,
   fxPresetAddress,
   fxSlotAddress,
@@ -91,9 +92,9 @@ export const DELAY_NOTES: { name: DelayNoteName; label: string }[] = [
 ];
 
 const BAND_KINDS: { name: BandKindName; label: string }[] = [
-  { name: "peak", label: "Glocke" },
-  { name: "low_shelf", label: "Kuhschwanz tief" },
-  { name: "high_shelf", label: "Kuhschwanz hoch" },
+  { name: "peak", label: "Peak" },
+  { name: "low_shelf", label: "Low shelf" },
+  { name: "high_shelf", label: "High shelf" },
 ];
 
 // --- how a number is printed ------------------------------------------------
@@ -335,18 +336,21 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
           <div className="live-fx-band" key={b.index}>
             <div className="live-fx-band-head">
               <span className="live-fx-band-name">Band {b.number}</span>
-              <select
-                className="live-fx-band-kind"
-                value={b.kind}
-                title="Glocke hebt oder senkt um eine Frequenz herum, ein Kuhschwanz das ganze Ende darüber oder darunter."
-                onChange={(e) => actions.fxBandKind(track, b.index, e.target.value as BandKindName)}
-              >
+              {/* Three buttons rather than a dropdown: each band shape is its own MIDI address
+                  (`eq.N.peak`, ...), and a button is something the learn mode can be pointed at. */}
+              <span className="live-fx-band-kinds">
                 {BAND_KINDS.map((k) => (
-                  <option key={k.name} value={k.name}>
+                  <button
+                    key={k.name}
+                    className={`btn btn-mini live-fx-band-kind${b.kind === k.name ? " btn-on" : ""}`}
+                    data-midi={fxBandKindAddress(track, b.index, k.name)}
+                    onClick={() => actions.fxBandKind(track, b.index, k.name)}
+                    title="Peak lifts or cuts around one frequency; a shelf moves everything above or below it."
+                  >
                     {k.label}
-                  </option>
+                  </button>
                 ))}
-              </select>
+              </span>
               {b.gain_db === 0 && (
                 <span className="live-fx-band-flat" title="Ein Band bei 0 dB ist ein Draht - die Engine rechnet es gar nicht erst">
                   flach

@@ -380,7 +380,8 @@ export function LiveView({ info }: { info: AppInfo | null }) {
     <div className="live live-running">
       <header className="live-head">
         <div className="live-head-facts">
-          <span className="live-fact">
+          {/* Learnable: a knob on `global.tempo` sets the BPM (20..400). */}
+          <span className="live-fact" data-midi={GLOBAL.tempo} title="MIDI Learn: map a knob to the tempo">
             <b>{tempo.bpm.toFixed(tempo.bpm % 1 === 0 ? 0 : 1)}</b> BPM
           </span>
           <span className="live-fact">

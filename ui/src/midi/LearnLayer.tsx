@@ -26,6 +26,23 @@
 //!
 //! On the Mac the shortcut is ⌘ instead: Ctrl+click is a right click there.
 //!
+//! # Disabled controls are learnable too
+//!
+//! "Play" is disabled on an empty track, and the transport buttons are disabled while no score
+//! runs - exactly the moments one sets a controller up. A disabled `<button>` gets no click, and in
+//! WebKit (the Mac's web view) no pointer event at all. So while the mode is on, the CSS lets
+//! pointer events fall through a disabled learnable control (`pointer-events: none`), the event
+//! lands on its parent, and [`learnableAt`] finds the disabled control under the pointer by its
+//! rectangle - only among the descendants of the element that was actually hit, so a panel lying
+//! over a control can never hand the click to what is underneath.
+//!
+//! # The badge, and whether the binding works
+//!
+//! Every element whose address is bound gets `data-midi-key` (`Pad 36`, or `Pad 36 · FS 1` when two
+//! controls do the same thing) and `data-midi-state`: `active` when at least one of them works right
+//! now, `inactive` when none does (device unplugged, track not in this session, taken over by the
+//! score - `bindings[].reason` in the view says which). The CSS strikes an inactive badge through.
+//!
 //! # Why the click is swallowed
 //!
 //! In learn mode a click on a learnable control must not *also* do its job - clicking „Aufnahme“ to
@@ -37,10 +54,37 @@
 import { useEffect } from "react";
 import { modHeld } from "../platform";
 import { midiApi } from "../api";
-import { bindingFor, isLearnMode, setLearnMode, setMidiView, sayMidi, useLearnMode, useMidiView } from "./store";
+import { bindingsFor, isLearnMode, setLearnMode, setMidiView, sayMidi, useLearnMode, useMidiView } from "./store";
+import { bindingWorks } from "./types";
 
 /** How long a `pointerdown` claims the `click` that follows it, so one gesture arms once. */
 const GESTURE_MS = 1000;
+
+/**
+ * The learnable control a pointer event means: the nearest element with `data-midi` around the
+ * target, or - for a disabled control the event fell through - the smallest disabled learnable
+ * control inside the hit element whose rectangle contains the pointer.
+ */
+function learnableAt(e: MouseEvent): HTMLElement | null {
+  const hit = e.target as HTMLElement | null;
+  const direct = hit?.closest?.("[data-midi]") as HTMLElement | null;
+  if (direct) return direct;
+  if (!hit?.querySelectorAll) return null;
+  let best: HTMLElement | null = null;
+  let bestArea = Infinity;
+  for (const el of hit.querySelectorAll<HTMLElement>(
+    "[data-midi]:disabled, [data-midi][aria-disabled='true'], [data-midi]:has(:disabled)",
+  )) {
+    const r = el.getBoundingClientRect();
+    if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) continue;
+    const area = r.width * r.height;
+    if (area < bestArea) {
+      best = el;
+      bestArea = area;
+    }
+  }
+  return best;
+}
 
 export function LearnLayer(): null {
   const learnMode = useLearnMode();
@@ -55,8 +99,7 @@ export function LearnLayer(): null {
 
     const grab = (e: PointerEvent | MouseEvent) => {
       if (!isLearnMode() && !modHeld(e)) return;
-      const target = e.target as HTMLElement | null;
-      const element = target?.closest?.("[data-midi]") as HTMLElement | null;
+      const element = learnableAt(e);
       const address = element?.dataset.midi;
       // No address means this is not a learnable control - the panel, a tab, a text field. It keeps
       // working as it always did, which is what makes the mode leaveable.
@@ -122,12 +165,17 @@ export function LearnLayer(): null {
       for (const element of document.querySelectorAll<HTMLElement>("[data-midi]")) {
         const address = element.dataset.midi;
         if (!address) continue;
-        const bound = bindingFor(address);
-        if (bound) element.dataset.midiKey = bound.short;
-        else delete element.dataset.midiKey;
+        const bound = bindingsFor(address);
+        if (bound.length > 0) {
+          element.dataset.midiKey = [...new Set(bound.map((b) => b.short))].join(" · ");
+          element.dataset.midiState = bound.some((b) => bindingWorks(b.state)) ? "active" : "inactive";
+        } else {
+          delete element.dataset.midiKey;
+          delete element.dataset.midiState;
+        }
         element.classList.toggle("midi-learnable", learnMode);
         element.classList.toggle("midi-waiting", learning === address);
-        element.classList.toggle("midi-from-score", bound?.from_score ?? false);
+        element.classList.toggle("midi-from-score", bound.some((b) => b.from_score && bindingWorks(b.state)));
       }
     };
 
@@ -139,7 +187,9 @@ export function LearnLayer(): null {
     // The track cards are rebuilt whenever the structure changes, and a fresh button carries no
     // badge yet. Watching the tree is cheaper than making every card know about the mapping.
     const observer = new MutationObserver(schedule);
-    observer.observe(document.body, { childList: true, subtree: true });
+    // `data-midi` itself is watched too: a control may change its address in place (the grid
+    // button offers the grid it would switch to), and its badge has to follow.
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-midi"] });
     return () => {
       observer.disconnect();
       if (scheduled !== 0) window.cancelAnimationFrame(scheduled);

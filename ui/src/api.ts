@@ -31,7 +31,7 @@ import type {
   StartConfig,
   TrackSourceId,
 } from "./types";
-import type { MidiPortView, MidiSaved, MidiView } from "./midi/types";
+import type { MidiBindingOptions, MidiPortView, MidiSaved, MidiView } from "./midi/types";
 
 /**
  * `status` is kept for the components written against the old HTTP layer. It is 0 for everything
@@ -178,20 +178,33 @@ export const api = {
 // the same object that event carries. So a caller may either use the answer or wait for the event -
 // both are the same picture, and the store takes whichever comes first.
 
+//
+// Known devices connect by themselves (at start and when plugged in); `open` is only needed once
+// per new device, which is remembered from then on. Every change to a binding is saved at once.
 export const midiApi = {
   /** Every MIDI input, with the profile that belongs to it. Opens nothing. */
   ports: () => call<MidiPortView[]>("midi_ports"),
-  /** Open a port by number or by part of its name, and load its profile. */
+  /** Connect a port by its number, its name or a unique part of it. Remembers the device. */
   open: (device: string) => call<MidiView>("midi_open", { device }),
-  close: () => call<MidiView>("midi_close"),
+  /**
+   * Disconnect one device (port name or `device:`), or all with no argument. Not reconnected
+   * automatically until it is unplugged or connected by hand again.
+   */
+  close: (device?: string) => call<MidiView>("midi_close", { device: device ?? null }),
   /**
    * Arm the learn mode for one address - the dotted path of the clicked control. `null` cancels.
    * The address is parsed on the Rust side, so a wrong one comes back as a German sentence.
    */
   learn: (address: string | null) => call<MidiView>("midi_learn", { address }),
-  /** Take a control's job away. `id` is what the overview shows: `ch1.note36`. */
-  unbind: (id: string) => call<MidiView>("midi_unbind", { id }),
-  /** Write the profile. The answer names the file. */
+  /**
+   * Take a control's job away (saved at once). `id` is what the overview shows (`ch1.note36`);
+   * `device` is the binding's `device`, needed when several profiles bind the same id.
+   */
+  unbind: (id: string, device?: string | null) => call<MidiView>("midi_unbind", { id, device: device ?? null }),
+  /** Replace a binding's options - mode, takeover, min, max (`null` = default). Saved at once. */
+  edit: (id: string, device: string | null, options: MidiBindingOptions) =>
+    call<MidiView>("midi_edit", { id, device, options }),
+  /** Retry writing profiles whose automatic save failed. Normally nothing to do. */
   save: () => call<MidiSaved>("midi_save"),
   /** For a frontend that just started and missed the events so far. */
   state: () => call<MidiView>("midi_state"),

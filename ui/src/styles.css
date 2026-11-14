@@ -1560,14 +1560,12 @@ body {
   font-weight: 700;
   color: var(--fg-muted);
 }
+.live-fx-band-kinds {
+  display: flex;
+  gap: 4px;
+}
 .live-fx-band-kind {
-  background: var(--bg-2);
-  color: var(--fg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 3px 6px;
-  font-size: 12px;
-  font-family: inherit;
+  font-size: 11px;
 }
 .live-fx-band-flat {
   margin-left: auto;
@@ -2385,6 +2383,120 @@ body {
 .midi-binding-score .midi-binding-key {
   color: var(--accent-2);
 }
+.midi-binding-list li.midi-binding {
+  grid-template-columns: 74px 1fr auto auto auto;
+}
+.midi-binding-inactive .midi-binding-key,
+.midi-binding-inactive .midi-binding-label {
+  color: var(--fg-muted);
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 255, 255, 0.25);
+}
+.midi-binding-reason {
+  display: block;
+  font-size: 11px;
+  color: var(--fg-muted);
+  text-decoration: none;
+  white-space: normal;
+}
+.midi-binding-state {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.midi-state-active {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.midi-state-device_missing,
+.midi-state-target_missing {
+  color: var(--err);
+  border-color: var(--err);
+}
+.midi-state-overridden {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.midi-binding-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  margin: 8px 0 2px;
+  color: var(--fg-muted);
+}
+.midi-option {
+  font-size: 11px;
+  padding: 1px 4px;
+}
+.midi-option-range {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.midi-option-number {
+  width: 56px;
+  font-size: 11px;
+  padding: 1px 4px;
+}
+
+/* ---------- devices ---------- */
+.midi-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.midi-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.midi-chip-missing,
+.midi-chip-error {
+  border-style: dashed;
+}
+.midi-chip-note {
+  font-weight: 400;
+  color: var(--fg-muted);
+}
+.midi-inactive-count {
+  color: var(--warn);
+}
+.midi-save-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--err);
+  font-size: 12px;
+}
+.midi-saved {
+  font-size: 11px;
+}
+.midi-device-list {
+  margin-bottom: 4px;
+}
+.midi-device-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.midi-device {
+  display: grid;
+  grid-template-columns: 12px auto 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  font-size: 12px;
+  border-bottom: 1px solid rgba(42, 47, 58, 0.5);
+}
+.midi-device-summary {
+  min-width: 0;
+}
 
 /* =============================================================================================
    The badge on a bound control, and the learn mode's look
@@ -2439,6 +2551,22 @@ body {
 }
 [data-midi].midi-learnable:hover {
   outline: 2px solid var(--warn);
+}
+/* A disabled control is learnable too ("Play" on an empty track). A disabled element gets no
+   pointer events in WebKit, so in learn mode they fall through to the parent, where
+   `LearnLayer.tsx` finds the control under the pointer by its rectangle. */
+[data-midi].midi-learnable:disabled,
+[data-midi].midi-learnable :disabled {
+  pointer-events: none;
+}
+/* None of the controls on this element works right now - device unplugged, track not in this
+   session, or the score took the control over. The binding is kept; the badge says it sleeps. */
+[data-midi-key][data-midi-state="inactive"]::after {
+  text-decoration: line-through;
+  border-style: dashed;
+  color: var(--fg-muted);
+  border-color: var(--fg-muted);
+  opacity: 0.8;
 }
 /* The one control the learn mode is waiting for. */
 [data-midi].midi-waiting {

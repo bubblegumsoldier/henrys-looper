@@ -22,8 +22,15 @@ const listeners = new Set<Listener>();
 let view: MidiView = EMPTY_MIDI_VIEW;
 let events: MidiEventReport[] = [];
 let learnMode = false;
-/** `address -> binding`, rebuilt whenever the view changes. What the badges are drawn from. */
-let byAddress = new Map<string, MidiBindingView>();
+/**
+ * `address -> bindings`, rebuilt whenever the view changes. What the badges are drawn from.
+ *
+ * Keyed by `resolved_address ?? address`, because that is the spelling a `data-midi` attribute
+ * uses: a score binding written as `track.vocals.record` belongs to the button `track.1.record`.
+ * A list, because one control may be bound several times - a pad *and* a foot switch for the same
+ * record button.
+ */
+let byAddress = new Map<string, MidiBindingView[]>();
 
 function announce(): void {
   for (const l of listeners) l();
@@ -43,7 +50,13 @@ function subscribe(listener: Listener): () => void {
 /** A fresh view, from a command's answer or from an event that carried one. */
 export function setMidiView(next: MidiView): void {
   view = next;
-  byAddress = new Map(next.bindings.map((b) => [b.address, b]));
+  byAddress = new Map();
+  for (const b of next.bindings) {
+    const key = b.resolved_address ?? b.address;
+    const list = byAddress.get(key);
+    if (list) list.push(b);
+    else byAddress.set(key, [b]);
+  }
   announce();
 }
 
@@ -99,9 +112,9 @@ export function isLearnMode(): boolean {
   return learnMode;
 }
 
-/** What is bound to an address, if anything. Used by the badges and by the panel. */
-export function bindingFor(address: string): MidiBindingView | undefined {
-  return byAddress.get(address);
+/** Everything bound to an address (empty when nothing is). Used by the badges and by the panel. */
+export function bindingsFor(address: string): MidiBindingView[] {
+  return byAddress.get(address) ?? [];
 }
 
 export function useMidiView(): MidiView {

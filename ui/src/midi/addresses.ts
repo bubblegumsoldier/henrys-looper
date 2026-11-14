@@ -24,6 +24,34 @@
 //! file exists so the strings are built in one place rather than typed out at forty call sites, not
 //! as a second source of truth.
 //!
+//! # The contract for a new control (read this before adding one)
+//!
+//! A control becomes MIDI-learnable by **one attribute and nothing else**:
+//!
+//! ```tsx
+//! <button data-midi={trackAddress(i, "record")} onClick={...}>Record</button>
+//! ```
+//!
+//! * `data-midi` holds the address of the parameter tree (`engine/src/midi/target.rs`;
+//!   `looper-engine midi targets` lists them all). Build it with a helper from this file.
+//! * The element may be anything clickable or not - button, label around a slider, a span showing
+//!   a value. In learn mode a click on it (or ⌘/Ctrl+click anywhere) arms it; the click does not
+//!   also operate the control. Disabled controls work too.
+//! * It gets, without any code of its own: the badge (`data-midi-key`, e.g. `Pad 36`), whether
+//!   that binding works right now (`data-midi-state="active" | "inactive"`), the learn-mode outline
+//!   (`midi-learnable`) and the pulse while waiting (`midi-waiting`). Style those, render nothing.
+//! * Addresses are 1-based and use **track positions** (`track.1`), never track names: a score
+//!   binding written as `track.vocals.record` is matched to the element through its
+//!   `resolved_address`, which the backend computes from the running session.
+//! * The kinds: a *trigger* fires (record, preset, band shape), a *switch* has on/off (monitor,
+//!   effect on), a *range* has a value (pan, gain, fx knobs, tempo). The address decides the kind;
+//!   the element does not have to say.
+//! * An address the backend does not know is refused when it is armed, with a sentence. A new kind
+//!   of thing to control therefore needs a new `Target` in `target.rs` first.
+//!
+//! Everything about the bindings themselves (which devices, which controls, works or not, why)
+//! comes from the backend as data - `MidiView` in `types.ts` - and is not computed here.
+//!
 //! Everything is **1-based on the outside**, on every level: `track.1` is `tracks[0]`, `layer.2` is
 //! `layers[1]`, `eq.3` is `bands[2]`. The indices this file is called with are the 0-based ones the
 //! status event uses, and the conversion happens here - once.
@@ -119,6 +147,11 @@ const PRESET_ADDRESS: Record<LoadablePreset, string> = {
 
 export function fxPresetAddress(track: number, preset: LoadablePreset): string {
   return fxAddress(track, `preset.${PRESET_ADDRESS[preset]}`);
+}
+
+/** One EQ band's shape - a trigger per shape. `band` is 0-based. */
+export function fxBandKindAddress(track: number, band: number, kind: "peak" | "low_shelf" | "high_shelf"): string {
+  return fxAddress(track, `eq.${band + 1}.${kind}`);
 }
 
 /** One EQ band's knob. `band` is 0-based, as `BandEvent.index` is. */
