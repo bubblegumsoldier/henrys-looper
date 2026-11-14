@@ -135,6 +135,7 @@ use super::command::{
     StatusSender, TrackStatus,
 };
 use super::frame::{Channels, Frame};
+use super::insert::{InsertEndpoint, InsertRack, MAX_BLOCK, Spread};
 use super::metro::Metronome;
 use super::timeline::Timeline;
 use super::track::{MAX_LAYERS, Track, TrackLatency};
@@ -221,6 +222,9 @@ pub struct EngineCore {
     refusal: Refusal,
     buffers_taken: [u64; BUFFER_KINDS],
     stopped: bool,
+    /// Plugin insert slots, if the host attached any (`super::insert`). `None` for the CLI and for
+    /// every test that predates plugins - they render exactly as before.
+    inserts: Option<Box<InsertRack>>,
 }
 
 impl EngineCore {
@@ -266,7 +270,14 @@ impl EngineCore {
             refusal: Refusal::None,
             buffers_taken: [0; BUFFER_KINDS],
             stopped: false,
+            inserts: None,
         }
+    }
+
+    /// Give the engine its plugin slots. Called on the control thread before the engine moves into
+    /// the audio callback; the rack's scratch blocks are allocated here.
+    pub fn attach_inserts(&mut self, endpoint: InsertEndpoint) {
+        self.inserts = Some(Box::new(InsertRack::new(endpoint)));
     }
 
     #[cfg(test)]
@@ -305,6 +316,7 @@ impl EngineCore {
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) {
         self.refill_spares();
         self.collect_commands();
+        self.collect_inserts();
         self.publish_tempo();
         let in_frames = input.len() / self.input_channels;
         let out_frames = output.len() / BUS_SAMPLES;
@@ -385,6 +397,18 @@ impl EngineCore {
         }
     }
 
+    /// Apply rack changes and tell every track how far ahead to read its loop for the latency of
+    /// its plugins. A handful of atomic loads per track and block.
+    fn collect_inserts(&mut self) {
+        let Some(rack) = self.inserts.as_mut() else {
+            return;
+        };
+        rack.collect();
+        for (t, track) in self.tracks.iter_mut().enumerate() {
+            track.set_playback_advance(rack.track_latency(t));
+        }
+    }
+
     /// Tell every chain what a quarter note is worth, so a tempo-synchronous delay knows its time.
     ///
     /// Once per block, not per sample, and the chain ignores it unless the number really changed -
@@ -428,13 +452,23 @@ impl EngineCore {
             if boundary > cursor {
                 let start = self.out_pos + cursor as u64;
                 // Frame indices become sample offsets only here, on the way into the output slice.
-                self.render(
-                    &mut output[cursor * BUS_SAMPLES..boundary * BUS_SAMPLES],
-                    start,
-                    input,
-                    cursor,
-                    in_frames,
-                );
+                if self.inserts.as_ref().is_some_and(|r| r.active()) {
+                    self.render_blocks(
+                        &mut output[cursor * BUS_SAMPLES..boundary * BUS_SAMPLES],
+                        start,
+                        input,
+                        cursor,
+                        in_frames,
+                    );
+                } else {
+                    self.render(
+                        &mut output[cursor * BUS_SAMPLES..boundary * BUS_SAMPLES],
+                        start,
+                        input,
+                        cursor,
+                        in_frames,
+                    );
+                }
                 cursor = boundary;
             }
             match due {
@@ -539,20 +573,7 @@ impl EngineCore {
             for track in tracks.iter_mut() {
                 // The live input of this track, already stereo: one channel fanned out on a mono
                 // track, the recorded pair on a stereo one.
-                let monitor = if track.monitor() && frame < in_frames {
-                    let base = frame * channels;
-                    let input_of = |c: usize| match input.get(base + track.input().device_channel(c))
-                    {
-                        Some(&s) => s * monitor_gain,
-                        None => 0.0,
-                    };
-                    match track.channels() {
-                        Channels::Mono => Frame::mono(input_of(0)),
-                        Channels::Stereo => Frame::new(input_of(0), input_of(1)),
-                    }
-                } else {
-                    Frame::SILENT
-                };
+                let monitor = monitor_frame(track, input, frame, in_frames, channels, monitor_gain);
                 let sent = track.render(pos, monitor, collapsed);
                 for (bus, part) in buses.iter_mut().zip(sent) {
                     *bus = bus.added(part);
@@ -561,6 +582,107 @@ impl EngineCore {
             for (b, bus) in buses.iter().enumerate() {
                 slot[b * BUS_CHANNELS] = bus.l * bus_gain[b];
                 slot[b * BUS_CHANNELS + 1] = bus.r * bus_gain[b];
+            }
+        }
+    }
+
+    /// The same as [`Self::render`], block by block instead of frame by frame - the path taken while
+    /// at least one plugin insert is installed, because a plugin wants a block.
+    ///
+    /// Per track the unpanned signal of each bus is rendered into a scratch block, the track's
+    /// inserts run over it (see [`super::insert`] for which bus signal they process), and the
+    /// panner places the result on the bus sums. The bus inserts then run over each bus sum, and
+    /// only after them is the click added and the bus volume applied - the click stays outside
+    /// every plugin. Long segments are cut into pieces of [`MAX_BLOCK`] frames.
+    fn render_blocks(
+        &mut self,
+        out: &mut [f32],
+        start: u64,
+        input: &[f32],
+        in_base: usize,
+        in_frames: usize,
+    ) {
+        let frames = out.len() / BUS_SAMPLES;
+        let mut done = 0;
+        while done < frames {
+            let n = (frames - done).min(MAX_BLOCK);
+            self.render_block(
+                &mut out[done * BUS_SAMPLES..(done + n) * BUS_SAMPLES],
+                start + done as u64,
+                input,
+                in_base + done,
+                in_frames,
+            );
+            done += n;
+        }
+    }
+
+    fn render_block(
+        &mut self,
+        out: &mut [f32],
+        start: u64,
+        input: &[f32],
+        in_base: usize,
+        in_frames: usize,
+    ) {
+        let n = out.len() / BUS_SAMPLES;
+        let channels = self.input_channels;
+        let monitor_gain = self.monitor_gain;
+        let collapsed = self.routing.collapsed();
+        let Some(rack) = self.inserts.as_deref_mut() else {
+            return;
+        };
+        for bus in rack.bus_scratch.iter_mut() {
+            bus.clear(n);
+        }
+        for (t, track) in self.tracks.iter_mut().enumerate() {
+            let mut spread = Spread::Shared;
+            {
+                let scratch = &mut rack.track_scratch[t];
+                for i in 0..n {
+                    let monitor =
+                        monitor_frame(track, input, in_base + i, in_frames, channels, monitor_gain);
+                    let (wet, s) = track.render_unpanned(start + i as u64, monitor, collapsed);
+                    spread = s;
+                    for (b, block) in scratch.iter_mut().enumerate() {
+                        block.l[i] = wet[b].l;
+                        block.r[i] = wet[b].r;
+                    }
+                }
+            }
+            // One instance per slot: it processes the Main signal. When both buses carry the same
+            // signal, the result serves both; when they differ, Monitor goes without the plugins.
+            rack.process_track(t, Bus::Main.index(), n);
+            if spread == Spread::Shared {
+                let [main, monitor] = &mut rack.track_scratch[t];
+                monitor.l[..n].copy_from_slice(&main.l[..n]);
+                monitor.r[..n].copy_from_slice(&main.r[..n]);
+            }
+            let [scratch_main, scratch_monitor] = &rack.track_scratch[t];
+            let [bus_main, bus_monitor] = &mut rack.bus_scratch;
+            for (src, dst) in [(scratch_main, bus_main), (scratch_monitor, bus_monitor)] {
+                for i in 0..n {
+                    let placed = track.place(Frame::new(src.l[i], src.r[i]));
+                    dst.l[i] += placed.l;
+                    dst.r[i] += placed.r;
+                }
+            }
+        }
+        for b in 0..BUS_COUNT {
+            rack.process_bus(b, n);
+        }
+        let click_bus = if collapsed { Bus::Main } else { Bus::Monitor }.index();
+        for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
+            let click = if self.click {
+                self.metro.sample_at(&self.timeline, start + i as u64) * self.click_gain
+            } else {
+                0.0
+            };
+            for b in 0..BUS_COUNT {
+                let block = &rack.bus_scratch[b];
+                let c = if b == click_bus { click } else { 0.0 };
+                slot[b * BUS_CHANNELS] = (block.l[i] + c) * self.bus_gain[b];
+                slot[b * BUS_CHANNELS + 1] = (block.r[i] + c) * self.bus_gain[b];
             }
         }
     }
@@ -1013,6 +1135,32 @@ impl EngineCore {
         };
         self.bus_peak = [[0.0; BUS_CHANNELS]; BUS_COUNT];
         self.status.push(status);
+    }
+}
+
+/// One track's live input at one frame of the block, already stereo and scaled: one channel fanned
+/// out on a mono track, the recorded pair on a stereo one, silence when monitoring is off or the
+/// input FIFO ran short.
+#[inline(always)]
+fn monitor_frame(
+    track: &Track,
+    input: &[f32],
+    frame: usize,
+    in_frames: usize,
+    channels: usize,
+    monitor_gain: f32,
+) -> Frame {
+    if !track.monitor() || frame >= in_frames {
+        return Frame::SILENT;
+    }
+    let base = frame * channels;
+    let input_of = |c: usize| match input.get(base + track.input().device_channel(c)) {
+        Some(&s) => s * monitor_gain,
+        None => 0.0,
+    };
+    match track.channels() {
+        Channels::Mono => Frame::mono(input_of(0)),
+        Channels::Stereo => Frame::new(input_of(0), input_of(1)),
     }
 }
 

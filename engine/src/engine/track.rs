@@ -99,6 +99,7 @@
 use super::bus::{BUS_COUNT, Bus, BusSend};
 use super::frame::{Channels, Frame, TrackInput, pan_gains};
 use super::fx::{Chain, FxParam, FxPreset, FxSlot, FxStatus};
+use super::insert::Spread;
 
 /// Hard ceiling of layers per track. Not a pre-allocation: layers are allocated one at a time in
 /// loop length. It exists so a runaway overdub hits a clear German message instead of the memory
@@ -338,6 +339,8 @@ pub struct Track {
     /// arithmetic once per frame. It is recomputed whenever the configuration or the default
     /// changes, which happens in the audio thread but only on a command - never per sample.
     latency_frames: u64,
+    /// Frames the loop is read ahead to make up for plugin latency. See [`Track::render_unpanned`].
+    playback_advance: u64,
 }
 
 impl Track {
@@ -369,6 +372,7 @@ impl Track {
             latency: TrackLatency::INHERITED,
             // Resolved by `EngineCore::new`, which is the only place that knows the default.
             latency_frames: 0,
+            playback_advance: 0,
         }
     }
 
@@ -525,15 +529,50 @@ impl Track {
     /// take", which is a property of the take.
     #[inline]
     pub fn render(&mut self, pos: u64, monitor: Frame, collapsed: bool) -> [Frame; BUS_COUNT] {
+        let (wet, _) = self.render_unpanned(pos, monitor, collapsed);
+        [self.place(wet[0]), self.place(wet[1])]
+    }
+
+    /// Apply this track's panner to one frame. The last step of the channel strip.
+    #[inline(always)]
+    pub fn place(&self, wet: Frame) -> Frame {
+        let (gain_l, gain_r) = pan_gains(self.pan);
+        Frame::new(wet.l * gain_l, wet.r * gain_r)
+    }
+
+    /// Frames the loop playback is read ahead of the output position, to make up for the latency of
+    /// this track's plugin inserts (`super::insert`). Zero without plugins.
+    #[inline]
+    pub fn set_playback_advance(&mut self, frames: u64) {
+        self.playback_advance = frames;
+    }
+
+    #[inline]
+    pub fn playback_advance(&self) -> u64 {
+        self.playback_advance
+    }
+
+    /// Everything [`Track::render`] does except the panner, plus how the two bus signals relate -
+    /// the stage the plugin inserts are run on (after the built-in chain, before the panner).
+    ///
+    /// The loop is read `playback_advance` frames ahead: a plugin that reports latency `L` delays
+    /// what it gets by `L`, so feeding it the loop `L` frames early puts the loop back on the click.
+    /// The live input cannot be read ahead and is late by `L` - the price of a plugin with lookahead.
+    #[inline]
+    pub fn render_unpanned(
+        &mut self,
+        pos: u64,
+        monitor: Frame,
+        collapsed: bool,
+    ) -> ([Frame; BUS_COUNT], Spread) {
         let dry = if self.playing {
-            self.read(pos)
+            self.read(pos + self.playback_advance)
         } else {
             Frame::SILENT
         };
         let (gain_l, gain_r) = pan_gains(self.pan);
         self.note_output_peak(Frame::new(dry.l * gain_l, dry.r * gain_r));
 
-        let place = |wet: Frame| Frame::new(wet.l * gain_l, wet.r * gain_r);
         let source = |bus: Bus, loop_send: BusSend, monitor_send: BusSend| {
             let mut src = Frame::SILENT;
             if loop_send.on(bus) {
@@ -553,26 +592,26 @@ impl Track {
             if !self.monitor_send.is_silent() {
                 src = src.added(monitor);
             }
-            let wet = place(self.fx[0].process(src));
+            let wet = self.fx[0].process(src);
             self.fx[1].process(Frame::SILENT);
-            return [wet, Frame::SILENT];
+            return ([wet, Frame::SILENT], Spread::Collapsed);
         }
 
         if self.buses_share_sources() {
             let src = source(Bus::Main, self.loop_send, self.monitor_send);
-            let wet = place(self.fx[0].process(src));
+            let wet = self.fx[0].process(src);
             // Keep the idle chain settled rather than frozen mid-tail; one comparison per sample
             // once it has run dry.
             self.fx[1].process(Frame::SILENT);
-            return [wet; BUS_COUNT];
+            return ([wet; BUS_COUNT], Spread::Shared);
         }
 
         let mut out = [Frame::SILENT; BUS_COUNT];
         for bus in Bus::ALL {
             let src = source(bus, self.loop_send, self.monitor_send);
-            out[bus.index()] = place(self.fx[bus.index()].process(src));
+            out[bus.index()] = self.fx[bus.index()].process(src);
         }
-        out
+        (out, Spread::Split)
     }
 
     #[inline]

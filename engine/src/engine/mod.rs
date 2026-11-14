@@ -43,6 +43,7 @@ pub mod calibrate;
 pub mod command;
 pub mod frame;
 pub mod fx;
+pub mod insert;
 pub mod live;
 pub mod metro;
 pub mod process;
@@ -56,3 +57,5 @@ pub mod track;
 mod sim;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod insert_tests;
