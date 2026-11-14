@@ -599,7 +599,8 @@ async fn midi_unbind(id: String, engine: State<'_, EngineHandle>) -> Result<Midi
     offload(move || handle.midi_unbind(id)).await
 }
 
-/// Write the profile to `%APPDATA%\henrys-looper\midi\<geraet>.yaml`. The answer names the file.
+/// Write the profile to `%APPDATA%\henrys-looper\midi\<geraet>.yaml` (macOS:
+/// `~/Library/Application Support/henrys-looper/midi/`). The answer names the file.
 #[tauri::command]
 async fn midi_save(engine: State<'_, EngineHandle>) -> Result<MidiSaved, String> {
     let handle = engine.inner().clone();

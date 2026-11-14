@@ -17,7 +17,8 @@
 //!
 //! # Where the file lives, and why not next to the score
 //!
-//! In the per-user application data directory - on Windows `%APPDATA%\henrys-looper\midi\`. The
+//! In the per-user application data directory - on Windows `%APPDATA%\henrys-looper\midi\`, on
+//! macOS `~/Library/Application Support/henrys-looper/midi/`. The
 //! argument is the same one that decided the two stages: the profile describes a piece of hardware
 //! that is plugged into *this computer*, so it belongs to the computer and not to a project folder
 //! that gets copied, mailed and version-controlled. A profile beside the score would travel with
@@ -367,6 +368,11 @@ pub fn profile_dir() -> PathBuf {
     }
     let base = if cfg!(windows) {
         std::env::var("APPDATA").ok().map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        // The macOS home of per-user application data; ~/.config is a Linux convention.
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join("Library").join("Application Support"))
     } else {
         std::env::var("XDG_CONFIG_HOME")
             .ok()

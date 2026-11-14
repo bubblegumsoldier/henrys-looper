@@ -155,11 +155,19 @@ pub fn cmd_midi(opts: &MidiOpts) -> Result<(), String> {
 fn list() -> Result<(), String> {
     let ports = input::list_ports()?;
     if ports.is_empty() {
-        println!(
-            "Kein MIDI-Eingang gefunden.\n\
-             Haengt der Controller am Rechner? Windows zeigt ein MIDI-Geraet erst, wenn es \
-             angesteckt und der Treiber geladen ist."
-        );
+        if cfg!(windows) {
+            println!(
+                "Kein MIDI-Eingang gefunden.\n\
+                 Haengt der Controller am Rechner? Windows zeigt ein MIDI-Geraet erst, wenn es \
+                 angesteckt und der Treiber geladen ist."
+            );
+        } else {
+            println!(
+                "Kein MIDI-Eingang gefunden.\n\
+                 Haengt der Controller am Rechner? Unter macOS zeigt \"Audio-MIDI-Setup\" im \
+                 Fenster \"MIDI-Studio\", welche Geraete das System sieht."
+            );
+        }
         return Ok(());
     }
     println!("MIDI-Eingaenge:");
@@ -176,10 +184,12 @@ fn list() -> Result<(), String> {
         };
         println!("  {}  {}\n{note}", port.index, port.name);
     }
-    println!(
-        "\nHinweis: Windows gibt ein MIDI-Geraet immer nur an ein Programm gleichzeitig heraus. \
-         Laeuft Ableton mit dem Controller als Control Surface, laesst er sich hier nicht oeffnen."
-    );
+    if cfg!(windows) {
+        println!(
+            "\nHinweis: Windows gibt ein MIDI-Geraet immer nur an ein Programm gleichzeitig heraus. \
+             Laeuft Ableton mit dem Controller als Control Surface, laesst er sich hier nicht oeffnen."
+        );
+    }
     Ok(())
 }
 
