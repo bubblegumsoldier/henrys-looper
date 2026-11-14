@@ -42,7 +42,15 @@ kbd {
 .pill.err { color: #ffb3bb; border-color: rgba(255,92,108,.45); background: rgba(255,92,108,.1); }
 .pill.err .led { background: var(--err); box-shadow: 0 0 6px var(--err); }
 @media (max-width: 1100px) { .hide-narrow { display: none !important; } }
-.tp.release { white-space: nowrap; }
+/* live.css's `.release` (the stage surface) also matches the title bar's `.tp.release`; the
+   mockups never load both. Restore the transport button's own shape. */
+.tp.release {
+  white-space: nowrap; display: inline-flex; flex-direction: row; justify-content: center; align-items: center;
+  width: auto; height: 28px; padding: 0 10px 0 8px; overflow: visible; border-radius: var(--r-2);
+  background: linear-gradient(to bottom, #232830, #1b1f25); border: 1px solid var(--line-3); box-shadow: var(--sh-ctl);
+  color: var(--tx-1);
+}
+.tp.release.armed { color: var(--st-armed); border: 1px dashed var(--st-armed-line); background: var(--hatch-armed), #1d1b12; }
 @media (max-width: 1100px) {
   .titlebar .lcd > div:nth-child(5), .titlebar .lcd > div:nth-child(4) { display: none; }
 }

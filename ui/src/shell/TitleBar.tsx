@@ -24,6 +24,7 @@ import { api } from "../api";
 import {
   scoreCanStart,
   scoreNext,
+  scoreRewind,
   scoreRuns,
   scoreStart,
   scoreStopAll,
@@ -206,8 +207,17 @@ function Doc({ score }: { score: ScoreView }) {
 function Transport({ score }: { score: ScoreView }) {
   const runs = scoreRuns(score);
   const armed = score.armed !== null && !score.armed.countIn;
+  const over = score.phase === "finished" || score.phase === "stopped";
   return (
     <div className="transport">
+      <button
+        className="tp"
+        disabled={!over}
+        onClick={scoreRewind}
+        title="Back to start: clears all tracks and returns to the first section. Asks first."
+      >
+        <Icon name="tostart" />
+      </button>
       <button
         className={`tp start${runs ? " on" : ""}`}
         data-midi={TRANSPORT.start}
