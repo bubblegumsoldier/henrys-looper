@@ -10,6 +10,9 @@
 //! handle on every write, so this catches everything printed anywhere in the process, including
 //! the whole `calibrate` report, with no dependency and no second sink to keep in sync.
 //!
+//! On macOS the same redirect is done with `dup2`: a bundled app started from the Finder has its
+//! standard output on `/dev/null`, which would swallow the calibration report just as silently.
+//!
 //! Set `LOOPER_LOG_STDOUT=1` to skip the redirect and keep the console (useful under
 //! `cargo tauri dev`).
 //!
@@ -187,9 +190,36 @@ fn has_console() -> bool {
     true
 }
 
-#[cfg(not(windows))]
+/// macOS (and any other Unix): an app started from the Finder has its standard output on
+/// `/dev/null`, so without the redirect the calibration report would be lost there just as it
+/// would be on Windows. Same mechanism, POSIX spelling: open the file for appending and `dup2` it
+/// over descriptors 1 and 2.
+#[cfg(unix)]
+fn redirect_std_handles(file: &Path) -> bool {
+    use std::os::fd::IntoRawFd;
+
+    unsafe extern "C" {
+        fn dup2(src: i32, dst: i32) -> i32;
+    }
+
+    let Ok(handle) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+    else {
+        return false;
+    };
+    // Deliberately leaked, like the Windows handle: it has to live as long as the process.
+    let fd = handle.into_raw_fd();
+    // Safety: `fd` is an open descriptor we own, 1 and 2 are the standard descriptors, and dup2
+    // touches nothing else.
+    let out = unsafe { dup2(fd, 1) };
+    let err = unsafe { dup2(fd, 2) };
+    out == 1 && err == 2
+}
+
+#[cfg(not(any(windows, unix)))]
 fn redirect_std_handles(_file: &Path) -> bool {
-    // Only Windows loses its console to the subsystem flag; elsewhere stdout stays usable.
     false
 }
 
