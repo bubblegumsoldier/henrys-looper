@@ -576,6 +576,168 @@ export interface ScoreLoaded {
   message: string;
 }
 
+// ---------------------------------------------------------------------------------------------
+// The score as an editable document. Mirrors `looper_engine::score::doc`.
+//
+// Text and graphical editor are two views of one document: `score_parse` turns text into a
+// `ScoreDoc`, `score_render` turns a `ScoreDoc` back into canonical text and validates it with the
+// compiler. Optional fields are optional on purpose: absent = "not written here" (the default
+// applies, or the section inherits it through `repeat`). What a value resolves to is in
+// `DocSection.resolved`, with its origin. `line` and `resolved` are output only - the backend
+// ignores them when a document comes back.
+// ---------------------------------------------------------------------------------------------
+
+/** Comments attached to one element: whole lines above it, and the comment at the end of its line.
+ *  Stored without the leading `# `. They move with the element and vanish with it. */
+export interface DocComments {
+  before?: string[];
+  after?: string;
+}
+
+export interface DocTrack {
+  name: string;
+  /** One-based input; the left one of a stereo pair. */
+  input: number;
+  /** One-based right input of a stereo track; absent = mono. */
+  input_right?: number;
+  /** -1..1; absent = centre. */
+  pan?: number;
+  /** Absent = true. */
+  monitor?: boolean;
+  /** Frames, 0..96000; absent = the engine's default. */
+  latency?: number;
+  /** Frames, -96000..96000; absent = 0. */
+  latency_trim?: number;
+  /** `main` | `monitor` | `main+monitor` | `none`; absent = `main+monitor`. */
+  bus?: string;
+  /** Same words; absent = `monitor`. */
+  monitor_bus?: string;
+  comments?: DocComments;
+  line?: number;
+}
+
+/** One entry of `midi:`. Exactly one of `note` / `cc`. */
+export interface DocMidiBinding {
+  /** The address as written: `next_section`, `track.voice.record`, ... */
+  key: string;
+  note?: number;
+  cc?: number;
+  /** 1..16; absent = 1. */
+  channel?: number;
+  /** `press` | `release` | `toggle` | `momentary`. */
+  mode?: string;
+  /** `pickup` | `jump`. */
+  takeover?: string;
+  min?: number;
+  max?: number;
+  comments?: DocComments;
+  line?: number;
+}
+
+/** One `track: state` line a section states itself. */
+export interface DocSectionTrack {
+  track: string;
+  state: ScoreState;
+  comments?: DocComments;
+  line?: number;
+}
+
+/** Where a resolved value comes from. */
+export type ValueSource =
+  | { kind: "own" }
+  /** Inherited through `repeat`, from the section that actually states it (end of the chain). */
+  | { kind: "repeat"; index: number; section: string }
+  /** Nobody states it: 4 bars, no autorelease, `loop`, track `stop`. */
+  | { kind: "default" };
+
+export interface Resolved<T> {
+  value: T;
+  from: ValueSource;
+}
+
+/** A section as the runner will play it. One `tracks` entry per score track, in track order. */
+export interface ResolvedSection {
+  bars: Resolved<number>;
+  autorelease: Resolved<boolean>;
+  quantize: Resolved<Quantize>;
+  tracks: { track: string; state: ScoreState; from: ValueSource }[];
+}
+
+export interface DocSection {
+  id: string;
+  repeat?: string;
+  bars?: number;
+  autorelease?: boolean;
+  quantize?: Quantize;
+  /** Only the states this section states itself, in written order. */
+  tracks: DocSectionTrack[];
+  /** Comments above the `- id:` line and at its end. */
+  comments?: DocComments;
+  /** Comments of the other field lines, keyed by field name. */
+  field_comments?: Record<string, DocComments>;
+  line?: number;
+  /** Output only. */
+  resolved?: ResolvedSection;
+}
+
+export interface ScoreDoc {
+  title?: string;
+  bpm: number;
+  /** `"3/4"`. */
+  time_signature?: string;
+  /** Old alias for the numerator; kept when a file used it. New documents use `time_signature`. */
+  beats_per_bar?: number;
+  tracks: DocTrack[];
+  midi: DocMidiBinding[];
+  sections: DocSection[];
+  /** Comment lines above the first key / after the last element. */
+  header?: string[];
+  footer?: string[];
+  /** Comments of the top-level keys. */
+  field_comments?: Record<string, DocComments>;
+}
+
+/** Which element something belongs to. `field` names one field of it; absent = the whole element. */
+export type ScoreRef =
+  | { kind: "score"; field?: string }
+  | { kind: "track"; index: number; name: string; field?: string }
+  | { kind: "midi"; index: number; key: string; field?: string }
+  | { kind: "section"; index: number; id: string; field?: string }
+  /** `index` is the position in `DocSection.tracks`. */
+  | { kind: "section_track"; section: number; section_id: string; index: number; track: string };
+
+/** Where an element's key stands in the text. */
+export interface ScoreLocation {
+  at: ScoreRef;
+  line: number;
+  column: number;
+}
+
+/** A compiler issue plus the element it belongs to. */
+export interface ModelIssue extends ScoreIssue {
+  at: ScoreRef | null;
+}
+
+/** Answer of `score_parse`. `doc` only when the text compiles. */
+export interface ParseOutcome {
+  ok: boolean;
+  doc: ScoreDoc | null;
+  score: CompiledScore | null;
+  locations: ScoreLocation[];
+  errors: ModelIssue[];
+}
+
+/** Answer of `score_render`. `yaml` always; positions in `errors` refer to it. */
+export interface RenderOutcome {
+  ok: boolean;
+  yaml: string;
+  /** When ok: parsed back from `yaml`. Otherwise the document as sent, `resolved` recomputed. */
+  doc: ScoreDoc;
+  score: CompiledScore | null;
+  locations: ScoreLocation[];
+  errors: ModelIssue[];
+}
+
 /** What the runner is doing. */
 export type Phase = "idle" | "count_in" | "running" | "finished" | "stopped";
 

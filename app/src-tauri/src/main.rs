@@ -29,6 +29,8 @@ use midi::{MidiPortView, MidiSaved, MidiView};
 use looper_engine::engine::bus::{Bus, TrackSource};
 use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
 use looper_engine::engine::track::TrackLatency as EngineTrackLatency;
+use looper_engine::score::ScoreDoc;
+use looper_engine::score::doc::{ParseOutcome, RenderOutcome};
 use proto::{
     AppInfo, BandKindName, BusOutConfig, CalibrateConfig, CalibrateOutcome, CompileOutcome,
     DelayNoteName,
@@ -472,6 +474,29 @@ async fn score_compile(yaml: String) -> Result<CompileOutcome, String> {
     offload(move || Ok(host::compile(&yaml))).await
 }
 
+/// Text -> structured document, for an editor that arranges the score graphically.
+///
+/// When the text compiles: the whole document - every track, binding and section as written,
+/// each section with what it states itself and what it inherits through `repeat:` (`resolved`),
+/// every comment attached to its element, and the source line of every element. When it does not:
+/// no document, and the compiler's issues, each additionally naming its element (`at`).
+///
+/// Pure, like `score_compile`: no engine, no device, safe while a score plays.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_parse(yaml: String) -> Result<ParseOutcome, String> {
+    offload(move || Ok(looper_engine::score::doc::parse_doc_outcome(&yaml))).await
+}
+
+/// Structured document -> canonical text, validated.
+///
+/// Always answers with the rendered text. `ok` says whether it compiles; `errors` are the
+/// compiler's own issues, each with the element of the document it belongs to (`at`). The rule for
+/// comments and layout is in `looper_engine::score::doc::render_doc`.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_render(doc: ScoreDoc) -> Result<RenderOutcome, String> {
+    offload(move || Ok(looper_engine::score::doc::render_doc_outcome(&doc))).await
+}
+
 /// Compile a score and hand it to the runner.
 ///
 /// Needs a running engine whose track layout matches the score (same names, same inputs - see
@@ -672,6 +697,8 @@ fn main() {
             fx_band_kind,
             fx_delay_note,
             score_compile,
+            score_parse,
+            score_render,
             score_load,
             score_start,
             score_next,

@@ -44,6 +44,10 @@ impl<V> OrderedMap<V> {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut V> {
+        self.entries.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
     pub fn contains_key(&self, key: &str) -> bool {
         self.entries.iter().any(|(k, _)| k == key)
     }

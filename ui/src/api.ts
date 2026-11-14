@@ -18,7 +18,10 @@ import type {
   FxParamName,
   FxPresetName,
   FxSlotName,
+  ParseOutcome,
   Quantize,
+  RenderOutcome,
+  ScoreDoc,
   ScoreLoaded,
   StartConfig,
   TrackSourceId,
@@ -195,6 +198,17 @@ export const scoreApi = {
    * once, each with line, column, message and often a suggestion.
    */
   compile: (yaml: string) => call<CompileOutcome>("score_compile", { yaml }),
+  /**
+   * Text -> structured document (for the arrangement view). `doc` only when the text compiles;
+   * otherwise `errors`, each also naming its element (`at`). Pure, safe at any time.
+   */
+  parse: (yaml: string) => call<ParseOutcome>("score_parse", { yaml }),
+  /**
+   * Structured document -> canonical text, validated by the compiler. `yaml` always comes back;
+   * `errors` carry the compiler's messages plus the element each belongs to. Comments stay with
+   * their element, layout becomes canonical.
+   */
+  render: (doc: ScoreDoc) => call<RenderOutcome>("score_render", { doc }),
   /**
    * Compile and hand to the runner. Needs a running engine whose tracks match the score and every
    * track empty; tempo, time signature and the layer length then come from the score.

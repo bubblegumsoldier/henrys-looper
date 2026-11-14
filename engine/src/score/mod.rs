@@ -35,6 +35,7 @@
 //! all of which are forbidden on the audio side and all of which are fine here.
 
 pub mod compile;
+pub mod doc;
 pub mod error;
 pub mod map;
 pub mod model;
@@ -44,6 +45,7 @@ pub mod yaml;
 #[cfg(test)]
 mod tests;
 
+pub use doc::{ModelIssue, ScoreDoc, ScoreRef, parse_doc, render_doc};
 pub use error::{ScoreError, ScoreIssue};
 pub use map::OrderedMap;
 pub use model::{

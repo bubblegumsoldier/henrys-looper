@@ -25,8 +25,8 @@ use crate::engine::schedule::Quantize;
 
 /// Defaults for a section that inherits nothing. `autorelease: false` means "wait for the release
 /// button"; `Quantize::Loop` is the engine's default grid (see `schedule.rs`).
-const DEFAULT_AUTORELEASE: bool = false;
-const DEFAULT_BARS: u32 = 4;
+pub(crate) const DEFAULT_AUTORELEASE: bool = false;
+pub(crate) const DEFAULT_BARS: u32 = 4;
 const DEFAULT_BEATS_PER_BAR: u32 = 4;
 const DEFAULT_BEAT_UNIT: u32 = 4;
 
