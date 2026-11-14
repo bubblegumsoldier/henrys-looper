@@ -1,9 +1,11 @@
 //! What has to be settled before a single sample can be recorded: which device, how big a buffer,
 //! how fast, how long a loop, how much latency to take out - and which tracks exist at all.
 //!
-//! The defaults are the values phase 0 measured on this machine (ASIO, Focusrite, 48 kHz, 128
-//! frames, 827 samples). They are also what the Rust side would fall back to, repeated here so the
-//! musician sees the numbers instead of guessing them.
+//! On Windows the defaults are the values phase 0 measured there (ASIO, Focusrite, 48 kHz, 128
+//! frames, 827 samples). On the Mac they are CoreAudio, 48 kHz, 128 frames and a latency of 596
+//! frames that is only an estimate from what CoreAudio reports - nobody has measured it with a
+//! cable, and the field says so. Both sets are also what the Rust side would fall back to,
+//! repeated here so the musician sees the numbers instead of guessing them.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
@@ -18,10 +20,19 @@ import type {
   StartTrack,
 } from "../types";
 import { TapTempo } from "./TapTempo";
+import { IS_MAC } from "../platform";
 
 const STORE_KEY = "looper.setup";
 
 const SAMPLE_RATES = [44100, 48000, 88200, 96000];
+
+/**
+ * Default compensation per platform, mirrored from `looper_engine::audio::DEFAULT_LATENCY_FRAMES`.
+ * Windows: measured with a loopback cable. Mac: estimated from CoreAudio's own figures for a
+ * Scarlett 2i2 at 48 kHz / 128 frames - not measured, and likely a little short.
+ */
+const DEFAULT_LATENCY = IS_MAC ? 596 : 827;
+const DEFAULT_LATENCY_MEASURED = !IS_MAC;
 
 /** The four ways a source can be routed, in the order they are actually used. */
 const BUS_CHOICES: { value: string; label: string }[] = [
@@ -32,7 +43,7 @@ const BUS_CHOICES: { value: string; label: string }[] = [
 ];
 
 export const DEFAULT_SETUP: StartConfig = {
-  host: "asio",
+  host: IS_MAC ? "coreaudio" : "asio",
   device: null,
   sample_rate: 48000,
   buffer_frames: 128,
@@ -66,7 +77,7 @@ export const DEFAULT_SETUP: StartConfig = {
   beat_unit: 4,
   bars: 8,
   quantize: "loop",
-  latency_frames: 827,
+  latency_frames: DEFAULT_LATENCY,
   monitor_gain: 1,
   click_gain: 1,
   click: true,
@@ -257,9 +268,15 @@ export function Setup({ info, busy, onStart, onError }: Props) {
         if (!host) return c;
         const known = host.devices.some((d) => d.name === c.device);
         if (host.name === c.host && (known || c.device === null)) return c;
-        // Prefer the interface this project was measured on, else the host's default input.
+        // Prefer the interface this project was measured on - "Focusrite USB ASIO" on Windows,
+        // "Scarlett 2i2 USB" under CoreAudio - else the host's default input if it can also play
+        // (one device, one clock), else any device that does both, else the default input. On a
+        // Mac the default output is often the built-in speakers while the input is the interface.
+        const duplex = (d: DeviceInfo) => d.input && d.output;
         const preferred =
-          host.devices.find((d) => d.name.toLowerCase().includes("focusrite")) ??
+          host.devices.find((d) => /focusrite|scarlett/i.test(d.name) && duplex(d)) ??
+          host.devices.find((d) => d.name === host.default_input && duplex(d)) ??
+          host.devices.find(duplex) ??
           host.devices.find((d) => d.name === host.default_input) ??
           host.devices.find((d) => d.input) ??
           null;
@@ -305,7 +322,7 @@ export function Setup({ info, busy, onStart, onError }: Props) {
     return usable.length > 0 ? usable : SAMPLE_RATES;
   }, [device]);
 
-  const asioMissing = report ? !report.asio_built || !report.hosts.some((h) => h.name === "asio") : false;
+  const asioMissing = !IS_MAC && report ? !report.asio_built || !report.hosts.some((h) => h.name === "asio") : false;
   const bufferOff = range !== null && (config.buffer_frames < range.min || config.buffer_frames > range.max);
 
   const setTrack = (index: number, part: Partial<StartTrack>) =>
@@ -417,7 +434,11 @@ export function Setup({ info, busy, onStart, onError }: Props) {
               onChange={(v) => patch({ latency_frames: Math.max(0, Math.round(v)) })}
               min={0}
               step={1}
-              hint={`≈ ${ms(config.latency_frames, config.sample_rate)} · Vorgabe für jeden Track, der nichts eigenes sagt · nach jedem Wechsel von Gerät, Rate oder Puffer neu messen`}
+              hint={`≈ ${ms(config.latency_frames, config.sample_rate)} · Vorgabe für jeden Track, der nichts eigenes sagt · ${
+                !DEFAULT_LATENCY_MEASURED && config.latency_frames === DEFAULT_LATENCY
+                  ? "Schätzwert aus den CoreAudio-Angaben, nicht gemessen — vor dem ersten ernsten Take kalibrieren"
+                  : "nach jedem Wechsel von Gerät, Rate oder Puffer neu messen"
+              }`}
             />
           </div>
         </section>

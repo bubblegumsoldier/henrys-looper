@@ -17,6 +17,7 @@ import { LiveView } from "./live/LiveView";
 import { ScoreView } from "./components/ScoreView";
 import { LearnLayer } from "./midi/LearnLayer";
 import { MidiPanel } from "./midi/MidiPanel";
+import { IS_MAC } from "./platform";
 import { useLooperEvents } from "./useWebSocket";
 
 type Tab = "live" | "score";
@@ -45,7 +46,7 @@ export default function App() {
         {info && (
           <span className="muted mono app-bar-info">
             v{info.version}
-            {info.asio_built ? " · ASIO" : " · ohne ASIO"}
+            {IS_MAC ? " · CoreAudio" : info.asio_built ? " · ASIO" : " · ohne ASIO"}
             {info.logging ? "" : " · kein Log"}
           </span>
         )}
