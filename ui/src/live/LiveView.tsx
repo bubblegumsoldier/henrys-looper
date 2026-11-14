@@ -118,6 +118,19 @@ const actions: TrackActions = {
   fxDelayNote: (t, note) => run(() => api.fxDelayNote(t, note)),
 };
 
+/** True while the Live area is narrower than 1200 px - the same break live.css uses. */
+function useNarrow(ref: React.RefObject<HTMLElement | null>): boolean {
+  const [narrow, setNarrow] = useState(false);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => setNarrow(entry.contentRect.width < 1200));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+  return narrow;
+}
+
 interface Props {
   onOpenSetup: () => void;
   onOpenArrangement: () => void;
@@ -207,6 +220,7 @@ function Stage({ onOpenArrangement }: Props) {
   // `data-beat` flips on every beat so the recording/armed pulse restarts on the beat, and
   // `--beat-dur` is one beat long - the glow breathes with the music rather than on its own clock.
   const root = useRef<HTMLDivElement | null>(null);
+  const narrow = useNarrow(root);
   const lastBeat = useRef(-1);
   const lastBp = useRef(-1);
   useStatusEffect((s) => {
@@ -343,7 +357,9 @@ function Stage({ onOpenArrangement }: Props) {
   // --- render ----------------------------------------------------------------------------------
   const barInLoop = clock.bars > 0 ? ((clock.bar - 1) % clock.bars) + 1 : clock.bar;
   const count = tracks.length;
-  const layout = count <= 5 ? "one" : count === 6 ? "six" : "two";
+  // Up to five tracks in one row (the mockup). Six still fit one row on a wide window; below 1200 px
+  // they, like seven or eight, go into two rows of compact tiles.
+  const layout = count <= 5 ? "one" : count === 6 && !narrow ? "six" : "two";
   const beatDur = clock.bpm > 0 ? 60 / clock.bpm : 0.5;
   const detailTrack = detail !== null ? tracks[detail] : undefined;
 
@@ -352,7 +368,7 @@ function Stage({ onOpenArrangement }: Props) {
       <div
         className={`live tiles-${layout}${detailTrack ? " with-drawer" : ""}`}
         ref={root}
-        style={{ "--beat-dur": `${beatDur}s`, "--n-tracks": Math.max(count, 1) } as CSSProperties}
+        style={{ "--beat-dur": `${beatDur}s`, "--n-tracks": Math.max(count, 1), "--cols": Math.ceil(count / 2) } as CSSProperties}
       >
         <div className="lv-top">
           <PositionPanel clock={clock} score={score} compiled={compiled} />

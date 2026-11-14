@@ -20,7 +20,7 @@ interface Props {
 export function ArrangementStrip({ score, compiled, onOpenArrangement }: Props) {
   if (!score.loaded) {
     return (
-      <section className="panel lane-live">
+      <section className="panel lane-live free">
         <div className="blk empty-lane" style={{ "--n": 1 } as CSSProperties}>
           <div className="bn">
             <b>No score loaded</b>

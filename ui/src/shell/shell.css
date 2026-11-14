@@ -225,14 +225,19 @@ input.range:disabled { opacity: .4; }
 .blk { text-align: left; color: inherit; font: inherit; cursor: default; }
 .blk[data-midi] { cursor: pointer; }
 .blk .prog { width: var(--p, 0%); }
-.blk.empty-lane { border-style: dashed; background: transparent; }
+.blk.empty-lane { border-style: dashed; background: transparent; flex-direction: row; align-items: center; justify-content: flex-start; gap: 16px; }
+/* Without a score the strip is one quiet line, so the tiles get the height. */
+.live .lane-live.free { height: 52px; padding: 6px; }
 .blk.empty-lane .bn b { color: var(--tx-2); font-family: var(--font-ui); }
 .blk .bm .auto { color: var(--tx-3); display: inline-flex; align-items: center; gap: 4px; }
 .linkish { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); font-weight: var(--fw-semibold); cursor: pointer; }
 .linkish .ic { --ic: 13px; }
 
 /* Tiles */
-.tile { cursor: default; }
+.tile { cursor: default; grid-template-columns: minmax(0, 1fr); }
+.tile > * { min-width: 0; }
+.soll { overflow: hidden; }
+.is .w span { overflow: hidden; text-overflow: ellipsis; }
 .tile.sel { box-shadow: 0 0 0 2px var(--accent-line); }
 .tile.rec.sel, .tile.dub.sel { box-shadow: 0 0 0 2px var(--accent-line), 0 0 40px rgba(255,71,87,.25); }
 .tile .tn .key {
@@ -256,7 +261,7 @@ input.range:disabled { opacity: .4; }
 /* Many tracks: six in a row with tighter tiles, seven or eight in two rows of four. */
 .live.tiles-six .tiles { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .live.tiles-two { grid-template-rows: minmax(0, 0.9fr) auto minmax(0, 1.5fr); }
-.live.tiles-two .tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
+.live.tiles-two .tiles { grid-template-columns: repeat(var(--cols, 4), minmax(0, 1fr)); grid-template-rows: repeat(2, minmax(0, 1fr)); }
 .live.tiles-six .tile, .live.tiles-two .tile { padding: 10px; gap: 7px; }
 .live.tiles-six .tile .tn b, .live.tiles-two .tile .tn b { font-size: 20px; }
 .live.tiles-six .tile .tn > span:not(.lay):not(.key), .live.tiles-two .tile .tn > span:not(.lay):not(.key) { display: none; }
@@ -269,11 +274,33 @@ input.range:disabled { opacity: .4; }
 .live.tiles-six .tb > span:not(.mb) { display: none; }
 .live.tiles-six .tbtns .tb.stop > span, .live.tiles-six .tbtns .tb.hear > span { display: inline; }
 .live.tiles-six .tbtns .tb.stop, .live.tiles-six .tbtns .tb.hear { height: 40px; font-size: 12px; }
+/* Two rows of tiles need the height: the position block and the strip give some of theirs. */
+.live.tiles-two { --fs-live-hero: 116px; --fs-live-xl: 38px; grid-template-rows: minmax(0, 0.85fr) auto minmax(0, 1.5fr); }
+.live.tiles-two .tile { display: flex; flex-direction: column; }
+.live.tiles-two .tile .tm { margin-top: auto; align-self: stretch; }
+.live.tiles-two .lane-live.free { height: 48px; }
+.live.tiles-two .pos { padding: 12px 20px; }
+.live.tiles-two .pos .big { gap: 28px; }
+.live.tiles-two .pos .big .right { gap: 8px; }
+.live.tiles-two .bigbeats i { width: 36px; height: 36px; font-size: 15px; }
+.live.tiles-two .secbar { margin-top: 8px; }
+.live.tiles-two .release { padding: 12px 20px; }
+.live.tiles-two .release .state { font-size: 24px; }
+.live.tiles-two .release .state .ic { --ic: 22px; }
+.live.tiles-two .release .to { font-size: 32px; }
+.live.tiles-two .release .when { font-size: 17px; }
+.live.tiles-two .bigbtn { height: 54px; font-size: 18px; }
+.live.tiles-two .lane-live { height: 64px; padding: 6px; }
+.live.tiles-two .blk { padding: 6px 10px; }
+.live.tiles-two .blk .bn b { font-size: 16px; }
+.live.tiles-two .blk .bm { font-size: 12px; }
+.live.tiles-two .tm { grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr); }
+.live.tiles-two .soll.none { display: none; }
 /* Two rows: one row of five icon buttons, the state word still big enough for the back of a stage. */
 .live.tiles-two .tile { grid-template-rows: auto auto auto 1fr auto; }
 .live.tiles-two .tm { gap: 3px 6px; }
 .live.tiles-two .tbtns { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
-.live.tiles-two .tbtns .tb, .live.tiles-two .tbtns .tb.stop, .live.tiles-two .tbtns .tb.hear { grid-column: auto; height: 46px; flex-direction: column; }
+.live.tiles-two .tbtns .tb, .live.tiles-two .tbtns .tb.stop, .live.tiles-two .tbtns .tb.hear { grid-column: auto; height: 54px; flex-direction: column; }
 .live.tiles-two .tb > span:not(.mb) { display: none; }
 .live.tiles-two .tbtns .tb .ic { --ic: 20px; }
 
@@ -284,6 +311,11 @@ input.range:disabled { opacity: .4; }
   .live.tiles-six .tbtns .tb.stop > span, .live.tiles-six .tbtns .tb.hear > span { display: none; }
   .release .rh .rq { display: none; }
   .release .to .muted-to { font-size: 22px; }
+}
+@container (max-width: 1200px) {
+  .live.tiles-two .tbtns .tb, .live.tiles-two .tbtns .tb.stop, .live.tiles-two .tbtns .tb.hear { height: 44px; }
+  .live.tiles-two .is { min-height: 46px; }
+  .live.tiles-two { --fs-live-hero: 100px; }
 }
 @container (max-height: 640px) {
   .live.tiles-two .tm { display: none; }
@@ -356,7 +388,7 @@ input.range:disabled { opacity: .4; }
 .layer { gap: 8px; }
 .layer.muted .no { color: var(--tx-4); }
 .layer.muted .range { opacity: .45; }
-.legacy-fx .live-fx { background: transparent; border: 0; padding: 0; margin: 0; }
+.legacy.legacy-fx .live-fx { background: transparent; border: 0; padding: 0; margin: 0; }
 
 /* =============================================================================================
    SETUP
@@ -380,7 +412,7 @@ table.tt .tn2 input.name-in { height: 24px; }
 .tap { display: inline-flex; align-items: center; gap: 8px; }
 .tap .tap-btn .tap-value { color: var(--tx-1); font-variant-numeric: var(--num); margin-left: 4px; }
 .tap .tap-hint { margin-left: 4px; }
-.card .legacy-midi { padding: 4px 0; }
+.card .legacy.legacy-midi { padding: 4px 0; }
 
 /* =============================================================================================
    ARRANGEMENT (placeholder shell)
@@ -393,28 +425,28 @@ table.tt .tn2 input.name-in { height: 24px; }
 /* =============================================================================================
    LEGACY parts, aligned to the tokens (the MIDI strip, the score view, the effect chain)
    ============================================================================================= */
-.legacy .btn {
+.legacy.legacy .btn {
   height: auto; min-height: var(--ctl-h); padding: 4px 10px; font-size: var(--fs-12); font-weight: var(--fw-medium);
   border-radius: var(--r-2); background: linear-gradient(to bottom, #20252c, #1a1e24); border: 1px solid var(--line-3);
   box-shadow: var(--sh-ctl); color: var(--tx-2);
 }
-.legacy .btn:hover:not(:disabled) { background: linear-gradient(to bottom, #262c35, #20242b); color: var(--tx-1); }
-.legacy .btn-on { color: var(--tx-1); background: linear-gradient(to bottom, #2b313b, #252a33); border-color: var(--line-4); }
-.legacy .btn-primary { color: #0b0d14; background: var(--accent); border-color: transparent; font-weight: var(--fw-semibold); }
-.legacy .btn-primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); color: #0b0d14; }
-.legacy select, .legacy input:not([type="range"]):not([type="checkbox"]) {
+.legacy.legacy .btn:hover:not(:disabled) { background: linear-gradient(to bottom, #262c35, #20242b); color: var(--tx-1); }
+.legacy.legacy .btn-on { color: var(--tx-1); background: linear-gradient(to bottom, #2b313b, #252a33); border-color: var(--line-4); }
+.legacy.legacy .btn-primary { color: #0b0d14; background: var(--accent); border-color: transparent; font-weight: var(--fw-semibold); }
+.legacy.legacy .btn-primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); color: #0b0d14; }
+.legacy.legacy select, .legacy.legacy input:not([type="range"]):not([type="checkbox"]) {
   background: var(--bg-inset); border: 0; border-radius: var(--r-2); box-shadow: var(--sh-inset); color: var(--tx-1); font-size: var(--fs-12);
 }
-.legacy .panel-title { font-size: var(--fs-11); font-weight: var(--fw-semibold); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--tx-3); }
+.legacy.legacy .panel-title { font-size: var(--fs-11); font-weight: var(--fw-semibold); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--tx-3); }
 
 /* MIDI strip */
-.legacy-midi .midi { background: var(--bg-1); border-bottom: 1px solid var(--line-2); }
-.legacy-midi .midi-bar { padding: 4px 14px; gap: 10px; min-height: 32px; font-size: var(--fs-12); }
-.legacy-midi .midi-state { font-weight: var(--fw-medium); color: var(--tx-2); }
-.legacy-midi .midi-learn-switch { display: none; }
-.legacy-midi .midi-learn-on { box-shadow: none; background: linear-gradient(to right, rgba(232,121,249,.20), rgba(232,121,249,.06)); border-bottom-color: var(--learn-line); }
-.legacy-midi .midi-hint-inline { color: #f7d7ff; }
-.legacy-midi .midi-waiting-banner { background: var(--learn-soft); border-color: var(--learn-line); color: #f7d7ff; }
-.legacy-midi .midi-message { background: var(--bg-2); font-size: var(--fs-12); color: var(--tx-2); }
-.legacy-midi .dot { width: 7px; height: 7px; }
-.card .legacy-midi .midi { background: transparent; border: 0; }
+.legacy.legacy-midi .midi { background: var(--bg-1); border-bottom: 1px solid var(--line-2); }
+.legacy.legacy-midi .midi-bar { padding: 4px 14px; gap: 10px; min-height: 32px; font-size: var(--fs-12); }
+.legacy.legacy-midi .midi-state { font-weight: var(--fw-medium); color: var(--tx-2); }
+.legacy.legacy-midi .midi-learn-switch { display: none; }
+.legacy.legacy-midi .midi-learn-on { box-shadow: none; background: linear-gradient(to right, rgba(232,121,249,.20), rgba(232,121,249,.06)); border-bottom-color: var(--learn-line); }
+.legacy.legacy-midi .midi-hint-inline { color: #f7d7ff; }
+.legacy.legacy-midi .midi-waiting-banner { background: var(--learn-soft); border-color: var(--learn-line); color: #f7d7ff; }
+.legacy.legacy-midi .midi-message { background: var(--bg-2); font-size: var(--fs-12); color: var(--tx-2); }
+.legacy.legacy-midi .dot { width: 7px; height: 7px; }
+.card .legacy.legacy-midi .midi { background: transparent; border: 0; }

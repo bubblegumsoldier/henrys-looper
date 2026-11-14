@@ -135,7 +135,7 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         </div>
       </div>
 
-      <div className="soll">
+      <div className={`soll${soll ? "" : " none"}`}>
         {soll ? (
           <>
             <span className="lbl">{T.next}</span>
