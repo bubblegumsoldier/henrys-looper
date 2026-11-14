@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Henrys Looper · Live</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="icons.css">
+<link rel="stylesheet" href="waves.css">
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="live.css">
+</head>
+<body>
+<!-- Mockup 3: Live-Modus im Lauf. voice_3 loopt (Durchlauf 1, Takt 7), keys nimmt auf, voice nimmt Ebene 3 als Overdub auf; Release ist gedrückt, der Wechsel zu „alles“ ist für das Loop-Ende armiert. Responsiv: 1440×900 und 1024×768. -->
+<div class="window">
+  <header class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="doc"><b>Henry 3/4</b><span><i class="dot"></i>gespeichert</span></div>
+    
+    <div class="grow"></div>
+    <div class="seg mode"><span class=""><i class="ic ic-grid"></i>Arrangement</span><span class="on"><i class="ic ic-play-o"></i>Live</span></div>
+    <div class="grow"></div>
+    <span class="btn learn-btn"><i class="ic ic-midi"></i>MIDI-Learn</span>
+    <span class="pill" title="Im Live-Modus ist das Arrangement gesperrt"><i class="ic ic-lock" style="--ic:11px"></i>Arrangement gesperrt</span><span class="pill"><i class="led"></i>48 kHz · 128 · 0 Aussetzer</span>
+    <span class="btn sq ghost"><i class="ic ic-gear"></i></span>
+  </header>
+
+<div style="display:grid;grid-template-rows:1fr;min-height:0"><div class="live-wrap"><div class="live">
+  <div class="lv-top">
+    <section class="panel pos">
+      <div class="kick"><span class="k">Sektion <b>4</b> / 6</span><span class="lv-chip run"><i class="ic ic-play"></i>läuft · Durchlauf 1</span><span class="lv-chip loop"><i class="ic ic-loop"></i>loopt bis Release</span></div>
+      <div class="big">
+        <div class="num-block"><label>Takt</label><div class="hero">7<small>/ 8</small></div></div>
+        <div class="right">
+          <h1>voice_3</h1>
+          <div class="num-block"><label>Schlag</label><div class="bigbeats"><i class="one on">1</i><i>2</i><i>3</i></div></div>
+        </div>
+      </div>
+      <div><div class="secbar"><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="done"></i><i class="now"></i><i class="tail"></i></div>
+      <div class="secbar-l"><span>141 BPM · 3/4 · Klick an</span><span>Takt 31 von 41 im Arrangement</span></div></div>
+    </section>
+    <div class="ctlcol">
+      <section class="release armed">
+        <div class="rh"><span class="lbl"><i class="ic ic-release"></i>Release</span><div class="grow"></div></div>
+        <div class="state"><i class="ic ic-armed"></i>Wechsel armiert</div>
+        <div class="to"><span>nach</span>alles</div>
+        <div class="when">am Loop-Ende · in <b>2 Takten</b></div>
+        <div class="countdown"><i class="cur"></i><i></i></div>
+      </section>
+      <div class="lv-row">
+        <span class="bigbtn running"><i class="ic ic-start"></i>Läuft <span class="sub">seit 1:13</span></span>
+        <span class="bigbtn"><i class="ic ic-stopall"></i>Alles stoppen</span>
+      </div>
+    </div>
+  </div>
+  <section class="panel lane-live"><div class="blk past" style="--n:8"><div class="bn"><i>1</i><b>gitarre_rec</b></div><div class="bm"><i class="ic ic-check"></i>8 T</div></div><div class="blk past" style="--n:8"><div class="bn"><i>2</i><b>voice_1</b></div><div class="bm"><i class="ic ic-check"></i>8 T</div></div><div class="blk past" style="--n:8"><div class="bn"><i>3</i><b>voice_2</b></div><div class="bm"><i class="ic ic-check"></i>8 T</div></div><div class="blk now" style="--n:8"><div class="bn"><i>4</i><b>voice_3</b></div><div class="bm">8 T · <span class="hide-s">Durchlauf 1 · </span><span class="rel"><i class="ic ic-loop"></i>bis Release</span></div><span class="tag">jetzt</span><span class="prog" style="--p:79%"></span></div><div class="blk next" style="--n:8"><div class="bn"><i>5</i><b>alles</b></div><div class="bm">8 T · <span class="rel"><i class="ic ic-hand"></i>Release</span></div><span class="tag">als Nächstes</span></div><div class="blk" style="--n:2.5"><div class="bn"><i>6</i><b>ende</b></div><div class="bm">1 T · <span class="rel"><i class="ic ic-hand"></i></span></div></div></section>
+  <div class="tiles"><div class="tile" style="--c:var(--trk-1)">
+  <div class="tn"><b>gitarre</b><span>In 2</span><span class="lay" title="Ebenen"><i class="on"></i><i></i><i></i></span></div>
+  <div class="is play"><i class="ic ic-play"></i><div class="w"><b>Wiedergabe</b><span>Loop 8 Takte · 10,2 s</span></div></div>
+  <div class="soll"><span class="lbl">danach</span><i class="ic ic-arr-r"></i><span class="st play"><i class="ic ic-play"></i>Wiedergabe</span></div>
+  <div class="tm"><span>Ein</span><span class="hm"><i style="--l:0%;--p:0%"></i></span><span>Aus</span><span class="hm"><i style="--l:58%;--p:66%"></i></span></div>
+  <div class="tbtns"><span class="tb rec"><i class="ic ic-rec"></i><span>Aufnahme</span></span><span class="tb dub"><i class="ic ic-dub"></i><span>Overdub</span></span><span class="tb play on"><i class="ic ic-play"></i><span>Wiedergabe</span></span><span class="tb stop"><i class="ic ic-stop"></i><span>Stopp</span></span><span class="tb hear"><i class="ic ic-hear"></i><span>Mithören</span></span></div>
+</div><div class="tile dub" style="--c:var(--trk-2)">
+  <div class="tn"><b>voice</b><span>In 1</span><span class="lay" title="Ebenen"><i class="on"></i><i class="on"></i><i class="rec"></i></span></div>
+  <div class="is dub"><i class="ic ic-dub"></i><div class="w"><b>Overdub</b><span>Ebene 3 · Takt 7 / 8</span></div></div>
+  <div class="soll"><span class="lbl">danach</span><i class="ic ic-arr-r"></i><span class="st play"><i class="ic ic-play"></i>Wiedergabe</span></div>
+  <div class="tm"><span>Ein</span><span class="hm"><i style="--l:72%;--p:78%"></i></span><span>Aus</span><span class="hm"><i style="--l:70%;--p:78%"></i></span></div>
+  <div class="tbtns"><span class="tb rec"><i class="ic ic-rec"></i><span>Aufnahme</span></span><span class="tb dub on"><i class="ic ic-dub"></i><span>Overdub</span></span><span class="tb play"><i class="ic ic-play"></i><span>Wiedergabe</span></span><span class="tb stop"><i class="ic ic-stop"></i><span>Stopp</span></span><span class="tb hear on"><i class="ic ic-hear"></i><span>Mithören</span></span></div>
+</div><div class="tile" style="--c:var(--trk-3)">
+  <div class="tn"><b>chor</b><span>In 1</span><span class="lay" title="Ebenen"><i></i><i></i><i></i></span></div>
+  <div class="is stop"><i class="ic ic-stop"></i><div class="w"><b>Still</b><span>kein Loop</span></div></div>
+  <div class="soll"><span class="lbl">danach</span><i class="ic ic-arr-r"></i><span class="st hear"><i class="ic ic-hear"></i>Mithören</span></div>
+  <div class="tm"><span>Ein</span><span class="hm"><i style="--l:72%;--p:78%"></i></span><span>Aus</span><span class="hm"><i style="--l:0%;--p:0%"></i></span></div>
+  <div class="tbtns"><span class="tb rec"><i class="ic ic-rec"></i><span>Aufnahme</span></span><span class="tb dub"><i class="ic ic-dub"></i><span>Overdub</span></span><span class="tb play"><i class="ic ic-play"></i><span>Wiedergabe</span></span><span class="tb stop"><i class="ic ic-stop"></i><span>Stopp</span></span><span class="tb hear on"><i class="ic ic-hear"></i><span>Mithören</span></span></div>
+</div><div class="tile" style="--c:var(--trk-4)">
+  <div class="tn"><b>perc</b><span>In 3</span><span class="lay" title="Ebenen"><i class="on"></i><i></i><i></i></span></div>
+  <div class="is play"><i class="ic ic-play"></i><div class="w"><b>Wiedergabe</b><span>Loop 8 Takte · 10,2 s</span></div></div>
+  <div class="soll"><span class="lbl">danach</span><i class="ic ic-arr-r"></i><span class="st play"><i class="ic ic-play"></i>Wiedergabe</span></div>
+  <div class="tm"><span>Ein</span><span class="hm"><i style="--l:0%;--p:0%"></i></span><span>Aus</span><span class="hm"><i style="--l:61%;--p:70%"></i></span></div>
+  <div class="tbtns"><span class="tb rec"><i class="ic ic-rec"></i><span>Aufnahme</span></span><span class="tb dub"><i class="ic ic-dub"></i><span>Overdub</span></span><span class="tb play on"><i class="ic ic-play"></i><span>Wiedergabe</span></span><span class="tb stop"><i class="ic ic-stop"></i><span>Stopp</span></span><span class="tb hear"><i class="ic ic-hear"></i><span>Mithören</span></span></div>
+</div><div class="tile rec" style="--c:var(--trk-5)">
+  <div class="tn"><b>keys</b><span>In 5–6</span><span class="lay" title="Ebenen"><i class="rec"></i><i></i><i></i></span></div>
+  <div class="is rec"><i class="ic ic-rec"></i><div class="w"><b>Aufnahme</b><span>Takt 7 / 8 · stereo</span></div></div>
+  <div class="soll"><span class="lbl">danach</span><i class="ic ic-arr-r"></i><span class="st play"><i class="ic ic-play"></i>Wiedergabe</span></div>
+  <div class="tm"><span>Ein</span><span class="hm"><i style="--l:66%;--p:72%"></i></span><span>Aus</span><span class="hm"><i style="--l:0%;--p:0%"></i></span></div>
+  <div class="tbtns"><span class="tb rec on"><i class="ic ic-rec"></i><span>Aufnahme</span></span><span class="tb dub"><i class="ic ic-dub"></i><span>Overdub</span></span><span class="tb play"><i class="ic ic-play"></i><span>Wiedergabe</span></span><span class="tb stop"><i class="ic ic-stop"></i><span>Stopp</span></span><span class="tb hear on"><i class="ic ic-hear"></i><span>Mithören</span></span></div>
+</div></div>
+</div></div></div>
+</div>
+</body></html>

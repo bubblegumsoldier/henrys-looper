@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Henrys Looper · Partitur als Text</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="icons.css">
+<link rel="stylesheet" href="waves.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<!-- Mockup 7: Die YAML-Textansicht als gleichwertige zweite Sicht derselben Partitur. Umschalter
+     „Raster | Text“ in der Werkzeugleiste; Fehler unter dem Cursor, Blockvorschau rechts live. -->
+<div class="window">
+  <header class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="doc"><b>Henry 3/4</b><span class="dirty"><i class="dot"></i>ungespeichert</span></div>
+    <div class="sep"></div>
+    <div class="transport">
+      <span class="tp start" title="Start"><i class="ic ic-start"></i></span>
+      <span class="tp" title="Alles stoppen"><i class="ic ic-stopall"></i></span>
+      <span class="tp release"><i class="ic ic-release"></i>Release</span>
+    </div>
+    <div class="lcd">
+      <div class="sec" style="width:162px"><label>Sektion 1 / 6</label><b>gitarre_rec</b></div>
+      <div><label>Takt</label><b class="num">1<small>/ 8</small></b></div>
+      <div><label>Schlag</label><b class="num">1<span class="beats"><i class="one on"></i><i class=""></i><i class=""></i></span></b></div>
+      <div><label>Tempo</label><b class="num">141<small>BPM</small></b></div>
+      <div><label>Taktart</label><b class="num">3/4</b></div>
+    </div>
+    <span class="btn sq on" title="Klick"><i class="ic ic-metro"></i></span>
+    <div class="grow"></div>
+    <div class="seg mode"><span class="on"><i class="ic ic-grid"></i>Arrangement</span><span class=""><i class="ic ic-play-o"></i>Live</span></div>
+    <div class="grow"></div>
+    <span class="btn learn-btn"><i class="ic ic-midi"></i>MIDI-Learn</span>
+    <span class="pill"><i class="led"></i>48 kHz · 128 · 0 Aussetzer</span>
+    <span class="btn sq ghost"><i class="ic ic-gear"></i></span>
+  </header>
+
+  <div class="workspace">
+    <div class="toolbar">
+      <div class="seg"><span><i class="ic ic-grid"></i>Raster</span><span class="on"><i class="ic ic-code"></i>Text (YAML)</span></div>
+      <div class="sep"></div>
+      <span class="dim" style="font-size:11px">henry-3-4.rust.yaml</span>
+      <div class="grow"></div>
+      <span class="lbl">Beide Ansichten bearbeiten dieselbe Partitur – Änderungen erscheinen sofort im Raster.</span>
+      <div class="sep"></div>
+      <span class="btn s"><i class="ic ic-save"></i>Sichern</span>
+    </div>
+    <div class="main">
+      <div class="code" style="position:relative">
+        <div class="gut"><div class="">1</div><div class="">2</div><div class="">3</div><div class="">4</div><div class="">5</div><div class="">6</div><div class="">7</div><div class="">8</div><div class="">9</div><div class="">10</div><div class="">11</div><div class="">12</div><div class="">13</div><div class="">14</div><div class="">15</div><div class="">16</div><div class="">17</div><div class="">18</div><div class="">19</div><div class="">20</div><div class="">21</div><div class="">22</div><div class="">23</div><div class="">24</div><div class="">25</div><div class="">26</div><div class="">27</div><div class="">28</div><div class="">29</div><div class="">30</div><div class="">31</div><div class="">32</div><div class="">33</div><div class="cur err">34</div><div class="">35</div><div class="">36</div><div class="">37</div><div class="">38</div><div class="">39</div></div>
+        <pre><span class="ln"><span class="y-c"># Henrys 3/4-Song: Gitarre-Loop, dann drei Voice-Ebenen stapeln.</span></span><span class="ln"><span class="y-k">title</span>: Henry <span class="y-n">3/4</span></span><span class="ln"><span class="y-k">bpm</span>: <span class="y-n">141</span></span><span class="ln"><span class="y-k">time_signature</span>: <span class="y-n">3/4</span></span><span class="ln"> </span><span class="ln"><span class="y-k">tracks</span>:</span><span class="ln">  <span class="y-k">gitarre</span>: {<span class="y-k">input</span>: <span class="y-n">2</span>}</span><span class="ln">  <span class="y-k">voice</span>:   {<span class="y-k">input</span>: <span class="y-n">1</span>}</span><span class="ln">  <span class="y-k">chor</span>:    {<span class="y-k">input</span>: <span class="y-n">1</span>, <span class="y-k">pan</span>: <span class="y-n">0.25</span>}</span><span class="ln">  <span class="y-k">perc</span>:    {<span class="y-k">input</span>: <span class="y-n">3</span>}</span><span class="ln">  <span class="y-k">keys</span>:    {<span class="y-k">input</span>: [<span class="y-n">5</span>, <span class="y-n">6</span>]}</span><span class="ln"> </span><span class="ln"><span class="y-k">sections</span>:</span><span class="ln">  - <span class="y-k">id</span>: gitarre_rec</span><span class="ln">    <span class="y-k">bars</span>: <span class="y-n">8</span></span><span class="ln">    <span class="y-k">autorelease</span>: <span class="y-b">true</span></span><span class="ln">    <span class="y-k">tracks</span>: {<span class="y-k">gitarre</span>: <span class="y-rec">record</span>, <span class="y-k">voice</span>: <span class="y-hear">hear_through</span>, <span class="y-k">perc</span>: <span class="y-rec">record</span>}</span><span class="ln"> </span><span class="ln">  - <span class="y-k">id</span>: voice_1</span><span class="ln">    <span class="y-k">bars</span>: <span class="y-n">8</span></span><span class="ln">    <span class="y-k">autorelease</span>: <span class="y-b">true</span></span><span class="ln">    <span class="y-k">tracks</span>: {<span class="y-k">gitarre</span>: <span class="y-play">play</span>, <span class="y-k">voice</span>: <span class="y-rec">record</span>, <span class="y-k">perc</span>: <span class="y-play">play</span>}</span><span class="ln"> </span><span class="ln">  - <span class="y-k">id</span>: voice_2</span><span class="ln">    <span class="y-k">bars</span>: <span class="y-n">8</span></span><span class="ln">    <span class="y-k">autorelease</span>: <span class="y-b">true</span></span><span class="ln">    <span class="y-k">tracks</span>: {<span class="y-k">gitarre</span>: <span class="y-play">play</span>, <span class="y-k">voice</span>: <span class="y-dub">overdub</span>, <span class="y-k">perc</span>: <span class="y-play">play</span>, <span class="y-k">keys</span>: <span class="y-hear">hear_through</span>}</span><span class="ln"> </span><span class="ln"><span class="y-c">  # Ebene 3. Loopt, bis du den Release-Knopf drückst.</span></span><span class="ln">  - <span class="y-k">id</span>: voice_3</span><span class="ln">    <span class="y-k">repeat</span>: voice_2</span><span class="ln">    <span class="y-k">autorelease</span>: <span class="y-b">false</span></span><span class="ln">    <span class="y-k">quantize</span>: loop</span><span class="ln cur">    <span class="y-k">tracks</span>: {<span class="y-k">keys</span>: <span class="squig y-s">recrod</span>}</span><span class="ln"> </span><span class="ln">  - <span class="y-k">id</span>: alles</span><span class="ln">    <span class="y-k">bars</span>: <span class="y-n">8</span></span><span class="ln">    <span class="y-k">autorelease</span>: <span class="y-b">false</span></span><span class="ln">    <span class="y-k">quantize</span>: bar</span></pre>
+        <div class="errpop" style="left:290px;top:622px"><b>Unbekannter Zustand „recrod“</b> für Spur <span class="mono">keys</span> in Sektion <span class="mono">voice_3</span>.<br>Erlaubt: <span class="mono">record</span>, <span class="mono">overdub</span>, <span class="mono">play</span>, <span class="mono">stop</span>, <span class="mono">hear_through</span>.<div style="margin-top:8px;display:flex;gap:6px"><span class="btn s accent">Ersetzen durch „record“</span></div></div>
+      </div>
+      <aside class="insp">
+        <div class="insp-h"><div class="kicker"><span class="caps">Blockvorschau</span><span class="pill warn" style="height:20px"><i class="led"></i>1 Fehler</span></div>
+          <div class="sub" style="margin-top:6px">Zeigt die Partitur, wie die Engine sie lesen würde. Die letzte gültige Fassung bleibt aktiv, bis der Fehler behoben ist.</div></div>
+        <div class="insp-s"><div class="pv"><div class="pv-r pv-h"><span></span><span style="flex:8;text-align:center">1</span><span style="flex:8;text-align:center">2</span><span style="flex:8;text-align:center">3</span><span style="flex:8;text-align:center">4</span><span style="flex:8;text-align:center">5</span><span style="flex:2;text-align:center">6</span></div><div class="pv-r"><span class="pv-t" style="--c:var(--trk-1)">gitarre</span><span class="pv-c" style="flex:8;--k:var(--st-rec)"><i class="ic ic-rec"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:2;--k:var(--bg-4)"><i class="ic ic-stop"></i></span></div><div class="pv-r"><span class="pv-t" style="--c:var(--trk-2)">voice</span><span class="pv-c" style="flex:8;--k:var(--st-hear)"><i class="ic ic-hear"></i></span><span class="pv-c" style="flex:8;--k:var(--st-rec)"><i class="ic ic-rec"></i></span><span class="pv-c" style="flex:8;--k:var(--st-dub)"><i class="ic ic-dub"></i></span><span class="pv-c" style="flex:8;--k:var(--st-dub)"><i class="ic ic-dub"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:2;--k:var(--bg-4)"><i class="ic ic-stop"></i></span></div><div class="pv-r"><span class="pv-t" style="--c:var(--trk-3)">chor</span><span class="pv-c" style="flex:8;--k:var(--bg-4)"><i class="ic ic-stop"></i></span><span class="pv-c" style="flex:8;--k:var(--bg-4)"><i class="ic ic-stop"></i></span><span class="pv-c" style="flex:8;--k:var(--bg-4)"><i class="ic ic-stop"></i></span><span class="pv-c" style="flex:8;--k:var(--bg-4)"><i class="ic ic-stop"></i></span><span class="pv-c" style="flex:8;--k:var(--st-hear)"><i class="ic ic-hear"></i></span><span class="pv-c" style="flex:2;--k:var(--bg-4)"><i class="ic ic-stop"></i></span></div><div class="pv-r"><span class="pv-t" style="--c:var(--trk-4)">perc</span><span class="pv-c" style="flex:8;--k:var(--st-rec)"><i class="ic ic-rec"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:2;--k:var(--bg-4)"><i class="ic ic-stop"></i></span></div><div class="pv-r"><span class="pv-t" style="--c:var(--trk-5)">keys</span><span class="pv-c" style="flex:8;--k:var(--bg-4)"><i class="ic ic-stop"></i></span><span class="pv-c" style="flex:8;--k:var(--bg-4)"><i class="ic ic-stop"></i></span><span class="pv-c" style="flex:8;--k:var(--st-hear)"><i class="ic ic-hear"></i></span><span class="pv-c err" style="flex:8;--k:var(--st-rec)"><i class="ic ic-warn"></i></span><span class="pv-c" style="flex:8;--k:var(--st-play)"><i class="ic ic-play"></i></span><span class="pv-c" style="flex:2;--k:var(--bg-4)"><i class="ic ic-stop"></i></span></div></div><div class="hint">Spalten = Sektionen 1–6 (Breite nach Takten), Zeilen = Spuren.</div></div>
+        <div class="insp-s">
+          <span class="caps">Meldungen</span>
+          <div class="diag err"><i class="ic ic-warn"></i><div><b>Zeile 34:</b> Unbekannter Zustand „recrod“.</div></div>
+          <div class="diag"><i class="ic ic-info"></i><div><b>Zeile 30:</b> voice_3 erbt 8 Takte und alle Zustände von voice_2.</div></div>
+          <div class="diag"><i class="ic ic-info"></i><div><b>Zeile 11:</b> keys ist stereo (Eingänge 5 und 6).</div></div>
+        </div>
+      </aside>
+    </div>
+    <div class="statusbar"><span>Zeile 34, Spalte 24</span><span>YAML · UTF-8</span><div class="grow"></div><span style="color:var(--warn)"><i class="ic ic-warn"></i> 1 Fehler · letzte gültige Fassung aktiv</span></div>
+  </div>
+</div>
+</body></html>

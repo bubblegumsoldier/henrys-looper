@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Henrys Looper · Einrichtung</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="icons.css">
+<link rel="stylesheet" href="waves.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<!-- Mockup 6: Einrichtung als eigene, ruhige Seite im selben Fenster. Links Navigation, rechts Karten. -->
+<div class="window">
+  <header class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="doc"><b>Henry 3/4</b><span><i class="dot"></i>gespeichert</span></div>
+    
+    <div class="grow"></div>
+    <div class="seg mode"><span class="on"><i class="ic ic-grid"></i>Arrangement</span><span class=""><i class="ic ic-play-o"></i>Live</span></div>
+    <div class="grow"></div>
+    <span class="btn learn-btn"><i class="ic ic-midi"></i>MIDI-Learn</span>
+    <span class="pill"><i class="led"></i>Engine läuft · 48 kHz · 128</span>
+    <span class="btn sq ghost"><i class="ic ic-gear"></i></span>
+  </header>
+
+<div class="setup">
+  <nav class="snav">
+    <div class="caps" style="padding:4px 10px 8px">Einrichtung</div>
+    <a class="on" href="#"><i class="ic ic-speaker"></i>Audio</a>
+    <a href="#"><i class="ic ic-input"></i>Spuren &amp; Eingänge<span class="badge">5</span></a>
+    <a href="#"><i class="ic ic-midi"></i>MIDI<span class="badge">2 Geräte</span></a>
+    <a href="#"><i class="ic ic-plug"></i>Plugins<span class="badge">AU · VST3</span></a>
+    <a href="#"><i class="ic ic-folder"></i>Sitzungen</a>
+    <a href="#"><i class="ic ic-gear"></i>Allgemein</a>
+    <div class="grow"></div>
+    <div class="hint" style="padding:0 10px">Änderungen an Gerät, Samplerate oder Puffer starten die Engine neu. Während eine Partitur läuft, sind sie gesperrt.</div>
+  </nav>
+  <main class="spage">
+    <div><h1>Audio</h1><p class="lead">Interface, Taktung und wohin die beiden Busse gehen.</p></div>
+    <section class="card">
+      <div class="card-h"><h3>Audio-Gerät</h3><div class="grow"></div><span class="pill"><i class="led"></i>verbunden</span></div>
+      <div class="card-b">
+        <div class="srow"><label>Treiber</label><div><span class="field sel" style="width:220px">CoreAudio<i class="ic ic-chev-d chev"></i></span></div></div>
+        <div class="srow"><label>Gerät</label><div><span class="field sel" style="width:320px">Audio-Interface (8 In · 8 Out)<i class="ic ic-chev-d chev"></i></span><span class="dim" style="font-size:12px">8 Eingänge · 8 Ausgänge</span></div></div>
+        <div class="srow"><label>Samplerate</label><div><div class="seg"><span>44,1 kHz</span><span class="on">48 kHz</span><span>88,2 kHz</span><span>96 kHz</span></div></div></div>
+        <div class="srow"><label>Puffer</label><div><div class="seg"><span>32</span><span>64</span><span class="on">128</span><span>256</span><span>512</span></div><span class="dim" style="font-size:12px">Samples</span></div></div>
+        <div class="srow"><label>Latenz</label><div class="lat"><span>Eingang <b>3,4 ms</b></span><span>Ausgang <b>3,9 ms</b></span><span>Rundweg <b>7,3 ms</b></span><span>Aussetzer seit Start <b style="color:var(--ok)">0</b></span></div></div>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-h"><h3>Ausgangsbusse</h3><span class="dim" style="font-size:12px">Der Klick liegt immer nur auf Monitor.</span></div>
+      <table class="tt">
+        <tr><th style="width:220px">Bus</th><th>Ausgang</th><th>Breite</th><th>Lautstärke</th><th style="width:220px">Pegel</th></tr>
+        <tr><td><span class="tn2"><i class="ic ic-speaker" style="--ic:15px"></i>Main · Saal</span></td><td><span class="field sel" style="width:140px">Ausgang 1–2<i class="ic ic-chev-d chev"></i></span></td><td><div class="seg" style="--ctl-h:22px"><span>mono</span><span class="on">stereo</span></div></td><td><span class="num">0,0 dB</span></td><td><span class="hm" style="width:200px"><i style="--l:72%;--p:80%"></i><i style="--l:70%;--p:78%"></i></span></td></tr>
+        <tr><td><span class="tn2"><i class="ic ic-phones" style="--ic:15px"></i>Monitor · Kopfhörer <span class="chip" style="margin-left:4px"><i class="ic ic-metro"></i>Klick</span></span></td><td><span class="field sel" style="width:140px">Ausgang 3–4<i class="ic ic-chev-d chev"></i></span></td><td><div class="seg" style="--ctl-h:22px"><span>mono</span><span class="on">stereo</span></div></td><td><span class="num">−4,0 dB</span></td><td><span class="hm" style="width:200px"><i style="--l:64%;--p:71%"></i><i style="--l:62%;--p:70%"></i></span></td></tr>
+      </table>
+    </section>
+    <section class="card">
+      <div class="card-h"><h3>Spuren und Eingänge</h3><span class="dim" style="font-size:12px">5 von 8 · gilt für diese Partitur</span><div class="grow"></div><span class="btn s"><i class="ic ic-plus"></i>Spur</span></div>
+      <table class="tt">
+        <tr><th>Spur</th><th>Eingang</th><th>Kanäle</th><th>Mithören</th><th>Loop auf</th><th>Mithören auf</th><th>Latenz</th><th>Zuschlag</th></tr>
+        <tr><td><span class="tn2" style="--c:var(--trk-1)"><i></i>gitarre</span></td><td><span class="field sel" style="width:120px">Eingang 2<i class="ic ic-chev-d chev"></i></span></td><td><div class="seg" style="--ctl-h:22px"><span class="on">mono</span><span class="">stereo</span></div></td>
+<td><span class="toggle"></span></td><td><span class="field sel" style="width:140px">Main + Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="field sel" style="width:110px">Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="num">7,3 ms</span> <span class="dim" style="font-size:11px">gemessen</span></td><td><span class="field" style="width:70px">+0,0<span class="unit">ms</span></span></td></tr><tr><td><span class="tn2" style="--c:var(--trk-2)"><i></i>voice</span></td><td><span class="field sel" style="width:120px">Eingang 1<i class="ic ic-chev-d chev"></i></span></td><td><div class="seg" style="--ctl-h:22px"><span class="on">mono</span><span class="">stereo</span></div></td>
+<td><span class="toggle on"></span></td><td><span class="field sel" style="width:140px">Main + Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="field sel" style="width:110px">Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="num">7,3 ms</span> <span class="dim" style="font-size:11px">gemessen</span></td><td><span class="field" style="width:70px">+0,0<span class="unit">ms</span></span></td></tr><tr><td><span class="tn2" style="--c:var(--trk-3)"><i></i>chor</span></td><td><span class="field sel" style="width:120px">Eingang 1<i class="ic ic-chev-d chev"></i></span></td><td><div class="seg" style="--ctl-h:22px"><span class="on">mono</span><span class="">stereo</span></div></td>
+<td><span class="toggle on"></span></td><td><span class="field sel" style="width:140px">Main + Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="field sel" style="width:110px">Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="num">7,3 ms</span> <span class="dim" style="font-size:11px">gemessen</span></td><td><span class="field" style="width:70px">+0,0<span class="unit">ms</span></span></td></tr><tr><td><span class="tn2" style="--c:var(--trk-4)"><i></i>perc</span></td><td><span class="field sel" style="width:120px">Eingang 3<i class="ic ic-chev-d chev"></i></span></td><td><div class="seg" style="--ctl-h:22px"><span class="on">mono</span><span class="">stereo</span></div></td>
+<td><span class="toggle"></span></td><td><span class="field sel" style="width:140px">Main + Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="field sel" style="width:110px">Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="num">7,3 ms</span> <span class="dim" style="font-size:11px">gemessen</span></td><td><span class="field" style="width:70px">+0,0<span class="unit">ms</span></span></td></tr><tr><td><span class="tn2" style="--c:var(--trk-5)"><i></i>keys</span></td><td><span class="field sel" style="width:120px">Eingang 5–6<i class="ic ic-chev-d chev"></i></span></td><td><div class="seg" style="--ctl-h:22px"><span class="">mono</span><span class="on">stereo</span></div></td>
+<td><span class="toggle on"></span></td><td><span class="field sel" style="width:140px">Main + Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="field sel" style="width:110px">Monitor<i class="ic ic-chev-d chev"></i></span></td><td><span class="btn s">Messen</span></td><td><span class="field" style="width:70px">+0,0<span class="unit">ms</span></span></td></tr>
+      </table>
+    </section>
+  </main>
+</div>
+</div>
+</body></html>

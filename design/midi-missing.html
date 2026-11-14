@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Henrys Looper · MIDI-Gerät fehlt</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="icons.css">
+<link rel="stylesheet" href="waves.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body class="learn-on">
+<!-- Mockup 5: MIDI-Mapping-Modus über dem Arrangement, Zustand „Gerät fehlt“. Belegungen der fehlenden
+     Fußleiste sind durchgestrichen/gestrichelt (inaktiv), die des verbundenen Pad-Controllers aktiv. -->
+<div class="window">
+  <header class="titlebar">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="doc"><b>Henry 3/4</b><span><i class="dot"></i>gespeichert</span></div>
+    <div class="sep"></div>
+    <div class="transport">
+      <span class="tp start lrn bound" title="Start"><i class="ic ic-start"></i><span class="mb mb-at inactive">FS 3</span></span>
+      <span class="tp lrn bound" title="Alles stoppen"><i class="ic ic-stopall"></i><span class="mb mb-at inactive">FS 4</span></span>
+      <span class="tp release lrn bound"><i class="ic ic-release"></i>Release<span class="mb mb-at inactive">FS 1</span></span>
+    </div>
+    <div class="lcd">
+      <div class="sec" style="width:162px"><label>Sektion 1 / 6</label><b>gitarre_rec</b></div>
+      <div><label>Takt</label><b class="num">1<small>/ 8</small></b></div>
+      <div><label>Schlag</label><b class="num">1<span class="beats"><i class="one on"></i><i class=""></i><i class=""></i></span></b></div>
+      <div><label>Tempo</label><b class="num">141<small>BPM</small></b></div>
+      <div><label>Taktart</label><b class="num">3/4</b></div>
+    </div>
+    <span class="btn sq on lrn bound" title="Klick"><i class="ic ic-metro"></i><span class="mb mb-at">CC 21</span></span>
+    <div class="grow"></div>
+    <div class="seg mode"><span class="on"><i class="ic ic-grid"></i>Arrangement</span><span class=""><i class="ic ic-play-o"></i>Live</span></div>
+    <div class="grow"></div>
+    <span class="btn learn-btn on"><i class="ic ic-midi"></i>MIDI-Learn</span>
+    <span class="pill"><i class="led"></i>48 kHz · 128 · 0 Aussetzer</span>
+    <span class="btn sq ghost"><i class="ic ic-gear"></i></span>
+  </header>
+
+  <div style="display:grid;grid-template-rows:auto 1fr;min-height:0">
+  <div class="learnbar"><i class="ic ic-target"></i><b>MIDI-Learn aktiv.</b> Markiertes Element anklicken, dann Taste oder Regler betätigen. Clips sind keine MIDI-Ziele.<div class="grow"></div><span class="pill warn" style="margin-right:8px"><i class="led"></i>Fußleiste fehlt · 3 inaktiv</span><span class="btn s">Fertig</span></div>
+  <div class="main learn" style="min-height:0">
+    <div class="editor"><div class="arr" style="--rowh:84px">
+      <div class="corner"><div class="row"><span class="caps">Spuren</span><span class="dim2" style="font-size:10px">5 / 8</span></div><div class="row"><span class="dim" style="font-size:11px">gestoppt</span></div></div>
+      <div class="ruler">
+<div class="sec" style="--s:0;--n:8"><div class="t"><span class="no">1</span>gitarre_rec</div><div class="m"><span>8 T</span><span><i class="ic ic-auto"></i>auto</span></div></div>
+<div class="sec" style="--s:8;--n:8"><div class="t"><span class="no">2</span>voice_1</div><div class="m"><span>8 T</span><span><i class="ic ic-auto"></i>auto</span></div></div>
+<div class="sec" style="--s:16;--n:8"><div class="t"><span class="no">3</span>voice_2</div><div class="m"><span>8 T</span><span><i class="ic ic-auto"></i>auto</span></div></div>
+<div class="sec loopsec" style="--s:24;--n:8"><div class="t"><span class="no">4</span>voice_3<i class="ic ic-link" style="--ic:11px;color:var(--accent)"></i></div><div class="m"><span>8 T</span><span class="rel"><i class="ic ic-hand"></i>Release</span><span><i class="ic ic-loop"></i>Loop</span></div></div>
+<div class="sec loopsec" style="--s:32;--n:8"><div class="t"><span class="no">5</span>alles</div><div class="m"><span>8 T</span><span class="rel"><i class="ic ic-hand"></i>Release</span><span><i class="ic ic-bar"></i>Takt</span></div></div>
+<div class="sec loopsec" style="--s:40;--n:1;padding-left:5px"><div class="t"><span class="no">6</span>ende</div><div class="m"><span>1 T</span><span class="rel"><i class="ic ic-hand"></i></span></div></div>
+<div class="bars"><span class="s" style="left:calc(var(--x0) + 0 * var(--b))">1</span><span style="left:calc(var(--x0) + 2 * var(--b))">3</span><span style="left:calc(var(--x0) + 4 * var(--b))">5</span><span style="left:calc(var(--x0) + 6 * var(--b))">7</span><span class="s" style="left:calc(var(--x0) + 8 * var(--b))">9</span><span style="left:calc(var(--x0) + 10 * var(--b))">11</span><span style="left:calc(var(--x0) + 12 * var(--b))">13</span><span style="left:calc(var(--x0) + 14 * var(--b))">15</span><span class="s" style="left:calc(var(--x0) + 16 * var(--b))">17</span><span style="left:calc(var(--x0) + 18 * var(--b))">19</span><span style="left:calc(var(--x0) + 20 * var(--b))">21</span><span style="left:calc(var(--x0) + 22 * var(--b))">23</span><span class="s" style="left:calc(var(--x0) + 24 * var(--b))">25</span><span style="left:calc(var(--x0) + 26 * var(--b))">27</span><span style="left:calc(var(--x0) + 28 * var(--b))">29</span><span style="left:calc(var(--x0) + 30 * var(--b))">31</span><span class="s" style="left:calc(var(--x0) + 32 * var(--b))">33</span><span style="left:calc(var(--x0) + 34 * var(--b))">35</span><span style="left:calc(var(--x0) + 36 * var(--b))">37</span><span style="left:calc(var(--x0) + 38 * var(--b))">39</span></div>
+<div class="ticks" style="right:auto;width:calc(41 * var(--b) + 1px)"></div>
+<div class="playhead ruler-ph stopped" style="--pos:0"></div>
+</div>
+      <div class="heads"><div class="th" style="--c:var(--trk-1)"><div class="clr"></div><div class="body" style="gap:8px;justify-content:center">
+  <div class="name"><span class="idx">1</span><b>gitarre</b><span class="ch">In 2 · mono</span></div>
+  <div class="ctl" style="gap:7px"><span class="chip sq lrn bound" style="color:var(--st-rec)"><i class="ic ic-rec"></i><span class="mb mb-b">Pad 40</span></span><span class="chip sq lrn" style="color:var(--st-dub)"><i class="ic ic-dub"></i></span><span class="chip sq lrn bound" style="color:var(--st-play)"><i class="ic ic-play"></i><span class="mb mb-b">Pad 41</span></span><span class="chip sq lrn"><i class="ic ic-stop"></i></span><span class="chip hear lrn"><i class="ic ic-hear"></i>Mithören</span><div class="grow"></div><span class="knob s lrn" style="--v:0"></span></div>
+</div></div>
+<div class="th" style="--c:var(--trk-2)"><div class="clr"></div><div class="body" style="gap:8px;justify-content:center">
+  <div class="name"><span class="idx">2</span><b>voice</b><span class="ch">In 1 · mono</span></div>
+  <div class="ctl" style="gap:7px"><span class="chip sq lrn bound" style="color:var(--st-rec)"><i class="ic ic-rec"></i><span class="mb mb-b">Pad 37</span></span><span class="chip sq lrn" style="color:var(--st-dub)"><i class="ic ic-dub"></i></span><span class="chip sq lrn bound" style="color:var(--st-play)"><i class="ic ic-play"></i><span class="mb mb-b">Pad 38</span></span><span class="chip sq lrn"><i class="ic ic-stop"></i></span><span class="chip hear on lrn"><i class="ic ic-hear"></i>Mithören</span><div class="grow"></div><span class="knob s lrn" style="--v:0"></span></div>
+</div></div>
+<div class="th" style="--c:var(--trk-3)"><div class="clr"></div><div class="body" style="gap:8px;justify-content:center">
+  <div class="name"><span class="idx">3</span><b>chor</b><span class="ch">In 1 · mono</span></div>
+  <div class="ctl" style="gap:7px"><span class="chip sq lrn" style="color:var(--st-rec)"><i class="ic ic-rec"></i></span><span class="chip sq lrn" style="color:var(--st-dub)"><i class="ic ic-dub"></i></span><span class="chip sq lrn" style="color:var(--st-play)"><i class="ic ic-play"></i></span><span class="chip sq lrn"><i class="ic ic-stop"></i></span><span class="chip hear on lrn bound"><i class="ic ic-hear"></i>Mithören<span class="mb mb-b">CC 20</span></span><div class="grow"></div><span class="knob s lrn" style="--v:0"></span></div>
+</div></div>
+<div class="th" style="--c:var(--trk-4)"><div class="clr"></div><div class="body" style="gap:8px;justify-content:center">
+  <div class="name"><span class="idx">4</span><b>perc</b><span class="ch">In 3 · mono</span></div>
+  <div class="ctl" style="gap:7px"><span class="chip sq lrn" style="color:var(--st-rec)"><i class="ic ic-rec"></i></span><span class="chip sq lrn" style="color:var(--st-dub)"><i class="ic ic-dub"></i></span><span class="chip sq lrn" style="color:var(--st-play)"><i class="ic ic-play"></i></span><span class="chip sq lrn"><i class="ic ic-stop"></i></span><span class="chip hear lrn"><i class="ic ic-hear"></i>Mithören</span><div class="grow"></div><span class="knob s lrn" style="--v:0"></span></div>
+</div></div>
+<div class="th" style="--c:var(--trk-5)"><div class="clr"></div><div class="body" style="gap:8px;justify-content:center">
+  <div class="name"><span class="idx">5</span><b>keys</b><span class="ch">In 5–6 · stereo</span></div>
+  <div class="ctl" style="gap:7px"><span class="chip sq lrn bound" style="color:var(--st-rec)"><i class="ic ic-rec"></i><span class="mb mb-b">Pad 44</span></span><span class="chip sq lrn" style="color:var(--st-dub)"><i class="ic ic-dub"></i></span><span class="chip sq lrn" style="color:var(--st-play)"><i class="ic ic-play"></i></span><span class="chip sq lrn"><i class="ic ic-stop"></i></span><span class="chip hear on lrn"><i class="ic ic-hear"></i>Mithören</span><div class="grow"></div><span class="knob s lrn" style="--v:0"></span></div>
+</div></div><div class="addtrack"><span class="btn s"><i class="ic ic-plus"></i>Spur hinzufügen</span></div></div>
+      <div class="lanes">
+<div class="secline" style="--s:8"></div><div class="secline" style="--s:16"></div><div class="secline" style="--s:24"></div><div class="secline" style="--s:32"></div><div class="secline" style="--s:40"></div>
+<div class="endzone" style="--s:41"></div>
+
+<div class="lane"><div class="clip rec" style="--s:0;--n:8"><div class="hd"><i class="ic ic-rec"></i><span>Aufnahme</span><span class="lay">8 T</span></div><div class="bd"><div class="wave gtr"></div></div></div><div class="clip play" style="--s:8;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"><div class="wave gtr"></div></div></div><div class="clip play" style="--s:16;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"><div class="wave gtr"></div></div></div><div class="clip play inh" style="--s:24;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"><div class="wave gtr"></div></div></div><div class="clip play" style="--s:32;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"><div class="wave gtr"></div></div></div><div class="clip stop tiny" style="--s:40;--n:1"><div class="hd"><i class="ic ic-stop"></i></div></div></div>
+<div class="lane alt sel"><div class="clip hear" style="--s:0;--n:8"><div class="hd"><i class="ic ic-hear"></i><span>Mithören</span></div><div class="bd"></div></div><div class="clip rec" style="--s:8;--n:8"><div class="hd"><i class="ic ic-rec"></i><span>Aufnahme</span><span class="lay">Ebene 1</span></div><div class="bd"><div class="wave vox"></div></div></div><div class="clip dub" style="--s:16;--n:8"><div class="hd"><i class="ic ic-dub"></i><span>Overdub</span><span class="lay">Ebene 2</span></div><div class="bd"><div class="wave vox part" style="--pw:calc(2.33 * var(--b))"></div></div></div><div class="clip dub inh" style="--s:24;--n:8"><div class="hd"><i class="ic ic-dub"></i><span>Overdub</span><span class="lay">Ebene 3</span></div><div class="bd"></div></div><div class="clip play" style="--s:32;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span><span class="lay">3 Ebenen</span></div><div class="bd"></div></div><div class="clip stop tiny" style="--s:40;--n:1"><div class="hd"><i class="ic ic-stop"></i></div></div></div>
+<div class="lane"><div class="clip stop" style="--s:0;--n:8"><div class="hd"><i class="ic ic-stop"></i><span>Still</span></div></div><div class="clip stop" style="--s:8;--n:8"><div class="hd"><i class="ic ic-stop"></i><span>Still</span></div></div><div class="clip stop" style="--s:16;--n:8"><div class="hd"><i class="ic ic-stop"></i><span>Still</span></div></div><div class="clip stop inh" style="--s:24;--n:8"><div class="hd"><i class="ic ic-stop"></i><span>Still</span></div></div><div class="clip hear" style="--s:32;--n:8"><div class="hd"><i class="ic ic-hear"></i><span>Mithören</span><span class="lay">live</span></div><div class="bd"></div></div><div class="clip stop tiny" style="--s:40;--n:1"><div class="hd"><i class="ic ic-stop"></i></div></div></div>
+<div class="lane alt"><div class="clip rec" style="--s:0;--n:8"><div class="hd"><i class="ic ic-rec"></i><span>Aufnahme</span><span class="lay">8 T</span></div><div class="bd"><div class="wave perc"></div></div></div><div class="clip play" style="--s:8;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"><div class="wave perc"></div></div></div><div class="clip play" style="--s:16;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"><div class="wave perc"></div></div></div><div class="clip play inh" style="--s:24;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"><div class="wave perc"></div></div></div><div class="clip play" style="--s:32;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"><div class="wave perc"></div></div></div><div class="clip stop tiny" style="--s:40;--n:1"><div class="hd"><i class="ic ic-stop"></i></div></div></div>
+<div class="lane"><div class="clip stop" style="--s:0;--n:8"><div class="hd"><i class="ic ic-stop"></i><span>Still</span></div></div><div class="clip stop" style="--s:8;--n:8"><div class="hd"><i class="ic ic-stop"></i><span>Still</span></div></div><div class="clip hear" style="--s:16;--n:8"><div class="hd"><i class="ic ic-hear"></i><span>Mithören</span></div><div class="bd"></div></div><div class="clip rec" style="--s:24;--n:8"><div class="hd"><i class="ic ic-rec"></i><span>Aufnahme</span><span class="lay">8 T</span></div><div class="bd"></div></div><div class="clip play" style="--s:32;--n:8"><div class="hd"><i class="ic ic-play"></i><span>Wiedergabe</span></div><div class="bd"></div></div><div class="clip stop tiny" style="--s:40;--n:1"><div class="hd"><i class="ic ic-stop"></i></div></div></div>
+<div class="playhead stopped" style="--pos:0"></div></div>
+    </div></div>
+    <aside class="side">
+  <div class="side-h"><i class="ic ic-midi" style="--ic:18px;color:var(--learn)"></i><h3>MIDI-Belegung</h3><div class="grow"></div><span class="btn s">Profil: Bühne<i class="ic ic-chev-d"></i></span></div>
+  <div class="dev missing"><i class="ic ic-warn"></i><div><b>Gerät fehlt: Fußleiste FS-4</b><span>3 Belegungen inaktiv · zuletzt gesehen 20:41</span></div><span></span></div>
+  <div class="dev" style="margin-top:8px"><i class="ic ic-pedal"></i><div><b>Pad-Controller 16</b><span>verbunden · 7 Belegungen aktiv</span></div><span class="pill" style="height:20px"><i class="led"></i>aktiv</span></div>
+  <div style="margin:10px 14px 0;display:flex;gap:6px"><span class="btn s"><i class="ic ic-search"></i>Erneut suchen</span><span class="btn s">Auf anderes Gerät übertragen</span></div>
+  <div class="hint" style="margin:10px 14px 0">Die Belegungen bleiben gespeichert und werden sofort wieder aktiv, sobald die Fußleiste angeschlossen ist. Bis dahin: <b>Release per Leertaste</b> oder Touch.</div>
+  <div class="blist">
+    <div class="bgrp caps">Transport</div>
+    <div class="brow off"><span class="t">Release<small>transport.next</small></span><span class="mb inactive">FS 1</span><i class="ic ic-x"></i></div>
+    <div class="brow off"><span class="t">Start<small>transport.start</small></span><span class="mb inactive">FS 3</span><i class="ic ic-x"></i></div>
+    <div class="brow off"><span class="t">Alles stoppen<small>transport.stop_all</small></span><span class="mb inactive">FS 4</span><i class="ic ic-x"></i></div>
+    <div class="bgrp caps">Spuren</div>
+    <div class="brow"><span class="t">gitarre · Aufnahme<small>track.1.record</small></span><span class="mb">Pad 40</span><i class="ic ic-x"></i></div>
+    <div class="brow"><span class="t">gitarre · Wiedergabe<small>track.1.play</small></span><span class="mb">Pad 41</span><i class="ic ic-x"></i></div>
+    <div class="brow"><span class="t">voice · Overdub<small>track.2.overdub</small></span><span class="mb">Pad 37</span><i class="ic ic-x"></i></div>
+    <div class="brow"><span class="t">voice · Wiedergabe<small>track.2.play</small></span><span class="mb">Pad 38</span><i class="ic ic-x"></i></div>
+    <div class="brow"><span class="t">chor · Mithören<small>track.3.monitor</small></span><span class="mb">CC 20</span><i class="ic ic-x"></i></div>
+    <div class="brow"><span class="t">keys · Aufnahme<small>track.5.record</small></span><span class="mb">Pad 44</span><i class="ic ic-x"></i></div>
+    <div class="bgrp caps">Global</div>
+    <div class="brow"><span class="t">Klick an/aus<small>global.click</small></span><span class="mb">CC 21</span><i class="ic ic-x"></i></div>
+  </div>
+  <div class="mon">
+    <div class="caps" style="margin-bottom:4px">Eingangsmonitor</div>
+    <div class="ln"><span>20:58:31</span><span>Pad-Contr.</span><b>Note 40 an · v 112</b></div>
+    <div class="ln"><span>20:58:33</span><span>Pad-Contr.</span><b>CC 21 = 127</b></div>
+  </div>
+</aside>
+  </div>
+  </div>
+</div>
+</body></html>
