@@ -2445,3 +2445,20 @@ body {
   outline: 2px solid var(--warn) !important;
   animation: midi-pulse 1s ease-in-out infinite;
 }
+
+/* ---------- score files: the row above the editor ---------- */
+.score-files {
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.score-recent {
+  max-width: 14em;
+}
+.score-file-name {
+  margin-left: auto;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 24em;
+}

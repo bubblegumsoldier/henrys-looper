@@ -17,7 +17,12 @@ import type {
   EngineInfo,
   FxParamName,
   FxPresetName,
+  FilesInfo,
   FxSlotName,
+  OpenedFile,
+  RecentFile,
+  SavedFile,
+  TemplateTrack,
   ParseOutcome,
   Quantize,
   RenderOutcome,
@@ -228,4 +233,21 @@ export const scoreApi = {
    * `start` plays it again. Refused while the score plays (stop it first). Ask before calling.
    */
   rewind: () => call<string>("score_rewind"),
+};
+
+// ---------------------------------------------------------------------------------------------
+// Score files. The pickers are the dialog plugin (`dialogs.ts`); contents go through these.
+// ---------------------------------------------------------------------------------------------
+
+export const filesApi = {
+  /** Proposed folder for "Save as" and the recent files, newest first. */
+  info: () => call<FilesInfo>("score_files_info"),
+  /** Read a `.yaml`/`.yml` score (at most 1 MB) and put it on top of the recent list. */
+  open: (path: string) => call<OpenedFile>("score_file_open", { path }),
+  /** Write atomically. A name without extension gets `.yaml`; the answer has the real path. */
+  save: (path: string, yaml: string) => call<SavedFile>("score_file_save", { path, yaml }),
+  /** Drop a recent entry (a file that has gone). */
+  forget: (path: string) => call<RecentFile[]>("score_file_forget", { path }),
+  /** Text for "New": the given tracks (normally the engine's) or a default pair. */
+  template: (tracks?: TemplateTrack[]) => call<string>("score_template", { tracks: tracks ?? null }),
 };

@@ -12,7 +12,11 @@
 //! layer counts as a column beside the editor. Whichever tab is open, the song can be run and the
 //! levels can be watched; the tab only decides what is available in *detail*.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { insideTauri } from "./api";
+import { confirmAction } from "./dialogs";
+import { isDirty, scoreFile, subscribeScoreFile } from "./scoreFile";
 import { LiveView } from "./live/LiveView";
 import { ScoreView } from "./components/ScoreView";
 import { LearnLayer } from "./midi/LearnLayer";
@@ -25,6 +29,47 @@ type Tab = "live" | "score";
 export default function App() {
   const [tab, setTab] = useState<Tab>("live");
   const { status, info, error } = useLooperEvents();
+
+  // The window title names the score file and marks unsaved changes; closing the window with
+  // unsaved changes asks first. Both live here rather than in the score view, which is unmounted
+  // while the live tab is open.
+  useEffect(() => {
+    if (!insideTauri()) return;
+    const win = getCurrentWindow();
+    let shown = "";
+    const show = () => {
+      const file = scoreFile();
+      const title = `${file.name ?? "Untitled"}${isDirty(file) ? " •" : ""} — Henrys Looper`;
+      if (title !== shown) {
+        shown = title;
+        void win.setTitle(title).catch(() => undefined);
+      }
+    };
+    show();
+    const offFile = subscribeScoreFile(show);
+    let offClose: (() => void) | null = null;
+    let disposed = false;
+    void win
+      .onCloseRequested(async (event) => {
+        if (!isDirty()) return;
+        const name = scoreFile().name ?? "the untitled score";
+        const quit = await confirmAction(
+          `${name} has unsaved changes. Quit without saving?`,
+          "Unsaved changes",
+          "Quit without saving",
+        );
+        if (!quit) event.preventDefault();
+      })
+      .then((off) => {
+        if (disposed) off();
+        else offClose = off;
+      });
+    return () => {
+      disposed = true;
+      offFile();
+      offClose?.();
+    };
+  }, []);
 
   return (
     <div className="app">

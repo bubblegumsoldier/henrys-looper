@@ -815,3 +815,43 @@ export const PHASE_LABEL: Record<Phase, string> = {
   finished: "Ende",
   stopped: "gestoppt",
 };
+
+// ---------------------------------------------------------------------------------------------
+// Score files (app/src-tauri/src/files.rs). Plain YAML, extension `.yaml`.
+// ---------------------------------------------------------------------------------------------
+
+export interface RecentFile {
+  path: string;
+  /** File name without folder. */
+  name: string;
+  /** False when the file has gone since it was last used. */
+  exists: boolean;
+}
+
+export interface FilesInfo {
+  /** `~/Documents/Henrys Looper`, already created; null without a documents folder. */
+  default_dir: string | null;
+  /** Newest first, at most ten. */
+  recent: RecentFile[];
+}
+
+export interface OpenedFile {
+  path: string;
+  name: string;
+  yaml: string;
+  recent: RecentFile[];
+}
+
+export interface SavedFile {
+  /** The path really written (`.yaml` appended when the name had no extension). */
+  path: string;
+  name: string;
+  recent: RecentFile[];
+}
+
+/** One track for the "New" template. Inputs one-based. */
+export interface TemplateTrack {
+  name: string;
+  input: number;
+  input_right?: number;
+}

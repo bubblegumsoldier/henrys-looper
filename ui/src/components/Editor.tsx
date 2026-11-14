@@ -41,7 +41,8 @@ export function Editor({ value, onChange, errors, onCompile, onLoad }: Props) {
         oneDark,
         keymap.of([
           { key: "Mod-Enter", run: () => (cbs.current.onCompile(), true) },
-          { key: "Mod-s", run: () => (cbs.current.onLoad(), true), preventDefault: true },
+          // Mod-S is Save, handled by the score view; loading into the runner is Mod-Shift-Enter.
+          { key: "Mod-Shift-Enter", run: () => (cbs.current.onLoad(), true), preventDefault: true },
           indentWithTab,
           ...defaultKeymap,
           ...historyKeymap,

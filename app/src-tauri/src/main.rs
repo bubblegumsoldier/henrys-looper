@@ -15,6 +15,7 @@
 //! musician. Where the engine already has a sentence for a situation, that sentence is used.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod files;
 mod host;
 mod logfile;
 mod midi;
@@ -497,6 +498,104 @@ async fn score_render(doc: ScoreDoc) -> Result<RenderOutcome, String> {
     offload(move || Ok(looper_engine::score::doc::render_doc_outcome(&doc))).await
 }
 
+// ---------------------------------------------------------------------------------------------
+// Score files. The pickers are the dialog plugin on the web side; reading and writing are these
+// commands - see `files.rs` for why not the FS plugin.
+// ---------------------------------------------------------------------------------------------
+
+fn config_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| std::env::temp_dir().join("henrys-looper"))
+}
+
+/// The folder "Save as" proposes (`~/Documents/Henrys Looper`, created on demand) and the recent
+/// files, newest first.
+#[tauri::command]
+async fn score_files_info(app: tauri::AppHandle) -> Result<files::FilesInfo, String> {
+    offload(move || {
+        Ok(files::FilesInfo {
+            default_dir: files::default_dir(app.path().document_dir().ok())
+                .map(|d| d.display().to_string()),
+            recent: files::load_recent(&config_dir(&app)),
+        })
+    })
+    .await
+}
+
+/// Read a score file (`.yaml`/`.yml`, at most 1 MB, UTF-8) and put it on top of the recent list.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_file_open(path: String, app: tauri::AppHandle) -> Result<files::OpenedFile, String> {
+    offload(move || {
+        let p = std::path::PathBuf::from(&path);
+        let yaml = files::read_score_file(&p)?;
+        let recent = files::remember(&config_dir(&app), &p);
+        Ok(files::OpenedFile {
+            name: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            path,
+            yaml,
+            recent,
+        })
+    })
+    .await
+}
+
+/// Write a score file atomically. A name without extension gets `.yaml`; the answer carries the
+/// path really written.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_file_save(
+    path: String,
+    yaml: String,
+    app: tauri::AppHandle,
+) -> Result<files::SavedFile, String> {
+    offload(move || {
+        let written = files::write_score_file(std::path::Path::new(&path), &yaml)?;
+        let recent = files::remember(&config_dir(&app), &written);
+        Ok(files::SavedFile {
+            name: written
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path: written.display().to_string(),
+            recent,
+        })
+    })
+    .await
+}
+
+/// Drop one entry from the recent list (a file that has gone).
+#[tauri::command(rename_all = "snake_case")]
+async fn score_file_forget(
+    path: String,
+    app: tauri::AppHandle,
+) -> Result<Vec<files::RecentFile>, String> {
+    offload(move || Ok(files::forget(&config_dir(&app), &path))).await
+}
+
+/// One track for the "New" template: name and 1-based input(s).
+#[derive(serde::Deserialize)]
+struct TemplateTrack {
+    name: String,
+    input: u32,
+    #[serde(default)]
+    input_right: Option<u32>,
+}
+
+/// The text behind "New": the given tracks (normally the running engine's, so the new score loads
+/// straight away) or a voice and a guitar, and three sections - record, layer, play out.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_template(tracks: Option<Vec<TemplateTrack>>) -> Result<String, String> {
+    offload(move || {
+        let tracks: Vec<(String, u32, Option<u32>)> = tracks
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| (t.name, t.input, t.input_right))
+            .collect();
+        Ok(looper_engine::score::doc::template(&tracks))
+    })
+    .await
+}
+
 /// Compile a score and hand it to the runner.
 ///
 /// Needs a running engine whose track layout matches the score (same names, same inputs - see
@@ -715,6 +814,11 @@ fn main() {
             score_compile,
             score_parse,
             score_render,
+            score_files_info,
+            score_file_open,
+            score_file_save,
+            score_file_forget,
+            score_template,
             score_load,
             score_start,
             score_next,

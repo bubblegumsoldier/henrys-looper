@@ -94,8 +94,9 @@ Vorgaben auf dem Mac: Host `coreaudio`, 48 kHz, 128 Frames. Die Latenzvorgabe vo
 ist geschätzt, nicht gemessen** (CoreAudio-Angaben einer Scarlett 2i2 plus Tiefe des
 Eingangspuffers); vor ernsthaften Aufnahmen mit `calibrate` und Loopback-Kabel nachmessen.
 Beim ersten „Engine starten“ der gebündelten App fragt macOS nach dem Mikrofonzugriff; unter
-`tauri dev` gilt die Freigabe des Terminals. Kürzel nehmen ⌘ statt Strg (⌘+Enter, ⌘+S,
-⌘+Klick zum MIDI-Lernen). Logdatei: `~/Library/Logs/de.getmika.henrys-looper/`,
+`tauri dev` gilt die Freigabe des Terminals. Kürzel nehmen ⌘ statt Strg (⌘+Enter übersetzt, ⌘+⇧+Enter lädt,
+⌘+N/⌘+O/⌘+S/⌘+⇧+S für Neu/Öffnen/Speichern/Speichern unter, ⌘+Klick zum MIDI-Lernen).
+Partituren liegen als `.yaml` standardmäßig in `~/Documents/Henrys Looper/`. Logdatei: `~/Library/Logs/de.getmika.henrys-looper/`,
 MIDI-Profile: `~/Library/Application Support/henrys-looper/midi/`.
 
 ## Benutzen
