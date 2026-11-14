@@ -45,7 +45,7 @@ sie sample-genau aus, auch mitten im Puffer.
 
 ## Voraussetzungen
 
-- Windows (macOS wäre portierbar, siehe `docs/architektur.md`)
+- Windows (für macOS siehe [unten](#macos))
 - **Ein Audio-Interface mit ASIO-Treiber.** WASAPI ist keine Alternative — die Begründung mit
   Messwerten steht im Messbericht.
 - Rust (MSVC-Toolchain) plus **MSVC Build Tools mit C++-Workload**
@@ -69,6 +69,34 @@ cd engine
 cargo build --release --features asio
 cargo test
 ```
+
+## macOS
+
+Auf dem Mac läuft alles über CoreAudio; ASIO, LLVM und das SDK braucht es dort nicht.
+
+**Voraussetzungen:** Xcode Command Line Tools (`xcode-select --install`), Rust über
+[rustup](https://rustup.rs), Node.js ≥ 18. Ein- und Ausgang müssen auf demselben Gerät liegen
+(eine Clock) — sollen es zwei sein, in „Audio-MIDI-Setup“ ein Aggregatgerät anlegen.
+
+```sh
+cd ui && npm install && cd ..        # Oberfläche samt Tauri-CLI
+cargo test                           # alle Tests
+ui/node_modules/.bin/tauri dev       # App im Entwicklungsmodus (aus dem Repo-Wurzelverzeichnis)
+ui/node_modules/.bin/tauri build     # target/release/bundle/macos/Henrys Looper.app
+open "target/release/bundle/macos/Henrys Looper.app"
+
+cargo build --release -p looper-engine
+target/release/looper-engine list                       # Host coreaudio, Geräte
+target/release/looper-engine thru --device Scarlett --buffer 128 --gain 0.1
+```
+
+Vorgaben auf dem Mac: Host `coreaudio`, 48 kHz, 128 Frames. Die Latenzvorgabe von **596 Frames
+ist geschätzt, nicht gemessen** (CoreAudio-Angaben einer Scarlett 2i2 plus Tiefe des
+Eingangspuffers); vor ernsthaften Aufnahmen mit `calibrate` und Loopback-Kabel nachmessen.
+Beim ersten „Engine starten“ der gebündelten App fragt macOS nach dem Mikrofonzugriff; unter
+`tauri dev` gilt die Freigabe des Terminals. Kürzel nehmen ⌘ statt Strg (⌘+Enter, ⌘+S,
+⌘+Klick zum MIDI-Lernen). Logdatei: `~/Library/Logs/de.getmika.henrys-looper/`,
+MIDI-Profile: `~/Library/Application Support/henrys-looper/midi/`.
 
 ## Benutzen
 
