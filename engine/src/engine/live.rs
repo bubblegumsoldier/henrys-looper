@@ -1885,7 +1885,10 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
             }
             if s.ignored_commands > last_refusal.0 || s.refusal != last_refusal.1 {
                 if let Some(text) = s.refusal.message() {
-                    control.message = text.to_string();
+                    control.message = match s.refusal.cli_hint() {
+                        Some(hint) => format!("{text} {hint}"),
+                        None => text.to_string(),
+                    };
                 }
                 last_refusal = (s.ignored_commands, s.refusal);
             }

@@ -2197,7 +2197,8 @@ impl Session {
                     bus.label(),
                     out.label(),
                     if out.first + out.width > self.output_channels {
-                        " Das Geraet hat so viele Kanaele nicht - der Bus landet auf dem naechsten                          Paar, das es gibt."
+                        " The device does not have that many outputs - the bus lands on the nearest pair \
+                         that exists."
                     } else {
                         ""
                     }
@@ -2318,7 +2319,8 @@ impl Session {
             Action::FxPreset { track, preset } => {
                 if preset == FxPreset::Custom {
                     return Err(
-                        "\"eigen\" ist kein Preset zum Laden - so heisst eine Kette, an der von                          Hand gedreht wurde."
+                        "\"custom\" is not a preset to load - it is what a chain is called once a knob \
+                         was turned by hand."
                             .to_string(),
                     );
                 }
@@ -2408,7 +2410,7 @@ impl Session {
         if busy {
             return Err(Refusal::Tempo
                 .message()
-                .unwrap_or("Tempo abgelehnt.")
+                .unwrap_or("Tempo change refused.")
                 .to_string());
         }
         let bars = bars.max(1);

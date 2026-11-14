@@ -923,3 +923,19 @@ fn an_unknown_bus_in_a_score_is_refused_in_german() {
     assert!(suggestion.contains("monitor"), "{suggestion}");
     assert!(suggestion.contains("Klick"), "der Grund steht dabei: {suggestion}");
 }
+
+/// Messages reach the app as they are written: no line-continuation whitespace in the middle of a
+/// sentence, and no key hints of the terminal (`(a)`, `(w <nr>)`) - the app has no such keys.
+#[test]
+fn messages_have_no_stray_whitespace_and_no_terminal_key_hints() {
+    let err = errors("bpm: 100\ntracks:\n  a: {input: 1, bus: xyz}\nsections:\n  - id: x\n    bars: 1\n");
+    let suggestion = err.issues[0].suggestion.clone().expect("Vorschlag");
+    assert!(!suggestion.contains("  "), "{suggestion:?}");
+
+    use crate::engine::command::Refusal;
+    for refusal in [Refusal::Tempo, Refusal::LayerLimit, Refusal::NoBuffer, Refusal::NoSuchTarget, Refusal::Busy] {
+        let text = refusal.message().expect("Text");
+        assert!(!text.contains("  ") && !text.contains("(a)") && !text.contains("(w"), "{text}");
+    }
+    assert_eq!(Refusal::Tempo.cli_hint(), Some("(a)"), "das Terminal behaelt seinen Hinweis");
+}

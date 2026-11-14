@@ -229,21 +229,31 @@ pub enum Refusal {
 }
 
 impl Refusal {
-    /// German explanation for the terminal, or `None` when nothing was refused.
+    /// Explanation for any front end, or `None` when nothing was refused. Free of key hints - the
+    /// app has no `a` key; the terminal adds its own with [`Refusal::cli_hint`].
     pub fn message(self) -> Option<&'static str> {
         match self {
             Refusal::None => None,
             Refusal::Tempo => Some(
-                "Tempo abgelehnt: es ist noch etwas aufgenommen oder es laeuft etwas. Erst alles leeren (a).",
+                "Tempo change refused: something is recorded or playing. Clear all tracks first.",
             ),
             Refusal::LayerLimit => {
-                Some("Ebenen-Obergrenze je Track erreicht. Erst eine Ebene entfernen (w <nr>).")
+                Some("This track has reached its layer limit. Remove a layer first.")
             }
             Refusal::NoBuffer => Some(
                 "Kein vorbereiteter Puffer frei - der Steuer-Thread kommt mit dem Nachlegen nicht nach.",
             ),
             Refusal::NoSuchTarget => Some("Das Kommando meinte einen Track oder eine Ebene, die es nicht gibt."),
             Refusal::Busy => Some("Ebenen lassen sich nicht bearbeiten, waehrend dieser Track aufnimmt."),
+        }
+    }
+
+    /// The `live` terminal's key for the way out, appended there to [`Refusal::message`].
+    pub fn cli_hint(self) -> Option<&'static str> {
+        match self {
+            Refusal::Tempo => Some("(a)"),
+            Refusal::LayerLimit => Some("(w <nr>)"),
+            _ => None,
         }
     }
 }

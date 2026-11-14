@@ -570,7 +570,8 @@ impl Reader {
                 self.error_with(
                     Some(node.pos),
                     format!("{what}: '{text}' ist keine Bus-Angabe."),
-                    "Erlaubt sind 'main' (nur in den Saal), 'monitor' (nur auf den Kopfhoerer),                      'main+monitor' und 'none'. Der Klick liegt immer und nur auf 'monitor'.",
+                    "Erlaubt sind 'main' (nur in den Saal), 'monitor' (nur auf den Kopfhoerer), \
+                     'main+monitor' und 'none'. Der Klick liegt immer und nur auf 'monitor'.",
                 );
                 None
             }
