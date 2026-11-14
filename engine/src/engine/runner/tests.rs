@@ -928,3 +928,54 @@ fn the_buttons_answer_in_german_before_the_start_and_after_the_end() {
     assert!(runner.start(0).contains("laeuft schon"));
     assert_eq!(runner.phase(), Phase::CountIn);
 }
+
+// ---------------------------------------------------------------------------------------------
+// What a score says about its tracks
+// ---------------------------------------------------------------------------------------------
+
+const SETUP: &str = "\
+bpm: 120
+tracks:
+  stimme: {input: 1, pan: -0.5, latency: 300, latency_trim: -20, bus: main, monitor_bus: none}
+  keys: {input: [2, 3], pan: 0.25, bus: monitor}
+sections:
+  - id: a
+    bars: 2
+";
+
+/// Pan, both bus assignments and the latency compensation of every track arrive in the engine,
+/// and monitoring starts off - the state the runner's picture begins with.
+#[test]
+fn a_score_sets_up_pan_buses_and_latency_of_every_track() {
+    use crate::engine::bus::BusSend;
+    use crate::engine::track::TrackLatency;
+
+    let score = compile_score(SETUP).expect("uebersetzt");
+    let mut sim = Sim::new(
+        SimSpec {
+            tracks: vec![TrackSpec::on(0).monitoring(), TrackSpec::stereo(1, 2)],
+            input_channels: 3,
+            loopback_channel: None,
+            ..Default::default()
+        },
+        mono(fingerprint),
+    );
+    for command in setup_commands(&score) {
+        assert!(command.at().is_none(), "Einrichtung ist kein musikalisches Ereignis: {command:?}");
+        sim.send(command);
+    }
+    sim.run_blocks(2);
+    let status = sim.latest_status().expect("Status");
+    let [stimme, keys] = [status.tracks()[0], status.tracks()[1]];
+    assert_eq!(stimme.pan, -0.5);
+    assert_eq!(stimme.loop_send, BusSend::parse("main").unwrap());
+    assert_eq!(stimme.monitor_send, BusSend::parse("none").unwrap());
+    assert_eq!(stimme.latency, TrackLatency { measured: Some(300), trim: -20 });
+    assert_eq!(stimme.latency_frames, 280);
+    assert!(!stimme.monitor, "Mithoeren beginnt aus, auch wenn der Track so gestartet wurde");
+    assert_eq!(keys.pan, 0.25);
+    assert_eq!(keys.loop_send, BusSend::MONITOR);
+    assert_eq!(keys.monitor_send, BusSend::MONITOR, "nicht genannt heisst: Vorgabe");
+    assert_eq!(keys.latency, TrackLatency::INHERITED);
+    assert_eq!(status.refusal, Refusal::None);
+}

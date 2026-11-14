@@ -53,14 +53,14 @@ use looper_engine::engine::process::{
     spare_slots_for, total_channels,
 };
 use looper_engine::engine::runner::{
-    DEFAULT_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks,
+    DEFAULT_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
 };
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
 use looper_engine::midi::{
     Context, FxKnob, MidiAction, ParamState, Resolution, Target, TrackLayout, TrackRef,
 };
-use looper_engine::score::{ScoreError, compile_score};
+use looper_engine::score::{CompiledScore, ScoreError, compile_score};
 
 use crate::logfile::{self, log};
 use crate::midi::{MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView};
@@ -1640,16 +1640,27 @@ impl Session {
 
         let bars = score.sections.iter().map(|s| s.bars).max().unwrap_or(1).max(1);
         let signature = score.signature();
-        self.reconfigure(score.bpm, signature.beats_per_bar, signature.beat_unit, bars)?;
-
-        // Monitoring belongs to the runner from now on (`hear_through` and the takes switch it,
-        // `monitor:` in the score says which tracks may have it at all). The runner's picture starts
-        // at "everything off", so the engine is put into that state rather than left wherever the
-        // setup screen happened to leave it - otherwise a track started with monitoring on would
-        // stay on for the whole score, because the runner would never see a difference to send.
-        for track in 0..self.tracks.len() {
-            self.cmd.send(Command::SetMonitor { track, on: false })?;
+        // The score's own compensation per track counts for the loop-length check, so it goes into
+        // the mirror before the grid moves - and back out if the grid refuses.
+        let previous: Vec<TrackLatency> = self.tracks.iter().map(|ui| ui.latency).collect();
+        for (ui, spec) in self.tracks.iter_mut().zip(&score.tracks) {
+            ui.latency = spec.track_latency();
         }
+        if let Err(e) =
+            self.reconfigure(score.bpm, signature.beats_per_bar, signature.beat_unit, bars)
+        {
+            for (ui, latency) in self.tracks.iter_mut().zip(previous) {
+                ui.latency = latency;
+            }
+            return Err(e);
+        }
+
+        // Everything the score says about its tracks: pan, both bus assignments, latency - and
+        // monitoring off. Monitoring belongs to the runner from now on (`hear_through` and the
+        // takes switch it, `monitor:` in the score says which tracks may have it at all), and its
+        // picture starts at "everything off"; a track started with monitoring on would otherwise
+        // stay on for the whole score, because the runner would never see a difference to send.
+        self.apply_score_setup(&score)?;
 
         let count_in = count_in.unwrap_or(DEFAULT_COUNT_IN_BARS);
         let title = score.title.clone();
@@ -1687,6 +1698,28 @@ impl Session {
         self.pump_runner();
         self.message = Some(message.clone());
         Ok(message)
+    }
+
+    /// Put every track into the setup the score describes. Untimed commands, only ever sent while
+    /// the tracks are empty and no score plays; the mirrors on this side follow along so a tempo
+    /// check and `EngineInfo` see the same numbers the engine has.
+    fn apply_score_setup(&mut self, score: &CompiledScore) -> Result<(), String> {
+        for command in setup_commands(score) {
+            self.cmd.send(command)?;
+        }
+        for (i, spec) in score.tracks.iter().enumerate() {
+            if let Some(ui) = self.tracks.get_mut(i) {
+                ui.latency = spec.track_latency();
+            }
+            if let Some(info) = self.info.tracks.get_mut(i) {
+                info.pan = spec.pan;
+                info.latency_frames = spec.latency;
+                info.latency_trim = spec.latency_trim;
+                info.bus = Some(spec.bus.clone());
+                info.monitor_bus = Some(spec.monitor_bus.clone());
+            }
+        }
+        Ok(())
     }
 
     /// The name of the first track that holds something, for the refusal above.

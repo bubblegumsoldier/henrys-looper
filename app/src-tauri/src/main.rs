@@ -501,7 +501,9 @@ async fn score_render(doc: ScoreDoc) -> Result<RenderOutcome, String> {
 ///
 /// Needs a running engine whose track layout matches the score (same names, same inputs - see
 /// `looper_engine::engine::runner::check_tracks`) and every track empty. Tempo, time signature and
-/// the length every layer buffer is allocated at then come from the score.
+/// the length every layer buffer is allocated at then come from the score, and so does every
+/// track's pan, bus assignment (`bus`, `monitor_bus`) and latency compensation (`latency`,
+/// `latency_trim`).
 ///
 /// `count_in` is the number of bars of click before the first section; absent means one bar, which
 /// is the shortest lead that is still a bar of the metre about to be played.

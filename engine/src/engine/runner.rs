@@ -893,6 +893,41 @@ fn lead_text(bars: u32, beats: u32) -> String {
     }
 }
 
+/// What a score says about how its tracks are set up, as the untimed commands that put an engine
+/// into that state: pan, the two bus assignments, the latency compensation - and monitoring off,
+/// which is the state the runner's picture starts from (`hear_through` and the takes switch it on
+/// at the section boundary).
+///
+/// Untimed on purpose: these are setup, not musical events, and they are only sent while every
+/// track is empty and no score is playing - on load, and again after "Clear all" has put the
+/// tracks back to the values they were *started* with.
+pub fn setup_commands(score: &CompiledScore) -> Vec<Command> {
+    use super::bus::TrackSource;
+    let mut out = Vec::with_capacity(score.tracks.len() * 5);
+    for (track, spec) in score.tracks.iter().enumerate() {
+        out.push(Command::SetPan {
+            track,
+            pan: spec.pan,
+        });
+        out.push(Command::SetTrackSend {
+            track,
+            source: TrackSource::Loop,
+            send: spec.loop_send(),
+        });
+        out.push(Command::SetTrackSend {
+            track,
+            source: TrackSource::Monitor,
+            send: spec.monitor_send(),
+        });
+        out.push(Command::SetTrackLatency {
+            track,
+            latency: spec.track_latency(),
+        });
+        out.push(Command::SetMonitor { track, on: false });
+    }
+    out
+}
+
 /// Check a score against the tracks an engine is **already** running with.
 ///
 /// The engine's track layout - how many tracks there are, what they are called and which inputs
