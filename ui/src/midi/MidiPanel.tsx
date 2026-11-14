@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { midiApi } from "../api";
+import { IS_MAC } from "../platform";
 import { MidiMonitor } from "./MidiMonitor";
 import { sayMidi, setLearnMode, setMidiView, useLearnMode, useMidiView } from "./store";
 import type { MidiPortView } from "./types";
@@ -110,7 +111,7 @@ export function MidiPanel() {
         <button
           className={`btn midi-learn-switch${learn ? " btn-on" : ""}`}
           onClick={toggleLearn}
-          title="Solange das an ist, belegt ein Klick auf ein Bedienelement dieses Element, statt es zu bedienen. Danach das gewünschte Pad drücken. Strg+Klick geht auch ohne den Schalter."
+          title={`Solange das an ist, belegt ein Klick auf ein Bedienelement dieses Element, statt es zu bedienen. Danach das gewünschte Pad drücken. ${IS_MAC ? "⌘" : "Strg"}+Klick geht auch ohne den Schalter.`}
         >
           MIDI lernen {learn ? "an" : "aus"}
         </button>
@@ -178,8 +179,9 @@ export function MidiPanel() {
           </div>
 
           <p className="midi-explain muted">
-            Windows gibt ein MIDI-Gerät immer nur an ein Programm gleichzeitig heraus: läuft Ableton
-            mit dem Controller als Control Surface, lässt er sich hier nicht öffnen. — Das Profil
+            {!IS_MAC &&
+              "Windows gibt ein MIDI-Gerät immer nur an ein Programm gleichzeitig heraus: läuft Ableton mit dem Controller als Control Surface, lässt er sich hier nicht öffnen. — "}
+            Das Profil
             gehört dem Gerät und gilt für jedes Stück; eine Partitur kann einzelne Tasten für sich
             umbelegen, und das steht dann hier als Herkunft „Partitur“.
           </p>

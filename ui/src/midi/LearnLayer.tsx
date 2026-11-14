@@ -24,6 +24,8 @@
 //! instead of binding a pad. That is a bad trade on a stage, so the reliable way is the visible one
 //! and Ctrl is the shortcut for whoever wants it.
 //!
+//! On the Mac the shortcut is ⌘ instead: Ctrl+click is a right click there.
+//!
 //! # Why the click is swallowed
 //!
 //! In learn mode a click on a learnable control must not *also* do its job - clicking „Aufnahme“ to
@@ -33,6 +35,7 @@
 //! (including the switch that turns this off again) working while the mode is on.
 
 import { useEffect } from "react";
+import { modHeld } from "../platform";
 import { midiApi } from "../api";
 import { bindingFor, isLearnMode, setLearnMode, setMidiView, sayMidi, useLearnMode, useMidiView } from "./store";
 
@@ -51,7 +54,7 @@ export function LearnLayer(): null {
     let claimed: { element: Element; at: number } | null = null;
 
     const grab = (e: PointerEvent | MouseEvent) => {
-      if (!isLearnMode() && !e.ctrlKey) return;
+      if (!isLearnMode() && !modHeld(e)) return;
       const target = e.target as HTMLElement | null;
       const element = target?.closest?.("[data-midi]") as HTMLElement | null;
       const address = element?.dataset.midi;

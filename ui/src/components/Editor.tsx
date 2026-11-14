@@ -40,8 +40,8 @@ export function Editor({ value, onChange, errors, onCompile, onLoad }: Props) {
         yaml(),
         oneDark,
         keymap.of([
-          { key: "Ctrl-Enter", run: () => (cbs.current.onCompile(), true) },
-          { key: "Ctrl-s", run: () => (cbs.current.onLoad(), true), preventDefault: true },
+          { key: "Mod-Enter", run: () => (cbs.current.onCompile(), true) },
+          { key: "Mod-s", run: () => (cbs.current.onLoad(), true), preventDefault: true },
           indentWithTab,
           ...defaultKeymap,
           ...historyKeymap,

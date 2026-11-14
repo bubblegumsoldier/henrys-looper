@@ -12,7 +12,7 @@
 //! point of this editor: the compiler reports *every* problem at once, each with a line, a column
 //! and often "meintest du 'bass'?", so a mistake should be under the cursor while the finger is
 //! still on the key, not after a trip to a button. The 400 ms of delay exist only so a half-typed
-//! track name does not flash red on every keystroke. Ctrl+Enter still compiles at once, for the
+//! track name does not flash red on every keystroke. Ctrl+Enter (⌘+Enter on the Mac) still compiles at once, for the
 //! moment one wants to know *now*, and Ctrl+S loads.
 //!
 //! Loading is the one deliberate act and stays a button: it moves the engine's tempo, time
@@ -27,6 +27,7 @@ import { Blocks } from "./Blocks";
 import { Transport } from "./Transport";
 import { ScoreLive } from "./ScoreLive";
 import type { CompiledScore, ScoreIssue } from "../types";
+import { MOD_LABEL } from "../platform";
 
 const LS_KEY = "looper.yaml";
 
@@ -195,14 +196,14 @@ export function ScoreView() {
               {errors.length === 0 ? "übersetzt beim Tippen" : `${errors.length} Fehler`}
             </span>
             <div className="spacer" />
-            <button className="btn" onClick={() => void compile(yamlText)} title="Ctrl+Enter">
+            <button className="btn" onClick={() => void compile(yamlText)} title={`${MOD_LABEL}+Enter`}>
               Übersetzen
             </button>
             <button
               className="btn btn-primary"
               onClick={load}
               disabled={busy || errors.length > 0 || yamlText.trim() === ""}
-              title="Ctrl+S — lädt die Partitur in den Runner. Braucht eine laufende, leere Engine."
+              title={`${MOD_LABEL}+S — lädt die Partitur in den Runner. Braucht eine laufende, leere Engine.`}
             >
               Laden
             </button>
