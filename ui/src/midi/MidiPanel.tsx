@@ -376,8 +376,10 @@ function BindingRow({
         {b.short}
       </span>
       <span className="midi-binding-label" title={b.describe}>
-        {b.label}
-        <span className="midi-binding-address mono muted"> {b.address}</span>
+        <span className="midi-binding-name">
+          {b.label}
+          <span className="midi-binding-address mono muted"> {b.address}</span>
+        </span>
         {b.reason && <span className="midi-binding-reason">{b.reason}</span>}
       </span>
       <span className={`midi-binding-state midi-state-${b.state}`} title={b.reason ?? "works"}>

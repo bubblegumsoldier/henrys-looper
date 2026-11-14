@@ -2387,7 +2387,7 @@ body {
   grid-template-columns: 74px 1fr auto auto auto;
 }
 .midi-binding-inactive .midi-binding-key,
-.midi-binding-inactive .midi-binding-label {
+.midi-binding-inactive .midi-binding-name {
   color: var(--fg-muted);
   text-decoration: line-through;
   text-decoration-color: rgba(255, 255, 255, 0.25);
