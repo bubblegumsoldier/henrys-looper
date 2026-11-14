@@ -25,7 +25,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use midir::{Ignore, MidiInput, MidiInputConnection};
+use midir::{Ignore, MidiInput, MidiInputConnection, MidiInputPort};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::event::{MidiDecoder, MidiEvent};
@@ -51,9 +51,50 @@ pub struct TimedEvent {
     pub event: MidiEvent,
 }
 
+/// Let the operating system tell this process about devices that came or went.
+///
+/// # Why this exists: CoreMIDI only learns about hot-plugging through a run loop
+///
+/// On macOS a process sees MIDI endpoints appear and disappear through notifications that CoreMIDI
+/// delivers to the **run loop of the thread that created the first MIDI client**. The host thread
+/// that does all MIDI work here has no run loop of its own, so without this the port list is frozen
+/// at the state of the first call: a controller plugged in later never shows up, and one pulled out
+/// stays in the list as an endpoint without a name. (Measured with a virtual port from a second
+/// process: no new port in sixteen polls without the pump, the right list from the next poll with
+/// it.) Running the run loop for zero seconds handles what is queued and returns at once.
+///
+/// Call it on the MIDI thread before [`list_ports`]. Elsewhere it does nothing: Windows' winmm and
+/// ALSA enumerate afresh on every call.
+pub fn refresh_system() {
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::c_void;
+        #[link(name = "CoreFoundation", kind = "framework")]
+        unsafe extern "C" {
+            static kCFRunLoopDefaultMode: *const c_void;
+            fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, after_one: u8) -> i32;
+        }
+        /// `kCFRunLoopRunHandledSource`: one source was handled and there may be more.
+        const HANDLED_SOURCE: i32 = 4;
+        // Bounded, so a flood of notifications cannot keep the host thread here.
+        for _ in 0..64 {
+            // SAFETY: plain C call with a constant the framework exports; every thread gets a run
+            // loop on first use, and a zero timeout never blocks.
+            let result = unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1) };
+            if result != HANDLED_SOURCE {
+                break;
+            }
+        }
+    }
+}
+
 /// Every MIDI input port. Opens nothing, so it is safe at any time - including while Ableton holds
 /// the device.
+///
+/// An endpoint without a name is left out: on macOS that is what a just-unplugged device looks like
+/// until the system has caught up, and it is nothing anybody could connect to.
 pub fn list_ports() -> Result<Vec<PortInfo>, String> {
+    refresh_system();
     let input = MidiInput::new(CLIENT).map_err(init_error)?;
     Ok(input
         .ports()
@@ -65,6 +106,7 @@ pub fn list_ports() -> Result<Vec<PortInfo>, String> {
                 .port_name(port)
                 .unwrap_or_else(|_| "<Name nicht lesbar>".to_string()),
         })
+        .filter(|port| !port.name.trim().is_empty())
         .collect())
 }
 
@@ -132,7 +174,24 @@ pub fn open(selector: &str) -> Result<MidiIn, String> {
     }
 
     let index = pick(selector, &names)?;
-    let name = names[index].clone();
+    connect(input, &ports[index], names[index].clone())
+}
+
+/// Open the port with exactly this name - what the automatic connection uses, because a name it
+/// got from [`list_ports`] a moment ago must not match two ports as a fragment.
+pub fn open_named(name: &str) -> Result<MidiIn, String> {
+    let mut input = MidiInput::new(CLIENT).map_err(init_error)?;
+    input.ignore(Ignore::All);
+    let ports = input.ports();
+    let port = ports
+        .iter()
+        .find(|port| input.port_name(port).is_ok_and(|n| n == name))
+        .cloned()
+        .ok_or_else(|| format!("MIDI input \"{name}\" is not available (any more)."))?;
+    connect(input, &port, name.to_string())
+}
+
+fn connect(input: MidiInput, port: &MidiInputPort, name: String) -> Result<MidiIn, String> {
 
     let (tx, rx) = RingBuffer::<TimedEvent>::new(QUEUE);
     let dropped = Arc::new(AtomicU64::new(0));
@@ -144,7 +203,7 @@ pub fn open(selector: &str) -> Result<MidiIn, String> {
 
     let connection = input
         .connect(
-            &ports[index],
+            port,
             "henrys-looper-in",
             |micros, bytes, sink: &mut Sink| {
                 // Split so the decoder and the queue are borrowed separately - the decoder needs
