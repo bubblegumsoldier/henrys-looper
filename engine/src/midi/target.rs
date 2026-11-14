@@ -506,6 +506,44 @@ impl Target {
         }
     }
 
+    /// The same target on another track; a target without a track comes back unchanged.
+    ///
+    /// What turns `track.stimme.record` into `track.1.record` once the session says which track
+    /// "stimme" is - the spelling a user interface element carries in its `data-midi` attribute.
+    #[must_use]
+    pub fn with_track(&self, track: TrackRef) -> Target {
+        let t = track;
+        match self.clone() {
+            Target::Record(_) => Target::Record(t),
+            Target::Overdub(_) => Target::Overdub(t),
+            Target::Play(_) => Target::Play(t),
+            Target::StopTrack(_) => Target::StopTrack(t),
+            Target::ClearTrack(_) => Target::ClearTrack(t),
+            Target::Monitor(_) => Target::Monitor(t),
+            Target::Pan(_) => Target::Pan(t),
+            Target::Send(_, source, bus) => Target::Send(t, source, bus),
+            Target::LatencyTrim(_) => Target::LatencyTrim(t),
+            Target::LayerMute(_, l) => Target::LayerMute(t, l),
+            Target::LayerRemove(_, l) => Target::LayerRemove(t, l),
+            Target::LayerGain(_, l) => Target::LayerGain(t, l),
+            Target::FxBypass(_) => Target::FxBypass(t),
+            Target::FxEnabled(_, slot) => Target::FxEnabled(t, slot),
+            Target::FxPreset(_, preset) => Target::FxPreset(t, preset),
+            Target::FxDelayNote(_, note) => Target::FxDelayNote(t, note),
+            Target::FxBandKind(_, band, kind) => Target::FxBandKind(t, band, kind),
+            Target::FxKnob(_, knob) => Target::FxKnob(t, knob),
+            other => other,
+        }
+    }
+
+    /// Whether this is part of the score's transport, which only exists while a score is loaded.
+    pub fn is_score_transport(&self) -> bool {
+        matches!(
+            self,
+            Target::ScoreStart | Target::ScoreNext | Target::ScoreStopAll | Target::ScoreGoto(_)
+        )
+    }
+
     /// Whether operating this moves the transport, i.e. whether it puts a take somewhere on the
     /// timeline.
     ///

@@ -216,36 +216,135 @@ impl Profile {
         out.push_str("# Controller-Profil fuer Henrys Looper.\n");
         out.push_str("# 'looper-engine midi targets' listet alle Ziele, 'midi monitor' zeigt,\n");
         out.push_str("# welche Adresse ein Pad oder Regler sendet.\n");
-        out.push_str(&format!("device: {}\n", quote(&self.device)));
-        out.push_str("bindings:\n");
+        out.push_str(&self.body_yaml());
+        out
+    }
+
+    /// Everything but the header comment.
+    fn body_yaml(&self) -> String {
+        let mut out = format!("device: {}\nbindings:\n", quote(&self.device));
         if self.map.is_empty() {
             out.push_str("  {}\n");
             return out;
         }
         for (id, binding) in self.map.sorted() {
-            let mut fields = vec![format!("target: {}", quote(&binding.target.to_string()))];
-            match binding.target.control() {
-                Control::Range(range) => {
-                    if binding.takeover != Takeover::default() {
-                        fields.push(format!("takeover: {}", binding.takeover.name()));
-                    }
-                    if let Some(min) = binding.min {
-                        fields.push(format!("min: {}", trim_number(min)));
-                    }
-                    if let Some(max) = binding.max {
-                        fields.push(format!("max: {}", trim_number(max)));
-                    }
-                    let _ = range;
-                }
-                _ => {
-                    if binding.button != Binding::new(binding.target.clone()).button {
-                        fields.push(format!("mode: {}", binding.button.name()));
-                    }
-                }
-            }
-            out.push_str(&format!("  {id}: {{{}}}\n", fields.join(", ")));
+            out.push_str(&format!("  {id}: {}\n", flow(binding)));
         }
         out
+    }
+
+    /// This profile written over `original`, changing as little of it as possible.
+    ///
+    /// # Why not simply [`Self::to_yaml`]
+    ///
+    /// Because a profile is a file people edit by hand, and the learn mode now saves after every
+    /// single binding. Rewriting the whole file each time would sort the lines, drop every comment
+    /// and every blank line a musician used to group his pads ("--- obere Reihe: Mithoeren ---",
+    /// see `examples/midi-mpd218.yaml`) - after the first learned pad, the file he wrote would be
+    /// gone. So the original is edited line by line:
+    ///
+    /// * a binding that did not change keeps its line exactly, comment and spacing included;
+    /// * a changed one gets a new value and keeps its trailing comment;
+    /// * a removed one loses its line (the comments around it stay - they may describe a group);
+    /// * a new one is appended at the end of the `bindings:` block.
+    ///
+    /// Only a file whose bindings are not one line each (a binding written as a nested block) is
+    /// written afresh, and then `kept` is false so the caller can keep a copy of the original. The
+    /// result is parsed again before it is returned: if the edited text would not read back as
+    /// exactly this profile, the fresh version is used instead.
+    pub fn rewrite(&self, original: &str) -> Rewritten {
+        if let Some(text) = self.edit_lines(original)
+            && Profile::parse(&text).is_ok_and(|back| back == *self)
+        {
+            return Rewritten { text, kept: true };
+        }
+        // The user's leading comment block survives even the fresh version.
+        let header: String = original
+            .lines()
+            .take_while(|line| line.trim().is_empty() || line.trim_start().starts_with('#'))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        let text = if header.trim().is_empty() {
+            self.to_yaml()
+        } else {
+            format!("{header}{}", self.body_yaml())
+        };
+        Rewritten { text, kept: false }
+    }
+
+    fn edit_lines(&self, original: &str) -> Option<String> {
+        let lines: Vec<&str> = original.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.starts_with("bindings:") || line.starts_with("bindings :"))?;
+        let (head_value, head_comment) = split_comment(lines[start].split_once(':')?.1);
+        if !matches!(head_value.trim(), "" | "{}") {
+            return None;
+        }
+        let end = lines[start + 1..]
+            .iter()
+            .position(|line| {
+                !line.trim().is_empty()
+                    && !line.starts_with(char::is_whitespace)
+                    && !line.starts_with('#')
+            })
+            .map_or(lines.len(), |offset| start + 1 + offset);
+
+        let mut out: Vec<String> = lines[..start].iter().map(|l| l.to_string()).collect();
+        out.push(format!("bindings:{head_comment}"));
+        let mut seen: Vec<MidiId> = Vec::new();
+        let mut indent = "  ".to_string();
+        let mut last_binding = out.len();
+        for line in &lines[start + 1..end] {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                out.push(line.to_string());
+                continue;
+            }
+            let own_indent = &line[..line.len() - trimmed.len()];
+            let (key, rest) = trimmed.split_once(':')?;
+            let id = MidiId::parse(key.trim()).ok()?;
+            let (value, comment) = split_comment(rest);
+            let value = value.trim();
+            if value.is_empty() || (value.starts_with('{') && !value.ends_with('}')) {
+                return None; // a nested block: not a one-line binding
+            }
+            indent = own_indent.to_string();
+            if seen.contains(&id) {
+                continue;
+            }
+            seen.push(id);
+            let Some(binding) = self.map.get(id) else {
+                continue; // unbound: the line goes
+            };
+            let old = parse_document(value)
+                .ok()
+                .and_then(|node| read_binding(&node).ok());
+            if old.as_ref() == Some(binding) {
+                out.push(line.to_string());
+            } else {
+                out.push(format!("{own_indent}{}: {}{comment}", key.trim(), flow(binding)));
+            }
+            last_binding = out.len();
+        }
+        let mut fresh: Vec<String> = self
+            .map
+            .sorted()
+            .into_iter()
+            .filter(|(id, _)| !seen.contains(id))
+            .map(|(id, binding)| format!("{indent}{id}: {}", flow(binding)))
+            .collect();
+        if self.map.is_empty() {
+            // Nothing left: `bindings: {}` says so more plainly than an empty block.
+            out[start] = format!("bindings: {{}}{head_comment}");
+        }
+        let tail = out.split_off(last_binding);
+        out.append(&mut fresh);
+        out.extend(tail);
+        out.extend(lines[end..].iter().map(|l| l.to_string()));
+        let mut text = out.join("\n");
+        text.push('\n');
+        Some(text)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
@@ -257,6 +356,72 @@ impl Profile {
         std::fs::write(path, self.to_yaml())
             .map_err(|e| format!("Profil {} laesst sich nicht schreiben: {e}", path.display()))
     }
+}
+
+/// What [`Profile::rewrite`] produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rewritten {
+    pub text: String,
+    /// True when the original's lines, comments and order were kept; false when the file had to be
+    /// written afresh (only its leading comment block survives then).
+    pub kept: bool,
+}
+
+/// One binding as a flow mapping, `{target: track.1.record, mode: momentary}` - only the fields
+/// that differ from the target's defaults.
+fn flow(binding: &Binding) -> String {
+    let mut fields = vec![format!("target: {}", quote(&binding.target.to_string()))];
+    match binding.target.control() {
+        Control::Range(_) => {
+            if binding.takeover != Takeover::default() {
+                fields.push(format!("takeover: {}", binding.takeover.name()));
+            }
+            if let Some(min) = binding.min {
+                fields.push(format!("min: {}", trim_number(min)));
+            }
+            if let Some(max) = binding.max {
+                fields.push(format!("max: {}", trim_number(max)));
+            }
+        }
+        _ => {
+            if binding.button != Binding::new(binding.target.clone()).button {
+                fields.push(format!("mode: {}", binding.button.name()));
+            }
+        }
+    }
+    format!("{{{}}}", fields.join(", "))
+}
+
+/// Split `value   # comment` into the value and the comment *with* the whitespace before it, so
+/// the comment can be put back exactly where it was. A `#` inside quotes is not a comment.
+fn split_comment(text: &str) -> (&str, &str) {
+    let mut quote: Option<char> = None;
+    let mut previous = ' ';
+    for (index, c) in text.char_indices() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '"' || c == '\'' => quote = Some(c),
+            None if c == '#' && previous.is_whitespace() => {
+                let value = &text[..index];
+                let start = value.trim_end().len();
+                return (&text[..start], &text[start..]);
+            }
+            None => {}
+        }
+        previous = c;
+    }
+    (text, "")
+}
+
+/// The `device:` of a file that does not parse as a whole - so a profile with a typo in line 20
+/// can still be recognised as "the MPD218's profile" and be reported as broken rather than
+/// silently replaced by a fresh one.
+pub fn device_hint(text: &str) -> Option<String> {
+    let line = text.lines().find(|line| line.starts_with("device:"))?;
+    let (value, _) = split_comment(&line["device:".len()..]);
+    let value = value.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// One `{target: ..., mode: ..., takeover: ..., min: ..., max: ...}` block.

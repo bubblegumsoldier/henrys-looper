@@ -29,6 +29,8 @@
 //! | [`router`] | nein | Ereignis + Mapping -> Absicht, samt der Grenze zum laufenden Runner |
 //! | [`profile`] | nein (nur Dateisystem) | Controller-Profil lesen und schreiben |
 //! | [`learn`] | nein | "die naechste Taste wird X" |
+//! | [`store`] | nein (nur Dateisystem) | alle Profile des Rechners, automatisch gespeichert |
+//! | [`status`] | nein | wuerde diese Bindung gerade funktionieren? |
 //! | [`input`] | **ja** | midir, Geraeteliste, Oeffnen, Queue |
 //! | [`cli`] | ja, ausser `targets` | das `midi`-Subkommando |
 //!
@@ -42,6 +44,8 @@ pub mod input;
 pub mod learn;
 pub mod profile;
 pub mod router;
+pub mod status;
+pub mod store;
 pub mod target;
 
 #[cfg(test)]
@@ -50,7 +54,9 @@ mod tests;
 pub use binding::{Binding, ButtonMode, MidiMap, Takeover};
 pub use event::{MidiDecoder, MidiEvent, MidiId, MidiIdKind};
 pub use learn::{Learn, Learned};
-pub use profile::{Profile, profile_dir, profile_for_port, profile_path};
+pub use profile::{Profile, Rewritten, profile_dir, profile_for_port, profile_path};
+pub use status::{BindingState, SessionShape, TargetCheck, check_target};
+pub use store::{ProfileStore, Saved, StoreChange, StoredProfile};
 pub use router::{
     Context, MidiAction, ParamState, Resolution, Router, StaticState, TrackLayout,
 };
