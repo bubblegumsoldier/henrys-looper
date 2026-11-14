@@ -138,6 +138,7 @@ fn a_known_device_connects_by_itself_at_start_and_after_a_replug() {
     let mpd = device(&view, "MPD218");
     assert_eq!(mpd.state, DeviceState::Missing);
     assert_eq!((mpd.active, mpd.inactive), (0, 2));
+    assert!(mpd.last_seen.is_some(), "\"last seen\" survives the unplug");
     assert!(mpd.summary.contains("not plugged in - 2 bindings inactive"), "{}", mpd.summary);
     assert!(view.bindings.iter().all(|b| b.state == BindingState::DeviceMissing));
 

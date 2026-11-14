@@ -203,6 +203,9 @@ pub struct MidiDeviceView {
     pub error: Option<String>,
     /// True while a change could not be written (see `save_error`).
     pub unsaved: bool,
+    /// When the device was last connected, in milliseconds since 1970 - "last seen 20:41". Only
+    /// known since the app started; null before that.
+    pub last_seen: Option<u64>,
     /// One English line, ready to show: "connected - 12 of 12 bindings active".
     pub summary: String,
 }
@@ -356,6 +359,8 @@ pub struct MidiBridge {
     last_emit: Instant,
     last_scan: Option<Instant>,
     last_shape: Option<Instant>,
+    /// Profile file -> when its device was last seen connected.
+    seen: Vec<(PathBuf, u64)>,
 }
 
 impl Default for MidiBridge {
@@ -390,6 +395,7 @@ impl MidiBridge {
             last_emit: Instant::now(),
             last_scan: None,
             last_shape: None,
+            seen: Vec::new(),
         }
     }
 
@@ -441,6 +447,15 @@ impl MidiBridge {
             self.view_changed = true;
         }
         self.available = ports;
+
+        // Still here: remember when, for "last seen" once it is gone.
+        let now = now_ms();
+        for link in &self.links {
+            match self.seen.iter_mut().find(|(p, _)| *p == link.profile) {
+                Some(slot) => slot.1 = now,
+                None => self.seen.push((link.profile.clone(), now)),
+            }
+        }
 
         // Gone: drop the link, say how many bindings went with it.
         let mut index = 0;
@@ -516,6 +531,8 @@ impl MidiBridge {
             router: Router::new(MidiMap::new()),
             notes: Vec::new(),
         });
+        self.seen.retain(|(p, _)| p != path);
+        self.seen.push((path.to_path_buf(), now_ms()));
         self.rebuild(path);
         self.view_changed = true;
         let entry = self.store.get(path);
@@ -1145,6 +1162,11 @@ impl MidiBridge {
                 inactive,
                 error: entry.error.clone().or(failure),
                 unsaved: entry.unsaved,
+                last_seen: self
+                    .seen
+                    .iter()
+                    .find(|(p, _)| *p == entry.path)
+                    .map(|(_, at)| *at),
                 summary,
             });
         }
@@ -1226,6 +1248,12 @@ fn pick(selector: &str, names: &[String]) -> Result<String, String> {
             names.join(", ")
         )),
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
