@@ -28,6 +28,7 @@ import { Transport } from "./Transport";
 import { ScoreLive } from "./ScoreLive";
 import type { CompiledScore, ScoreIssue } from "../types";
 import { MOD_LABEL } from "../platform";
+import { confirmAction } from "../dialogs";
 
 const LS_KEY = "looper.yaml";
 
@@ -162,10 +163,19 @@ export function ScoreView() {
   const next = useCallback(() => say(() => scoreApi.next()), [say]);
   const stopAll = useCallback(() => say(() => scoreApi.stopAll()), [say]);
   const goto = useCallback((section: number) => say(() => scoreApi.goto(section)), [say]);
+  const rewind = useCallback(() => {
+    void confirmAction(
+      "Back to start clears ALL tracks - every recorded loop is gone - and returns to the first section.",
+      "Back to start",
+      "Clear tracks & rewind",
+    ).then((yes) => {
+      if (yes) say(() => scoreApi.rewind());
+    });
+  }, [say]);
 
   return (
     <div className="score-view">
-      <Transport loaded={inRunner} onStart={start} onNext={next} onStopAll={stopAll} />
+      <Transport loaded={inRunner} onStart={start} onNext={next} onStopAll={stopAll} onRewind={rewind} />
 
       {notes.length > 0 && (
         <section className="live-notes">

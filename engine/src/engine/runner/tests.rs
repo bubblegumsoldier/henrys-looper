@@ -930,6 +930,190 @@ fn the_buttons_answer_in_german_before_the_start_and_after_the_end() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Stopping in the middle of a take, and starting over
+// ---------------------------------------------------------------------------------------------
+
+/// One section that records and then waits for the release button - so while its take runs,
+/// nothing is armed, and the take's own `StartPlay` at its end is already in the engine.
+const ONE_TAKE: &str = "\
+bpm: 120
+tracks:
+  a: {input: 1}
+sections:
+  - id: rec
+    bars: 4
+    autorelease: false
+    tracks:
+      a: record
+";
+
+/// A runner and the real engine core, driven together block by block.
+struct Live {
+    sim: Sim,
+    runner: Runner,
+    first_bar: u64,
+}
+
+impl Live {
+    fn new(yaml: &str) -> Self {
+        let score = compile_score(yaml).expect("uebersetzt");
+        let timeline = Timeline::new(RATE, score.bpm, score.signature());
+        let max_bars = score.sections.iter().map(|s| s.bars).max().unwrap();
+        let sim = Sim::new(
+            SimSpec {
+                bpm: score.bpm,
+                signature: score.signature(),
+                bars: max_bars,
+                block: BLOCK as usize,
+                tracks: vec![TrackSpec::on(0)],
+                input_channels: 1,
+                loopback_channel: None,
+                layer_frames: Some(loop_capacity(&timeline, max_bars)),
+                ..Default::default()
+            },
+            mono(fingerprint),
+        );
+        let mut runner = Runner::new(score, timeline, BLOCK).expect("Runner");
+        runner.start(0);
+        let first_bar = runner.armed_at().expect("armiert").1;
+        let mut live = Self { sim, runner, first_bar };
+        live.pump();
+        live
+    }
+
+    fn pump(&mut self) {
+        for cmd in self.runner.take_commands() {
+            self.sim.send(cmd);
+        }
+    }
+
+    fn bar(&self, bars: u64) -> u64 {
+        self.runner.scheduler().timeline.bar_start(self.first_bar + bars)
+    }
+
+    fn run_to(&mut self, pos: u64) {
+        while self.sim.pos() < pos {
+            self.runner.tick(self.sim.pos());
+            self.pump();
+            self.sim.run_blocks(1);
+        }
+    }
+
+    fn track(&mut self) -> crate::engine::command::TrackStatus {
+        self.sim.latest_status().expect("Status").tracks()[0]
+    }
+}
+
+/// **The gap, nailed down.** "Stop all" in the middle of a take, in a section that waits for the
+/// release button (so nothing is armed): the take is closed early, but the `StartPlay` it scheduled
+/// for its own end was already in the engine. Without a counter-command the track would start
+/// playing again on its own, bars after the musician asked for silence.
+#[test]
+fn stop_all_during_a_take_keeps_the_track_silent_after_the_takes_planned_end() {
+    let mut live = Live::new(ONE_TAKE);
+    live.run_to(live.bar(1) + 1_000);
+    assert_eq!(live.runner.view(live.sim.pos()).section, Some(0));
+    assert!(live.runner.armed_at().is_none(), "nichts armiert - genau der Fall");
+
+    let message = live.runner.stop_all(live.sim.pos());
+    live.pump();
+    assert!(message.contains("Alles gestoppt"), "{message}");
+
+    // Well past the bar the take would have ended on.
+    let past = live.bar(6);
+    live.run_to(past);
+    let track = live.track();
+    assert!(!track.playing, "der Track laeuft wieder an: {track:?}");
+    assert_eq!(live.sim.latest_status().unwrap().refusal, Refusal::None);
+}
+
+/// The same when the take ends between the press and the next bar line: the take is not cut, but
+/// its `StartPlay` comes after the stop and must not undo it.
+#[test]
+fn stop_all_just_before_a_take_ends_keeps_the_track_silent() {
+    let mut live = Live::new(ONE_TAKE);
+    let end = live.bar(4);
+    let guard = live.runner.scheduler().guard;
+    live.run_to(end - guard - 2 * BLOCK as u64);
+    live.runner.stop_all(live.sim.pos());
+    live.pump();
+    live.run_to(live.bar(7));
+    assert!(!live.track().playing);
+}
+
+/// Back to the start: the run is over, the tracks are cleared, and the same score plays again from
+/// its first section - with exactly the command stream of a first run, shifted in time.
+#[test]
+fn a_finished_score_can_be_rewound_and_played_again() {
+    let mut live = Live::new(ONE_TAKE);
+    live.run_to(live.bar(1));
+    assert!(live.runner.start(live.sim.pos()).contains("laeuft schon"));
+    live.runner.stop_all(live.sim.pos());
+    live.pump();
+    assert!(
+        live.runner.start(live.sim.pos()).contains("Back to start"),
+        "nach dem Ende sagt Start, wie es weitergeht"
+    );
+
+    let est = live.sim.pos();
+    let (message, commands) = live.runner.rewind(est).expect("zurueckspulen");
+    assert!(message.contains("Back to start"), "{message}");
+    assert!(
+        commands.iter().any(|c| matches!(c, Command::ClearAll { .. })),
+        "zurueck auf Anfang leert die Tracks: {commands:?}"
+    );
+    for cmd in commands {
+        live.sim.send(cmd);
+    }
+    assert_eq!(live.runner.phase(), Phase::Idle);
+
+    // And again, from the top.
+    live.runner.start(live.sim.pos());
+    let (start, first_bar) = live.runner.armed_at().expect("wieder armiert");
+    live.first_bar = first_bar;
+    live.pump();
+    live.run_to(live.bar(4) + 4 * BLOCK as u64);
+    let track = live.track();
+    assert_eq!(track.layers, 1, "ein frischer Take, kein alter Rest");
+    assert_eq!(track.origin, start);
+    assert_eq!(track.loop_len, live.bar(4) - start, "genau vier Takte");
+    assert!(track.playing);
+    assert_eq!(live.sim.latest_status().unwrap().refusal, Refusal::None);
+}
+
+/// While the score plays there is no rewinding - the armed commands would outlive it.
+#[test]
+fn rewinding_a_playing_score_is_refused() {
+    let mut runner = runner_for(HENRY);
+    assert!(runner.rewind(0).is_ok(), "vor dem Start ist das harmlos");
+    runner.start(0);
+    let refusal = runner.rewind(0).expect_err("laeuft");
+    assert!(refusal.contains("Stop all"), "{refusal}");
+}
+
+/// "Clear all" throws away what was scheduled before it, so a far-future command of a stopped run
+/// cannot reach into the next one.
+#[test]
+fn clear_all_drops_what_was_scheduled_before_it() {
+    let mut live = Live::new(ONE_TAKE);
+    live.run_to(live.bar(0) + 1_000);
+    // A stray command far in the future, as a stopped run could leave behind.
+    let late = live.bar(6);
+    live.sim.send(Command::StartPlay { track: 0, at: late });
+    let now = live.sim.pos();
+    live.sim.send(Command::ClearAll { at: now + 1_000 });
+    // Sent after the clear: survives it.
+    let (from, to) = (live.bar(2), live.bar(3));
+    live.sim.send(Command::StartRecord { track: 0, at: from });
+    live.sim.send(Command::StopRecord { track: 0, at: to });
+    live.run_to(live.bar(7));
+    let track = live.track();
+    assert!(!track.playing, "der alte StartPlay wurde mit geleert");
+    assert_eq!(track.layers, 1, "was nach dem Leeren geschickt wurde, gilt");
+    assert_eq!(track.loop_len, to - from);
+}
+
+// ---------------------------------------------------------------------------------------------
 // What a score says about its tracks
 // ---------------------------------------------------------------------------------------------
 

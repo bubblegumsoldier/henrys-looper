@@ -383,6 +383,12 @@ impl Runner {
     /// Everything the first section needs is scheduled here, with timestamps - the runner does not
     /// come back at the boundary to do it.
     pub fn start(&mut self, est: u64) -> String {
+        if self.phase.is_over() {
+            self.message =
+                "The score has ended. Use \"Back to start\" to clear the tracks and play it again."
+                    .to_string();
+            return self.message.clone();
+        }
         if self.phase != Phase::Idle {
             self.message = "Die Partitur laeuft schon.".to_string();
             return self.message.clone();
@@ -466,14 +472,25 @@ impl Runner {
             let name = self.tracks[track].name.clone();
             // A take that is still running is closed on the bar line rather than left open; the
             // loop it defines is short, but the musician asked for silence.
-            if self.tracks[track].take_end > bar {
+            let take_end = self.tracks[track].take_end;
+            if take_end > bar {
                 self.out.push(Command::StopRecord { track, at: bar });
-                self.tracks[track].take_end = 0;
             }
-            if self.tracks[track].sounding || self.tracks[track].take_end != 0 {
+            if self.tracks[track].sounding || take_end != 0 {
                 let plan = self.sched.stop_play_at(track, &name, soon);
                 self.push(plan);
                 stopped += 1;
+            }
+            // Every take was scheduled as `StartRecord, StopRecord, StartPlay` in one go, and the
+            // last two are in the engine already, stamped for the take's planned end. Cutting the
+            // take short does not recall them, so the track would start playing again on its own
+            // at that sample. A `StopPlay` at the very same position, sent after them, keeps it
+            // silent - commands due at one position run in the order they were sent.
+            if take_end != 0 {
+                self.out.push(Command::StopPlay {
+                    track,
+                    at: take_end,
+                });
             }
             self.set_monitor(track, false);
             self.tracks[track].sounding = false;
@@ -511,6 +528,53 @@ impl Runner {
         self.current = None;
         self.message = format!("Alles gestoppt ({stopped} Tracks).{note}");
         self.message.clone()
+    }
+
+    /// Back to the start: the run is forgotten and the score can be started again.
+    ///
+    /// **The tracks are cleared, and that is not optional.** The runner plans every overdub
+    /// against the loop geometry of the takes it scheduled itself and starts from the belief that
+    /// every track is empty (see the module comment). A loop left over from the previous run would
+    /// be invisible to that plan - the first `play` would not start it, the first `overdub` would
+    /// land on a grid the runner does not know. So rewinding means: clear every track (one
+    /// `ClearAll`, which also drops whatever the previous run still had waiting in the engine), and
+    /// begin again from an empty session, exactly as after loading.
+    ///
+    /// Refused while the score plays: "Stop all" first. Returns the commands to send; the caller
+    /// also has to restore the score's track setup once the clear has happened, because a clear
+    /// puts every track back to the values it was *started* with.
+    pub fn rewind(&mut self, est: u64) -> Result<(String, Vec<Command>), String> {
+        if matches!(self.phase, Phase::CountIn | Phase::Running) {
+            return Err(
+                "The score is playing. Press \"Stop all\" first, then \"Back to start\"."
+                    .to_string(),
+            );
+        }
+        let clear = Command::ClearAll {
+            at: self.sched.soon(est),
+        };
+        for track in self.tracks.iter_mut() {
+            track.target = ScoreState::Stop;
+            track.sounding = false;
+            track.origin = 0;
+            track.len = 0;
+            track.len_bars = 0;
+            track.layers = 0;
+            track.take_end = 0;
+            track.take_end_bar = 0;
+            // A clear restores each track's start-up monitoring, which the caller then switches
+            // off again; the runner's picture is "off" either way.
+            track.monitor = false;
+        }
+        self.out.clear();
+        self.current = None;
+        self.armed = None;
+        self.phase = Phase::Idle;
+        self.message = format!(
+            "Back to start: all tracks cleared, \"{}\" is ready to play again.",
+            self.score.title
+        );
+        Ok((self.message.clone(), vec![clear]))
     }
 
     // ---- the clock ---------------------------------------------------------------------------

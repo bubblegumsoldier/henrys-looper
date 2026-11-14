@@ -545,6 +545,17 @@ async fn score_stop_all(engine: State<'_, EngineHandle>) -> Result<String, Strin
     score_act(engine, ScoreAction::StopAll).await
 }
 
+/// Back to the start: clear every track and put the score before its first section, so "Start"
+/// plays it again from the top. Refused while the score plays ("Stop all" first).
+///
+/// The clearing is not optional: the runner plans every overdub against loops it recorded itself,
+/// and a loop left over from the previous run would be invisible to it. The score's track setup
+/// (pan, buses, latency) is restored right after the clear.
+#[tauri::command]
+async fn score_rewind(engine: State<'_, EngineHandle>) -> Result<String, String> {
+    score_act(engine, ScoreAction::Rewind).await
+}
+
 /// Every score transport press funnels through here.
 async fn score_act(
     engine: State<'_, EngineHandle>,
@@ -644,6 +655,9 @@ async fn midi_state(engine: State<'_, EngineHandle>) -> Result<MidiView, String>
 
 fn main() {
     tauri::Builder::default()
+        // Native open/save dialogs and the "are you sure" questions. File contents never go
+        // through the plugin: reading and writing a score are commands of our own (`files.rs`).
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // The log file first: from here on every println! in the process - ours and the
             // engine library's - ends up in it.
@@ -706,6 +720,7 @@ fn main() {
             score_next,
             score_goto,
             score_stop_all,
+            score_rewind,
             calibrate,
             midi_ports,
             midi_open,

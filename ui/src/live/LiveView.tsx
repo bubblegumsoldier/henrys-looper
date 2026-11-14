@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, scoreApi } from "../api";
 import { GLOBAL, quantizeAddress } from "../midi/addresses";
 import { currentStatus, structureSignature, useStatusSlice } from "../status";
+import { confirmAction } from "../dialogs";
 import { Transport } from "../components/Transport";
 import { Position } from "./Position";
 import { Setup } from "./Setup";
@@ -427,6 +428,15 @@ export function LiveView({ info }: { info: AppInfo | null }) {
           onStart={() => say(() => scoreApi.start())}
           onNext={() => say(() => scoreApi.next())}
           onStopAll={() => say(() => scoreApi.stopAll())}
+          onRewind={() =>
+            void confirmAction(
+              "Back to start clears ALL tracks - every recorded loop is gone - and returns to the first section.",
+              "Back to start",
+              "Clear tracks & rewind",
+            ).then((yes) => {
+              if (yes) say(() => scoreApi.rewind());
+            })
+          }
         />
       )}
 

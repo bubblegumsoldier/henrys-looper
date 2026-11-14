@@ -1,7 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Fenster darf Kommandos aufrufen und Events empfangen. Mehr braucht der Looper nicht.",
+  "description": "Window may call commands and receive events, show native open/save dialogs and questions, and set its own title and close guard.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-ask",
+    "dialog:allow-message",
+    "core:window:allow-set-title",
+    "core:window:allow-destroy"
+  ]
 }

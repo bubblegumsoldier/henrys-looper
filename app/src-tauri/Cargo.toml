@@ -25,3 +25,4 @@ serde_json = "1"
 # needs to name `cpal::Stream` (it owns two of them) and the input FIFO type.
 cpal = "0.18"
 rtrb = "0.4.0"
+tauri-plugin-dialog = "2"

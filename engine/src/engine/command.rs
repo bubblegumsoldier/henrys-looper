@@ -66,7 +66,9 @@ pub enum Command {
     StopPlay { track: usize, at: u64 },
     /// Throw this track's layers away; the buffers go back to the control thread.
     ClearTrack { track: usize, at: u64 },
-    /// Reset every track to the state of a fresh start and return every buffer.
+    /// Reset every track to the state of a fresh start and return every buffer. Commands that were
+    /// sent before it and are still waiting for their time are dropped with it - a fresh start has
+    /// nothing scheduled.
     ClearAll { at: u64 },
     /// Input monitoring (hearing yourself through the engine) for one track, independent of whether
     /// that track is playing.

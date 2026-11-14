@@ -441,6 +441,15 @@ impl EngineCore {
                 Some((index, _)) => {
                     // `remove` on a `Vec` of `Copy` commands is a memmove of a few dozen bytes.
                     let cmd = self.scheduled.remove(index);
+                    if matches!(cmd, Command::ClearAll { .. }) {
+                        // "Like freshly started" includes the waiting room: everything still in it
+                        // that was sent *before* the clear (the lower slots - arrival order is kept)
+                        // belongs to the state being thrown away. Without this a take's `StartPlay`
+                        // scheduled bars ahead would wake a track up after it was cleared. What was
+                        // sent after the clear stays. `drain` on a `Vec` of `Copy` values moves
+                        // memory and allocates nothing.
+                        self.scheduled.drain(..index);
+                    }
                     self.apply(cmd);
                 }
                 None => break,

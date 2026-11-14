@@ -223,4 +223,9 @@ export const scoreApi = {
   goto: (section: number) => call<string>("score_goto", { section }),
   /** Stop every track and end the run. */
   stopAll: () => call<string>("score_stop_all"),
+  /**
+   * Back to the start: **clears every track** and puts the score before its first section, so
+   * `start` plays it again. Refused while the score plays (stop it first). Ask before calling.
+   */
+  rewind: () => call<string>("score_rewind"),
 };

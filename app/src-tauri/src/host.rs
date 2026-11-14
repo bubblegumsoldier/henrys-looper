@@ -178,6 +178,8 @@ pub enum ScoreAction {
     Goto(usize),
     /// Stop every track and end the run.
     StopAll,
+    /// Clear every track and put the score back before its first section, ready to start again.
+    Rewind,
 }
 
 impl Action {
@@ -1188,6 +1190,10 @@ struct Session {
     last_refusal: (u64, Refusal),
     message: Option<String>,
     stopped: bool,
+    /// Sample position of a pending `ClearAll`, while a score is loaded. A clear puts every track
+    /// back to the pan, buses and latency it was *started* with, so the score's own setup is sent
+    /// again once the engine has passed this position - not before, or the clear would undo it.
+    reapply_at: Option<u64>,
 }
 
 impl Session {
@@ -1443,6 +1449,7 @@ impl Session {
             last_refusal: (0, Refusal::None),
             message: None,
             stopped: false,
+            reapply_at: None,
         })
     }
 
@@ -1504,6 +1511,18 @@ impl Session {
                 runner.tick(status.pos);
             }
             self.pump_runner();
+        }
+
+        // A clear has happened: the score's track setup goes back on.
+        if let (Some(at), Some((status, _))) = (self.reapply_at, self.last)
+            && status.pos > at
+        {
+            self.reapply_at = None;
+            if let Some(score) = self.runner.as_ref().map(|r| r.score().clone())
+                && let Err(e) = self.apply_score_setup(&score)
+            {
+                self.message = Some(e);
+            }
         }
 
         // The only place layer buffers are allocated, zeroed and dropped.
@@ -1694,6 +1713,19 @@ impl Session {
             ScoreAction::Next => runner.next(est),
             ScoreAction::Goto(index) => runner.goto(index, est),
             ScoreAction::StopAll => runner.stop_all(est),
+            ScoreAction::Rewind => {
+                let (message, commands) = runner.rewind(est)?;
+                for command in commands {
+                    if let Command::ClearAll { at } = command {
+                        self.reapply_at = Some(at);
+                    }
+                    self.cmd.send(command)?;
+                }
+                for ui in self.tracks.iter_mut() {
+                    ui.gains.clear();
+                }
+                message
+            }
         };
         self.pump_runner();
         self.message = Some(message.clone());
@@ -1855,6 +1887,12 @@ impl Session {
                 let plan = self.scheduler.clear_all(est);
                 for ui in self.tracks.iter_mut() {
                     ui.gains.clear();
+                }
+                // With a score loaded, "like freshly started" means: as the score sets it up.
+                if self.runner.is_some()
+                    && let Some(Command::ClearAll { at }) = plan.commands.first()
+                {
+                    self.reapply_at = Some(*at);
                 }
                 self.send_all(plan)
             }

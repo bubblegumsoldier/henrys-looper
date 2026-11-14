@@ -23,6 +23,8 @@ interface Props {
   onStart: () => void;
   onNext: () => void;
   onStopAll: () => void;
+  /** Clear the tracks and go back before the first section. Absent: no button. */
+  onRewind?: () => void;
   /** The strip inside the live view rather than the header of the score view. */
   compact?: boolean;
 }
@@ -110,10 +112,11 @@ function typing(target: EventTarget | null): boolean {
   );
 }
 
-export function Transport({ loaded, onStart, onNext, onStopAll, compact = false }: Props) {
+export function Transport({ loaded, onStart, onNext, onStopAll, onRewind, compact = false }: Props) {
   const view = useStatusSlice(pick, same);
   const runs = playing(view.phase);
   const canStart = loaded && (view.phase === "idle" || view.phase === "none");
+  const over = view.phase === "finished" || view.phase === "stopped";
 
   // The same keys the CLI has: space or `n` releases, `s` stops everything. `s` carries Shift here
   // because the live view already spends the bare letter on "stop the selected track", and the two
@@ -204,6 +207,17 @@ export function Transport({ loaded, onStart, onNext, onStopAll, compact = false 
           Alles stoppen
           <kbd>⇧S</kbd>
         </button>
+        {onRewind && (
+          <button
+            className="btn btn-score btn-score-rewind"
+            onClick={onRewind}
+            disabled={!over}
+            title="Clears all tracks and returns to the first section, so Start plays the score again. Asks first."
+          >
+            Back to start
+            <kbd>clears tracks</kbd>
+          </button>
+        )}
       </div>
     </section>
   );
