@@ -58,12 +58,13 @@ use looper_engine::engine::runner::{
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
 use looper_engine::midi::{
-    Context, FxKnob, MidiAction, ParamState, Resolution, Target, TrackLayout, TrackRef,
+    Context, FxKnob, MidiAction, ParamState, Resolution, SessionShape, Target, TrackLayout,
+    TrackRef,
 };
 use looper_engine::score::{CompiledScore, ScoreError, compile_score};
 
 use crate::logfile::{self, log};
-use crate::midi::{MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView};
+use crate::midi::{BindingOptions, MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView};
 use crate::proto::{
     AppInfo, BusOutConfig, CalibrateConfig, NoticeEvent, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
     DeviceReport, EngineInfo, HostInfo, QuantizeName, ScoreLoaded, StartConfig, StatusEvent,
@@ -256,10 +257,13 @@ enum Request {
     // connection belongs to the thread that opened it.
     MidiPorts(Sender<Result<Vec<MidiPortView>, String>>),
     MidiOpen(String, Sender<Result<MidiView, String>>),
-    MidiClose(Sender<Result<MidiView, String>>),
+    /// `Some(port or device)` disconnects that one, `None` all of them.
+    MidiClose(Option<String>, Sender<Result<MidiView, String>>),
     /// `Some(address)` arms the learn mode for that address, `None` cancels it.
     MidiLearn(Option<String>, Sender<Result<MidiView, String>>),
-    MidiUnbind(String, Sender<Result<MidiView, String>>),
+    /// Id and, when several profiles bind it, the device.
+    MidiUnbind(String, Option<String>, Sender<Result<MidiView, String>>),
+    MidiEdit(String, Option<String>, BindingOptions, Sender<Result<MidiView, String>>),
     MidiSave(Sender<Result<MidiSaved, String>>),
     MidiState(Sender<Result<MidiView, String>>),
 }
@@ -330,16 +334,25 @@ impl EngineHandle {
         self.call(|reply| Request::MidiOpen(device, reply))
     }
 
-    pub fn midi_close(&self) -> Result<MidiView, String> {
-        self.call(Request::MidiClose)
+    pub fn midi_close(&self, device: Option<String>) -> Result<MidiView, String> {
+        self.call(|reply| Request::MidiClose(device, reply))
     }
 
     pub fn midi_learn(&self, address: Option<String>) -> Result<MidiView, String> {
         self.call(|reply| Request::MidiLearn(address, reply))
     }
 
-    pub fn midi_unbind(&self, id: String) -> Result<MidiView, String> {
-        self.call(|reply| Request::MidiUnbind(id, reply))
+    pub fn midi_unbind(&self, id: String, device: Option<String>) -> Result<MidiView, String> {
+        self.call(|reply| Request::MidiUnbind(id, device, reply))
+    }
+
+    pub fn midi_edit(
+        &self,
+        id: String,
+        device: Option<String>,
+        options: BindingOptions,
+    ) -> Result<MidiView, String> {
+        self.call(|reply| Request::MidiEdit(id, device, options, reply))
     }
 
     pub fn midi_save(&self) -> Result<MidiSaved, String> {
@@ -521,23 +534,19 @@ fn handle(
 
         // --- MIDI -------------------------------------------------------------------------
         Request::MidiPorts(reply) => {
-            let _ = reply.send(MidiBridge::ports());
+            let _ = reply.send(midi.ports());
         }
         Request::MidiOpen(device, reply) => {
             let result = midi.open(&device);
             match &result {
-                Ok(view) => log!(
-                    "MIDI-Eingang offen: {} ({} Bindungen).",
-                    view.port.as_deref().unwrap_or("?"),
-                    view.bindings.len()
-                ),
+                Ok(view) => log!("MIDI: {}", view.message.as_deref().unwrap_or("")),
                 Err(e) => log!("MIDI-Eingang nicht geoeffnet: {e}"),
             }
             let _ = reply.send(result);
         }
-        Request::MidiClose(reply) => {
-            let view = midi.close();
-            log!("MIDI-Eingang geschlossen.");
+        Request::MidiClose(device, reply) => {
+            let view = midi.close(device.as_deref());
+            log!("MIDI: {}", view.message.as_deref().unwrap_or(""));
             let _ = reply.send(Ok(view));
         }
         Request::MidiLearn(address, reply) => {
@@ -550,8 +559,11 @@ fn handle(
             }
             let _ = reply.send(result);
         }
-        Request::MidiUnbind(id, reply) => {
-            let _ = reply.send(midi.unbind(&id));
+        Request::MidiUnbind(id, device, reply) => {
+            let _ = reply.send(midi.unbind(&id, device.as_deref()));
+        }
+        Request::MidiEdit(id, device, options, reply) => {
+            let _ = reply.send(midi.edit(&id, device.as_deref(), &options));
         }
         Request::MidiSave(reply) => {
             let result = midi.save();
@@ -665,23 +677,44 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
     }
 }
 
+/// The session as the MIDI status sees it: track names, and the sections of a loaded score.
+fn midi_shape(session: Option<&Session>) -> SessionShape {
+    match session {
+        None => SessionShape::default(),
+        Some(active) => SessionShape {
+            tracks: Some(active.tracks.iter().map(|ui| ui.name.clone()).collect()),
+            sections: active
+                .runner
+                .as_ref()
+                .map(|runner| runner.score().sections.len()),
+        },
+    }
+}
+
 /// Drain the MIDI queue, apply what it means, and tell the web view.
 ///
 /// Called once per turn of the host loop, which is every four milliseconds while anything is open.
 /// Nothing here allocates unless an event actually arrived.
 fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHandle) {
-    if let Some(gone) = midi.check_alive() {
-        log!("{gone}");
+    // Known controllers connect by themselves, unplugged ones are dropped, profiles edited by hand
+    // are read again - see the module comment of `midi.rs`.
+    for line in midi.tick() {
+        log!("{line}");
+    }
+    // What the status of every binding is judged against: which tracks exist, whether a score is
+    // loaded. Sampled, because a session's shape changes a few times an evening.
+    if midi.shape_due() {
+        midi.set_shape(midi_shape(session.as_ref()));
     }
 
     let mut events = Vec::new();
     midi.drain(&mut events);
 
-    for event in events {
+    for (link, event) in events {
         // The learn mode swallows the stream: while it waits for a control, that control must not
         // also do its old job on the way in.
         if midi.is_learning() {
-            if let Some(report) = midi.feed_learn(&event) {
+            if let Some(report) = midi.feed_learn(link, &event) {
                 log!("MIDI gelernt: {}", report.note.as_deref().unwrap_or(""));
             }
             continue;
@@ -696,30 +729,31 @@ fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHand
                     state: &state,
                     score_is_playing: active.score_is_playing(),
                 };
-                midi.resolve(&event, &ctx)
+                midi.resolve(link, &event, &ctx)
             }
             // Without an engine there are no tracks to resolve a binding against. The router says
             // so per binding, which is a better sentence than one blanket refusal.
             None => {
                 let layout = TrackLayout::default();
                 let ctx = Context::bare(&layout);
-                midi.resolve(&event, &ctx)
+                midi.resolve(link, &event, &ctx)
             }
         };
 
-        let target = midi.target_of(&event);
+        let target = midi.target_of(link, &event);
         match resolution {
-            Resolution::Unbound => midi.report(&event, MidiOutcome::Unbound, None, None),
+            Resolution::Unbound => midi.report(link, &event, MidiOutcome::Unbound, None, None),
             Resolution::Absorbed(reason) => {
-                midi.report(&event, MidiOutcome::Absorbed, target.as_ref(), Some(reason));
+                midi.report(link, &event, MidiOutcome::Absorbed, target.as_ref(), Some(reason));
             }
             Resolution::Refused(reason) => {
                 log!("MIDI abgelehnt: {reason}");
-                midi.report(&event, MidiOutcome::Refused, target.as_ref(), Some(reason));
+                midi.report(link, &event, MidiOutcome::Refused, target.as_ref(), Some(reason));
             }
             Resolution::Action(action) => {
                 let Some(active) = session.as_mut() else {
                     midi.report(
+                        link,
                         &event,
                         MidiOutcome::Refused,
                         target.as_ref(),
@@ -748,11 +782,11 @@ fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHand
                         if matches!(action, MidiAction::FxPreset { .. }) {
                             midi.rearm();
                         }
-                        midi.report(&event, MidiOutcome::Action, target.as_ref(), message);
+                        midi.report(link, &event, MidiOutcome::Action, target.as_ref(), message);
                     }
                     Err(e) => {
                         log!("MIDI abgelehnt: {e}");
-                        midi.report(&event, MidiOutcome::Refused, target.as_ref(), Some(e));
+                        midi.report(link, &event, MidiOutcome::Refused, target.as_ref(), Some(e));
                     }
                 }
             }

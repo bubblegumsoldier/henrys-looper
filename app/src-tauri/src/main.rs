@@ -26,7 +26,7 @@ use tauri::{Emitter, Manager, State};
 
 use host::{Action, EngineHandle, READY_EVENT, ScoreAction};
 use logfile::log;
-use midi::{MidiPortView, MidiSaved, MidiView};
+use midi::{BindingOptions, MidiPortView, MidiSaved, MidiView};
 use looper_engine::engine::bus::{Bus, TrackSource};
 use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
 use looper_engine::engine::track::TrackLatency as EngineTrackLatency;
@@ -707,11 +707,16 @@ async fn midi_open(device: String, engine: State<'_, EngineHandle>) -> Result<Mi
     offload(move || handle.midi_open(device)).await
 }
 
-/// Give the port back. What was learned and not saved stays in memory.
-#[tauri::command]
-async fn midi_close(engine: State<'_, EngineHandle>) -> Result<MidiView, String> {
+/// Disconnect by hand: one device (`device` = port name or the profile's `device:`), or all of them
+/// when `device` is missing. A disconnected device is not reconnected automatically until it is
+/// unplugged or connected by hand again.
+#[tauri::command(rename_all = "snake_case")]
+async fn midi_close(
+    device: Option<String>,
+    engine: State<'_, EngineHandle>,
+) -> Result<MidiView, String> {
     let handle = engine.inner().clone();
-    offload(move || handle.midi_close()).await
+    offload(move || handle.midi_close(device)).await
 }
 
 /// Arm the learn mode for one address, or cancel it with `null`.
@@ -729,15 +734,34 @@ async fn midi_learn(
     offload(move || handle.midi_learn(address)).await
 }
 
-/// Take a control's job away. `id` is what the overview shows: `ch1.note36`.
+/// Take a control's job away and save the profile. `id` is what the overview shows (`ch1.note36`);
+/// `device` (the binding's `device`) is only needed when several profiles bind the same id.
 #[tauri::command(rename_all = "snake_case")]
-async fn midi_unbind(id: String, engine: State<'_, EngineHandle>) -> Result<MidiView, String> {
+async fn midi_unbind(
+    id: String,
+    device: Option<String>,
+    engine: State<'_, EngineHandle>,
+) -> Result<MidiView, String> {
     let handle = engine.inner().clone();
-    offload(move || handle.midi_unbind(id)).await
+    offload(move || handle.midi_unbind(id, device)).await
 }
 
-/// Write the profile to `%APPDATA%\henrys-looper\midi\<geraet>.yaml` (macOS:
-/// `~/Library/Application Support/henrys-looper/midi/`). The answer names the file.
+/// Change a binding's options and save the profile. `options` replaces all four at once:
+/// `{mode, takeover, min, max}`, each `null` for the target's default.
+#[tauri::command(rename_all = "snake_case")]
+async fn midi_edit(
+    id: String,
+    device: Option<String>,
+    options: BindingOptions,
+    engine: State<'_, EngineHandle>,
+) -> Result<MidiView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_edit(id, device, options)).await
+}
+
+/// Write every profile whose last automatic save failed - the retry. Normally there is nothing to
+/// do: every learned, unbound or edited binding is written at once to
+/// `%APPDATA%\henrys-looper\midi\<geraet>.yaml` (macOS: `~/Library/Application Support/...`).
 #[tauri::command]
 async fn midi_save(engine: State<'_, EngineHandle>) -> Result<MidiSaved, String> {
     let handle = engine.inner().clone();
@@ -831,6 +855,7 @@ fn main() {
             midi_close,
             midi_learn,
             midi_unbind,
+            midi_edit,
             midi_save,
             midi_state
         ])

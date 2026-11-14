@@ -26,3 +26,8 @@ serde_json = "1"
 cpal = "0.18"
 rtrb = "0.4.0"
 tauri-plugin-dialog = "2"
+
+[dev-dependencies]
+# Only for the CoreMIDI test in `midi/tests.rs`, which plays a controller through a virtual port.
+# The engine already depends on it; this names it for the test.
+midir = "0.11.0"
