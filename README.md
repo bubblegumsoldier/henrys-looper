@@ -97,7 +97,11 @@ Beim ersten „Engine starten“ der gebündelten App fragt macOS nach dem Mikro
 `tauri dev` gilt die Freigabe des Terminals. Kürzel nehmen ⌘ statt Strg (⌘+Enter übersetzt, ⌘+⇧+Enter lädt,
 ⌘+N/⌘+O/⌘+S/⌘+⇧+S für Neu/Öffnen/Speichern/Speichern unter, ⌘+Klick zum MIDI-Lernen).
 Partituren liegen als `.yaml` standardmäßig in `~/Documents/Henrys Looper/`. Logdatei: `~/Library/Logs/de.getmika.henrys-looper/`,
-MIDI-Profile: `~/Library/Application Support/henrys-looper/midi/`.
+MIDI-Profile: `~/Library/Application Support/henrys-looper/midi/` (eine YAML-Datei je Gerät;
+bekannte Controller verbinden sich beim Start und beim Anstecken selbst, jede Belegung wird sofort
+gespeichert, Kommentare in der Datei bleiben erhalten). Ohne Controller testen:
+`cargo run -p looper-engine --example midi-virtual -- "Testpad"` legt einen virtuellen
+CoreMIDI-Eingang an und sendet Befehle von stdin (`note 36`, `cc 3 64`, `quit`).
 
 ## Benutzen
 
