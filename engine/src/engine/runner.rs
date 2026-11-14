@@ -263,6 +263,9 @@ pub struct Runner {
     out: Vec<Command>,
     /// Latest German sentence for the display.
     message: String,
+    /// Sentences the runner produced on its own, at a section boundary - nobody pressed anything,
+    /// so no command reply carries them. Collected until the caller takes them.
+    notices: Vec<String>,
 }
 
 impl Runner {
@@ -334,6 +337,7 @@ impl Runner {
             armed: None,
             out: Vec::new(),
             message: String::new(),
+            notices: Vec::new(),
         })
     }
 
@@ -369,6 +373,12 @@ impl Runner {
     /// Where the audio thread is now, as well as the control side can know.
     pub fn estimated_pos(&self, last: Option<(u64, Duration)>) -> u64 {
         self.sched.estimated_pos(last)
+    }
+
+    /// What happened on its own since the last call: a section began, the score ended. Oldest
+    /// first. A front end shows these the way it shows the answer to a button press.
+    pub fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
     }
 
     /// Commands the engine has not been given yet. The caller sends them in this order.
@@ -567,6 +577,7 @@ impl Runner {
             track.monitor = false;
         }
         self.out.clear();
+        self.notices.clear();
         self.current = None;
         self.armed = None;
         self.phase = Phase::Idle;
@@ -609,17 +620,19 @@ impl Runner {
                 self.phase = Phase::Running;
                 self.apply_monitor(index);
                 self.message = format!(
-                    "Sektion {}/{} \"{}\" laeuft, {} Takte{}.",
+                    "Sektion {}/{} \"{}\" laeuft, {} Takt{}{}.",
                     index + 1,
                     self.plans.len(),
                     self.plans[index].id,
                     self.plans[index].bars,
+                    if self.plans[index].bars == 1 { "" } else { "e" },
                     if self.plans[index].autorelease {
                         ""
                     } else {
                         ", loopt bis zum Release"
                     }
                 );
+                self.notices.push(self.message.clone());
                 if self.plans[index].autorelease {
                     // The follow-up is known to the sample, so it is armed and sent right away.
                     let at_bar = armed.at_bar + self.plans[index].bars as u64;
@@ -639,6 +652,7 @@ impl Runner {
                 self.current = None;
                 self.phase = Phase::Finished;
                 self.message = "Partitur zu Ende - alle Tracks still.".to_string();
+                self.notices.push(self.message.clone());
             }
         }
     }

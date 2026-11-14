@@ -21,13 +21,14 @@
 //! by accident.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { filesApi, scoreApi } from "../api";
+import { listen } from "@tauri-apps/api/event";
+import { filesApi, insideTauri, scoreApi } from "../api";
 import { useStatusSlice } from "../status";
 import { Editor } from "./Editor";
 import { Blocks } from "./Blocks";
 import { Transport } from "./Transport";
 import { ScoreLive } from "./ScoreLive";
-import type { CompiledScore, RecentFile, ScoreIssue } from "../types";
+import type { CompiledScore, NoticeEvent, RecentFile, ScoreIssue } from "../types";
 import { IS_MAC, MOD_LABEL } from "../platform";
 import { confirmAction, pickScoreToOpen, pickScoreToSave } from "../dialogs";
 import { currentStatus } from "../status";
@@ -71,6 +72,21 @@ export function ScoreView() {
   const note = useCallback((text: string, kind: Note["kind"]) => {
     setNotes((list) => [{ text, kind, seq: ++noteSeq }, ...list].slice(0, 6));
   }, []);
+
+  // What the runner says on its own at a section boundary - no button reply carries it.
+  useEffect(() => {
+    if (!insideTauri()) return;
+    let off: (() => void) | null = null;
+    let disposed = false;
+    void listen<NoticeEvent>("looper://notice", (e) => note(e.payload.text, "engine")).then((unlisten) => {
+      if (disposed) unlisten();
+      else off = unlisten;
+    });
+    return () => {
+      disposed = true;
+      off?.();
+    };
+  }, [note]);
 
   // --- files ---------------------------------------------------------------
   useEffect(() => {

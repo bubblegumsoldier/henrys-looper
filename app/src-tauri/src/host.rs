@@ -65,7 +65,7 @@ use looper_engine::score::{CompiledScore, ScoreError, compile_score};
 use crate::logfile::{self, log};
 use crate::midi::{MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView};
 use crate::proto::{
-    AppInfo, BusOutConfig, CalibrateConfig, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
+    AppInfo, BusOutConfig, CalibrateConfig, NoticeEvent, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
     DeviceReport, EngineInfo, HostInfo, QuantizeName, ScoreLoaded, StartConfig, StatusEvent,
     TrackConfig, bus_events, dbfs, score_event, track_event,
 };
@@ -81,6 +81,9 @@ pub const MIDI_EVENT: &str = "looper://midi";
 /// Event carrying a fresh [`EngineInfo`] when the engine was rebuilt without `engine_start` - when
 /// loading a score set it up with the score's tracks.
 pub const ENGINE_EVENT: &str = "looper://engine";
+/// Event carrying a [`NoticeEvent`]: something the program says on its own, e.g. the runner at a
+/// section boundary.
+pub const NOTICE_EVENT: &str = "looper://notice";
 
 /// Input FIFO size in multiples of the audio buffer. Same value as the CLI: a few dozen kB, and
 /// the difference between a hiccup and a permanently misaligned recording.
@@ -1654,10 +1657,23 @@ impl Session {
         if let Some((status, _)) = self.last
             && self.runner.is_some()
         {
-            if let Some(runner) = self.runner.as_mut() {
-                runner.tick(status.pos);
-            }
+            let notices = match self.runner.as_mut() {
+                Some(runner) => {
+                    runner.tick(status.pos);
+                    runner.take_notices()
+                }
+                None => Vec::new(),
+            };
             self.pump_runner();
+            // What the runner said on its own - a section began, the score ended. No reply carries
+            // it, so it goes out as the status message and as an event of its own (the status
+            // message only shows the newest sentence, and two equal sentences in a row would look
+            // like one).
+            for text in notices {
+                log!("Partitur: {text}");
+                let _ = app.emit(NOTICE_EVENT, NoticeEvent::score(&text));
+                self.message = Some(text);
+            }
         }
 
         // A clear has happened: the score's track setup goes back on.

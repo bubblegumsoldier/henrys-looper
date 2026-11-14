@@ -857,3 +857,12 @@ export interface TemplateTrack {
   input: number;
   input_right?: number;
 }
+
+/** Pushed as `looper://notice`: something the program says on its own - the runner at a section
+ *  boundary and at the end of the score. `seq` increases per notice. */
+export interface NoticeEvent {
+  seq: number;
+  /** `score` for the runner. */
+  source: string;
+  text: string;
+}

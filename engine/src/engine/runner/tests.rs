@@ -1113,6 +1113,31 @@ fn clear_all_drops_what_was_scheduled_before_it() {
     assert_eq!(track.loop_len, to - from);
 }
 
+/// Section boundaries and the end of the score produce a sentence of their own - nobody pressed a
+/// button there, so no reply would ever carry it. Each one exactly once, in order.
+#[test]
+fn every_section_start_and_the_end_are_announced_once() {
+    let mut drive = Drive::new(HENRY);
+    assert!(drive.runner.take_notices().is_empty(), "der Start selbst antwortet per Rueckgabe");
+    let mut notices = Vec::new();
+    for section in 0..6u64 {
+        // Sections 3 and 4 wait for the release button.
+        drive.to(drive.at_bar(8 * section) + 1_000);
+        notices.extend(drive.runner.take_notices());
+        if drive.runner.armed_at().is_none() {
+            drive.release();
+        }
+    }
+    drive.to(drive.at_bar(8 * 5 + 2) + 1_000);
+    notices.extend(drive.runner.take_notices());
+    assert_eq!(notices.len(), 7, "{notices:#?}");
+    assert!(notices[0].starts_with("Sektion 1/6 \"gitarre_rec\" laeuft"), "{}", notices[0]);
+    assert!(notices[3].contains("loopt bis zum Release"), "{}", notices[3]);
+    assert!(notices[5].starts_with("Sektion 6/6 \"ende\" laeuft, 1 Takt,"), "{}", notices[5]);
+    assert!(notices[6].starts_with("Partitur zu Ende"), "{}", notices[6]);
+    assert!(drive.runner.take_notices().is_empty(), "abgeholt ist abgeholt");
+}
+
 // ---------------------------------------------------------------------------------------------
 // What a score says about its tracks
 // ---------------------------------------------------------------------------------------------

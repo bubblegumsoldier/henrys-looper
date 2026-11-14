@@ -1406,6 +1406,31 @@ impl CompileOutcome {
     }
 }
 
+/// Pushed as `looper://notice` whenever the program says something on its own - today: the runner
+/// at a section boundary ("Sektion 2/6 ... laeuft") and at the end of the score.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct NoticeEvent {
+    /// Increases by one per notice for the life of the process, so a listener can tell two equal
+    /// sentences apart and notice a gap.
+    pub seq: u64,
+    /// Who speaks: `score` for the runner.
+    pub source: String,
+    pub text: String,
+}
+
+impl NoticeEvent {
+    pub fn score(text: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        Self {
+            seq: SEQ.fetch_add(1, Ordering::Relaxed) + 1,
+            source: "score".to_string(),
+            text: text.to_string(),
+        }
+    }
+}
+
 /// Answer of `score_load`: what the runner now holds, plus the German sentence about it.
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -1508,6 +1533,16 @@ mod tests {
     use serde_json::{Value, json};
 
     const RATE: u32 = 48_000;
+
+    #[test]
+    fn notices_are_numbered_and_carry_their_source() {
+        let a = NoticeEvent::score("Sektion 1/2 laeuft.");
+        let b = NoticeEvent::score("Sektion 1/2 laeuft.");
+        assert!(b.seq > a.seq, "zwei gleiche Saetze bleiben zwei");
+        let json = serde_json::to_value(&a).unwrap();
+        assert_eq!(json["source"], "score");
+        assert_eq!(json["text"], "Sektion 1/2 laeuft.");
+    }
 
     /// The default compensation written out per platform, so a change to the engine constant
     /// shows up here: measured 827 on Windows, the unmeasured CoreAudio estimate on macOS.

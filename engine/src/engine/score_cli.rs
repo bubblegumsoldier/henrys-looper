@@ -412,6 +412,9 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
         }
         if let Some((s, _)) = last {
             runner.tick(s.pos);
+            if let Some(notice) = runner.take_notices().pop() {
+                message = notice;
+            }
         }
 
         match keys.recv_timeout(Duration::from_millis(20)) {
