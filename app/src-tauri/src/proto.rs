@@ -314,7 +314,8 @@ impl From<PendingKind> for PendingKindName {
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct StartConfig {
-    /// `asio` or `wasapi`. Only ASIO reaches a usable latency, see docs/architektur.md section 2.
+    /// `asio` or `wasapi` on Windows, `coreaudio` on macOS. On Windows only ASIO reaches a usable
+    /// latency, see docs/architektur.md section 2.
     #[serde(default = "default_host")]
     pub host: String,
     /// Case-insensitive substring of the device name; `null` takes the host default.
@@ -433,8 +434,15 @@ impl StartConfig {
     }
 }
 
-fn default_host() -> String {
-    "asio".to_string()
+/// The host the app starts on when the frontend names none. Windows: ASIO, the only host there
+/// with a usable latency (the CLI starts on WASAPI because ASIO needs a separate build). macOS:
+/// CoreAudio, the only host there is.
+pub fn default_host() -> String {
+    if cfg!(target_os = "windows") {
+        "asio".to_string()
+    } else {
+        looper_engine::audio::DEFAULT_HOST.to_string()
+    }
 }
 fn default_sample_rate() -> u32 {
     48_000
@@ -454,8 +462,9 @@ fn default_beat_unit() -> u32 {
 fn default_bars() -> u32 {
     8
 }
+/// Measured on Windows, only estimated on macOS - see `looper_engine::audio::DEFAULT_LATENCY_FRAMES`.
 fn default_latency_frames() -> u64 {
-    827
+    looper_engine::audio::DEFAULT_LATENCY_FRAMES
 }
 fn default_gain() -> f32 {
     1.0
@@ -1496,6 +1505,13 @@ mod tests {
 
     const RATE: u32 = 48_000;
 
+    /// The default compensation written out per platform, so a change to the engine constant
+    /// shows up here: measured 827 on Windows, the unmeasured CoreAudio estimate on macOS.
+    #[cfg(target_os = "macos")]
+    const PLATFORM_LATENCY: u64 = 596;
+    #[cfg(not(target_os = "macos"))]
+    const PLATFORM_LATENCY: u64 = 827;
+
     fn sample_status() -> TrackStatus {
         TrackStatus {
             state: TrackState::Playing,
@@ -1979,7 +1995,11 @@ mod tests {
             "tracks": [{"name": "stimme", "input_channel": 1}]
         }))
         .expect("Minimalkonfiguration");
+        assert_eq!(config.host, default_host());
+        #[cfg(target_os = "windows")]
         assert_eq!(config.host, "asio");
+        #[cfg(target_os = "macos")]
+        assert_eq!(config.host, "coreaudio");
         assert_eq!(config.device, None);
         assert_eq!(config.sample_rate, 48_000);
         assert_eq!(config.buffer_frames, 128);
@@ -1992,7 +2012,7 @@ mod tests {
             QuantizeName::Loop,
             "ohne Angabe rastet eine Aufnahme auf den Loop-Anfang ein"
         );
-        assert_eq!(config.latency_frames, 827);
+        assert_eq!(config.latency_frames, PLATFORM_LATENCY);
         assert_eq!(config.monitor_gain, 1.0);
         assert_eq!(config.click_gain, 1.0);
         assert!(config.click, "der Klick ist standardmaessig an");
@@ -2056,7 +2076,10 @@ mod tests {
             ]
         }))
         .expect("Latenz-Konfiguration");
-        assert_eq!(config.latency_frames, 827, "die Vorgabe steht weiter global");
+        assert_eq!(
+            config.latency_frames, PLATFORM_LATENCY,
+            "die Vorgabe steht weiter global"
+        );
 
         assert_eq!(config.tracks[0].track_latency(), TrackLatency::INHERITED);
         assert_eq!(config.tracks[0].track_latency().resolve(827), 827);
@@ -2123,13 +2146,13 @@ mod tests {
     #[test]
     fn a_calibration_configuration_defaults_to_the_measurement_from_phase_zero() {
         let config: CalibrateConfig = serde_json::from_value(json!({})).expect("leer geht");
-        assert_eq!(config.host, "asio");
+        assert_eq!(config.host, default_host());
         assert_eq!(config.sample_rate, 48_000);
         assert_eq!(config.buffer_frames, 128);
         assert_eq!(config.bpm, 100.0);
         assert_eq!(config.bars, 4);
         assert_eq!(config.runs, 5);
-        assert_eq!(config.latency_frames, 827);
+        assert_eq!(config.latency_frames, PLATFORM_LATENCY);
         assert_eq!(config.click_gain, 1.0);
         assert_eq!(config.for_track, 1, "gemessen wird der erste Track");
         assert!(config.tracks.is_empty(), "ohne Angabe gilt die Standardbelegung");

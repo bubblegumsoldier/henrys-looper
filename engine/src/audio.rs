@@ -13,11 +13,53 @@ use cpal::{
     SupportedStreamConfigRange,
 };
 
+// ---------------------------------------------------------------------------------------------
+// Platform defaults
+// ---------------------------------------------------------------------------------------------
+
+/// The audio host a command uses when none is named. On Windows the CLI has always started on
+/// WASAPI (ASIO needs a separate build); on macOS there is only CoreAudio, and it is the one that
+/// reaches a usable latency there.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_HOST: &str = "coreaudio";
+#[cfg(target_os = "windows")]
+pub const DEFAULT_HOST: &str = "wasapi";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub const DEFAULT_HOST: &str = "alsa";
+
+/// Roundtrip latency compensation, in frames, that is assumed until somebody measures it.
+///
+/// * Windows: 827 - **measured** in phase 0 with a loopback cable (Scarlett 2i2, ASIO, 48 kHz,
+///   128 frames, standard deviation 0 over 60 runs).
+/// * macOS: 596 - **not measured**. An estimate from what CoreAudio reports for the same
+///   Scarlett 2i2 at 48 kHz / 128 frames: device latency, safety offset and I/O buffer on both
+///   sides, plus the depth the input FIFO settles at with the stream layout the engine uses.
+///   It was read off silently, without a loopback cable, and converter latency the driver does
+///   not report is missing from it - so the real value is more likely higher than lower. Measure
+///   it with `calibrate` before trusting a recording to the sample.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_LATENCY_FRAMES: u64 = 596;
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_LATENCY_FRAMES: u64 = 827;
+
+/// Whether [`DEFAULT_LATENCY_FRAMES`] is a measurement or an estimate. Every place that shows the
+/// number says which of the two it is.
+pub const DEFAULT_LATENCY_MEASURED: bool = cfg!(not(target_os = "macos"));
+
+/// One sentence on where [`DEFAULT_LATENCY_FRAMES`] comes from, for help texts and the UI.
+#[cfg(target_os = "macos")]
+pub const DEFAULT_LATENCY_ORIGIN: &str = "Schaetzwert aus den CoreAudio-Angaben einer Scarlett 2i2 \
+     (48 kHz, 128 Frames), nicht per Loopback gemessen - mit calibrate nachmessen";
+#[cfg(not(target_os = "macos"))]
+pub const DEFAULT_LATENCY_ORIGIN: &str =
+    "Messwert aus Phase 0 (Scarlett 2i2 an ASIO, 48 kHz, 128 Frames)";
+
 /// Flags shared by every subcommand that opens an audio device.
 #[derive(Args, Debug, Clone)]
 pub struct DeviceOpts {
-    /// Audio-Host: wasapi oder asio (asio nur mit --features asio gebaut)
-    #[arg(long, default_value = "wasapi")]
+    /// Audio-Host: coreaudio (macOS), wasapi oder asio (Windows; asio nur mit --features asio
+    /// gebaut). Standard ist der uebliche Host des Systems.
+    #[arg(long, default_value = DEFAULT_HOST)]
     pub host: String,
 
     /// Teilstring des Geraetenamens (Gross-/Kleinschreibung egal), sonst Standardgeraet
@@ -42,7 +84,8 @@ pub struct DeviceOpts {
 
     /// Puffergroesse trotzdem anfordern, wenn das Geraet einen anderen Bereich meldet.
     /// WASAPI im Shared Mode meldet nur die Geraeteperiode (bei 48 kHz meist 480 Frames);
-    /// ob eine kleinere Anforderung wirklich greift, ist selbst Teil der Messung.
+    /// ob eine kleinere Anforderung wirklich greift, ist selbst Teil der Messung. CoreAudio
+    /// meldet ehrlich 15..4096 und braucht das nicht.
     #[arg(long)]
     pub force_buffer: bool,
 }
@@ -119,14 +162,24 @@ pub fn asio_status() -> &'static str {
     "ASIO ist eingebaut (Feature \"asio\")."
 }
 
-#[cfg(not(feature = "asio"))]
+#[cfg(all(not(feature = "asio"), target_os = "windows"))]
 pub fn asio_status() -> &'static str {
     "ASIO ist NICHT eingebaut. Neu bauen mit: cargo build --release --features asio"
 }
 
+#[cfg(all(not(feature = "asio"), not(target_os = "windows")))]
+pub fn asio_status() -> &'static str {
+    "ASIO gibt es nur unter Windows; hier ist der Audio-Host CoreAudio (macOS) bzw. ALSA (Linux)."
+}
+
 pub fn open_host(name: &str) -> Result<Host, String> {
     let id = HostId::from_str(name).map_err(|e| {
-        if name.eq_ignore_ascii_case("asio") {
+        if name.eq_ignore_ascii_case("asio") && cfg!(not(target_os = "windows")) {
+            format!(
+                "Host \"asio\" gibt es auf diesem System nicht - ASIO ist ein Windows-Treibermodell. \
+                 Unter macOS heisst der Host \"{DEFAULT_HOST}\"."
+            )
+        } else if name.eq_ignore_ascii_case("asio") {
             format!("ASIO-Host nicht verfuegbar: {e}. {}", asio_status())
         } else {
             let available: Vec<String> =
@@ -303,17 +356,24 @@ pub fn resolve_config(
         && (opts.buffer < min || opts.buffer > max)
     {
         if !opts.force_buffer {
+            let ways = if cfg!(target_os = "windows") {
+                format!(
+                    "\x20 - mit --buffer {min} messen (das ist die Geraeteperiode im WASAPI-Shared-Mode)\n\
+                     \x20 - ASIO nutzen: --host asio --buffer {} (Binary mit --features asio bauen)\n",
+                    opts.buffer
+                )
+            } else {
+                format!("\x20 - eine Puffergroesse zwischen {min} und {max} Frames waehlen\n")
+            };
             return Err(format!(
                 "Puffergroesse {} Frames wird am {} nicht unterstuetzt. Geraet \"{}\" meldet bei {} Hz nur {min}..{max} Frames.\n\
                  Moeglichkeiten:\n\
-                 \x20 - mit --buffer {min} messen (das ist die Geraeteperiode im WASAPI-Shared-Mode)\n\
-                 \x20 - ASIO nutzen: --host asio --buffer {} (Binary mit --features asio bauen)\n\
+                 {ways}\
                  \x20 - --force-buffer setzen, um {} Frames trotzdem anzufordern (dann steht im Ergebnis, was der Treiber daraus macht)",
                 opts.buffer,
                 dir.label(),
                 device_name(device),
                 opts.rate,
-                opts.buffer,
                 opts.buffer
             ));
         }
@@ -348,10 +408,41 @@ pub fn open_output(opts: &DeviceOpts) -> Result<OutputSetup, String> {
     })
 }
 
+/// What to do when input and output live on different devices. The engine needs one clock for
+/// both directions; CoreAudio can provide that through an aggregate device.
+fn separate_devices_hint() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "\nEin- und Ausgang muessen auf demselben Geraet liegen (eine gemeinsame Clock). Sollen \
+         es zwei verschiedene sein, in \"Audio-MIDI-Setup\" ein Aggregatgeraet mit \
+         Drift-Korrektur anlegen und das waehlen."
+    } else {
+        ""
+    }
+}
+
 pub fn open_duplex(opts: &DeviceOpts) -> Result<DuplexSetup, String> {
     let host = open_host(&opts.host)?;
     let input = pick_device(&host, opts.device.as_deref(), Direction::Input)?;
-    let output = pick_device(&host, opts.device.as_deref(), Direction::Output)?;
+    let output = match opts.device.as_deref() {
+        Some(_) => pick_device(&host, opts.device.as_deref(), Direction::Output)
+            .map_err(|e| format!("{e}{}", separate_devices_hint()))?,
+        // No device named: the output follows the input device whenever that one can play. On
+        // macOS the default input is typically the interface while the default output is the
+        // built-in speakers - two devices, two clocks, and the loop would come out of the laptop.
+        None if input.supports_output() => input.clone(),
+        None => {
+            let output = pick_device(&host, None, Direction::Output)?;
+            eprintln!(
+                "Warnung: Standard-Eingang \"{}\" und Standard-Ausgang \"{}\" sind verschiedene \
+                 Geraete mit getrennten Clocks. Fuer den Looper besser ein Geraet mit --device \
+                 waehlen.{}",
+                device_name(&input),
+                device_name(&output),
+                separate_devices_hint()
+            );
+            output
+        }
+    };
     let in_plan = resolve_config(&input, Direction::Input, opts, opts.in_channels)?;
     let out_plan = resolve_config(&output, Direction::Output, opts, opts.out_channels)?;
     let in_name = device_name(&input);

@@ -125,8 +125,9 @@ pub struct LiveOpts {
     /// Roundtrip-Latenz in Frames, die beim Aufnehmen herausgerechnet wird - die Vorgabe fuer
     /// jeden Track, der nichts eigenes sagt. Ein Frame ist ein Zeitpunkt: ein Sample bei einer
     /// Mono-Quelle, zwei bei einer Stereo-Quelle.
-    /// Standard ist der Messwert aus Phase 0 (128 Frames, 48 kHz, Scarlett 2i2 an ASIO).
-    #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = 827)]
+    /// Standard: unter Windows der Messwert aus Phase 0 (827, Scarlett 2i2 an ASIO, 128 Frames,
+    /// 48 kHz), unter macOS ein ungemessener Schaetzwert aus den CoreAudio-Angaben (596).
+    #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = audio::DEFAULT_LATENCY_FRAMES)]
     pub latency_frames: u64,
 
     /// Eigene Latenzkompensation fuer einen Track, mehrfach angebbar:

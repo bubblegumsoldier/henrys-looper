@@ -137,8 +137,9 @@ pub struct CalibrateOpts {
     #[arg(long, default_value_t = 4)]
     pub bars: u32,
 
-    /// Zu pruefende Latenzkompensation in Frames (Standard: Messwert aus Phase 0)
-    #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = 827)]
+    /// Zu pruefende Latenzkompensation in Frames (Standard: unter Windows der Messwert
+    /// aus Phase 0, unter macOS ein ungemessener Schaetzwert)
+    #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = audio::DEFAULT_LATENCY_FRAMES)]
     pub latency_frames: u64,
 
     /// Anzahl der Messdurchlaeufe

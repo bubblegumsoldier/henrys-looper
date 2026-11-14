@@ -19,7 +19,7 @@ use looper_engine::{click, duplex, engine, latency, midi, soak};
 #[command(
     name = "looper-engine",
     version,
-    about = "Audio-Messwerkzeug fuer den Looper-Prototyp (cpal / Windows)"
+    about = "Audio-Messwerkzeug fuer den Looper-Prototyp (cpal; Windows und macOS)"
 )]
 struct Cli {
     #[command(subcommand)]

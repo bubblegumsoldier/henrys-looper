@@ -42,7 +42,7 @@ pub struct ScoreOpts {
 
     /// Roundtrip-Latenz in Frames, die beim Aufnehmen herausgerechnet wird - die Vorgabe fuer
     /// jeden Track, der in der Partitur nichts eigenes sagt.
-    #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = 827)]
+    #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = audio::DEFAULT_LATENCY_FRAMES)]
     pub latency_frames: u64,
 
     /// Eigene Latenzkompensation fuer einen Track: NAME:FRAMES[+ZUSCHLAG] oder NAME:+ZUSCHLAG.
