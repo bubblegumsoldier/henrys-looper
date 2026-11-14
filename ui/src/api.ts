@@ -215,8 +215,10 @@ export const scoreApi = {
    */
   render: (doc: ScoreDoc) => call<RenderOutcome>("score_render", { doc }),
   /**
-   * Compile and hand to the runner. Needs a running engine whose tracks match the score and every
-   * track empty; tempo, time signature and the layer length then come from the score.
+   * Compile and hand to the runner. Needs a running engine and every track empty. When the score's
+   * tracks differ from the engine's, the engine is rebuilt with the score's tracks (short audio
+   * gap; `engine` in the answer is then the new `EngineInfo`). Tempo, time signature, layer length
+   * and every track's pan, buses and latency then come from the score.
    */
   load: (yaml: string, countIn?: number) =>
     call<ScoreLoaded>("score_load", { yaml, count_in: countIn ?? null }),

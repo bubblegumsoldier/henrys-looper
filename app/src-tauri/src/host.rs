@@ -65,7 +65,7 @@ use looper_engine::score::{CompiledScore, ScoreError, compile_score};
 use crate::logfile::{self, log};
 use crate::midi::{MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView};
 use crate::proto::{
-    AppInfo, CalibrateConfig, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
+    AppInfo, BusOutConfig, CalibrateConfig, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
     DeviceReport, EngineInfo, HostInfo, QuantizeName, ScoreLoaded, StartConfig, StatusEvent,
     TrackConfig, bus_events, dbfs, score_event, track_event,
 };
@@ -78,6 +78,9 @@ pub const READY_EVENT: &str = "looper://ready";
 /// Event carrying incoming MIDI and the state of the mapping. Its own event and not part of the
 /// status snapshot - see the module comment of [`crate::midi`] for why.
 pub const MIDI_EVENT: &str = "looper://midi";
+/// Event carrying a fresh [`EngineInfo`] when the engine was rebuilt without `engine_start` - when
+/// loading a score set it up with the score's tracks.
+pub const ENGINE_EVENT: &str = "looper://engine";
 
 /// Input FIFO size in multiples of the audio buffer. Same value as the CLI: a few dozen kB, and
 /// the difference between a hiccup and a permanently misaligned recording.
@@ -469,10 +472,7 @@ fn handle(
             let _ = reply.send(result);
         }
         Request::ScoreLoad(yaml, count_in, reply) => {
-            let result = match session.as_mut() {
-                Some(active) => active.load_score(&yaml, count_in),
-                None => Err(NO_ENGINE.to_string()),
-            };
+            let result = load_score_onto(session, midi, app, &yaml, count_in);
             match &result {
                 Ok(loaded) => {
                     log!("Partitur geladen: {}", loaded.message);
@@ -878,6 +878,149 @@ fn knob_value(settings: &looper_engine::engine::fx::ChainSettings, knob: FxKnob)
     }
 }
 
+/// Load a score, rebuilding the engine around the score's tracks when they differ from the running
+/// ones.
+///
+/// # Why a rebuild, and why only on an empty session
+///
+/// The track layout is part of what the audio callback owns: the track array, the loop buffers of
+/// each kind, the size of the buffer pool and of the return queue are all fixed when the streams
+/// are built. Changing them under a running callback would need allocation or a hand-over the
+/// real-time rules forbid. So the layout is not *changed*, the session is **rebuilt**: the same
+/// stop and start a changed setup goes through - streams dropped on this thread, every buffer of
+/// the new session allocated before its streams exist. Nothing new happens on the audio side.
+///
+/// That costs a short gap in the audio (the device is closed and reopened) and it throws away
+/// whatever the tracks hold, which is why it is only done while every track is empty and no score
+/// plays; otherwise the old refusal stands, with the reason. Device, buffer size, sample rate,
+/// latency default, bus outputs, bus volumes and the click carry over from the running session.
+fn load_score_onto(
+    session: &mut Option<Session>,
+    midi: &mut MidiBridge,
+    app: &AppHandle,
+    yaml: &str,
+    count_in: Option<u32>,
+) -> Result<ScoreLoaded, String> {
+    let Some(active) = session.as_mut() else {
+        return Err(NO_ENGINE.to_string());
+    };
+    let score = compile_score(yaml).map_err(|error| render_issues(&error))?;
+    let Err(mismatch) = check_tracks(&score, &active.defs) else {
+        return active.load_score(yaml, count_in).map(|loaded| ScoreLoaded {
+            engine: None,
+            ..loaded
+        });
+    };
+    if active.score_is_playing() {
+        return Err(format!(
+            "{mismatch} A score is playing - press \"Stop all\" first; the engine can only be \
+             rebuilt with the score's tracks while nothing plays."
+        ));
+    }
+    if let Some(busy) = active.first_non_empty_track() {
+        return Err(format!(
+            "The score's tracks differ from the running engine's, and rebuilding the engine would \
+             throw away what track \"{busy}\" holds. Clear all tracks first, then load again. \
+             ({mismatch})"
+        ));
+    }
+
+    let previous = active.config.clone();
+    let config = rebuilt_config(
+        &previous,
+        &score,
+        active.last.map(|(status, _)| status).as_ref(),
+        active.scheduler.quantize,
+    );
+    log!("Engine wird fuer die Partitur neu aufgebaut: {mismatch}");
+    // Not `stop_session`: that would tell the frontend "stopped" and the live view would flip to
+    // the setup screen for the moment the rebuild takes.
+    if let Some(old) = session.take() {
+        old.shutdown();
+    }
+    match Session::start(config) {
+        Ok(fresh) => {
+            *session = Some(fresh);
+            midi.rearm();
+        }
+        Err(e) => {
+            log!("Neuaufbau gescheitert: {e}");
+            let restored = Session::start(previous);
+            let note = match &restored {
+                Ok(_) => "The previous setup is running again.",
+                Err(_) => "The engine is stopped; start it again from the setup screen.",
+            };
+            *session = restored.ok();
+            return Err(format!(
+                "Could not rebuild the engine with the score's tracks: {e} {note}"
+            ));
+        }
+    }
+    let active = session.as_mut().expect("eben gestartet");
+    let info = active.info.clone();
+    let _ = app.emit(ENGINE_EVENT, &info);
+    let loaded = active.load_score(yaml, count_in)?;
+    let names: Vec<&str> = info.tracks.iter().map(|t| t.name.as_str()).collect();
+    let message = format!(
+        "Engine rebuilt with the score's tracks ({}). {}",
+        names.join(", "),
+        loaded.message
+    );
+    active.message = Some(message.clone());
+    Ok(ScoreLoaded {
+        score: loaded.score,
+        message,
+        engine: Some(info),
+    })
+}
+
+/// The start configuration a rebuild uses: the running one, with the score's tracks and grid, and
+/// with what was changed at runtime (bus outputs and volumes, click, grid) carried over from the
+/// newest snapshot - a rebuild must not reset the monitor volume the musician just turned down.
+fn rebuilt_config(
+    previous: &StartConfig,
+    score: &CompiledScore,
+    status: Option<&Status>,
+    quantize: Quantize,
+) -> StartConfig {
+    let mut config = previous.clone();
+    config.tracks = score
+        .tracks
+        .iter()
+        .map(|t| TrackConfig {
+            name: t.name.clone(),
+            input_channel: t.input,
+            input_channel_right: t.input_right,
+            pan: t.pan,
+            latency_frames: t.latency,
+            latency_trim: t.latency_trim,
+            bus: Some(t.bus.clone()),
+            monitor_bus: Some(t.monitor_bus.clone()),
+        })
+        .collect();
+    config.bpm = score.bpm;
+    config.beats_per_bar = score.beats_per_bar;
+    config.beat_unit = score.beat_unit;
+    config.bars = score.sections.iter().map(|s| s.bars).max().unwrap_or(1).max(1);
+    config.quantize = quantize.into();
+    if let Some(status) = status {
+        config.click = status.click;
+        config.bus_gain_main = Some(status.bus_gain(Bus::Main));
+        config.bus_gain_monitor = Some(status.bus_gain(Bus::Monitor));
+        for (bus, slot) in [
+            (Bus::Main, &mut config.bus_out_main),
+            (Bus::Monitor, &mut config.bus_out_monitor),
+        ] {
+            let out = status.bus_out.get(bus);
+            *slot = Some(BusOutConfig {
+                channel: out.first as u32 + 1,
+                width: out.width as u32,
+            });
+        }
+    }
+    config
+}
+
 /// Shut the engine down and tell the frontend, in that order.
 fn stop_session(session: &mut Option<Session>, app: &AppHandle) {
     if let Some(active) = session.take() {
@@ -1194,10 +1337,13 @@ struct Session {
     /// back to the pan, buses and latency it was *started* with, so the score's own setup is sent
     /// again once the engine has passed this position - not before, or the clear would undo it.
     reapply_at: Option<u64>,
+    /// What this session was started with - the base for rebuilding it around a score's tracks.
+    config: StartConfig,
 }
 
 impl Session {
     fn start(config: StartConfig) -> Result<Session, String> {
+        let started_with = config.clone();
         let dev = DeviceOpts {
             host: config.host.clone(),
             device: config.device.clone(),
@@ -1450,6 +1596,7 @@ impl Session {
             message: None,
             stopped: false,
             reapply_at: None,
+            config: started_with,
         })
     }
 
@@ -1696,7 +1843,11 @@ impl Session {
             if count_in == 1 { "" } else { "e" },
         );
         self.message = Some(message.clone());
-        Ok(ScoreLoaded { score, message })
+        Ok(ScoreLoaded {
+            score,
+            message,
+            engine: None,
+        })
     }
 
     /// One press of the score transport. The answer is always a German sentence - see
@@ -2662,6 +2813,73 @@ mod tests {
             1 + error.issues.len(),
             "Kopfzeile plus eine Zeile je Fehler: {text}"
         );
+    }
+
+    fn start_config(tracks: &str) -> StartConfig {
+        serde_json::from_str(&format!(r#"{{"host": "coreaudio", "tracks": {tracks}}}"#))
+            .expect("Konfiguration")
+    }
+
+    /// A rebuild takes the score's tracks with everything the score says about them, and the
+    /// score's grid - and the result is exactly what `check_tracks` accepts, so the load that
+    /// follows cannot be refused for the layout.
+    #[test]
+    fn a_rebuild_takes_the_tracks_and_grid_of_the_score() {
+        let score = compile_score(
+            "bpm: 90\ntime_signature: 6/8\ntracks:\n  keys: {input: [3, 4], pan: 0.3, latency: 400, \
+             latency_trim: 12, bus: main, monitor_bus: none}\n  stimme: {input: 1}\nsections:\n  \
+             - id: a\n    bars: 3\n  - id: b\n    bars: 5\n",
+        )
+        .expect("Partitur");
+        let previous = start_config(r#"[{"name": "gitarre", "input_channel": 2}]"#);
+        let config = rebuilt_config(&previous, &score, None, Quantize::Bar);
+
+        assert_eq!(config.tracks.len(), 2);
+        let keys = &config.tracks[0];
+        assert_eq!(
+            (keys.name.as_str(), keys.input_channel, keys.input_channel_right),
+            ("keys", 3, Some(4))
+        );
+        assert_eq!(keys.pan, 0.3);
+        assert_eq!(keys.track_latency(), TrackLatency { measured: Some(400), trim: 12 });
+        assert_eq!(keys.loop_send("keys").unwrap(), BusSend::parse("main").unwrap());
+        assert_eq!(keys.monitor_send("keys").unwrap(), BusSend::parse("none").unwrap());
+        assert_eq!(
+            (config.bpm, config.beats_per_bar, config.beat_unit, config.bars),
+            (90.0, 6, 8, 5)
+        );
+        assert_eq!(config.quantize, QuantizeName::Bar);
+        // The device side is untouched.
+        assert_eq!(config.host, previous.host);
+        assert_eq!(config.buffer_frames, previous.buffer_frames);
+        assert_eq!(config.latency_frames, previous.latency_frames);
+
+        let defs = resolve_tracks(&config.tracks, 8).expect("Tracks passen aufs Geraet");
+        assert_eq!(check_tracks(&score, &defs), Ok(()));
+        assert!(
+            check_tracks(&score, &resolve_tracks(&previous.tracks, 8).unwrap()).is_err(),
+            "vorher passte die Engine nicht"
+        );
+    }
+
+    /// What was changed at runtime survives a rebuild: bus volumes and outputs, and the click.
+    #[test]
+    fn a_rebuild_keeps_the_bus_setup_and_the_click_of_the_running_session() {
+        use looper_engine::engine::bus::{BusOutput, BusRouting};
+        let score =
+            compile_score("bpm: 100\ntracks:\n  a: {input: 1}\nsections:\n  - id: x\n    bars: 2\n")
+                .expect("Partitur");
+        let previous = start_config(r#"[{"name": "b", "input_channel": 1}]"#);
+        let mut status = Status::default();
+        status.click = false;
+        status.bus_gain = [0.8, 0.25];
+        status.bus_out = BusRouting::new(BusOutput::pair(0), BusOutput::pair(2));
+        let config = rebuilt_config(&previous, &score, Some(&status), Quantize::Loop);
+        assert!(!config.click);
+        assert_eq!(config.bus_gain_main, Some(0.8));
+        assert_eq!(config.bus_gain_monitor, Some(0.25));
+        assert_eq!(config.bus_out_monitor, Some(BusOutConfig { channel: 3, width: 2 }));
+        assert_eq!(config.bus_out_main, Some(BusOutConfig { channel: 1, width: 2 }));
     }
 
     /// The one fact about the build that decides whether the app is usable at all.

@@ -16,9 +16,10 @@
 //! hands are on an instrument. Anything typed into a field is left alone.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, scoreApi } from "../api";
+import { api, insideTauri, scoreApi } from "../api";
 import { GLOBAL, quantizeAddress } from "../midi/addresses";
 import { currentStatus, structureSignature, useStatusSlice } from "../status";
+import { listen } from "@tauri-apps/api/event";
 import { confirmAction } from "../dialogs";
 import { Transport } from "../components/Transport";
 import { Position } from "./Position";
@@ -140,6 +141,21 @@ export function LiveView({ info }: { info: AppInfo | null }) {
     },
     [fail],
   );
+
+  // Loading a score with other tracks rebuilds the engine; the footer follows.
+  useEffect(() => {
+    if (!insideTauri()) return;
+    let off: (() => void) | null = null;
+    let disposed = false;
+    void listen<EngineInfo>("looper://engine", (e) => setEngine(e.payload)).then((unlisten) => {
+      if (disposed) unlisten();
+      else off = unlisten;
+    });
+    return () => {
+      disposed = true;
+      off?.();
+    };
+  }, []);
 
   // The engine's own sentence about the last thing that happened.
   const message = useStatusSlice((s) => s.message);

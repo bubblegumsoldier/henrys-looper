@@ -1412,6 +1412,10 @@ impl CompileOutcome {
 pub struct ScoreLoaded {
     pub score: CompiledScore,
     pub message: String,
+    /// Set when loading rebuilt the engine around the score's tracks (they differed from the
+    /// running ones and every track was empty): what is running now. The same object also goes out
+    /// on `looper://engine`. `null` when the engine was kept.
+    pub engine: Option<EngineInfo>,
 }
 
 // ---------------------------------------------------------------------------------------------

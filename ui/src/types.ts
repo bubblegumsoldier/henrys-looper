@@ -574,6 +574,8 @@ export interface CompileOutcome {
 export interface ScoreLoaded {
   score: CompiledScore;
   message: string;
+  /** Set when loading rebuilt the engine with the score's tracks (also sent as `looper://engine`). */
+  engine: EngineInfo | null;
 }
 
 // ---------------------------------------------------------------------------------------------
