@@ -60,27 +60,36 @@ const FX_THROTTLE_MS = 60;
 export const FX_PRESETS: { name: LoadablePreset; label: string; hint: string }[] = [
   {
     name: "voice",
-    label: "Stimme",
-    hint: "80 Hz Hochpass, Präsenz bei 3 kHz, 3:1 ab -18 dBFS, 18 % Hall",
+    label: "Voice",
+    hint: "80 Hz high-pass, presence at 3 kHz, 3:1 from -18 dBFS, 18 % reverb",
   },
   {
     name: "piezo_guitar",
-    label: "Gitarre",
-    hint: "100 Hz Hochpass, -4 dB auf das Quäkband bei 3 kHz, 2,5:1, 10 % Hall",
+    label: "Guitar",
+    hint: "100 Hz high-pass, -4 dB on the quack band at 3 kHz, 2.5:1, 10 % reverb",
   },
-  { name: "dry", label: "Trocken", hint: "Alles aus, Kette umgangen - bitgleich durchgereicht" },
+  { name: "dry", label: "Dry", hint: "Everything off, chain bypassed - passed through bit for bit" },
 ];
 
 /** Mirrors `FxSlot::letter` in the engine: the letters that make up `HEK-R`. */
 const FX_LETTER: Record<FxSlotName, string> = {
   high_pass: "H",
   eq: "E",
-  comp: "K",
+  comp: "C",
   delay: "D",
   reverb: "R",
 };
 
 /** In signal order, so the digit of the keyboard chord `X` is the position in the chain. */
+/** English names of the five effects; the engine's own `label` is German. */
+export const FX_NAME: Record<FxSlotName, string> = {
+  high_pass: "High-pass",
+  eq: "EQ",
+  comp: "Compressor",
+  delay: "Delay",
+  reverb: "Reverb",
+};
+
 export const FX_SLOT_ORDER: FxSlotName[] = ["high_pass", "eq", "comp", "delay", "reverb"];
 
 /** The note values the tempo-synchronous delay knows, in the order the chord `D` numbers them. */
@@ -156,11 +165,11 @@ function CompMeter({ track, on }: { track: number; on: boolean }) {
       className={`live-fx-comp${on ? "" : " live-fx-comp-off"}`}
       title={
         on
-          ? `Wie viel der Kompressor gerade herunterzieht. Volle Länge sind ${-REDUCTION_FLOOR_DB} dB.`
-          : "Der Kompressor ist aus - er zieht nichts."
+          ? `Gain reduction right now. Full length is ${-REDUCTION_FLOOR_DB} dB.`
+          : "The compressor is off - no gain reduction."
       }
     >
-      <span className="live-fx-comp-label">Komp</span>
+      <span className="live-fx-comp-label">Comp</span>
       <div className="live-fx-comp-bar">
         <div className="live-fx-comp-fill" ref={fill} style={{ width: "0%" }} />
       </div>
@@ -304,7 +313,7 @@ function FxBlock({
       <div className="live-fx-block-head">
         <span className="live-fx-block-letter mono">{letter}</span>
         <span className="live-fx-block-title">{title}</span>
-        {!on && <span className="live-fx-block-tag">aus</span>}
+        {!on && <span className="live-fx-block-tag">off</span>}
       </div>
       {children}
     </div>
@@ -316,9 +325,9 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
 
   return (
     <div className="live-fx-details">
-      <FxBlock letter="H" title="Hochpass" on={on("high_pass")}>
+      <FxBlock letter="H" title="High-pass" on={on("high_pass")}>
         <FxSlider
-          label="Grenze"
+          label="Cutoff"
           value={fx.high_pass_hz}
           address={fxAddress(track, "high_pass.hz")}
           min={20}
@@ -326,12 +335,12 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
           step={1}
           log
           format={asHz}
-          title="Butterworth, 12 dB je Oktave, exakt -3 dB an der Grenze. Nimmt Trittschall, Griffgeräusche und Popplaute weg."
+          title="Butterworth, 12 dB per octave, exactly -3 dB at the cutoff. Removes rumble, handling noise and plosives."
           onChange={(v) => actions.fxSet(track, "high_pass_hz", v)}
         />
       </FxBlock>
 
-      <FxBlock letter="E" title="EQ · drei Bänder" on={on("eq")}>
+      <FxBlock letter="E" title="EQ · three bands" on={on("eq")}>
         {fx.bands.map((b) => (
           <div className="live-fx-band" key={b.index}>
             <div className="live-fx-band-head">
@@ -352,13 +361,13 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
                 ))}
               </span>
               {b.gain_db === 0 && (
-                <span className="live-fx-band-flat" title="Ein Band bei 0 dB ist ein Draht - die Engine rechnet es gar nicht erst">
-                  flach
+                <span className="live-fx-band-flat" title="A band at 0 dB is a wire - the engine skips it">
+                  flat
                 </span>
               )}
             </div>
             <FxSlider
-              label="Frequenz"
+              label="Freq"
               value={b.hz}
               address={fxBandAddress(track, b.index, "hz")}
               min={20}
@@ -369,18 +378,18 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
               onChange={(v) => actions.fxSet(track, "band_hz", v, b.index)}
             />
             <FxSlider
-              label="Güte"
+              label="Q"
               value={b.q}
               address={fxBandAddress(track, b.index, "q")}
               min={0.1}
               max={12}
               step={0.05}
               format={asQ}
-              title="Wie breit das Band greift. Klein ist breit und musikalisch, groß ist chirurgisch."
+              title="How wide the band acts. Small is broad and musical, large is surgical."
               onChange={(v) => actions.fxSet(track, "band_q", v, b.index)}
             />
             <FxSlider
-              label="Pegel"
+              label="Gain"
               value={b.gain_db}
               address={fxBandAddress(track, b.index, "gain")}
               min={-24}
@@ -393,27 +402,27 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         ))}
       </FxBlock>
 
-      <FxBlock letter="K" title="Kompressor" on={on("comp")}>
+      <FxBlock letter="C" title="Compressor" on={on("comp")}>
         <FxSlider
-          label="Schwelle"
+          label="Threshold"
           value={fx.comp_threshold_db}
           address={fxAddress(track, "comp.threshold")}
           min={-60}
           max={0}
           step={0.5}
           format={asDb}
-          title="Ab diesem Pegel wird heruntergezogen. Eine Stimme am Scarlett bei vernünftiger Verstärkung liegt um -10 dBFS."
+          title="Above this level the signal is pulled down. A voice on the Scarlett at sensible gain sits around -10 dBFS."
           onChange={(v) => actions.fxSet(track, "comp_threshold_db", v)}
         />
         <FxSlider
-          label="Verhältnis"
+          label="Ratio"
           value={fx.comp_ratio}
           address={fxAddress(track, "comp.ratio")}
           min={1}
           max={20}
           step={0.1}
           format={asRatio}
-          title="3:1 ist Pegeln, über 6:1 klingt eine Stimme festgehalten."
+          title="3:1 is levelling; above 6:1 a voice sounds held down."
           onChange={(v) => actions.fxSet(track, "comp_ratio", v)}
         />
         <FxSlider
@@ -425,7 +434,7 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
           step={0.1}
           log
           format={asMs}
-          title="Wie lange der Einschwinger durchgelassen wird. Zu schnell frisst die Konsonanten und den Anschlag."
+          title="How long the transient passes. Too fast eats consonants and the pick attack."
           onChange={(v) => actions.fxSet(track, "comp_attack_ms", v)}
         />
         <FxSlider
@@ -437,43 +446,43 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
           step={1}
           log
           format={asMs}
-          title="Etwa eine Silbe oder ein Anschlag: schnell genug zum Erholen, langsam genug, um nicht zu pumpen."
+          title="About a syllable or a strum: fast enough to recover, slow enough not to pump."
           onChange={(v) => actions.fxSet(track, "comp_release_ms", v)}
         />
         <FxSlider
-          label="Knie"
+          label="Knee"
           value={fx.comp_knee_db}
           address={fxAddress(track, "comp.knee")}
           min={0}
           max={24}
           step={0.5}
           format={asDbWidth}
-          title="Breite des weichen Übergangs um die Schwelle. 0 ist ein hartes Knie, das an der Schwelle mehrmals je Sekunde umschaltet."
+          title="Width of the soft transition around the threshold. 0 is a hard knee."
           onChange={(v) => actions.fxSet(track, "comp_knee_db", v)}
         />
         <FxSlider
-          label="Ausgleich"
+          label="Makeup"
           value={fx.comp_makeup_db}
           address={fxAddress(track, "comp.makeup")}
           min={-24}
           max={24}
           step={0.5}
           format={asDb}
-          title="Gibt zurück, was die Kompression gekostet hat. Einschalten soll dichter machen, nicht lauter."
+          title="Gives back what the compression took. Switching on should make it denser, not louder."
           onChange={(v) => actions.fxSet(track, "comp_makeup_db", v)}
         />
       </FxBlock>
 
-      <FxBlock letter="D" title="Delay · tempo-synchron" on={on("delay")}>
+      <FxBlock letter="D" title="Delay · tempo-synced" on={on("delay")}>
         <div className="live-fx-notes">
-          <span className="live-fx-knob-label">Notenwert</span>
+          <span className="live-fx-knob-label">Note</span>
           {DELAY_NOTES.map((n) => (
             <button
               key={n.name}
               className={`btn btn-mini live-fx-note${fx.delay_note === n.name ? " btn-on" : ""}`}
               data-midi={fxDelayNoteAddress(track, n.name)}
               onClick={() => actions.fxDelayNote(track, n.name)}
-              title="Die Verzögerung kommt aus der Zeitachse der Engine, nicht aus einer Millisekundenzahl - ein Tempowechsel nimmt sie mit."
+              title="The delay time follows the engine's timeline, not a millisecond value - a tempo change takes it along."
             >
               {n.label}
             </button>
@@ -481,18 +490,18 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
           <span className="live-fx-knob-value mono">{Math.round(fx.delay_ms)} ms</span>
         </div>
         <FxSlider
-          label="Rückkopplung"
+          label="Feedback"
           value={fx.delay_feedback}
           address={fxAddress(track, "delay.feedback")}
           min={0}
           max={0.95}
           step={0.01}
           format={asPercent}
-          title="Wie viel jeder Wiederholung in die Leitung zurückgeht - also wie viele Echos man hört."
+          title="How much of each repeat goes back in - how many echoes you hear."
           onChange={(v) => actions.fxSet(track, "delay_feedback", v)}
         />
         <FxSlider
-          label="Anteil"
+          label="Mix"
           value={fx.delay_mix}
           address={fxAddress(track, "delay.mix")}
           min={0}
@@ -503,31 +512,31 @@ function FxDetails({ track, fx, actions }: { track: number; fx: FxStatus; action
         />
       </FxBlock>
 
-      <FxBlock letter="R" title="Hall" on={on("reverb")}>
+      <FxBlock letter="R" title="Reverb" on={on("reverb")}>
         <FxSlider
-          label="Größe"
+          label="Size"
           value={fx.reverb_size}
           address={fxAddress(track, "reverb.size")}
           min={0}
           max={1}
           step={0.01}
           format={asPercent}
-          title="Wie groß der Raum ist. 62 % sind etwa anderthalb Sekunden."
+          title="How big the room is. 62 % is about one and a half seconds."
           onChange={(v) => actions.fxSet(track, "reverb_size", v)}
         />
         <FxSlider
-          label="Dämpfung"
+          label="Damping"
           value={fx.reverb_damping}
           address={fxAddress(track, "reverb.damping")}
           min={0}
           max={1}
           step={0.01}
           format={asPercent}
-          title="Nimmt dem Nachhall das obere Ende, damit er keine Zischlaute nachbaut."
+          title="Takes the top end off the tail so it does not rebuild sibilants."
           onChange={(v) => actions.fxSet(track, "reverb_damping", v)}
         />
         <FxSlider
-          label="Anteil"
+          label="Mix"
           value={fx.reverb_mix}
           address={fxAddress(track, "reverb.mix")}
           min={0}
@@ -553,7 +562,7 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
   return (
     <section className={`live-fx${fx.bypass ? " live-fx-bypassed" : ""}`}>
       <div className="live-fx-top">
-        <span className="live-fx-label">Effekte</span>
+        <span className="live-fx-label">Effects</span>
         <div className="live-fx-presets">
           {FX_PRESETS.map((p, n) => (
             <button
@@ -561,14 +570,14 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
               className={`btn live-fx-preset${fx.preset === p.name ? " btn-on" : ""}`}
               data-midi={fxPresetAddress(track, p.name)}
               onClick={() => actions.fxPreset(track, p.name)}
-              title={`${p.hint}. Taste V, dann ${n + 1}.`}
+              title={`${p.hint}. Key V, then ${n + 1}.`}
             >
               {p.label}
             </button>
           ))}
           {fx.preset === "custom" && (
-            <span className="live-fx-custom" title="Seit dem letzten Preset wurde an einem Regler gedreht">
-              eigen
+            <span className="live-fx-custom" title="A knob was moved since the last preset">
+              custom
             </span>
           )}
         </div>
@@ -578,11 +587,11 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
           onClick={() => actions.fxBypass(track, !fx.bypass)}
           title={
             fx.bypass
-              ? "Die Kette ist umgangen: der Track wird bitgleich durchgereicht. Klick schaltet sie ein. Taste F."
-              : "Die Kette ist im Signalweg. Klick nimmt sie heraus - bitgleich, das ist der Notschalter. Taste F."
+              ? "The chain is bypassed: the track passes bit for bit. Click to switch it in. Key F."
+              : "The chain is in the signal path. Click takes it out - bit for bit, the panic switch. Key F."
           }
         >
-          {fx.bypass ? "Kette aus" : "Kette an"} <kbd>F</kbd>
+          {fx.bypass ? "Chain off" : "Chain on"} <kbd>F</kbd>
         </button>
       </div>
 
@@ -596,10 +605,10 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
               className={`btn live-fx-slot${e.on ? " live-fx-slot-on" : ""}`}
               data-midi={fxSlotAddress(track, name)}
               onClick={() => actions.fxEnable(track, name, !e.on)}
-              title={`${e.label} ist ${e.on ? "an" : "aus"}. Taste X, dann ${n + 1}.`}
+              title={`${FX_NAME[name]} is ${e.on ? "on" : "off"}. Key X, then ${n + 1}.`}
             >
               <span className="live-fx-slot-letter mono">{e.on ? FX_LETTER[name] : "–"}</span>
-              <span className="live-fx-slot-name">{e.label}</span>
+              <span className="live-fx-slot-name">{FX_NAME[name]}</span>
             </button>
           );
         })}
@@ -608,14 +617,14 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
       <div className="live-fx-readout">
         <span
           className="live-fx-letters mono"
-          title="Dieselbe Kurzform wie im Terminal: ein Buchstabe je eingeschaltetem Effekt, ein Strich für aus."
+          title="The same short form as in the terminal: one letter per effect that is on, a dash for off."
         >
           {fx.letters}
         </span>
         {delayOn && (
           <span
             className="live-fx-delay mono"
-            title="Der Delay rechnet aus der Zeitachse der Engine, nicht in Millisekunden - ein Tempowechsel nimmt ihn mit."
+            title="The delay follows the engine's timeline, not milliseconds - a tempo change takes it along."
           >
             {fx.delay_note_label} · {Math.round(fx.delay_ms)} ms
           </span>
@@ -625,7 +634,7 @@ export function FxRow({ track, fx, actions }: { track: number; fx: FxStatus; act
           className="btn btn-mini live-fx-more"
           onClick={() => setOpen((o) => !o)}
           aria-expanded={open}
-          title="Alle Parameter der fünf Effekte - beim Produzieren, nicht auf der Bühne"
+          title="Every parameter of the five effects - for producing, not for the stage"
         >
           Details {open ? "▲" : "▼"}
         </button>

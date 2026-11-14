@@ -79,26 +79,26 @@ export function TapTempo({ onTempo }: { onTempo: (bpm: number) => void }) {
   };
 
   const hint = (() => {
-    if (count === 0) return "Vier Mal im Takt klicken, dann steht das Tempo.";
-    if (count === 1) return "Weiter klicken …";
-    if (stale) return `${count} Klicks · Pause erkannt, der nächste Klick beginnt neu.`;
-    return `${count} Klicks${bpm !== null ? ` · ${bpm.toFixed(1)} BPM übernommen` : ""}`;
+    if (count === 0) return "Tap four times in time to set the tempo.";
+    if (count === 1) return "Keep tapping…";
+    if (stale) return `${count} taps · pause detected, the next tap starts over.`;
+    return `${count} taps${bpm !== null ? ` · ${bpm.toFixed(1)} BPM applied` : ""}`;
   })();
 
   return (
     <div className="tap">
       <button
         type="button"
-        className={`btn tap-btn${count > 0 && !stale ? " tap-active" : ""}`}
+        className={`btn tap-btn${count > 0 && !stale ? " on" : ""}`}
         onClick={tap}
       >
-        Tempo tippen
+        Tap tempo
         <span className="tap-value">{bpm !== null ? bpm.toFixed(1) : "–"}</span>
       </button>
-      <button type="button" className="btn btn-mini" onClick={reset} disabled={count === 0}>
-        Zurücksetzen
+      <button type="button" className="btn s" onClick={reset} disabled={count === 0}>
+        Reset
       </button>
-      <div className="field-hint tap-hint">{hint}</div>
+      <div className="hint tap-hint">{hint}</div>
     </div>
   );
 }

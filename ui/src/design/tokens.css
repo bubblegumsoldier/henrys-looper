@@ -1,0 +1,177 @@
+/* =============================================================================================
+   Henrys Looper — Design-Tokens
+   ---------------------------------------------------------------------------------------------
+   Einzige Quelle für Farben, Zustandsfarben, Abstände, Radien, Schrift und Schatten.
+   Die React-App übernimmt diese Datei 1:1 (z. B. als ui/src/tokens.css) und verwendet in
+   Komponenten ausschließlich die Variablen, nie Rohwerte.
+
+   Regeln:
+   - Dunkel ist Standard (Bühne, dunkle Räume). Ein helles Thema ist nicht vorgesehen.
+   - Zustandsfarben (--st-*) bedeuten in Arrangement, Live, Mixer und MIDI immer dasselbe und
+     werden NIE für Dekoration benutzt. Jeder Zustand hat zusätzlich ein festes Icon (icons.css)
+     und ein festes Wort — Farbe allein trägt nie eine Bedeutung.
+   - --accent ist Auswahl/Fokus (UI-Bedienung), --learn ist ausschließlich MIDI-Learn.
+   ============================================================================================= */
+
+:root {
+  color-scheme: dark;
+
+  /* --- Flächen (von tief nach hoch) ------------------------------------------------------- */
+  --bg-0: #08090b;          /* Fenstergrund, Spurenbahnen-Grund */
+  --bg-1: #0e1013;          /* Panels: Spurköpfe, Inspektor, Mixer */
+  --bg-2: #14171b;          /* erhabene Flächen: Karten, Kopfleiste */
+  --bg-3: #1b1f25;          /* Bedienelemente: Buttons, Felder */
+  --bg-4: #242932;          /* Hover / gedrückt */
+  --bg-5: #2e3440;          /* aktive neutrale Bedienelemente */
+  --bg-inset: #050607;      /* vertiefte Anzeigen: Positions-LCD, Pegel-Schacht, Fader-Schlitz */
+
+  /* --- Linien ------------------------------------------------------------------------------ */
+  --line-1: rgba(255, 255, 255, 0.055);   /* Rasterlinien, feinste Trennung */
+  --line-2: rgba(255, 255, 255, 0.09);    /* Panel-Kanten */
+  --line-3: rgba(255, 255, 255, 0.14);    /* Kanten von Bedienelementen */
+  --line-4: rgba(255, 255, 255, 0.24);    /* betonte Kanten, Taktlinien */
+
+  /* --- Text -------------------------------------------------------------------------------- */
+  --tx-1: #eef1f5;          /* primär */
+  --tx-2: #aab2bf;          /* sekundär */
+  --tx-3: #737c8a;          /* tertiär: Einheiten, Beschriftungen */
+  --tx-4: #4b525d;          /* deaktiviert, Platzhalter */
+  --tx-inv: #0a0b0d;        /* Text auf hellen Zustandsflächen */
+
+  /* --- Akzente ----------------------------------------------------------------------------- */
+  --accent: #8ea2ff;        /* Auswahl, Fokus, aktiver Tab — nie ein Zustand */
+  --accent-soft: rgba(142, 162, 255, 0.16);
+  --accent-line: rgba(142, 162, 255, 0.55);
+  --learn: #e879f9;         /* nur MIDI-Learn: Markierungen, Abzeichen, Ziel */
+  --learn-soft: rgba(232, 121, 249, 0.14);
+  --learn-line: rgba(232, 121, 249, 0.6);
+  --ok: #3ddc97;            /* Systemstatus „in Ordnung" (Engine, Gerät) */
+  --warn: #f5b942;          /* Systemwarnung (Aussetzer, Gerät fehlt) */
+  --err: #ff5c6c;           /* Systemfehler */
+
+  /* --- Zustandsfarben (feste Bedeutung) ---------------------------------------------------
+     Je Zustand: Grundfarbe, weiche Fläche (Clip-/Kachelgrund), Kante, Text auf der Fläche.  */
+  --st-rec: #ff4757;                 /* Aufnahme — neuer Loop.          Icon: gefüllter Kreis   */
+  --st-rec-soft: rgba(255, 71, 87, 0.20);
+  --st-rec-line: rgba(255, 71, 87, 0.70);
+
+  --st-dub: #ff9f43;                 /* Overdub — weitere Ebene.        Icon: Ring mit Punkt    */
+  --st-dub-soft: rgba(255, 159, 67, 0.19);
+  --st-dub-line: rgba(255, 159, 67, 0.68);
+
+  --st-play: #2ed58c;                /* Wiedergabe.                     Icon: Dreieck           */
+  --st-play-soft: rgba(46, 213, 140, 0.15);
+  --st-play-line: rgba(46, 213, 140, 0.55);
+
+  --st-stop: #7d8796;                /* Still (stop).                   Icon: Quadrat           */
+  --st-stop-soft: rgba(125, 135, 150, 0.07);
+  --st-stop-line: rgba(125, 135, 150, 0.28);
+
+  --st-hear: #38bdf8;                /* Mithören (hear_through).        Icon: Mikrofon          */
+  --st-hear-soft: rgba(56, 189, 248, 0.13);
+  --st-hear-line: rgba(56, 189, 248, 0.55);
+
+  --st-armed: #f7d046;               /* Armiert — Wechsel/Aktion wartet. Icon: Sanduhr,
+                                        Form: diagonale Schraffur + gestrichelte Kante          */
+  --st-armed-soft: rgba(247, 208, 70, 0.14);
+  --st-armed-line: rgba(247, 208, 70, 0.75);
+
+  --st-empty: #4b525d;               /* Leer (Laufzeit) — gestrichelter Umriss                  */
+  --st-ready: #2ed58c;               /* Bereit (Loop vorhanden, steht) — Dreieck als Umriss     */
+
+  /* Schraffur für „armiert" (Form-Kennzeichen zusätzlich zur Farbe) */
+  --hatch-armed: repeating-linear-gradient(-45deg, rgba(247, 208, 70, 0.20) 0 6px, transparent 6px 12px);
+
+  /* --- Pegel ------------------------------------------------------------------------------- */
+  --meter-low: #27c97f;
+  --meter-mid: #c9e04a;
+  --meter-high: #f7b23b;
+  --meter-clip: #ff4757;
+  --meter-off: #15191e;
+  --meter-gradient: linear-gradient(to top,
+      #1fae6c 0%, #27c97f 55%, #9edc4f 70%, #e7d84a 80%, #f7a53b 90%, #ff4757 97%);
+  --meter-gradient-h: linear-gradient(to right,
+      #1fae6c 0%, #27c97f 55%, #9edc4f 70%, #e7d84a 80%, #f7a53b 90%, #ff4757 97%);
+
+  /* --- Spurfarben (Identität einer Spur, NICHT Zustand) — gedämpft, nie gesättigt ----------- */
+  --trk-1: #c7a26b;   /* gitarre */
+  --trk-2: #b79cf0;   /* voice   */
+  --trk-3: #e48fb3;   /* chor    */
+  --trk-4: #8fc7b8;   /* perc    */
+  --trk-5: #8fb3e4;   /* keys    */
+  --trk-6: #d5c46e;
+  --trk-7: #a3b18a;
+  --trk-8: #c98f8f;
+
+  /* --- Schrift ----------------------------------------------------------------------------- */
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter Display", "Inter", system-ui, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+  --num: tabular-nums;      /* font-variant-numeric für jede Zahl, die sich ändert */
+
+  --fs-9: 9px;              /* Rasterziffern, Skalen */
+  --fs-10: 10px;            /* Mikro-Beschriftung (Versalien) */
+  --fs-11: 11px;            /* dichte DAW-Beschriftung */
+  --fs-12: 12px;            /* Standard Arrangement */
+  --fs-13: 13px;            /* Felder, Inspektor */
+  --fs-15: 15px;            /* Panel-Titel */
+  --fs-18: 18px;
+  --fs-22: 22px;            /* LCD-Ziffern */
+  --fs-live-s: 17px;        /* Live: kleinste Schrift (aus 2 m lesbar) */
+  --fs-live-m: 22px;
+  --fs-live-l: 32px;
+  --fs-live-xl: 48px;
+  --fs-live-hero: 168px;    /* Live: Taktziffer */
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+  --tracking-caps: 0.07em;  /* Versalien-Beschriftungen */
+
+  /* --- Abstände (4er-Raster) ----------------------------------------------------------------- */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 20px;
+  --sp-8: 24px;
+  --sp-9: 32px;
+  --sp-10: 48px;
+
+  /* --- Maße ---------------------------------------------------------------------------------- */
+  --titlebar-h: 52px;       /* Kopfleiste inkl. Ampel (macOS Overlay-Titelleiste) */
+  --toolbar-h: 38px;
+  --ruler-h: 58px;
+  --trackhead-w: 252px;
+  --inspector-w: 304px;
+  --ctl-h: 24px;            /* Standard-Bedienhöhe Arrangement */
+  --ctl-h-s: 20px;
+  --live-ctl-h: 64px;       /* Mindesthöhe Touch-Ziel Live */
+
+  /* --- Radien -------------------------------------------------------------------------------- */
+  --r-1: 3px;               /* Clips, kleine Chips */
+  --r-2: 5px;               /* Buttons, Felder */
+  --r-3: 8px;               /* Panels, Kacheln Arrangement */
+  --r-4: 12px;              /* Live-Kacheln */
+  --r-5: 18px;              /* Live-Release-Knopf */
+  --r-pill: 999px;
+
+  /* --- Schatten ------------------------------------------------------------------------------ */
+  --sh-inset: inset 0 1px 2px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --sh-ctl: 0 1px 0 rgba(255, 255, 255, 0.05) inset, 0 1px 2px rgba(0, 0, 0, 0.45);
+  --sh-raise: 0 1px 0 rgba(255, 255, 255, 0.06) inset, 0 6px 18px rgba(0, 0, 0, 0.45);
+  --sh-pop: 0 18px 50px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --glow-rec: 0 0 0 1px var(--st-rec), 0 0 28px rgba(255, 71, 87, 0.35);
+  --glow-dub: 0 0 0 1px var(--st-dub), 0 0 28px rgba(255, 159, 67, 0.30);
+  --glow-armed: 0 0 0 1px var(--st-armed), 0 0 32px rgba(247, 208, 70, 0.22);
+  --glow-learn: 0 0 0 1px var(--learn), 0 0 16px rgba(232, 121, 249, 0.35);
+
+  /* --- Bewegung ------------------------------------------------------------------------------ */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-1: 90ms;
+  --dur-2: 180ms;
+  --pulse: 1.06s;           /* Aufnahme-/Armiert-Puls; im Takt wäre schöner (60/bpm) */
+}

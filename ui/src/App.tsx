@@ -1,116 +1,140 @@
-//! The shell: one event bridge, two views.
+//! The frame: one window, one title bar, two modes and a setup page.
 //!
-//! `Live` is the looper - device setup while the engine is down, the stage view while it runs.
-//! `Partitur` is the score: the editor, the block preview and the transport of the runner.
+//! ```text
+//!  ┌ TitleBar ───────────────────────────────────────────────────────────────┐
+//!  ├ bars: input-loss alarm · MIDI strip (Arrangement/Setup, and Live while learning) ┤
+//!  │ Arrangement  |  Live  |  Setup (gear)                                    │
+//!  └──────────────────────────────────────────────────── toasts, popovers ───┘
+//! ```
 //!
-//! **Two tabs, and each borrows a little of the other.** The two views answer different questions -
-//! "how does it sound" and "what does the song say" - and while a score plays a musician needs
-//! both. A third combined tab would be a third thing to choose on stage; a split screen would halve
-//! exactly the two elements that have to carry across a room, the release button and the meters. So
-//! each view keeps its own subject at full size and shows the other one compressed: the live view
-//! gets the score transport as a strip above its track cards, the score view gets the meters and
-//! layer counts as a column beside the editor. Whichever tab is open, the song can be run and the
-//! levels can be watched; the tab only decides what is available in *detail*.
+//! **Arrangement** is where a song is written (today: the score editor and block preview; next
+//! stage: grid, inspector, mixer). **Live** is the stage: big, readable from across the room,
+//! every control reachable by MIDI. **Setup** is reachable from the gear at any time; with the
+//! engine stopped it is where the app opens, and starting the engine from it switches to Live.
+//!
+//! MIDI learn reaches every view: `LearnLayer` is the one document-level listener that turns a click
+//! on any element with a `data-midi` address into a binding, and `.learn-on` on the window lets the
+//! CSS mark every learnable control.
 
-import { useEffect, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { insideTauri } from "./api";
-import { confirmAction } from "./dialogs";
-import { isDirty, scoreFile, subscribeScoreFile } from "./scoreFile";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { LiveView } from "./live/LiveView";
-import { ScoreView } from "./components/ScoreView";
+import { ArrangementView } from "./arrangement/ArrangementView";
+import { SetupView, type SetupPage } from "./setup/SetupView";
 import { LearnLayer } from "./midi/LearnLayer";
 import { MidiPanel } from "./midi/MidiPanel";
-import { IS_MAC } from "./platform";
+import { useLearnMode } from "./midi/store";
 import { useLooperEvents } from "./useWebSocket";
+import { useStatusSlice } from "./status";
+import { TitleBar, type Mode } from "./shell/TitleBar";
+import { EnginePanel } from "./shell/EnginePanel";
+import { Alarm } from "./shell/Toasts";
+import { fail } from "./shell/notes";
+import { useScoreKeys } from "./shell/scoreTransport";
+import { useScoreModelSync } from "./shell/scoreModel";
+import { useWindowTitle } from "./shell/windowTitle";
+import { IS_MAC } from "./platform";
 
-type Tab = "live" | "score";
+const MODE_KEY = "looper.mode";
+
+function storedMode(): Mode {
+  try {
+    return localStorage.getItem(MODE_KEY) === "arrangement" ? "arrangement" : "live";
+  } catch {
+    return "live";
+  }
+}
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("live");
-  const { status, info, error } = useLooperEvents();
+  const { info, error } = useLooperEvents();
+  const running = useStatusSlice((s) => s.running);
+  const learn = useLearnMode();
+  const [mode, setMode] = useState<Mode>(storedMode);
+  // The app opens on Setup while the engine is down - that is where the first thing to do is.
+  const [setupOpen, setSetupOpen] = useState(!running);
+  const [page, setPage] = useState<SetupPage>("audio");
+  const [enginePanel, setEnginePanel] = useState(false);
 
-  // The window title names the score file and marks unsaved changes; closing the window with
-  // unsaved changes asks first. Both live here rather than in the score view, which is unmounted
-  // while the live tab is open.
+  useScoreModelSync();
+  useWindowTitle();
+  // Arrangement embeds the score view, whose transport listens to the same keys.
+  useScoreKeys(setupOpen || mode === "live");
+
   useEffect(() => {
-    if (!insideTauri()) return;
-    const win = getCurrentWindow();
-    let shown = "";
-    const show = () => {
-      const file = scoreFile();
-      const title = `${file.name ?? "Untitled"}${isDirty(file) ? " •" : ""} — Henrys Looper`;
-      if (title !== shown) {
-        shown = title;
-        void win.setTitle(title).catch(() => undefined);
+    if (error) fail(error);
+  }, [error]);
+
+  // Development only: the autopilot (dev/autopilot.ts) switches views through this event.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const onPilot = (e: Event) => {
+      const step = (e as CustomEvent<Record<string, unknown>>).detail;
+      if (step.do === "mode") chooseModeRef.current(step.to === "arrangement" ? "arrangement" : "live");
+      const d = step.detail as { setup?: SetupPage; engine?: boolean } | undefined;
+      if (d?.setup) {
+        setPage(d.setup);
+        setSetupOpen(true);
       }
+      if (d?.engine !== undefined) setEnginePanel(d.engine);
     };
-    show();
-    const offFile = subscribeScoreFile(show);
-    let offClose: (() => void) | null = null;
-    let disposed = false;
-    void win
-      .onCloseRequested(async (event) => {
-        if (!isDirty()) return;
-        const name = scoreFile().name ?? "the untitled score";
-        const quit = await confirmAction(
-          `${name} has unsaved changes. Quit without saving?`,
-          "Unsaved changes",
-          "Quit without saving",
-        );
-        if (!quit) event.preventDefault();
-      })
-      .then((off) => {
-        if (disposed) off();
-        else offClose = off;
-      });
-    return () => {
-      disposed = true;
-      offFile();
-      offClose?.();
-    };
+    window.addEventListener("looper-autopilot", onPilot);
+    return () => window.removeEventListener("looper-autopilot", onPilot);
   }, []);
 
+  const chooseMode = useCallback((m: Mode) => {
+    setMode(m);
+    setSetupOpen(false);
+    try {
+      localStorage.setItem(MODE_KEY, m);
+    } catch {
+      /* not worth an error */
+    }
+  }, []);
+
+  const chooseModeRef = useRef(chooseMode);
+  chooseModeRef.current = chooseMode;
+
+  const openSetup = useCallback(() => {
+    setEnginePanel(false);
+    setSetupOpen(true);
+  }, []);
+
+  // The old MIDI strip (connection, pending learn target, save) until the next stage brings the
+  // MIDI sidebar of the design: always while learning, otherwise only above the Arrangement. In
+  // Setup it lives on the MIDI page.
+  const showMidiStrip = (learn && !(setupOpen && page === "midi")) || (!setupOpen && mode === "arrangement");
+
   return (
-    <div className="app">
-      <header className="app-bar">
-        <div className="brand">Henrys Looper</div>
-        <nav className="tabs">
-          <button className={`tab${tab === "live" ? " tab-on" : ""}`} onClick={() => setTab("live")}>
-            Live
-          </button>
-          <button className={`tab${tab === "score" ? " tab-on" : ""}`} onClick={() => setTab("score")}>
-            Partitur
-          </button>
-        </nav>
-        <div className="spacer" />
-        <span className="ws" title={info ? `Logdatei: ${info.log_path}` : undefined}>
-          <span className={`dot ${status === "open" ? "dot-ok" : status === "connecting" ? "dot-warn" : "dot-err"}`} />
-          {status === "open" ? "verbunden" : status === "connecting" ? "verbinde…" : "getrennt"}
-        </span>
-        {info && (
-          <span className="muted mono app-bar-info">
-            v{info.version}
-            {IS_MAC ? " · CoreAudio" : info.asio_built ? " · ASIO" : " · ohne ASIO"}
-            {info.logging ? "" : " · kein Log"}
-          </span>
+    <div className={`window${learn ? " learn-on" : ""}${IS_MAC ? " mac" : ""}`}>
+      <TitleBar
+        mode={mode}
+        setupOpen={setupOpen}
+        onMode={chooseMode}
+        onSetup={() => (setupOpen ? setSetupOpen(false) : openSetup())}
+        enginePanelOpen={enginePanel}
+        onEnginePanel={() => setEnginePanel((o) => !o)}
+      />
+
+      <div className="bars">
+        <Alarm />
+        {showMidiStrip && (
+          <div className="legacy legacy-midi">
+            <MidiPanel />
+          </div>
         )}
-      </header>
+      </div>
 
-      {error && (
-        <div className="banner" role="alert">
-          {error}
-        </div>
-      )}
+      <div className="content">
+        {setupOpen ? (
+          <SetupView info={info} page={page} onPage={setPage} onStarted={() => chooseMode("live")} />
+        ) : mode === "live" ? (
+          <LiveView onOpenSetup={openSetup} onOpenArrangement={() => chooseMode("arrangement")} />
+        ) : (
+          <ArrangementView />
+        )}
+      </div>
 
-      {/* MIDI sits above both views rather than inside one: the learn mode has to reach the score
-          transport as well as the track cards, and „hängt der Controller noch?“ is a question one
-          asks in whichever tab is open. `LearnLayer` renders nothing - it is the one listener that
-          turns a click on a control into a binding. */}
+      {enginePanel && <EnginePanel onClose={() => setEnginePanel(false)} onSetup={openSetup} />}
       <LearnLayer />
-      <MidiPanel />
-
-      {tab === "live" ? <LiveView info={info} /> : <ScoreView />}
     </div>
   );
 }

@@ -16,7 +16,8 @@
 import { useEffect, useRef } from "react";
 import { gotoAddress } from "../midi/addresses";
 import { useStatusSlice } from "../status";
-import { SCORE_STATE_LABEL, type CompiledScore, type CompiledSection, type LooperStatus } from "../types";
+import { SCORE_STATE } from "../shell/terms";
+import { type CompiledScore, type CompiledSection, type LooperStatus } from "../types";
 
 interface Props {
   score: CompiledScore | null;
@@ -104,9 +105,9 @@ export function Blocks({ score, stale, onGoto }: Props) {
   if (!score) {
     return (
       <section className="blocks">
-        <div className="panel-title">Blockvorschau</div>
+        <div className="panel-title">Section preview</div>
         <div className="blocks-empty">
-          Noch keine übersetzte Partitur. Links YAML schreiben — übersetzt wird beim Tippen.
+          No compiled score yet. Write YAML on the left - it compiles while you type.
         </div>
       </section>
     );
@@ -117,18 +118,18 @@ export function Blocks({ score, stale, onGoto }: Props) {
   return (
     <section className="blocks">
       <div className="panel-title">
-        Blockvorschau
+        Section preview
         <span className="muted">
-          {score.title} · {score.bpm} BPM · {score.time_signature} · {score.sections.length} Sektionen ·{" "}
+          {score.title} · {score.bpm} BPM · {score.time_signature} · {score.sections.length} sections ·{" "}
           {score.tracks.map((t) => t.name).join(", ")}
         </span>
         {stale && (
-          <span className="badge badge-warn" title="Der Text im Editor ist neuer als das, was der Runner spielt.">
-            nicht geladen
+          <span className="badge badge-warn" title="The text in the editor is newer than what the runner plays.">
+            not loaded
           </span>
         )}
         <div className="spacer" />
-        <span className="muted">nur Anzeige — der Text ist die Quelle</span>
+        <span className="muted">display only - the text is the source</span>
       </div>
       <div className="blocks-row" ref={row}>
         {score.sections.map((section) => (
@@ -145,7 +146,7 @@ export function Blocks({ score, stale, onGoto }: Props) {
           <article className="card card-pending card-end">
             <header className="card-head">
               <span className="card-index">▮</span>
-              <h3 className="card-title">Ende</h3>
+              <h3 className="card-title">End</h3>
             </header>
             <div className="pending-label">{live.armedText}</div>
           </article>
@@ -173,10 +174,10 @@ function SectionCard({ section, tracks, beatsPerBar, live, onGoto }: CardProps) 
 
   const classes = ["card", "card-jump", active && "card-active", armed && "card-pending"].filter(Boolean).join(" ");
   const jumpTitle = !live.running
-    ? "Die Partitur läuft nicht — erst starten."
+    ? "The score is not running - start it first."
     : live.blocked
-      ? `Sprung nicht möglich: ${live.armedText}. Ein armierter Wechsel liegt schon in der Engine.`
-      : `Zu „${section.id}" springen`;
+      ? `Cannot jump: ${live.armedText}. An armed switch is already in the engine.`
+      : `Jump to "${section.id}"`;
 
   return (
     <article
@@ -196,18 +197,18 @@ function SectionCard({ section, tracks, beatsPerBar, live, onGoto }: CardProps) 
     >
       <header className="card-head">
         <span className="card-index">{section.index + 1}</span>
-        <h3 className="card-title" title={section.source_line ? `Zeile ${section.source_line}` : undefined}>
+        <h3 className="card-title" title={section.source_line ? `Line ${section.source_line}` : undefined}>
           {section.id}
         </h3>
-        <span className="card-bars">{section.bars} Takte</span>
+        <span className="card-bars">{section.bars} bars</span>
       </header>
       <div className="card-badges">
         <span
           className={`badge ${section.autorelease ? "badge-auto" : "badge-manual"}`}
           title={
             section.autorelease
-              ? "Der Folgewechsel liegt sample-genau am Sektionsende und wird sofort armiert."
-              : "Die Sektion loopt, bis der Release-Knopf gedrückt wird."
+              ? "The switch to the next section sits sample-exact at the section end and is armed at once."
+              : "The section loops until Release is pressed."
           }
         >
           {section.autorelease ? "autorelease" : "Release"}
@@ -216,8 +217,8 @@ function SectionCard({ section, tracks, beatsPerBar, live, onGoto }: CardProps) 
           className="badge badge-quant"
           title={
             section.quantize === "bar"
-              ? "Ein Release rastet auf die nächste Taktgrenze ein."
-              : "Ein Release rastet auf das Ende des laufenden Durchlaufs ein."
+              ? "A Release snaps to the next bar."
+              : "A Release snaps to the end of the running pass."
           }
         >
           quantize: {section.quantize}
@@ -229,7 +230,7 @@ function SectionCard({ section, tracks, beatsPerBar, live, onGoto }: CardProps) 
           return (
             <li key={name}>
               <span className="track-name">{name}</span>
-              <span className={`state state-${state}`}>{SCORE_STATE_LABEL[state] ?? state}</span>
+              <span className={`state state-${state}`}>{SCORE_STATE[state] ?? state}</span>
             </li>
           );
         })}
@@ -241,7 +242,7 @@ function SectionCard({ section, tracks, beatsPerBar, live, onGoto }: CardProps) 
             <div className="progress-fill" style={{ width: `${progress * 100}%` }} />
           </div>
           <div className="progress-text">
-            Takt {bar}/{section.bars} · Durchlauf {live.pass}
+            Bar {bar}/{section.bars} · Pass {live.pass}
           </div>
           <div className="beats">
             {Array.from({ length: beatsPerBar }, (_, i) => (

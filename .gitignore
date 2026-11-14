@@ -14,6 +14,8 @@ ui/dist/
 .DS_Store
 Thumbs.db
 ui/*.tsbuildinfo
+# Steuerdatei des Entwicklungs-Autopiloten (ui/src/dev/autopilot.ts)
+ui/autopilot.local.json
 
 # Rust: seit dem Cargo-Workspace liegen alle Artefakte im Wurzel-target/
 target/
