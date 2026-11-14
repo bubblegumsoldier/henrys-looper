@@ -136,6 +136,11 @@ export const api = {
   // --- global --------------------------------------------------------------
   clearAll: () => call<void>("clear_all"),
   setClick: (on: boolean) => call<void>("set_click", { on }),
+  /** Click volume, linear 0..4. On the monitor bus only. */
+  clickGain: (gain: number) => call<void>("click_gain", { gain }),
+  /** Volume of every monitored live input, linear 0..4. Output side only. */
+  monitorGain: (gain: number) => call<void>("monitor_gain", { gain }),
+  /** Tempo and time signature. Refused unless every track is empty (and no score plays). */
   setTempo: (bpm: number, beatsPerBar: number, beatUnit: number) =>
     call<void>("set_tempo", { bpm, beats_per_bar: beatsPerBar, beat_unit: beatUnit }),
   /** Grid a recording and an overdub snap to. Armed takes keep the position they already have. */
@@ -248,6 +253,8 @@ export const scoreApi = {
    * `start` plays it again. Refused while the score plays (stop it first). Ask before calling.
    */
   rewind: () => call<string>("score_rewind"),
+  /** Count-in bars for the next start (1..8; 0 becomes 1). Only before the start. Answers a sentence. */
+  countIn: (bars: number) => call<string>("score_count_in", { bars }),
 };
 
 // ---------------------------------------------------------------------------------------------

@@ -253,6 +253,10 @@ export interface LooperStatus {
   latency_frames: number;
   /** The metronome. It is on the monitor bus and reaches the main bus by no path at all. */
   click: boolean;
+  /** Click volume, linear 0..4 (`api.clickGain`). */
+  click_gain: number;
+  /** Volume of all monitored live inputs, linear 0..4 (`api.monitorGain`). Never reaches a recording. */
+  monitor_gain: number;
   /** Louder side of the main bus, i.e. of what goes to the room. */
   output_peak: number;
   output_dbfs: number | null;
@@ -306,6 +310,8 @@ export const IDLE_STATUS: LooperStatus = {
   sample_rate: 0,
   latency_frames: 0,
   click: false,
+  click_gain: 0,
+  monitor_gain: 0,
   output_peak: 0,
   output_dbfs: null,
   output_peaks: [0, 0],
@@ -787,6 +793,8 @@ export interface ScoreStatus {
   pass: number;
   tracks: ScoreTarget[];
   armed: ArmedChange | null;
+  /** Bars of count-in the next start plays (1..8). Set with `scoreApi.countIn` before the start. */
+  count_in: number;
 }
 
 /**

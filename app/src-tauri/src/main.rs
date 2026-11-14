@@ -301,6 +301,19 @@ async fn set_click(on: bool, engine: State<'_, EngineHandle>) -> Result<(), Stri
     act(engine, Action::SetClick { on }).await
 }
 
+/// Volume of the click, linear 0.0 to 4.0. The click is on the monitor bus only.
+#[tauri::command(rename_all = "snake_case")]
+async fn click_gain(gain: f32, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::SetClickGain { gain }).await
+}
+
+/// Volume of every monitored live input, linear 0.0 to 4.0. Output side only - a recording is
+/// never affected.
+#[tauri::command(rename_all = "snake_case")]
+async fn monitor_gain(gain: f32, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::SetMonitorGain { gain }).await
+}
+
 /// New tempo and time signature. Only accepted while every track is empty.
 #[tauri::command(rename_all = "snake_case")]
 async fn set_tempo(
@@ -655,6 +668,13 @@ async fn score_rewind(engine: State<'_, EngineHandle>) -> Result<String, String>
     score_act(engine, ScoreAction::Rewind).await
 }
 
+/// Bars of count-in for the next start of the loaded score (1 to 8; 0 becomes 1, and the answer
+/// says so). Only before the score starts. Shown in the status as `score.count_in`.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_count_in(bars: u32, engine: State<'_, EngineHandle>) -> Result<String, String> {
+    score_act(engine, ScoreAction::CountIn(bars)).await
+}
+
 /// Every score transport press funnels through here.
 async fn score_act(
     engine: State<'_, EngineHandle>,
@@ -828,6 +848,8 @@ fn main() {
             clear_all,
             set_click,
             set_tempo,
+            click_gain,
+            monitor_gain,
             set_quantize,
             fx_bypass,
             fx_enable,
@@ -849,6 +871,7 @@ fn main() {
             score_goto,
             score_stop_all,
             score_rewind,
+            score_count_in,
             calibrate,
             midi_ports,
             midi_open,

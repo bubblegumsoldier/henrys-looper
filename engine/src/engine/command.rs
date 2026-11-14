@@ -38,6 +38,9 @@ use super::fx::{FxParam, FxPreset, FxSlot, FxStatus};
 use super::timeline::TimeSignature;
 use super::track::{TrackLatency, TrackState};
 
+/// Upper end of the click and monitor volumes, linear - the same headroom a layer gain has.
+pub const MAX_LEVEL_GAIN: f32 = 4.0;
+
 /// Hard ceiling of tracks. Bounds the fixed-size status snapshot, which has to stay `Copy`.
 pub const MAX_TRACKS: usize = 8;
 
@@ -112,6 +115,11 @@ pub enum Command {
     RemoveLayer { track: usize, layer: usize },
     /// Metronome on or off. The click grid keeps running either way.
     SetClick { on: bool },
+    /// Volume of the click, linear, clamped to `0..=MAX_LEVEL_GAIN`. Untimed: a level, not an event.
+    SetClickGain { gain: f32 },
+    /// Volume of every monitored live input, linear, clamped like the click. Untimed, and it
+    /// cannot reach a recording - what is recorded is the input before this gain.
+    SetMonitorGain { gain: f32 },
     /// New tempo, time signature and layer length. Only accepted while every track is empty and
     /// idle, because it redefines what every sample position means.
     SetTempo {
@@ -159,6 +167,8 @@ impl Command {
             | Command::SetLayerGain { .. }
             | Command::RemoveLayer { .. }
             | Command::SetClick { .. }
+            | Command::SetClickGain { .. }
+            | Command::SetMonitorGain { .. }
             | Command::SetTempo { .. }
             | Command::SetFxBypass { .. }
             | Command::SetFxEnabled { .. }
@@ -190,6 +200,8 @@ impl Command {
             | Command::LoadFxPreset { track, .. } => Some(*track),
             Command::ClearAll { .. }
             | Command::SetClick { .. }
+            | Command::SetClickGain { .. }
+            | Command::SetMonitorGain { .. }
             | Command::SetBusGain { .. }
             | Command::SetBusOutput { .. }
             | Command::SetTempo { .. }
@@ -355,6 +367,9 @@ pub struct Status {
     /// explain the two-output case without asking anybody else.
     pub output_channels: u8,
     pub click: bool,
+    /// Volume of the click and of the monitored live inputs, linear.
+    pub click_gain: f32,
+    pub monitor_gain: f32,
     pub bpm: f64,
     /// Commands the engine refused, in total.
     pub ignored_commands: u64,

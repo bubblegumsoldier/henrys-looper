@@ -40,7 +40,7 @@ use looper_engine::engine::bus::{
 };
 use looper_engine::engine::calibrate::{CalibrateOpts, cmd_calibrate};
 use looper_engine::engine::command::{
-    Command, CommandSender, LayerPool, MAX_TRACKS, Refusal, Status, StatusReceiver, TrackStatus,
+    Command, CommandSender, LayerPool, MAX_LEVEL_GAIN, MAX_TRACKS, Refusal, Status, StatusReceiver, TrackStatus,
     buffer_channel, command_channel, status_channel,
 };
 use looper_engine::engine::frame::{Channels, TrackInput};
@@ -150,6 +150,10 @@ pub enum Action {
     LayerGain { track: usize, layer: usize, gain: f32 },
     ClearAll,
     SetClick { on: bool },
+    /// Volume of the click, linear.
+    SetClickGain { gain: f32 },
+    /// Volume of every monitored live input, linear. Output side only.
+    SetMonitorGain { gain: f32 },
     SetTempo { bpm: f64, beats_per_bar: u32, beat_unit: u32 },
     /// Switch the grid a take snaps to while the engine runs. Takes that are already armed keep
     /// the position they were given - the engine has those commands already.
@@ -187,6 +191,8 @@ pub enum ScoreAction {
     StopAll,
     /// Clear every track and put the score back before its first section, ready to start again.
     Rewind,
+    /// Bars of count-in for the next start. Only before the score starts.
+    CountIn(u32),
 }
 
 impl Action {
@@ -236,6 +242,8 @@ impl Action {
             | Action::FxPreset { track, .. } => Some(track),
             Action::ClearAll
             | Action::SetClick { .. }
+            | Action::SetClickGain { .. }
+            | Action::SetMonitorGain { .. }
             | Action::SetBusGain { .. }
             | Action::SetBusOutput { .. }
             | Action::SetTempo { .. }
@@ -1058,6 +1066,16 @@ fn rebuilt_config(
     config
 }
 
+/// A click or monitor volume, refused in a sentence when it is out of range rather than clamped
+/// silently.
+fn check_level(what: &str, gain: f32) -> Result<(), String> {
+    if (0.0..=MAX_LEVEL_GAIN).contains(&gain) {
+        Ok(())
+    } else {
+        Err(format!("{what} level must be between 0.0 and {MAX_LEVEL_GAIN}."))
+    }
+}
+
 /// Shut the engine down and tell the frontend, in that order.
 fn stop_session(session: &mut Option<Session>, app: &AppHandle) {
     if let Some(active) = session.take() {
@@ -1757,6 +1775,8 @@ impl Session {
             sample_rate: rate,
             latency_frames: self.info.latency_frames,
             click: status.click,
+            click_gain: status.click_gain,
+            monitor_gain: status.monitor_gain,
             output_peak: status.output_peak_max(),
             output_dbfs: dbfs(status.output_peak_max()),
             output_peaks: status.output_peak().to_vec(),
@@ -1878,11 +1898,12 @@ impl Session {
         // stay on for the whole score, because the runner would never see a difference to send.
         self.apply_score_setup(&score)?;
 
-        let count_in = count_in.unwrap_or(DEFAULT_COUNT_IN_BARS);
         let title = score.title.clone();
         let sections = score.sections.len();
         let runner = Runner::new(score.clone(), self.scheduler.timeline, self.info.buffer_frames)?
-            .with_count_in(count_in);
+            .with_count_in(count_in.unwrap_or(DEFAULT_COUNT_IN_BARS));
+        // What the runner really uses: a requested 0 is one bar, and the sentence says so.
+        let count_in = runner.count_in_bars();
         self.runner = Some(runner);
 
         let message = format!(
@@ -1914,6 +1935,7 @@ impl Session {
             ScoreAction::Next => runner.next(est),
             ScoreAction::Goto(index) => runner.goto(index, est),
             ScoreAction::StopAll => runner.stop_all(est),
+            ScoreAction::CountIn(bars) => runner.set_count_in(bars),
             ScoreAction::Rewind => {
                 let (message, commands) = runner.rewind(est)?;
                 for command in commands {
@@ -2188,6 +2210,16 @@ impl Session {
                 self.message = Some(format!("Klick {}.", if on { "an" } else { "aus" }));
                 Ok(())
             }
+            // Levels, like a bus fader: no message per mouse move, the value comes back in the
+            // status.
+            Action::SetClickGain { gain } => {
+                check_level("Click", gain)?;
+                self.cmd.send(Command::SetClickGain { gain })
+            }
+            Action::SetMonitorGain { gain } => {
+                check_level("Monitoring", gain)?;
+                self.cmd.send(Command::SetMonitorGain { gain })
+            }
             Action::LayerMute {
                 track,
                 layer,
@@ -2242,7 +2274,18 @@ impl Session {
                 bpm,
                 beats_per_bar,
                 beat_unit,
-            } => self.set_tempo(bpm, beats_per_bar, beat_unit),
+            } => {
+                // The runner schedules on the timeline it was loaded with; moving the engine's grid
+                // under a loaded score would put every later section on the wrong samples.
+                if self.runner.is_some() {
+                    return Err(
+                        "A score is loaded, and its tempo and time signature come from the score. \
+                         Change bpm / time_signature there and load it again."
+                            .to_string(),
+                    );
+                }
+                self.set_tempo(bpm, beats_per_bar, beat_unit)
+            }
             Action::SetQuantize { quantize } => {
                 self.message = Some(self.scheduler.set_quantize(quantize));
                 Ok(())
@@ -2930,6 +2973,21 @@ mod tests {
         assert_eq!(config.bus_gain_monitor, Some(0.25));
         assert_eq!(config.bus_out_monitor, Some(BusOutConfig { channel: 3, width: 2 }));
         assert_eq!(config.bus_out_main, Some(BusOutConfig { channel: 1, width: 2 }));
+    }
+
+    /// Click and monitor levels are mix decisions: available while a score plays, on no track,
+    /// and refused in a sentence outside 0..4.
+    #[test]
+    fn the_levels_belong_to_the_human_and_are_range_checked() {
+        for action in [Action::SetClickGain { gain: 0.5 }, Action::SetMonitorGain { gain: 2.0 }] {
+            assert!(!action.moves_transport());
+            assert_eq!(action.track(), None);
+        }
+        assert!(check_level("Click", 0.0).is_ok());
+        assert!(check_level("Click", MAX_LEVEL_GAIN).is_ok());
+        let refusal = check_level("Monitoring", 4.5).unwrap_err();
+        assert!(refusal.starts_with("Monitoring level"), "{refusal}");
+        assert!(check_level("Click", -0.1).is_err());
     }
 
     /// The one fact about the build that decides whether the app is usable at all.

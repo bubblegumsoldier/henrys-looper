@@ -62,6 +62,10 @@ export function ScoreView() {
   /** The text the runner actually holds, so the preview can say "nicht geladen". */
   const [loadedText, setLoadedText] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Count-in for the next load and start. Sent with `load`, and to the runner when it is idle. */
+  const [countIn, setCountIn] = useState(1);
+  const runnerCountIn = useStatusSlice((s) => s.score?.count_in ?? null);
+  const runnerIdle = useStatusSlice((s) => s.score?.phase === "idle");
   /**
    * Whether the runner holds a score at all. Asked of the status rather than of `loadedText`,
    * because a score loaded before this component was mounted (or from the live tab) is just as
@@ -269,7 +273,7 @@ export function ScoreView() {
     setBusy(true);
     const text = yamlText;
     scoreApi
-      .load(text)
+      .load(text, countIn)
       .then((loaded) => {
         setCompiled(loaded.score);
         setErrors([]);
@@ -278,7 +282,7 @@ export function ScoreView() {
       })
       .catch((e) => note((e as Error).message, "error"))
       .finally(() => setBusy(false));
-  }, [yamlText, note]);
+  }, [yamlText, note, countIn]);
 
   /** Every transport press answers with a German sentence - the runner never fails, it explains. */
   const say = useCallback(
@@ -374,6 +378,21 @@ export function ScoreView() {
             <button className="btn" onClick={() => void compile(yamlText)} title={`${MOD_LABEL}+Enter`}>
               Übersetzen
             </button>
+            <label className="score-countin" title="Bars of click before the first section (1 to 8)">
+              Count-in
+              <input
+                type="number"
+                min={1}
+                max={8}
+                value={runnerIdle && runnerCountIn !== null ? runnerCountIn : countIn}
+                onChange={(e) => {
+                  const bars = Math.max(1, Math.min(8, Number(e.target.value) || 1));
+                  setCountIn(bars);
+                  if (runnerIdle) say(() => scoreApi.countIn(bars));
+                }}
+              />
+              bars
+            </label>
             <button
               className="btn btn-primary"
               onClick={load}

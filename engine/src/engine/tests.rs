@@ -2886,3 +2886,43 @@ fn a_bus_output_the_device_does_not_have_is_brought_back_to_one_it_has() {
     );
     assert_eq!(status.output_channels, 2);
 }
+
+/// Click and monitor volume can be changed while the engine runs, act on the next block, are
+/// clamped and come back in the status - the setup screen is no longer the only place to set them.
+#[test]
+fn click_and_monitor_levels_change_at_runtime() {
+    let bar = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4)).span_bars(0, 1);
+    let mut sim = Sim::new(
+        SimSpec {
+            click: true,
+            output_channels: 4,
+            loopback_channel: None,
+            tracks: vec![TrackSpec::on(0).monitoring()],
+            ..Default::default()
+        },
+        mono(|k| if k % 2 == 0 { 0.5 } else { -0.5 }),
+    );
+    let monitor_peak = |sim: &mut Sim| sim.latest_status().expect("Status").bus_peak_max(Bus::Monitor);
+    sim.run_to(bar);
+    assert!(monitor_peak(&mut sim) > 0.0, "Klick und Mithoeren klingen");
+
+    sim.send(Command::SetClick { on: false });
+    sim.send(Command::SetMonitorGain { gain: 0.0 });
+    sim.run_to(2 * bar);
+    assert_eq!(monitor_peak(&mut sim), 0.0, "Mithoeren auf null ist still");
+
+    sim.send(Command::SetClick { on: true });
+    sim.send(Command::SetClickGain { gain: 0.0 });
+    sim.run_to(3 * bar);
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.bus_peak_max(Bus::Monitor), 0.0, "Klick auf null ist still");
+    assert_eq!((status.click_gain, status.monitor_gain), (0.0, 0.0));
+
+    sim.send(Command::SetClickGain { gain: 9.0 });
+    sim.send(Command::SetMonitorGain { gain: 0.5 });
+    sim.run_to(4 * bar);
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.click_gain, super::command::MAX_LEVEL_GAIN, "begrenzt");
+    assert_eq!(status.monitor_gain, 0.5);
+    assert!(status.bus_peak_max(Bus::Monitor) > 0.0);
+}

@@ -22,6 +22,7 @@ import { currentStatus, structureSignature, useStatusSlice } from "../status";
 import { listen } from "@tauri-apps/api/event";
 import { confirmAction } from "../dialogs";
 import { Transport } from "../components/Transport";
+import { SessionControls } from "./SessionControls";
 import { Position } from "./Position";
 import { Setup } from "./Setup";
 import { TrackCard, type TrackActions } from "./TrackCard";
@@ -458,6 +459,7 @@ export function LiveView({ info }: { info: AppInfo | null }) {
       )}
 
       <BusStrip run={run} />
+      <SessionControls run={run} />
       <Warnings />
       <Position />
       <Notes notes={notes} onClear={() => setNotes([])} />

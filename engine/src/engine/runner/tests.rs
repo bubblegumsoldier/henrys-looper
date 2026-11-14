@@ -1138,6 +1138,24 @@ fn every_section_start_and_the_end_are_announced_once() {
     assert!(drive.runner.take_notices().is_empty(), "abgeholt ist abgeholt");
 }
 
+/// The count-in can be set before the start, is at least one bar and is reported in the view;
+/// once the score runs it stays as it was.
+#[test]
+fn the_count_in_is_set_before_the_start_and_never_zero() {
+    let mut runner = runner_for(HENRY);
+    assert_eq!(runner.view(0).count_in_bars, DEFAULT_COUNT_IN_BARS);
+    assert!(runner.set_count_in(3).contains("3 bars"));
+    assert_eq!(runner.count_in_bars(), 3);
+    let message = runner.set_count_in(0);
+    assert_eq!(runner.count_in_bars(), 1, "{message}");
+    assert!(message.contains("at least one bar"), "{message}");
+    assert_eq!(runner_for(HENRY).with_count_in(0).count_in_bars(), 1);
+    runner.set_count_in(2);
+    runner.start(0);
+    assert!(runner.set_count_in(4).contains("before the score starts"));
+    assert_eq!(runner.view(0).count_in_bars, 2);
+}
+
 // ---------------------------------------------------------------------------------------------
 // What a score says about its tracks
 // ---------------------------------------------------------------------------------------------

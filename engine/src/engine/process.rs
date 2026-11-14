@@ -861,6 +861,13 @@ impl EngineCore {
             }
             Command::SetFxParam { track, param } => self.tracks[track].set_fx_param(param),
             Command::LoadFxPreset { track, preset } => self.tracks[track].load_fx_preset(preset),
+            // Two stores. The values are read once per block in `render`.
+            Command::SetClickGain { gain } => {
+                self.click_gain = gain.clamp(0.0, super::command::MAX_LEVEL_GAIN);
+            }
+            Command::SetMonitorGain { gain } => {
+                self.monitor_gain = gain.clamp(0.0, super::command::MAX_LEVEL_GAIN);
+            }
             Command::Stop => {
                 for track in 0..self.tracks.len() {
                     self.cancel_takes(track);
@@ -995,6 +1002,8 @@ impl EngineCore {
             bus_out: self.routing,
             output_channels: self.output_channels.min(u8::MAX as usize) as u8,
             click: self.click,
+            click_gain: self.click_gain,
+            monitor_gain: self.monitor_gain,
             bpm: self.timeline.bpm(),
             ignored_commands: self.ignored_commands,
             refusal: self.refusal,

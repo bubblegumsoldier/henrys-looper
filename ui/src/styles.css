@@ -2590,3 +2590,36 @@ body {
   text-overflow: ellipsis;
   max-width: 24em;
 }
+
+/* ---------- session controls: tempo, click and monitor level ---------- */
+.session-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  padding: 6px 14px;
+  font-size: 12px;
+}
+.session-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.session-bpm {
+  width: 4.5em;
+}
+.session-sig {
+  width: 3.5em;
+}
+.session-level input[type="range"] {
+  width: 120px;
+}
+.score-countin {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 400;
+}
+.score-countin input {
+  width: 3.5em;
+}

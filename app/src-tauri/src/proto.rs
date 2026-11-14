@@ -686,6 +686,11 @@ pub struct StatusEvent {
     /// The metronome. It is on the **monitor** bus and reaches the main bus by no path at all -
     /// unless the two share a socket, in which case `buses_collapsed` says so.
     pub click: bool,
+    /// Volume of the click, linear 0..4. Changeable at runtime with `click_gain`.
+    pub click_gain: f32,
+    /// Volume of every monitored live input, linear 0..4. Changeable with `monitor_gain`; it never
+    /// reaches a recording.
+    pub monitor_gain: f32,
     /// Louder side of the main bus, i.e. of what goes to the room. The monitor bus carries the
     /// click, so a single "output level" that included it would be useless for setting a mix.
     pub output_peak: f32,
@@ -755,6 +760,8 @@ impl StatusEvent {
             sample_rate: 0,
             latency_frames: 0,
             click: false,
+            click_gain: 0.0,
+            monitor_gain: 0.0,
             output_peak: 0.0,
             output_dbfs: None,
             output_peaks: vec![0.0, 0.0],
@@ -1335,6 +1342,9 @@ pub struct ScoreStatusEvent {
     pub tracks: Vec<ScoreTargetEvent>,
     /// The armed change, or `null` when nothing is armed.
     pub armed: Option<ArmedEvent>,
+    /// Bars of count-in the next start plays (at least 1). Changeable with `score_count_in` while
+    /// the score has not started.
+    pub count_in: u32,
 }
 
 /// Build the runner's part of a status event. `names` is the engine's track list, which
@@ -1362,6 +1372,7 @@ pub fn score_event(title: &str, view: &RunnerView, names: &[String]) -> ScoreSta
                 label: state.label().to_string(),
             })
             .collect(),
+        count_in: view.count_in_bars,
         armed: view.armed.as_ref().map(|a| ArmedEvent {
             label: a.label.clone(),
             section: a.section,
@@ -1792,6 +1803,7 @@ mod tests {
                 "buses",
                 "buses_collapsed",
                 "click",
+                "click_gain",
                 "fifo_overruns",
                 "fifo_underruns",
                 "ignored_commands",
@@ -1800,6 +1812,7 @@ mod tests {
                 "loop_seconds",
                 "max_callback_ms",
                 "message",
+                "monitor_gain",
                 "other_errors",
                 "output_channels",
                 "output_dbfs",
@@ -2225,6 +2238,7 @@ mod tests {
             beat: 2,
             pass: 1,
             tracks: vec![ScoreState::Play, ScoreState::Record],
+            count_in_bars: 2,
             armed: Some(looper_engine::engine::runner::ArmedView {
                 label: "voice_2".to_string(),
                 section: Some(2),
@@ -2286,6 +2300,7 @@ mod tests {
                 "bar",
                 "bars_total",
                 "beat",
+                "count_in",
                 "pass",
                 "phase",
                 "phase_label",

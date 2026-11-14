@@ -73,6 +73,8 @@ use super::timeline::Timeline;
 /// line the command queue can still be told about in time, so what the musician gets is the rest of
 /// the bar he pressed in *plus* the full count-in.
 pub const DEFAULT_COUNT_IN_BARS: u32 = 1;
+/// Longest count-in that can be set. More than eight bars of click is waiting, not counting in.
+pub const MAX_COUNT_IN_BARS: u32 = 8;
 
 /// The refusal every by-hand transport action gets while a score is playing.
 ///
@@ -211,6 +213,8 @@ pub struct RunnerView {
     pub tracks: Vec<ScoreState>,
     /// German description of an armed change plus its lead, or `None`.
     pub armed: Option<ArmedView>,
+    /// Bars of count-in the next start plays.
+    pub count_in_bars: u32,
 }
 
 /// An armed change as the display shows it.
@@ -344,8 +348,36 @@ impl Runner {
     /// Bars of count-in before the first section. See [`DEFAULT_COUNT_IN_BARS`].
     #[must_use]
     pub fn with_count_in(mut self, bars: u32) -> Self {
-        self.count_in_bars = bars.max(1);
+        self.count_in_bars = bars.clamp(1, MAX_COUNT_IN_BARS);
         self
+    }
+
+    /// Bars of count-in the next start plays - after the clamp to at least one.
+    pub fn count_in_bars(&self) -> u32 {
+        self.count_in_bars
+    }
+
+    /// Change the count-in of a loaded score before it is started (or after a rewind). Refused
+    /// while it plays: the count-in of a running score is already over or already scheduled.
+    pub fn set_count_in(&mut self, bars: u32) -> String {
+        self.message = if self.phase == Phase::Idle {
+            self.count_in_bars = bars.clamp(1, MAX_COUNT_IN_BARS);
+            let note = if bars == 0 {
+                " (at least one bar - without it the first take would start at the very next bar line)"
+            } else if bars > MAX_COUNT_IN_BARS {
+                " (at most 8)"
+            } else {
+                ""
+            };
+            format!(
+                "Count-in: {} bar{}{note}.",
+                self.count_in_bars,
+                if self.count_in_bars == 1 { "" } else { "s" }
+            )
+        } else {
+            "The count-in can only be changed before the score starts.".to_string()
+        };
+        self.message.clone()
     }
 
     pub fn score(&self) -> &CompiledScore {
@@ -707,6 +739,7 @@ impl Runner {
             pass,
             tracks,
             armed,
+            count_in_bars: self.count_in_bars,
         }
     }
 
