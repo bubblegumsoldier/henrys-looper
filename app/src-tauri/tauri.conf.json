@@ -13,9 +13,12 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "Henrys Looper",
-        "width": 1280,
-        "height": 860,
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 700,
         "resizable": true
       }
     ],

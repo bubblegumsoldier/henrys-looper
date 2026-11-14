@@ -31,3 +31,11 @@ tauri-plugin-dialog = "2"
 # Only for the CoreMIDI test in `midi/tests.rs`, which plays a controller through a virtual port.
 # The engine already depends on it; this names it for the test.
 midir = "0.11.0"
+
+# Only for `dev_snapshot` (devshot.rs): WebKit's own snapshot of the page. Already in the build
+# through Tauri's WebView layer; named here to switch on the few classes it needs.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSError", "NSString"] }
+objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep"] }
+objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }

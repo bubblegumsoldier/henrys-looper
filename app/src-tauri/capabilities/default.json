@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Window may call commands and receive events, show native open/save dialogs and questions, and set its own title and close guard.",
+  "description": "Window may call commands and receive events, show native open/save dialogs and questions, set its own title and close guard, and be dragged by its title bar.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -10,6 +10,7 @@
     "dialog:allow-ask",
     "dialog:allow-message",
     "core:window:allow-set-title",
-    "core:window:allow-destroy"
+    "core:window:allow-destroy",
+    "core:window:allow-start-dragging"
   ]
 }

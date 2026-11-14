@@ -16,6 +16,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod files;
+mod devshot;
 mod host;
 mod logfile;
 mod midi;
@@ -796,6 +797,13 @@ async fn midi_state(engine: State<'_, EngineHandle>) -> Result<MidiView, String>
     offload(move || handle.midi_state()).await
 }
 
+/// The window's page as a PNG at `path` (macOS, WebKit's own snapshot). For comparing the UI with
+/// the design mockups from a script; see `devshot.rs`.
+#[tauri::command]
+async fn dev_snapshot(window: tauri::WebviewWindow, path: String) -> Result<String, String> {
+    devshot::snapshot(&window, path)
+}
+
 fn main() {
     tauri::Builder::default()
         // Native open/save dialogs and the "are you sure" questions. File contents never go
@@ -880,7 +888,8 @@ fn main() {
             midi_unbind,
             midi_edit,
             midi_save,
-            midi_state
+            midi_state,
+            dev_snapshot
         ])
         .run(tauri::generate_context!())
         .expect("Tauri-Anwendung liess sich nicht starten");
