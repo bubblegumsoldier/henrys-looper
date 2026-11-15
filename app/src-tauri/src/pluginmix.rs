@@ -101,6 +101,17 @@ pub fn inserts_missing(track: &str, wanted: Vec<InsertLine>) {
     });
 }
 
+/// Whether `id` on `track` is already known to be missing - an undo or a second apply of the
+/// same section then says nothing new.
+pub fn instrument_is_missing(track: &str, id: &str) -> bool {
+    with(|s| s.missing_instrument.get(track).is_some_and(|m| m == id))
+}
+
+/// The same for a track's insert list.
+pub fn inserts_are_missing(track: &str, wanted: &[InsertLine]) -> bool {
+    with(|s| s.missing_inserts.get(track).is_some_and(|m| m == wanted))
+}
+
 /// The score's request for `track` was met after all.
 pub fn found(track: &str, instrument: bool) {
     with(|s| {

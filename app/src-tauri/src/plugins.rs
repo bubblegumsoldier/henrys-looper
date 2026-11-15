@@ -1118,6 +1118,13 @@ impl Manager {
             crate::pluginmix::found(track, false);
             return;
         }
+        if crate::pluginmix::inserts_are_missing(track, wanted) {
+            // Asked for again (an undo, a second apply) and still not here: nothing new to do.
+            let present: Vec<&str> = have.iter().map(|p| self.slots[*p].info.info.id.as_str()).collect();
+            if present.iter().all(|id| wanted.iter().any(|w| w.plugin == *id)) {
+                return;
+            }
+        }
         // The states of what is there now, by plugin id, in slot order.
         let mut states: Vec<(String, Option<Vec<u8>>)> = have
             .iter()

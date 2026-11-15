@@ -332,6 +332,9 @@ impl Manager {
             crate::pluginmix::found(track, true);
             return;
         }
+        if self.position(track).is_none() && crate::pluginmix::instrument_is_missing(track, plugin_id) {
+            return;
+        }
         // Still waiting to be restored from the last session: the same one stays queued (with its
         // sound); another one's sound goes on the shelf before the score's replaces it.
         if let Some(pending) = self.restoring.iter().find(|e| e.track == track).cloned() {

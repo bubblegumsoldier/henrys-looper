@@ -196,7 +196,7 @@ function ScorePanel({ doc, errors, editable, edit, setSel, onIssue }: Props) {
             <i className="c" style={{ "--c": `var(--trk-${(i % 8) + 1})` } as React.CSSProperties} />
             <b>{t.name}</b>
             <span className="dim">{inputLabel(t)}</span>
-            <span className="dim">{t.input_right ? "stereo" : "mono"}</span>
+            <span className="dim">{t.instrument || t.input_right ? "stereo" : "mono"}</span>
           </button>
         ))}
       </div>
