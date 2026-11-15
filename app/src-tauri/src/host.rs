@@ -1764,11 +1764,13 @@ impl Session {
         let layout: Vec<LayoutTrack> = defs
             .iter()
             .map(|d| {
-                let right = match d.input {
-                    TrackInput::Stereo { right, .. } => Some(right as u32 + 1),
-                    TrackInput::Mono(_) => None,
+                // An instrument track has no input; 0 is what no 1-based input can be.
+                let (left, right) = match d.input {
+                    TrackInput::Stereo { left, right } => (left as u32 + 1, Some(right as u32 + 1)),
+                    TrackInput::Mono(c) => (c as u32 + 1, None),
+                    TrackInput::Instrument => (0, None),
                 };
-                LayoutTrack::new(d.name.clone(), d.input.first() as u32 + 1, right)
+                LayoutTrack::new(d.name.clone(), left, right)
             })
             .collect();
         let renamed = layout::replace(&layout);

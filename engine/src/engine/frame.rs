@@ -192,11 +192,11 @@ impl TrackInput {
 
     /// Device channel feeding buffer channel `i`. For a mono track every `i` is the one channel,
     /// which is what makes the recording loop in `process.rs` free of special cases. An instrument
-    /// track has none and answers `usize::MAX`; the engine never reads a device channel for it.
+    /// track has none and answers 0, harmlessly; the engine never reads a device channel for it.
     #[inline(always)]
     pub fn device_channel(self, i: usize) -> usize {
         match self {
-            TrackInput::Instrument => usize::MAX,
+            TrackInput::Instrument => 0,
             TrackInput::Mono(c) => c,
             TrackInput::Stereo { left, right } => {
                 if i == 1 {
