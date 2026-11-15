@@ -540,6 +540,11 @@ async fn score_render(doc: ScoreDoc) -> Result<RenderOutcome, String> {
 // ---------------------------------------------------------------------------------------------
 
 fn config_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    // The same override the MIDI profiles and the plugin cache honour, so a test run with its own
+    // directory leaves the musician's recent-files list alone too.
+    if let Some(dir) = std::env::var_os("HENRYS_LOOPER_CONFIG_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
     app.path()
         .app_config_dir()
         .unwrap_or_else(|_| std::env::temp_dir().join("henrys-looper"))
@@ -837,6 +842,18 @@ async fn dev_snapshot(window: tauri::WebviewWindow, path: String) -> Result<Stri
     devshot::snapshot(&window, path)
 }
 
+/// Development aid for the autopilot (`ui/src/dev/autopilot.ts`, step `dump`): write what the page
+/// shows as text, so a script can read the UI without a screenshot. Only into the temp directory.
+#[tauri::command]
+async fn dev_dump(path: String, text: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    let tmp = std::env::temp_dir();
+    if !(p.starts_with(&tmp) || p.starts_with("/private/tmp") || p.starts_with("/tmp")) {
+        return Err("dev_dump writes into the temp directory only.".into());
+    }
+    std::fs::write(p, text).map_err(|e| e.to_string())
+}
+
 fn main() {
     // The plugin scan starts this executable as a child to load one plugin at a time, so a plugin
     // that crashes takes the child down and not the program (`looper_engine::plugin::scan`).
@@ -946,7 +963,8 @@ fn main() {
             plugins::plugin_editor,
             plugins::plugin_state_get,
             plugins::plugin_state_set,
-            dev_snapshot
+            dev_snapshot,
+            dev_dump
         ])
         .run(tauri::generate_context!())
         .expect("the Tauri application did not start");

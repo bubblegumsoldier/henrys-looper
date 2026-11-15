@@ -96,7 +96,7 @@ export interface FxStatus {
   preset: FxPresetName;
   /** German word for the preset, ready to print. */
   preset_label: string;
-  /** `HEK-R`: one letter per effect that is on, a dash for one that is off. Always five characters. */
+  /** `HEC-R`: one letter per effect that is on, a dash for one that is off. Always five characters. */
   letters: string;
   /** On/off per effect, in signal order. */
   effects: FxEffectStatus[];

@@ -85,6 +85,14 @@ async function runStep(step: Step): Promise<void> {
       // WebKit's own snapshot of this page (app/src-tauri/src/devshot.rs).
       await invoke("dev_snapshot", { path: String(step.path) });
       return;
+    case "dump": {
+      // The page as text (or one element's), plus the notes, into a file in the temp directory:
+      // {"do": "dump", "path": "/private/tmp/…/ui.txt", "sel": ".ticker"}
+      const els = step.sel ? Array.from(document.querySelectorAll<HTMLElement>(String(step.sel))) : [document.body];
+      const text = els.map((e) => e.innerText).join("\n----\n");
+      await invoke("dev_dump", { path: String(step.path), text });
+      return;
+    }
     case "frame": {
       // Pretend a smaller window (e.g. 1024 x 768) without resizing the real one: the frame is laid
       // out at that size in the top-left corner, and the snapshot is cropped afterwards.
