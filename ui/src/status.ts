@@ -126,6 +126,12 @@ export function structureSignature(status: LooperStatus): string {
     sig += `~${t.bus_main ? 1 : 0}${t.bus_monitor ? 1 : 0}${t.monitor_bus_main ? 1 : 0}${t.monitor_bus_monitor ? 1 : 0}`;
     // The channel fader, mute and solo: settings again, moved by a hand, never by the music.
     sig += `~${t.gain ?? 1}${t.muted ? 1 : 0}${t.soloed ? 1 : 0}`;
+    // An instrument track's loop type, note grid and transposition: settings, moved by a click in
+    // the track drawer, the setup or the inspector. Without them the drawer kept showing the old
+    // value after the engine had already taken the new one. The note count of a MIDI layer is
+    // here too, so the layer list follows an overdub.
+    sig += `~${t.midi_loop ? 1 : 0}${t.grid ?? ""}~${t.transpose ?? 0}`;
+    for (const l of t.layers) sig += `~${l.notes ?? ""}`;
     sig += fxSignature(t.fx);
     for (const l of t.layers) sig += `${l.index}${l.muted ? 1 : 0}${l.gain}`;
   }

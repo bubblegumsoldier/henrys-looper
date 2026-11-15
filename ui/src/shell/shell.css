@@ -68,6 +68,8 @@ kbd {
 }
 .btn:not(:disabled):active, .tp:not(:disabled):active, .tb:not(:disabled):active, .bigbtn:not(:disabled):active, .chip:active { transform: translateY(1px); }
 .seg > button:disabled { cursor: default; opacity: .45; }
+/* Locked, but still answers a click with the reason (e.g. the loop type of a track that holds a loop). */
+.seg > button[aria-disabled="true"]:not(.on) { cursor: help; opacity: .45; }
 .seg > button:not(.on):not(:disabled):hover { color: var(--tx-1); background: var(--bg-3); }
 .seg.off > .on { opacity: .7; }
 .chip:not(.on):hover { color: var(--tx-1); border-color: var(--line-3); }

@@ -37,6 +37,11 @@ export function clearNotes(): void {
   announce();
 }
 
+/** The notes on screen right now, newest first. */
+export function currentNotes(): Note[] {
+  return notes;
+}
+
 export function useNotes(): Note[] {
   return useSyncExternalStore(
     (l) => {

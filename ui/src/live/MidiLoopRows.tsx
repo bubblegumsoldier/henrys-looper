@@ -7,7 +7,7 @@
 
 import { api } from "../api";
 import { setConfig } from "../setup/config";
-import { run } from "../shell/notes";
+import { fail, run } from "../shell/notes";
 import { T } from "../shell/terms";
 import type { LooperTrackStatus, StartConfig, StartInstrument } from "../types";
 
@@ -65,31 +65,64 @@ function remember(name: string, change: Partial<StartInstrument>) {
   }));
 }
 
+type TrackLike = Pick<LooperTrackStatus, "index" | "name" | "state" | "layers" | "midi_loop">;
+
+/**
+ * Why the loop type of this track cannot change right now, or null when it can. The engine only
+ * takes the change on an empty track; the sentence says what is in the way.
+ */
+export function loopKindBlock(track: TrackLike): string | null {
+  const layers = track.layers.length;
+  switch (track.state) {
+    case "empty":
+      return layers === 0 ? null : `"${track.name}" still holds ${layers} ${layers === 1 ? "layer" : "layers"}.`;
+    case "armed":
+      return `"${track.name}" is waiting for a take to start.`;
+    case "recording":
+    case "overdub":
+      return `"${track.name}" is recording.`;
+    default:
+      return `"${track.name}" holds a loop (${layers} ${layers === 1 ? "layer" : "layers"}).`;
+  }
+}
+
+/** Switch what a take of an instrument track stores. Refused (with a note) while it holds a loop. */
+export function setLoopKind(track: TrackLike, kind: "audio" | "midi"): void {
+  if ((kind === "midi") === !!track.midi_loop) return;
+  const block = loopKindBlock(track);
+  if (block) {
+    fail(`Clear the track first: ${block} The loop type changes only while the track is empty.`);
+    return;
+  }
+  run(async () => {
+    await api.trackLoopKind(track.index, kind);
+    remember(track.name, { loop: kind === "midi" ? "midi" : null });
+  });
+}
+
+export function setNoteGrid(track: TrackLike, grid: string): void {
+  run(async () => {
+    await api.trackGrid(track.index, grid);
+    remember(track.name, { grid: grid === "none" ? null : grid });
+  });
+}
+
+export function setTranspose(track: TrackLike, semitones: number): void {
+  run(async () => {
+    await api.trackTranspose(track.index, semitones);
+    remember(track.name, { transpose: semitones === 0 ? null : semitones });
+  });
+}
+
 export function MidiLoopRows({ track }: { track: LooperTrackStatus }) {
-  const i = track.index;
   const midi = !!track.midi_loop;
-  const empty = track.state === "empty" && track.layers.length === 0;
-  const setKind = (kind: "audio" | "midi") =>
-    run(async () => {
-      await api.trackLoopKind(i, kind);
-      remember(track.name, { loop: kind === "midi" ? "midi" : null });
-    });
-  const setTranspose = (semitones: number) =>
-    run(async () => {
-      await api.trackTranspose(i, semitones);
-      remember(track.name, { transpose: semitones === 0 ? null : semitones });
-    });
-  const setGrid = (grid: string) =>
-    run(async () => {
-      await api.trackGrid(i, grid);
-      remember(track.name, { grid: grid === "none" ? null : grid });
-    });
+  const empty = loopKindBlock(track) === null;
   return (
     <>
       <div className="frow">
         <label>{T.transpose}</label>
         <div>
-          <TransposeControl value={track.transpose ?? 0} onChange={setTranspose} />
+          <TransposeControl value={track.transpose ?? 0} onChange={(v) => setTranspose(track, v)} />
         </div>
       </div>
       <div className="frow">
@@ -100,8 +133,8 @@ export function MidiLoopRows({ track }: { track: LooperTrackStatus }) {
               <button
                 key={k}
                 className={(k === "midi") === midi ? "on" : ""}
-                disabled={!empty}
-                onClick={() => (k === "midi") !== midi && setKind(k)}
+                aria-disabled={!empty}
+                onClick={() => setLoopKind(track, k)}
                 title={
                   empty
                     ? k === "midi"
@@ -123,7 +156,7 @@ export function MidiLoopRows({ track }: { track: LooperTrackStatus }) {
             <select
               className="field sel"
               value={track.grid ?? "none"}
-              onChange={(e) => setGrid(e.target.value)}
+              onChange={(e) => setNoteGrid(track, e.target.value)}
               title="Notes play on this grid - also the ones already recorded. The recording itself never changes."
             >
               {GRID_CHOICES.map((g) => (
