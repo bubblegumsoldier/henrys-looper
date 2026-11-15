@@ -1216,9 +1216,9 @@ dessen, was das Gerät hat. Bei einem einzelnen Kanal wird der Bus mit halbem Pe
 | 1 | beide auf Kanal 1, mono gefaltet |
 
 `engine/src/engine/bus.rs::place_buses` ist die **einzige** Stelle, an der aus einem Bus eine Buchse
-wird; sie hat `process::spread_frame` abgelöst, das L/R auf jedes Kanalpaar des Geräts legte.
-Überschneiden sich zwei Busse teilweise, wird auf dem gemeinsamen Kanal **summiert** und nichts
-verworfen.
+wird; sie hat `process::spread_frame` abgelöst, das L/R auf jedes Kanalpaar des Geräts legte. Jeder
+Ausgabe-Callback (App, CLI, `calibrate`, Simulation) ruft sie über `EngineCore::place_output` auf, die
+Ausgangsstufe: platzieren, je Gerätekanal messen, Sicherheits-Limiter (siehe unten).
 
 ### Was bei zwei Ausgängen passiert, und wie es erklärt wird
 
@@ -1226,27 +1226,72 @@ Henrys Gerät ist ein Focusrite Scarlett 2i2, dessen Kopfhörerausgang eine Kopi
 **zwei Ausgangskanäle, getrennte Busse brauchen vier.** Das ist kein Fehler und wird nicht heimlich
 repariert.
 
-**Legen beide Busse auf exakt demselben Ausgang, mischt die Engine sie zu einem.** Jede Quelle
-klingt dann genau **einmal**, gleichgültig auf wie viele Busse sie gelegt ist. Das ist keine
-Kosmetik: Zwei Busse übereinanderzulegen würde einen Track, der auf beide geht, 6 dB über einen
-legen, der auf einen geht — und das Einstecken eines zweiten Ausgangspaares würde die Balance des
-ersten verändern. Ein Weg hinaus ist eine Mischung; so verhält sich die Engine auf dem 2i2
-**exakt wie vor dem Umbau**, den Klick eingeschlossen.
+**Teilen sich die Busse auch nur einen Gerätekanal, mischt die Engine sie zu einem**
+(`BusRouting::collapsed`). Jede Quelle klingt dann genau **einmal**, gleichgültig auf wie viele
+Busse sie gelegt ist. Das ist keine Kosmetik: Zwei Busse übereinanderzulegen würde einen Track, der
+auf beide geht, 6 dB über einen legen, der auf einen geht — und das Einstecken eines zweiten
+Ausgangspaares würde die Balance des ersten verändern. Die Regel:
 
-Der Preis steht in einem deutschen Satz, einmal beim Start, einmal im Einrichtungsfeld und einmal
-auf der Bus-Leiste (`bus::routing_note`) — nicht bei jeder Statusaktualisierung, denn eine Meldung,
-die nervt, erzieht dazu, Meldungen nicht mehr zu lesen:
+* Ein Weg hinaus ist **eine Mischung**: alle Tracks, das Mithören und der Klick, jede Quelle einmal,
+  auf dem Main-Bus gerechnet. Der Monitor-Bus bleibt still.
+* **Die Main-Lautstärke regelt diese eine Mischung**, den Klick eingeschlossen. Die
+  Monitor-Lautstärke hat nichts Eigenes zu regeln und ist in der App ausgegraut. Für den Klick und
+  das Mithören gibt es ohnehin die eigenen Pegel (Klick, Monitoring). Gegenüber einem Gerät mit vier
+  Ausgängen hört der Kopfhörer also, was dort der Saal hört, plus Klick — nicht 6 dB mehr.
+* Die Regel gilt **kanalweise**: `place_buses` legt die eine Mischung auf jeden Kanal, den einer der
+  Busse belegt, und auf keinen zweimal — mit Mains Belegung, wo Main liegt, mit der des Monitors, wo
+  nur er liegt. Main auf 1-2 und Monitor auf 3-4 überschneiden sich nicht und bleiben getrennt; beide
+  auf 1-2 sind eine Mischung; Main auf 1-2 und Monitor auf 2-3 sind es auch, und Kanal 3 bekommt die
+  rechte Seite derselben Mischung.
+* Plugin-Inserts, Mitschnitt und Latenzmessung bleiben, wie sie sind: der Track-Insert verarbeitet
+  das Main-Signal, `Mix.wav` ist der Main-Bus nach den Inserts, vor der Main-Lautstärke, ohne Klick
+  (Stems addiert = Mix), und `calibrate` legt beide Busse absichtlich auf ein Paar.
 
-> Das Gerät hat 2 Ausgangskanäle. Getrennte Busse brauchen vier. Main und Monitor liegen deshalb
-> beide auf Ausgang 1-2: es gibt einen Weg hinaus und damit eine Mischung. Jede Quelle klingt darin
-> genau einmal, die Lautstärken bleiben also, wie sie wären — aber der Klick geht mit in den Saal,
-> und die Monitor-Lautstärke hat nichts, was sie getrennt regeln könnte.
+Der Preis steht in einem Satz, einmal beim Start, einmal im Einrichtungsfeld, einmal im
+Engine-Panel und einmal auf der Bus-Leiste (`bus::routing_note`) — nicht bei jeder
+Statusaktualisierung, denn eine Meldung, die nervt, erzieht dazu, Meldungen nicht mehr zu lesen:
+
+> The device has 2 output channels. Separate buses need four. Main and Monitor are therefore both
+> on output 1-2: there is one way out and therefore one mix. Every source is in it exactly once, so
+> levels stay as they would be - but the click goes out to the room too, the Main level sets the
+> whole output and the Monitor level has nothing of its own to control.
 
 **Der Notbehelf, den erfahrene Musiker mit zwei Ausgängen benutzen**, braucht dafür keinen eigenen
 Modus: weil ein Bus auch auf einem einzelnen Kanal liegen darf, ist „Mix links, Klick rechts" schon
 möglich — `--bus-out main:1 --bus-out monitor:2`, mit einem Y-Kabel aufzutrennen. Ein eigener
 Schalter dafür wäre eine dritte Sache zu erklären für etwas, das der allgemeine Mechanismus ohnehin
 kann.
+
+### Warum der Kopfhörer übersteuern konnte, obwohl der Mitschnitt sauber war
+
+Beobachtet am 2i2: Kratzen im Kopfhörer, `Mix.wav` mit Spitze −1,4 dBFS, nichts geclippt. Eine
+Doppelung war es nicht (siehe oben, durch Simulation belegt: ein Loop auf beiden Bussen mit −3 dBFS
+kommt mit −3,00 dBFS heraus). Es war, was der Mitschnitt nicht enthält: **der Klick** (Spitze bis
+0,5 × Klick-Pegel, also −6 dBFS bei Pegel 1) liegt auf dem Mix, und ein Schlag auf der Zählzeit trifft
+ihn genau dort; dazu die **Main-Lautstärke**, die nach dem Abgriff des Mitschnitts kommt. Ein
+−1,4-dBFS-Mix plus Klick erreicht in der Simulation +1,8 dBFS. Bis dahin klemmte die Engine jeden
+Bus hart auf ±1 — hartes digitales Clipping auf jedem Schlag — und das Bus-Meter maß **nach** dieser
+Klemme, konnte also höchstens 0 dBFS zeigen.
+
+Seitdem gilt:
+
+* **Kein Clamp mehr je Bus.** Die Bus-Meter zeigen den wahren Pegel, auch über 0 dBFS.
+* **Ausgangsmeter je Gerätekanal** (`Status::out_peak`, die ersten acht Kanäle): die Summe auf der
+  Buchse, **vor** dem Limiter — das einzige Meter, das eine Übersteuerung der Summe zeigen kann.
+* **Sicherheits-Limiter je Gerätekanal** (`bus::OutputLimiter`): Schwelle −0,3 dBFS, **ohne
+  Vorausschau und damit ohne Latenz** (die ganze Zeitrechnung des Loopers ruht auf einer einmal
+  gemessenen Roundtrip-Latenz). Ein Sample über der Schwelle verlangt die Verstärkung, die es auf die
+  Schwelle bringt; die niedrigste wird 10 ms gehalten und mit 80 ms Zeitkonstante freigegeben, die
+  angewandte Verstärkung folgt ihr in etwa 0,5 ms nach unten. Was in dieser halben Millisekunde noch
+  darüber liegt, rundet ein Soft-Clipper (`safety_limit`, tanh-Knie, nie über 1,0). Solange nichts
+  darüber ist und die Verstärkung wieder bei 1 steht, geht jedes Sample **bitgleich** durch. Die
+  Reduktion steht als `out_reduction_db` im Status. Im Callback wird nichts alloziert; der Zustand
+  wird beim Bau der Engine angelegt.
+* **Der Mitschnitt bleibt unbegrenzt** — er wird lange vor der Ausgangsstufe abgegriffen.
+* **Anzeige**: im Engine-Panel je Ausgang ein Meter und „Limiter −x dB", solange er arbeitet; in der
+  Kopfleiste eine rote, einrastende Clip-Lampe („Clip 1/2"), sobald ein Ausgang 0 dBFS erreicht hat,
+  mit Tooltip, welcher Ausgang wie weit darüber war und was leiser zu stellen ist. Ein Klick löscht sie
+  und öffnet das Engine-Panel.
 
 ### Warum es eine Effektkette je Bus gibt
 
@@ -1287,7 +1332,9 @@ Die Wörter sind überall dieselben: `main`, `monitor`, `main+monitor`, `none`.
 
 Global: `buses` (je Bus Kennung, Beschriftung, Ausgangskanal, Breite, Lautstärke, Pegel je Seite,
 und ob der Klick darauf liegt), `output_channels`, `buses_collapsed` und `bus_note` — der deutsche
-Satz von oben, oder `null`, wenn die Busse sauber getrennt sind. Je Track vier Schalter:
+Satz von oben, oder `null`, wenn die Busse sauber getrennt sind — und `outputs`: je
+Gerätekanal (höchstens acht) Kanalnummer, Spitze vor dem Limiter, Limiter-Reduktion in dB und welche
+Busse dort hinausgehen. Je Track vier Schalter:
 `bus_main`, `bus_monitor`, `monitor_bus_main`, `monitor_bus_monitor`. `output_peak` meint jetzt
 ausdrücklich den **Main-Bus**; eine Zahl, die den Klick enthielte, wäre zum Pegeleinstellen wertlos.
 
@@ -1315,9 +1362,11 @@ neuen Adressen verschiebt den Transport, alle bleiben also bedienbar, während e
 
 | Datei | Inhalt |
 |---|---|
-| `engine/src/engine/bus.rs` | `Bus`, `BusSend`, `BusOutput`, `BusRouting`, `place_buses`, `routing_note` |
+| `engine/src/engine/bus.rs` | `Bus`, `BusSend`, `BusOutput`, `BusRouting`, `place_buses`, `routing_note`, `OutputLimiter`, `safety_limit` |
 | `engine/src/engine/track.rs` | eine Kette je Bus, die zwei Zuordnungen je Track, `render` |
-| `engine/src/engine/process.rs` | Summierung auf zwei Busse, Bus-Lautstärken, Klick auf Monitor |
+| `engine/src/engine/process.rs` | Summierung auf zwei Busse, Bus-Lautstärken, Klick auf Monitor, Ausgangsstufe `place_output` |
+| `engine/src/engine/output_tests.rs` | geteilte Busse, Limiter und Ausgangsmeter in der Simulation |
+| `ui/src/shell/OutputClip.tsx`, `outputLatch.ts` | die Clip-Lampe der Kopfleiste |
 | `engine/src/engine/live.rs` | `--bus-out`, `--bus-gain`, `--track-bus`, `--track-monitor-bus`, Tasten `b g u` |
 | `engine/src/score/read.rs` | `bus:` und `monitor_bus:` in der Partitur |
 | `engine/src/midi/target.rs` | die neuen Adressen |
