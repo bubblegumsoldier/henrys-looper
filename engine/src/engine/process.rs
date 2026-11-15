@@ -138,6 +138,7 @@ use super::command::{
 };
 use super::frame::{Channels, Frame};
 use super::insert::{InsertEndpoint, InsertRack, MAX_BLOCK, Spread};
+use super::latch::Latches;
 use super::metro::Metronome;
 use super::source::{HostClock, SourceEndpoint, SourceRack, place_event};
 use super::timeline::Timeline;
@@ -247,6 +248,8 @@ pub struct EngineCore {
     /// `C`, the fixed delay between a key and its sound, in frames. Latched on the first clocked
     /// call unless the host set it; `None` until then. See `super::source`.
     instrument_delay: Option<u64>,
+    /// Continuous overdub per track (`super::latch`).
+    latch: Latches,
 }
 
 impl EngineCore {
@@ -299,6 +302,7 @@ impl EngineCore {
             sources: None,
             clock: None,
             instrument_delay: None,
+            latch: Latches::default(),
         }
     }
 
@@ -1026,9 +1030,14 @@ impl EngineCore {
             self.finish_take(t, end);
             // This very sample is the first one *after* the old take - and therefore the first
             // one of a take queued behind it, if the two are back to back.
-            return self.write_into_take(t, pos, frame);
+            let wrote = self.write_into_take(t, pos, frame);
+            if wrote {
+                self.latch.note(t, frame);
+            }
+            return wrote;
         }
         self.tracks[t].write(pos, frame);
+        self.latch.note(t, frame);
         true
     }
 
@@ -1101,6 +1110,7 @@ impl EngineCore {
                     self.begin_take(track, start, defines_loop);
                 }
             }
+            Command::LatchOverdub { track, on } => self.latch.set(track, on),
             Command::StopRecord { track, at } => {
                 // The loop length is known now, even though the last R samples of the take are
                 // still travelling in from the interface. Publishing it here is what makes the
@@ -1109,8 +1119,12 @@ impl EngineCore {
             }
             Command::StartPlay { track, .. } => self.tracks[track].set_playing(true),
             Command::StopPlay { track, .. } => self.tracks[track].set_playing(false),
-            Command::ClearTrack { track, .. } => self.clear_track(track),
+            Command::ClearTrack { track, .. } => {
+                self.latch.set(track, false);
+                self.clear_track(track);
+            }
             Command::ClearAll { .. } => {
+                self.latch.all_off();
                 for track in 0..self.tracks.len() {
                     self.clear_track(track);
                     self.tracks[track].restore_defaults();
@@ -1249,6 +1263,7 @@ impl EngineCore {
             Command::TransportStart { at } => self.start_transport(at),
             Command::TransportStop => self.stop_transport(),
             Command::Stop => {
+                self.latch.all_off();
                 for track in 0..self.tracks.len() {
                     self.cancel_takes(track);
                     self.tracks[track].set_playing(false);
@@ -1267,6 +1282,7 @@ impl EngineCore {
     /// first, because moving the origin under a take that is still writing would tear it apart.
     /// Bounded work: a handful of stores per track, nothing allocated.
     fn start_transport(&mut self, at: u64) {
+        self.latch.all_off();
         for t in 0..self.tracks.len() {
             if let Some(take) = self.tracks[t].take() {
                 let end = take.end.unwrap_or(at);
@@ -1295,6 +1311,7 @@ impl EngineCore {
     /// * **overdub**: ended right here and kept. A layer is addressed modulo the loop, so a partial
     ///   pass is simply a layer that is silent for the rest of the loop - what was played stays.
     fn stop_transport(&mut self) {
+        self.latch.all_off();
         let now = self.out_pos;
         for t in 0..self.tracks.len() {
             if let Some(buffer) = self.tracks[t].take_pending_buffer() {
@@ -1333,7 +1350,15 @@ impl EngineCore {
 
     /// Close a take and immediately start whatever was queued behind it.
     fn finish_take(&mut self, track: usize, end: u64) {
+        let closed = self.tracks[track].take();
         self.tracks[track].finish_take(end);
+        // A latched pass in which nothing was played goes again before anything else can push a
+        // layer - it is the last one, since every take writes into the layer it pushed.
+        if closed.is_some_and(|take| !take.defines_loop) && self.latch.closed_silent(track) {
+            if let Some(buffer) = self.tracks[track].pop_layer() {
+                self.buffers.retire(buffer);
+            }
+        }
         if self.tracks[track].pending_defines_loop() {
             // What was queued is a completely new loop, so the old layers go back first.
             self.tracks[track].set_playing(false);
@@ -1344,6 +1369,24 @@ impl EngineCore {
         if let Some(buffer) = self.tracks[track].promote_pending() {
             self.buffers.retire(buffer);
             self.refuse(Refusal::LayerLimit);
+        }
+        match self.tracks[track].take() {
+            Some(take) => self.latch.begun(track, !take.defines_loop),
+            // Nothing queued behind it: a latched track carries straight on with the next pass,
+            // starting on the very sample the closed take ended on.
+            None if closed.is_some() && self.latch.on(track) => {
+                if self.tracks[track].layer_count() >= MAX_LAYERS {
+                    self.latch.set(track, false);
+                    self.refuse(Refusal::OverdubFull);
+                } else {
+                    self.begin_take(track, end, false);
+                    if self.tracks[track].take().is_none() {
+                        // `begin_take` has said why (no buffer); do not try again every frame.
+                        self.latch.set(track, false);
+                    }
+                }
+            }
+            None => {}
         }
     }
 
@@ -1375,6 +1418,7 @@ impl EngineCore {
         } else {
             self.tracks[track].begin_overdub_take(start, buffer);
         }
+        self.latch.begun(track, !defines_loop);
     }
 
     /// Cancel whatever this track is doing and give every one of its buffers back.
@@ -1435,6 +1479,7 @@ impl EngineCore {
                 instrument_loaded,
                 notes,
                 held_notes,
+                latched: self.latch.on(i),
                 state: track.state(musical_input),
                 layers: track.layer_count() as u8,
                 muted_mask: track.muted_mask(),

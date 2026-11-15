@@ -65,6 +65,11 @@ pub enum Command {
     /// End the running take; `at` is the position just after its last musical sample, so a
     /// loop-defining take produces a loop of exactly `at - start` samples.
     StopRecord { track: usize, at: u64 },
+    /// Keep overdubbing: while on, every take of this track that ends at its loop boundary is
+    /// followed seamlessly by a further overdub pass, each one its own layer, and a pass that
+    /// stayed practically silent is dropped instead of kept. Off lets the running pass finish and
+    /// starts no further one. Untimed - see `super::latch` for the whole behaviour.
+    LatchOverdub { track: usize, on: bool },
     StartPlay { track: usize, at: u64 },
     StopPlay { track: usize, at: u64 },
     /// Throw this track's layers away; the buffers go back to the control thread.
@@ -178,7 +183,8 @@ impl Command {
             | Command::ClearTrack { at, .. }
             | Command::ClearAll { at }
             | Command::TransportStart { at } => Some(*at),
-            Command::SetMonitor { .. }
+            Command::LatchOverdub { .. }
+            | Command::SetMonitor { .. }
             | Command::SetPan { .. }
             | Command::SetTrackGain { .. }
             | Command::SetTrackMute { .. }
@@ -212,6 +218,7 @@ impl Command {
             | Command::StartPlay { track, .. }
             | Command::StopPlay { track, .. }
             | Command::ClearTrack { track, .. }
+            | Command::LatchOverdub { track, .. }
             | Command::SetMonitor { track, .. }
             | Command::SetPan { track, .. }
             | Command::SetTrackGain { track, .. }
@@ -256,6 +263,8 @@ pub enum Refusal {
     NoSuchTarget,
     /// A layer operation while that track is recording.
     Busy,
+    /// A continuous overdub reached the layer ceiling and stopped on its own.
+    OverdubFull,
 }
 
 impl Refusal {
@@ -275,6 +284,10 @@ impl Refusal {
             ),
             Refusal::NoSuchTarget => Some("The command referred to a track or layer that does not exist."),
             Refusal::Busy => Some("Layers cannot be edited while this track is recording."),
+            Refusal::OverdubFull => Some(
+                "Overdub ended: this track holds 16 layers, the most it can. Undo or remove a layer \
+                 to add more.",
+            ),
         }
     }
 
@@ -347,6 +360,9 @@ pub struct TrackStatus {
     pub notes: u32,
     /// Notes the musician is holding on this track right now.
     pub held_notes: u8,
+    /// Whether the overdub of this track keeps going into the next pass (`Command::LatchOverdub`).
+    /// During a first recording it means "overdub next".
+    pub latched: bool,
 }
 
 impl Default for TrackStatus {
@@ -381,6 +397,7 @@ impl Default for TrackStatus {
             instrument_loaded: false,
             notes: 0,
             held_notes: 0,
+            latched: false,
         }
     }
 }

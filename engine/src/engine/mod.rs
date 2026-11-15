@@ -44,6 +44,7 @@ pub mod command;
 pub mod frame;
 pub mod fx;
 pub mod insert;
+pub mod latch;
 pub mod live;
 pub mod metro;
 pub mod process;
@@ -66,3 +67,5 @@ mod fader_tests;
 mod transport_tests;
 #[cfg(test)]
 mod source_tests;
+#[cfg(test)]
+mod latch_tests;
