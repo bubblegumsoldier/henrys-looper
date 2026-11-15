@@ -172,6 +172,9 @@ pub enum TrackInput {
     /// A pair; the loop buffer is stereo. The two need not be adjacent - a router can put the two
     /// halves of a stereo return wherever it likes.
     Stereo { left: usize, right: usize },
+    /// No input channel: the track is played by the instrument in its source slot
+    /// (`super::source`). Always stereo.
+    Instrument,
 }
 
 impl TrackInput {
@@ -179,15 +182,21 @@ impl TrackInput {
     pub fn channels(self) -> Channels {
         match self {
             TrackInput::Mono(_) => Channels::Mono,
-            TrackInput::Stereo { .. } => Channels::Stereo,
+            TrackInput::Stereo { .. } | TrackInput::Instrument => Channels::Stereo,
         }
     }
 
+    pub fn is_instrument(self) -> bool {
+        matches!(self, TrackInput::Instrument)
+    }
+
     /// Device channel feeding buffer channel `i`. For a mono track every `i` is the one channel,
-    /// which is what makes the recording loop in `process.rs` free of special cases.
+    /// which is what makes the recording loop in `process.rs` free of special cases. An instrument
+    /// track has none and answers `usize::MAX`; the engine never reads a device channel for it.
     #[inline(always)]
     pub fn device_channel(self, i: usize) -> usize {
         match self {
+            TrackInput::Instrument => usize::MAX,
             TrackInput::Mono(c) => c,
             TrackInput::Stereo { left, right } => {
                 if i == 1 {
@@ -208,6 +217,7 @@ impl TrackInput {
     /// Highest device channel this track needs, for checking against what the device offers.
     pub fn highest(self) -> usize {
         match self {
+            TrackInput::Instrument => 0,
             TrackInput::Mono(c) => c,
             TrackInput::Stereo { left, right } => left.max(right),
         }
@@ -222,6 +232,7 @@ impl TrackInput {
     /// `1` or `3+4`, one-based, as the channels are printed on the interface.
     pub fn label(self) -> String {
         match self {
+            TrackInput::Instrument => "instrument".to_string(),
             TrackInput::Mono(c) => format!("{}", c + 1),
             TrackInput::Stereo { left, right } => format!("{}+{}", left + 1, right + 1),
         }

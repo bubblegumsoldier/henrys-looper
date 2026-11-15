@@ -338,6 +338,15 @@ pub struct TrackStatus {
     /// two buses per side, monitored input included. What a mixer's channel meter shows - unlike
     /// `output_peak`, which measures the take.
     pub strip_peak: [f32; 2],
+    /// Whether the track is played by an instrument rather than an input channel.
+    pub instrument: bool,
+    /// Whether an instrument sits in the track's source slot right now.
+    pub instrument_loaded: bool,
+    /// Note ons that reached the track since the engine started, wrapping - the activity light
+    /// blinks when it moves.
+    pub notes: u32,
+    /// Notes the musician is holding on this track right now.
+    pub held_notes: u8,
 }
 
 impl Default for TrackStatus {
@@ -368,6 +377,10 @@ impl Default for TrackStatus {
             muted: false,
             soloed: false,
             strip_peak: [0.0; 2],
+            instrument: false,
+            instrument_loaded: false,
+            notes: 0,
+            held_notes: 0,
         }
     }
 }

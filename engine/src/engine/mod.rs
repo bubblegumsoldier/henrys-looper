@@ -50,6 +50,7 @@ pub mod process;
 pub mod runner;
 pub mod schedule;
 pub mod score_cli;
+pub mod source;
 pub mod timeline;
 pub mod track;
 
@@ -63,3 +64,5 @@ mod insert_tests;
 mod fader_tests;
 #[cfg(test)]
 mod transport_tests;
+#[cfg(test)]
+mod source_tests;

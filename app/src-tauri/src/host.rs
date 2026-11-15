@@ -1821,7 +1821,7 @@ impl Session {
                 .map(|d| TrackConfig {
                     input_channel_right: match d.input {
                         TrackInput::Stereo { right, .. } => Some(right as u32 + 1),
-                        TrackInput::Mono(_) => None,
+                        TrackInput::Mono(_) | TrackInput::Instrument => None,
                     },
                     pan: d.pan,
                     latency_frames: d.latency.measured,

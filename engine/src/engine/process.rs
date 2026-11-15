@@ -139,6 +139,7 @@ use super::command::{
 use super::frame::{Channels, Frame};
 use super::insert::{InsertEndpoint, InsertRack, MAX_BLOCK, Spread};
 use super::metro::Metronome;
+use super::source::{HostClock, SourceEndpoint, SourceRack, place_event};
 use super::timeline::Timeline;
 use super::track::{MAX_LAYERS, Track, TrackLatency};
 
@@ -237,6 +238,15 @@ pub struct EngineCore {
     /// The recorder's slot (`crate::capture`), if the host attached one. Taps the stems, the mix and
     /// the latency-aligned live input; `None` costs one branch per frame.
     capture: Option<Box<CaptureSlot>>,
+    /// Instrument slots and the MIDI event stage, if the host attached them (`super::source`).
+    /// `None` for the CLI and every test that predates instruments.
+    sources: Option<Box<SourceRack>>,
+    /// The host clock for the next process call, set by the output callback right before it.
+    /// Taken by that call, so a host that stops sending it falls back to "no clock".
+    clock: Option<HostClock>,
+    /// `C`, the fixed delay between a key and its sound, in frames. Latched on the first clocked
+    /// call unless the host set it; `None` until then. See `super::source`.
+    instrument_delay: Option<u64>,
 }
 
 impl EngineCore {
@@ -286,7 +296,40 @@ impl EngineCore {
             any_solo: false,
             transport: true,
             capture: None,
+            sources: None,
+            clock: None,
+            instrument_delay: None,
         }
+    }
+
+    /// Give the engine its instrument slots and the MIDI event stage. Called on the control thread
+    /// before the engine moves into the callback; `capacity` is the largest process call in frames,
+    /// and every source buffer is allocated here.
+    pub fn attach_sources(&mut self, endpoint: SourceEndpoint, capacity: usize) {
+        self.sources = Some(Box::new(SourceRack::new(endpoint, capacity)));
+    }
+
+    /// When the next process call will be heard. Called by the output callback before every
+    /// [`Self::process`]; see `super::source` for what it is used for.
+    #[inline]
+    pub fn set_clock(&mut self, clock: HostClock) {
+        self.clock = Some(clock);
+    }
+
+    /// Fix `C` instead of measuring it from the first clock. For tests and for a host that knows
+    /// better.
+    pub fn set_instrument_delay(&mut self, frames: u64) {
+        self.instrument_delay = Some(frames);
+    }
+
+    /// `C` in frames, once known.
+    pub fn instrument_delay(&self) -> Option<u64> {
+        self.instrument_delay
+    }
+
+    /// Events that sounded later than their fixed position because they arrived too late.
+    pub fn late_events(&self) -> u64 {
+        self.sources.as_ref().map_or(0, |s| s.late())
     }
 
     /// Open with the transport standing: bar 1, no click, no loop heard until a
@@ -358,9 +401,11 @@ impl EngineCore {
         let in_frames = input.len() / self.input_channels;
         let out_frames = output.len() / BUS_SAMPLES;
 
+        self.render_sources(out_frames);
         self.render_with_commands(input, in_frames, output, out_frames);
         self.clamp_and_meter(output);
         self.record_input(input, in_frames);
+        self.record_sources(out_frames);
         if let Some(capture) = self.capture.as_deref_mut() {
             capture.end_block(self.out_pos + out_frames as u64);
         }
@@ -462,6 +507,82 @@ impl EngineCore {
             .max()
             .unwrap_or(self.latency);
         capture.collect(max_latency);
+    }
+
+    /// Apply instrument changes, take the MIDI that arrived, and render every instrument for the
+    /// whole block - before the tracks are mixed, because a track reads its instrument's output the
+    /// way an audio track reads its input channel.
+    ///
+    /// Each instrument track learns how far back its recording has to be taken: `C` plus what its
+    /// instrument reports as latency.
+    fn render_sources(&mut self, frames: usize) {
+        let clock = self.clock.take();
+        let Some(rack) = self.sources.as_deref_mut() else {
+            return;
+        };
+        let rate = self.timeline.sample_rate();
+        if self.instrument_delay.is_none()
+            && let Some(clock) = clock
+        {
+            self.instrument_delay = Some(clock.fixed_delay(rate));
+        }
+        rack.collect();
+        let delay = self.instrument_delay.unwrap_or(0);
+        let start = self.out_pos;
+        match clock {
+            Some(clock) => {
+                rack.gather(|ns| place_event(ns, start, clock.playback_ns, rate, delay));
+            }
+            // Without a clock there is no "when": everything sounds at the top of this block.
+            None => rack.gather(|_| start),
+        }
+        rack.render(start, frames);
+        for (t, track) in self.tracks.iter_mut().enumerate() {
+            if track.is_instrument() {
+                track.set_source_base(delay + rack.latency(t));
+            }
+        }
+    }
+
+    /// Record every instrument track's source output, on the **output** axis.
+    ///
+    /// What the instrument rendered at output position `q` was played at `q - C` (see
+    /// `super::source`) and comes out of the plugin its own latency `L` later. It is therefore
+    /// stored at `pos = q - latency_frames`, where the track's `latency_frames` is `C + L` plus the
+    /// trim - the same subtraction as `m = k - R` on an audio track, only on the other axis. The
+    /// take logic is the one input frames go through.
+    fn record_sources(&mut self, frames: usize) {
+        let Some(capacity) = self.sources.as_deref().map(SourceRack::capacity) else {
+            return;
+        };
+        let frames = frames.min(capacity);
+        let collapsed = self.routing.collapsed();
+        for t in 0..self.tracks.len() {
+            if !self.tracks[t].is_instrument() {
+                continue;
+            }
+            let latency = self.tracks[t].latency_frames();
+            for i in 0..frames {
+                let (l, r) = match self.sources.as_deref() {
+                    Some(rack) => rack.frame(t, i),
+                    None => return,
+                };
+                self.tracks[t].note_input_peak(0, l.abs());
+                self.tracks[t].note_input_peak(1, r.abs());
+                let q = self.out_pos + i as u64;
+                if q < latency {
+                    continue;
+                }
+                let (pos, frame) = (q - latency, Frame::new(l, r));
+                let wrote = self.record_frame(t, pos, frame);
+                // The recorder hears the instrument like any live input, at the same position.
+                if let Some(capture) = self.capture.as_deref_mut().and_then(CaptureSlot::session) {
+                    let track = &self.tracks[t];
+                    let live = wrote || track.monitor();
+                    capture.live_frame(t, pos, frame, track, live, collapsed);
+                }
+            }
+        }
     }
 
     /// Tell every chain what a quarter note is worth, so a tempo-synchronous delay knows its time.
@@ -616,6 +737,7 @@ impl EngineCore {
         let timeline = &self.timeline;
         let tracks = &mut self.tracks;
         let mut capture = self.capture.as_deref_mut().and_then(CaptureSlot::session);
+        let sources = self.sources.as_deref();
 
         for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
             let pos = start + i as u64;
@@ -631,8 +753,12 @@ impl EngineCore {
             let mut mix = Frame::SILENT;
             for (t, track) in tracks.iter_mut().enumerate() {
                 // The live input of this track, already stereo: one channel fanned out on a mono
-                // track, the recorded pair on a stereo one.
-                let monitor = monitor_frame(track, input, frame, in_frames, channels, monitor_gain);
+                // track, the recorded pair on a stereo one, the instrument on an instrument track.
+                let monitor = if track.is_instrument() {
+                    instrument_frame(track, sources, t, frame)
+                } else {
+                    monitor_frame(track, input, frame, in_frames, channels, monitor_gain)
+                };
                 let sent = track.render(pos, monitor, collapsed);
                 if let Some(capture) = capture.as_mut() {
                     let main = sent[Bus::Main.index()];
@@ -696,6 +822,7 @@ impl EngineCore {
         let channels = self.input_channels;
         let monitor_gain = self.monitor_gain;
         let collapsed = self.routing.collapsed();
+        let sources = self.sources.as_deref();
         let Some(rack) = self.inserts.as_deref_mut() else {
             return;
         };
@@ -708,8 +835,11 @@ impl EngineCore {
             {
                 let scratch = &mut rack.track_scratch[t];
                 for i in 0..n {
-                    let monitor =
-                        monitor_frame(track, input, in_base + i, in_frames, channels, monitor_gain);
+                    let monitor = if track.is_instrument() {
+                        instrument_frame(track, sources, t, in_base + i)
+                    } else {
+                        monitor_frame(track, input, in_base + i, in_frames, channels, monitor_gain)
+                    };
                     let (wet, s) = track.render_unpanned(start + i as u64, monitor, collapsed);
                     spread = s;
                     for (b, block) in scratch.iter_mut().enumerate() {
@@ -821,6 +951,10 @@ impl EngineCore {
             let k = self.in_index + j as u64;
             let base = j * ch;
             for t in 0..self.tracks.len() {
+                // An instrument track records its instrument, on the output axis.
+                if self.tracks[t].is_instrument() {
+                    continue;
+                }
                 let latency = self.tracks[t].latency_frames();
                 // Nothing that arrives in the first R frames of the session was played after
                 // position 0, so there is no musical position to store it at.
@@ -1268,13 +1402,16 @@ impl EngineCore {
     /// Musical position of the next input frame to be consumed **on this track**. Two tracks with
     /// different compensation are at different musical positions at the same instant, and a
     /// command that must not land in the past has to be measured against the right one.
+    ///
+    /// An instrument track is recorded on the output axis, so its "input" is the output position
+    /// minus its own compensation.
     #[inline]
     fn musical_input_pos(&self, track: usize) -> u64 {
-        let latency = match self.tracks.get(track) {
-            Some(track) => track.latency_frames(),
-            None => self.latency,
-        };
-        self.in_index.saturating_sub(latency)
+        match self.tracks.get(track) {
+            Some(t) if t.is_instrument() => self.out_pos.saturating_sub(t.latency_frames()),
+            Some(t) => self.in_index.saturating_sub(t.latency_frames()),
+            None => self.in_index.saturating_sub(self.latency),
+        }
     }
 
     fn publish_status(&mut self) {
@@ -1284,12 +1421,20 @@ impl EngineCore {
         } else {
             super::timeline::MusicalPos::default()
         };
-        let in_index = self.in_index;
         let mut tracks = [TrackStatus::default(); MAX_TRACKS];
         for (i, slot) in tracks.iter_mut().enumerate().take(self.tracks.len()) {
+            let musical_input = self.musical_input_pos(i);
+            let rack = self.sources.as_deref();
+            let (instrument_loaded, notes, held_notes) = match rack {
+                Some(r) => (r.has_instrument(i), r.notes(i), r.held(i).min(255) as u8),
+                None => (false, 0, 0),
+            };
             let track = &mut self.tracks[i];
-            let musical_input = in_index.saturating_sub(track.latency_frames());
             *slot = TrackStatus {
+                instrument: track.is_instrument(),
+                instrument_loaded,
+                notes,
+                held_notes,
                 state: track.state(musical_input),
                 layers: track.layer_count() as u8,
                 muted_mask: track.muted_mask(),
@@ -1368,6 +1513,19 @@ fn monitor_frame(
     match track.channels() {
         Channels::Mono => Frame::mono(input_of(0)),
         Channels::Stereo => Frame::new(input_of(0), input_of(1)),
+    }
+}
+
+/// One instrument track's source output at one frame of the block, or silence when it was set up
+/// without monitoring or no rack is attached.
+#[inline(always)]
+fn instrument_frame(track: &Track, rack: Option<&SourceRack>, t: usize, frame: usize) -> Frame {
+    match rack {
+        Some(rack) if track.monitor() => {
+            let (l, r) = rack.frame(t, frame);
+            Frame::new(l, r)
+        }
+        _ => Frame::SILENT,
     }
 }
 

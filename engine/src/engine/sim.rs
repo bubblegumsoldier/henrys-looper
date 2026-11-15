@@ -60,6 +60,18 @@ impl TrackSpec {
         }
     }
 
+    /// A track played by an instrument, heard (as instrument tracks are by default).
+    pub fn instrument() -> Self {
+        Self {
+            input: TrackInput::Instrument,
+            monitor: true,
+            pan: 0.0,
+            latency: TrackLatency::INHERITED,
+            loop_send: BusSend::BOTH,
+            monitor_send: BusSend::BOTH,
+        }
+    }
+
     /// A stereo track on a pair of input channels, centred, not monitoring.
     pub fn stereo(left: usize, right: usize) -> Self {
         Self {
@@ -210,6 +222,10 @@ pub struct Sim {
     routing: BusRouting,
     output_channels: usize,
     dev_frame: Vec<f32>,
+    rate: u32,
+    /// Output latency of the simulated device in frames, when the simulation hands the engine a
+    /// host clock (`super::source`). Host time is simply `position / rate`.
+    clock: Option<u64>,
 }
 
 impl Sim {
@@ -287,7 +303,26 @@ impl Sim {
             routing,
             output_channels,
             dev_frame: vec![0.0; output_channels],
+            clock: None,
+            rate: spec.sample_rate,
         }
+    }
+
+    /// From now on hand the engine a host clock before every block, with an output latency of
+    /// `out_frames`: frame `p` is "heard" at host time `(p + out_frames) / rate`.
+    pub fn with_clock(&mut self, out_frames: u64) {
+        self.clock = Some(out_frames);
+    }
+
+    /// Host nanoseconds at which output position `pos` is heard, under [`Self::with_clock`].
+    pub fn heard_ns(&self, pos: u64) -> u64 {
+        let rate = u128::from(self.core_rate());
+        let out = self.clock.unwrap_or(0);
+        (u128::from(pos + out) * 1_000_000_000 / rate) as u64
+    }
+
+    fn core_rate(&self) -> u32 {
+        self.rate
     }
 
     pub fn send(&mut self, cmd: Command) {
@@ -373,6 +408,15 @@ impl Sim {
                 }
                 self.in_buf[j * ch + c] = value;
             }
+        }
+        if let Some(out) = self.clock {
+            let rate = u128::from(self.rate);
+            let ns = |p: u64| (u128::from(p) * 1_000_000_000 / rate) as u64;
+            self.core.set_clock(super::source::HostClock {
+                playback_ns: ns(self.pos + out),
+                callback_ns: ns(self.pos),
+                block_frames: self.block as u32,
+            });
         }
         self.core.process(&self.in_buf, &mut self.out_buf);
         let routing = self.core.routing();

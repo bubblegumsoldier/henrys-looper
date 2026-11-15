@@ -1631,6 +1631,7 @@ mod tests {
             muted: false,
             soloed: false,
             strip_peak: [0.5, 0.25],
+            ..TrackStatus::default()
         }
     }
 

@@ -364,6 +364,9 @@ pub struct Track {
     audible: Smoothed,
     /// Peak of what this strip sends, post-fader and post-panner, the louder bus per side.
     strip_peak: [f32; 2],
+    /// On an instrument track: the fixed delay `C` plus the instrument's own latency, in frames -
+    /// what its recording is taken back by before the trim is added. See `super::source`.
+    source_base: u64,
 }
 
 impl Track {
@@ -402,7 +405,42 @@ impl Track {
             soloed: false,
             audible: Smoothed::new(1.0, FADER_MS, sample_rate),
             strip_peak: [0.0; 2],
+            source_base: 0,
         }
+        .instrument_defaults()
+    }
+
+    /// An instrument track is heard in the room as well as in the headphones: its "live input" is
+    /// music, not a voice the PA already carries. Every other track keeps its defaults.
+    fn instrument_defaults(mut self) -> Self {
+        if self.is_instrument() {
+            self.monitor_send = BusSend::BOTH;
+            self.monitor_send_default = BusSend::BOTH;
+        }
+        self
+    }
+
+    /// Whether this track's sound comes from an instrument in its source slot rather than from an
+    /// input channel.
+    #[inline(always)]
+    pub fn is_instrument(&self) -> bool {
+        matches!(self.input, TrackInput::Instrument)
+    }
+
+    /// On an instrument track: the fixed delay plus the instrument's latency, recomputed by the
+    /// engine every block. The trim of [`TrackLatency`] is added on top, the measured part is
+    /// meaningless here - nothing travels through a converter.
+    #[inline]
+    pub fn set_source_base(&mut self, base: u64) {
+        if self.source_base != base {
+            self.source_base = base;
+            self.latency_frames = self.instrument_latency();
+        }
+    }
+
+    #[inline]
+    fn instrument_latency(&self) -> u64 {
+        (self.source_base as i64 + self.latency.trim as i64).max(0) as u64
     }
 
     /// The channel fader, linear.
@@ -516,12 +554,16 @@ impl Track {
     /// measured value of its own follows it.
     pub fn set_latency(&mut self, latency: TrackLatency, default: u64) {
         self.latency = latency;
-        self.latency_frames = latency.resolve(default);
+        self.resolve_latency(default);
     }
 
     /// Recompute the effective value after the engine's default changed (or was first supplied).
     pub fn resolve_latency(&mut self, default: u64) {
-        self.latency_frames = self.latency.resolve(default);
+        self.latency_frames = if self.is_instrument() {
+            self.instrument_latency()
+        } else {
+            self.latency.resolve(default)
+        };
     }
 
     /// The chain that answers for the settings. All of them carry the same ones; this is the one
@@ -814,9 +856,14 @@ impl Track {
         self.monitor
     }
 
+    /// Switch monitoring. An instrument track ignores it: it is heard whenever it plays, unless it
+    /// was set up with monitoring off - a score that only monitors a track while it records would
+    /// otherwise silence the piano between two takes.
     #[inline]
     pub fn set_monitor(&mut self, on: bool) {
-        self.monitor = on;
+        if !self.is_instrument() {
+            self.monitor = on;
+        }
     }
 
     #[inline]
