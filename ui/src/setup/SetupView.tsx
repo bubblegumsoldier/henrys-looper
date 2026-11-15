@@ -43,6 +43,7 @@ import type {
   DeviceReport,
   LooperStatus,
   LooperTrackStatus,
+  OverdubMode,
   Quantize,
   StartBusOut,
   StartConfig,
@@ -1020,6 +1021,8 @@ function TempoPage({ config, running, patch }: { config: StartConfig; running: b
   );
   const [bpm, bpb, unit, bars, quantize, click, loopSeconds, clickGain, monitorGain] = live.split("|");
   const q = (running ? quantize : config.quantize) as Quantize;
+  const odLive = useStatusSlice((s) => s.overdub_mode);
+  const od: OverdubMode = running ? odLive : (config.overdub_mode ?? "latch");
   const seconds = running ? Number(loopSeconds) : (config.bars * config.beats_per_bar * 60) / (config.bpm || 100);
 
   return (
@@ -1111,6 +1114,27 @@ function TempoPage({ config, running, patch }: { config: StartConfig; running: b
               />
             </div>
           </div>
+          <div className="srow">
+            <label>{T.overdub}</label>
+            <div>
+              <Seg
+                value={od}
+                options={[
+                  { value: "latch", label: <><Icon name="dub" /> {T.overdubLatch}</> },
+                  { value: "once", label: <><Icon name="dub" /> {T.overdubOnce}</> },
+                ]}
+                onChange={(v) => {
+                  patch({ overdub_mode: v });
+                  if (running) run(() => api.setOverdubMode(v));
+                }}
+              />
+            </div>
+          </div>
+          <div className="hint">
+            {od === "latch"
+              ? "O keeps overdubbing: every pass of the loop becomes a layer of its own until O is pressed again (it ends at the end of that pass). O during the first recording runs it straight on into overdub. A pass with nothing played is dropped."
+              : "O records exactly one pass of the loop as one layer, then plays."}
+          </div>
           <div className="hint">
             {q === "loop"
               ? "Pressing early is enough: R or O anywhere in the loop arms the take for the start of the next loop. The tile counts down the bars - time to get to the guitar."
@@ -1174,6 +1198,8 @@ function GeneralPage({ info }: { info: AppInfo | null }) {
   const keys: [string, string][] = [
     ["1 – 8", "select a track"],
     ["R · O · P · S · M", "record · overdub · play · stop · monitor (selected track)"],
+    ["O (continuous)", "on: every pass a new layer · again: ends at the end of the pass · during R: overdub next"],
+    ["Q", "mute / unmute the selected track (at once, the loop keeps its place)"],
     ["I", "track details (pan, sends, latency, effects, layers)"],
     ["K", "click on/off"],
     ["F", "effect chain in/out"],

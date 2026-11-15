@@ -37,13 +37,16 @@ export function trackKind(t: LooperTrackStatus): StateKind {
   return kind;
 }
 
-function stateLine(t: LooperTrackStatus, kind: StateKind, barInLoop: number, loopBars: number): string {
+function stateLine(t: LooperTrackStatus, kind: StateKind, barInLoop: number, loopBars: number, latchMode: boolean): string {
   const loop = t.loop_seconds > 0 ? `${T.loop} ${bars(loopBars)} · ${num(t.loop_seconds)} s` : T.noLoop;
   switch (kind) {
     case "rec":
       return `${T.bar} ${barInLoop} / ${loopBars} · ${t.channels_label === "stereo" ? T.stereo : T.mono}`;
     case "dub":
-      return `${T.layer} ${t.layers.length} · ${T.bar} ${barInLoop} / ${loopBars}`;
+      // A continuous overdub that was switched off still finishes its pass - say so, or the
+      // musician presses O again thinking it did not take.
+      if (latchMode && !t.latched) return `${T.lastPass} · ${T.bar} ${barInLoop} / ${loopBars}`;
+      return `${T.bar} ${barInLoop} / ${loopBars}`;
     case "armed":
       return t.pending_kind === "overdub" ? "overdub waits for the grid" : "record waits for the grid";
     case "hear":
@@ -64,9 +67,11 @@ interface Props {
   /** Bar inside the loop, for the recording/overdub sub line. */
   barInLoop: number;
   loopBars: number;
+  /** O keeps overdubbing until pressed again (free looping, `overdub_mode: latch`). */
+  latchMode: boolean;
 }
 
-function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, barInLoop, loopBars }: Props) {
+function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, barInLoop, loopBars, latchMode }: Props) {
   const i = track.index;
   const kind = trackKind(track);
   const pending = track.pending_kind ? PENDING[track.pending_kind] : null;
@@ -89,7 +94,11 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
 
   // The countdown wins the "next" row: it is the more immediate future.
   let soll: { kind: StateKind; word: string; armed: boolean } | null = null;
-  if (pending && track.pending_kind) {
+  // "Overdub next" wins over the record's own countdown: it is what happens at the loop end.
+  const overdubNext = track.latched && (track.state === "recording" || track.state === "armed");
+  if (overdubNext) {
+    soll = { kind: "dub", word: T.overdubNext, armed: true };
+  } else if (pending && track.pending_kind) {
     const value = countdown(track.pending_bars, track.pending_beats);
     soll = { kind: pending, word: `${STATE_WORD[pending] === "Stopped" ? T.stop : STATE_WORD[pending]} in ${value}`, armed: true };
   } else if (next) {
@@ -130,8 +139,8 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
       <div className={`is ${kind}`}>
         <Icon name={STATE_ICON[kind]} />
         <div className="w">
-          <b>{STATE_WORD[kind]}</b>
-          <span>{stateLine(track, kind, barInLoop, loopBars)}</span>
+          <b>{kind === "dub" ? `${STATE_WORD[kind]} · ${T.layer.toLowerCase()} ${Math.max(1, track.layers.length)}` : STATE_WORD[kind]}</b>
+          <span>{stateLine(track, kind, barInLoop, loopBars, latchMode)}</span>
         </div>
       </div>
 
@@ -172,7 +181,8 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
           <span>{T.record}</span>
         </button>
         <button
-          className={`tb dub${track.state === "overdub" ? " on" : ""}${pending === "dub" ? " pend" : ""}`}
+          className={`tb dub${track.state === "overdub" && (!latchMode || track.latched) ? " on" : ""}${pending === "dub" || overdubNext ? " pend" : ""}`}
+          aria-pressed={latchMode ? track.latched : undefined}
           data-midi={trackAddress(i, "overdub")}
           disabled={empty}
           onClick={(e) => {
@@ -180,7 +190,13 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
             onSelect(i);
             actions.overdub(i);
           }}
-          title={empty ? "Record a loop first, then overdub" : `${T.overdub} · key O`}
+          title={
+            empty
+              ? "Record a loop first, then overdub"
+              : latchMode
+                ? `${T.overdub} · key O · stays on until pressed again`
+                : `${T.overdub} · key O`
+          }
         >
           <Icon name="dub" />
           <span>{T.overdub}</span>
@@ -224,6 +240,20 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         >
           <Icon name="hear" />
           <span>{T.monitor}</span>
+        </button>
+        <button
+          className={`tb hear mute${track.muted ? " on" : ""}`}
+          data-midi={trackAddress(i, "mute")}
+          aria-pressed={track.muted}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect(i);
+            actions.mute(i, !track.muted);
+          }}
+          title={`${T.mute} · key Q · silent at once, the loop keeps running in time`}
+        >
+          <Icon name="mute" />
+          <span>{track.muted ? T.muted : T.mute}</span>
         </button>
       </div>
     </article>

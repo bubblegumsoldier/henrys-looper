@@ -23,6 +23,13 @@ export type LooperTrackState = "empty" | "armed" | "recording" | "overdub" | "re
  */
 export type Quantize = "bar" | "loop";
 
+/**
+ * What `O` does in free looping. `latch` - the default - keeps overdubbing until O is pressed
+ * again, every pass of the loop a layer of its own (a pass with nothing played is dropped);
+ * `once` records one pass. A score is not affected.
+ */
+export type OverdubMode = "latch" | "once";
+
 /** What a track is waiting for while its count-in runs. */
 export type PendingKind = "record" | "overdub" | "play" | "stop";
 
@@ -229,6 +236,11 @@ export interface LooperTrackStatus {
   pending_bars: number;
   /** Beats on top of that; inside the last bar `pending_bars` is 0 and this counts down. */
   pending_beats: number;
+  /**
+   * The overdub keeps going into the next pass. During the first recording this means "overdub
+   * next": the take runs straight on into a continuous overdub.
+   */
+  latched: boolean;
   /** This track's effect chain. It sits in the playback path; what is recorded is always dry. */
   fx: FxStatus;
 
@@ -273,6 +285,8 @@ export interface LooperStatus {
   loop_seconds: number;
   /** Grid a recording and an overdub currently snap to. Changeable while the engine runs. */
   quantize: Quantize;
+  /** What `O` does in free looping. */
+  overdub_mode: OverdubMode;
   sample_rate: number;
   /** The engine's **default** compensation in frames; a track with its own reports it itself. */
   latency_frames: number;
@@ -338,6 +352,7 @@ export const IDLE_STATUS: LooperStatus = {
   loop_samples: 0,
   loop_seconds: 0,
   quantize: "loop",
+  overdub_mode: "latch",
   sample_rate: 0,
   latency_frames: 0,
   click: false,
@@ -458,6 +473,8 @@ export interface StartConfig {
   bars: number;
   /** Grid a recording and an overdub snap to. */
   quantize: Quantize;
+  /** What `O` does in free looping. Missing in an older stored setup: `latch`. */
+  overdub_mode?: OverdubMode;
   /** Default compensation in frames, for every track that brings none of its own. */
   latency_frames: number;
   monitor_gain: number;

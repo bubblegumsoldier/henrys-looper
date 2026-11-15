@@ -117,7 +117,7 @@ export function structureSignature(status: LooperStatus): string {
     // The count-in belongs in the signature: it only changes on a beat line, so it costs a handful
     // of renders per bar rather than twenty a second - and a countdown that does not count is
     // useless.
-    sig += `~${t.pending_kind ?? ""}~${t.pending_bars}~${t.pending_beats}`;
+    sig += `~${t.pending_kind ?? ""}~${t.pending_bars}~${t.pending_beats}~${t.latched ? 1 : 0}`;
     // The latency belongs here for the same reason the pan does: it is a setting, so it changes
     // when somebody types a number and never on its own.
     sig += `~${t.latency_frames}~${t.latency_measured ?? ""}~${t.latency_trim}`;

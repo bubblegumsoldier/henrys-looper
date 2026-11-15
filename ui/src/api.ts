@@ -21,6 +21,7 @@ import type {
   FxSlotName,
   MixerSource,
   OpenedFile,
+  OverdubMode,
   RecentFile,
   SavedFile,
   TemplateTrack,
@@ -162,6 +163,8 @@ export const api = {
     call<void>("set_tempo", { bpm, beats_per_bar: beatsPerBar, beat_unit: beatUnit }),
   /** Grid a recording and an overdub snap to. Armed takes keep the position they already have. */
   setQuantize: (quantize: Quantize) => call<void>("set_quantize", { quantize }),
+  /** What `O` does in free looping: stay on until pressed again, or one pass. */
+  setOverdubMode: (mode: OverdubMode) => call<void>("set_overdub_mode", { mode }),
   /**
    * Volume of one output bus, 0 to 4. Half the reason there are two: the headphones can be turned
    * down without the room changing.

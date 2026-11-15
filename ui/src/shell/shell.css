@@ -307,7 +307,7 @@ input.range:disabled { opacity: .4; }
 /* Two rows: one row of five icon buttons, the state word still big enough for the back of a stage. */
 .live.tiles-two .tile { grid-template-rows: auto auto auto 1fr auto; }
 .live.tiles-two .tm { gap: 3px 6px; }
-.live.tiles-two .tbtns { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+.live.tiles-two .tbtns { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px; }
 .live.tiles-two .tbtns .tb, .live.tiles-two .tbtns .tb.stop, .live.tiles-two .tbtns .tb.hear { grid-column: auto; height: 54px; flex-direction: column; }
 .live.tiles-two .tb > span:not(.mb) { display: none; }
 .live.tiles-two .tbtns .tb .ic { --ic: 20px; }
@@ -424,3 +424,9 @@ table.tt .tn2 input.name-in { height: 24px; }
 .titlebar button.lockpill { cursor: pointer; font: inherit; }
 .titlebar button.lockpill:hover { color: var(--tx-1); border-color: var(--line-4); }
 .titlebar button.lockpill:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Three small buttons in the second row: Stop, Monitor, Mute. Mute is the stage switch for "this
+   track out, the loop keeps its place" - a warm colour, so it never reads as Monitor. */
+.tbtns .tb.stop, .tbtns .tb.hear { grid-column: span 2; }
+.tb.hear.mute.on { background: rgba(245,185,66,.16); color: #ffe2a6; border-color: var(--warn); }
+.tb.hear.mute.on .ic { color: var(--warn); }

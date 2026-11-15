@@ -22,7 +22,8 @@
 //! `transport: false`, nothing here moves, and Space or the big Start button starts it. R on a
 //! standing clock starts it too, with the take on bar 1.
 //!
-//! Keyboard: a digit picks a track, then R O S P M act on it, K toggles the click, F takes the
+//! Keyboard: a digit picks a track, then R O S P M act on it, Q mutes it (at once, the loop runs on
+//! in time - unlike S, which stops it), K toggles the click, F takes the
 //! selected track's effect chain in or out, I opens its details. X, V and D wait for one more digit
 //! - `X 3` switches the compressor, `V 1` loads "Voice", `D 2` sets the delay to a dotted eighth,
 //! exactly as in the CLI. Space/N and Shift+S belong to the score transport (see `scoreTransport`).
@@ -171,6 +172,9 @@ function Stage({ onOpenArrangement }: Props) {
   const clock = useStatusSlice(pickClock, sameClock);
   const score = useScore();
   const compiled = useLoadedScore();
+  const overdubMode = useStatusSlice((s) => s.overdub_mode);
+  // The score plans its own overdubs; the continuous one belongs to free looping.
+  const latchMode = overdubMode === "latch" && !compiled;
 
   const signature = useStatusSlice(structureSignature);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -329,6 +333,10 @@ function Stage({ onOpenArrangement }: Props) {
           e.preventDefault();
           actions.monitor(track.index, !track.monitor);
           break;
+        case "q":
+          e.preventDefault();
+          actions.mute(track.index, !track.muted);
+          break;
         case "i":
           e.preventDefault();
           setDetail((d) => (d === track.index ? null : track.index));
@@ -386,6 +394,7 @@ function Stage({ onOpenArrangement }: Props) {
                 next={nextStates[t.index] ?? null}
                 barInLoop={writing ? t.take_bar || barInLoop : 0}
                 loopBars={t.loop_bars || clock.bars}
+                latchMode={latchMode}
               />
             );
           })}

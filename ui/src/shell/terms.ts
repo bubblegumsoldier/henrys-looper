@@ -23,6 +23,13 @@ export const T = {
   stop: "Stop",
   monitor: "Monitor",
   clear: "Clear",
+  mute: "Mute",
+  muted: "Muted",
+  /** Overdub mode, setup and tile. */
+  overdubLatch: "Stays on until pressed again",
+  overdubOnce: "One pass",
+  overdubNext: "Overdub next",
+  lastPass: "last pass · ends at loop end",
 
   // --- positions -------------------------------------------------------------
   section: "Section",

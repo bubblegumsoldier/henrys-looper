@@ -65,6 +65,7 @@ export const DEFAULT_SETUP: StartConfig = {
   beat_unit: 4,
   bars: 8,
   quantize: "loop",
+  overdub_mode: "latch",
   latency_frames: DEFAULT_LATENCY,
   monitor_gain: 1,
   click_gain: 1,
