@@ -513,6 +513,28 @@ impl Status {
     pub fn spares_total(&self) -> u32 {
         self.spares.iter().sum()
     }
+
+    /// Take over the meters of an `earlier` snapshot that will not be shown on its own: every
+    /// peak becomes the larger of both, every gain reduction the deeper one. A snapshot covers
+    /// 5 ms, a display shows one in ten - without this the meters would show a random 5 ms slice
+    /// of every 50 ms and miss most transients, which reads as nervous flicker.
+    pub fn hold_meters(&mut self, earlier: &Status) {
+        let max2 = |a: &mut [f32; 2], b: [f32; 2]| {
+            a[0] = a[0].max(b[0]);
+            a[1] = a[1].max(b[1]);
+        };
+        for (t, e) in self.tracks.iter_mut().zip(earlier.tracks.iter()) {
+            max2(&mut t.input_peak, e.input_peak);
+            max2(&mut t.output_peak, e.output_peak);
+            max2(&mut t.strip_peak, e.strip_peak);
+            t.fx.reduction_db = t.fx.reduction_db.min(e.fx.reduction_db);
+        }
+        for (b, e) in self.bus_peak.iter_mut().zip(earlier.bus_peak.iter()) {
+            for (c, v) in b.iter_mut().zip(e.iter()) {
+                *c = c.max(*v);
+            }
+        }
+    }
 }
 
 /// Control thread -> audio thread.
@@ -565,10 +587,14 @@ pub struct StatusReceiver {
 }
 
 impl StatusReceiver {
-    /// Newest status in the queue, discarding everything older.
+    /// Newest status in the queue, discarding everything older - except the meters, which hold
+    /// the peaks of the discarded snapshots too (`Status::hold_meters`).
     pub fn latest(&mut self) -> Option<Status> {
-        let mut last = None;
-        while let Ok(s) = self.rx.pop() {
+        let mut last: Option<Status> = None;
+        while let Ok(mut s) = self.rx.pop() {
+            if let Some(prev) = &last {
+                s.hold_meters(prev);
+            }
             last = Some(s);
         }
         last
@@ -907,6 +933,34 @@ mod tests {
         }
         assert_eq!(rx.latest().map(|s| s.pos), Some(4));
         assert!(rx.latest().is_none());
+    }
+
+    /// The newest snapshot wins - but its meters hold the peaks of every snapshot it replaced, so
+    /// a transient between two display events is not lost.
+    #[test]
+    fn status_receiver_holds_the_peaks_of_discarded_snapshots() {
+        let (mut tx, mut rx) = status_channel(8);
+        let mut loud = Status::default();
+        loud.tracks[0].input_peak = [0.9, 0.1];
+        loud.tracks[0].output_peak = [0.2, 0.8];
+        loud.tracks[0].strip_peak = [0.7, 0.7];
+        loud.tracks[0].fx.reduction_db = -9.0;
+        loud.bus_peak[0] = [0.6, 0.5];
+        tx.push(loud);
+        let mut quiet = Status {
+            pos: 7,
+            ..Default::default()
+        };
+        quiet.tracks[0].input_peak = [0.05, 0.3];
+        quiet.tracks[0].fx.reduction_db = -1.0;
+        tx.push(quiet);
+        let s = rx.latest().expect("Status");
+        assert_eq!(s.pos, 7);
+        assert_eq!(s.tracks[0].input_peak, [0.9, 0.3]);
+        assert_eq!(s.tracks[0].output_peak, [0.2, 0.8]);
+        assert_eq!(s.tracks[0].strip_peak, [0.7, 0.7]);
+        assert_eq!(s.tracks[0].fx.reduction_db, -9.0);
+        assert_eq!(s.bus_peak[0], [0.6, 0.5]);
     }
 
     /// A track that does not exist reports one channel, not zero - a buffer with no channels is

@@ -1583,6 +1583,8 @@ struct Session {
     info: EngineInfo,
     /// Newest snapshot and when it arrived, for the position estimate.
     last: Option<(Status, Instant)>,
+    /// Whether the meters in `last` went out with an event; until then newer snapshots hold them.
+    meters_shown: bool,
     last_emit: Instant,
     last_refusal: (u64, Refusal),
     message: Option<String>,
@@ -1955,6 +1957,7 @@ impl Session {
             runner: None,
             info,
             last: None,
+            meters_shown: false,
             last_emit: Instant::now() - EMIT_INTERVAL,
             last_refusal: (0, Refusal::None),
             message: None,
@@ -2094,7 +2097,12 @@ impl Session {
     /// One round of control-thread duty: take the newest status, keep the buffer pool filled, and
     /// push an event if the rate allows.
     fn service(&mut self, app: &AppHandle) {
-        if let Some(status) = self.status_rx.latest() {
+        if let Some(mut status) = self.status_rx.latest() {
+            // Meters hold their peaks until the next event shows them (`Status::hold_meters`).
+            if let Some((prev, _)) = self.last.filter(|_| !self.meters_shown) {
+                status.hold_meters(&prev);
+            }
+            self.meters_shown = false;
             if status.stopped {
                 self.stopped = true;
             }
@@ -2208,6 +2216,7 @@ impl Session {
             && let Some((status, _)) = self.last
         {
             self.last_emit = Instant::now();
+            self.meters_shown = true;
             let _ = app.emit(STATUS_EVENT, self.event(&status));
         }
     }
