@@ -250,6 +250,9 @@ pub struct EngineCore {
     instrument_delay: Option<u64>,
     /// Continuous overdub per track (`super::latch`).
     latch: Latches,
+    /// End of a running count-in (`Command::CountIn`): until then the click sounds whatever its
+    /// switch says, and the loops stay held.
+    count_in: Option<u64>,
 }
 
 impl EngineCore {
@@ -303,6 +306,7 @@ impl EngineCore {
             clock: None,
             instrument_delay: None,
             latch: Latches::default(),
+            count_in: None,
         }
     }
 
@@ -730,7 +734,7 @@ impl EngineCore {
         let channels = self.input_channels;
         let monitor_gain = self.monitor_gain;
         // A standing transport has no beat to click on.
-        let click = self.click && self.transport;
+        let click = (self.click || self.count_in.is_some()) && self.transport;
         let click_gain = self.click_gain;
         let bus_gain = self.bus_gain;
         // One way out is one mix. See `Track::render` and `super::bus::BusRouting::collapsed`.
@@ -892,7 +896,7 @@ impl EngineCore {
         }
         let click_bus = if collapsed { Bus::Main } else { Bus::Monitor }.index();
         for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
-            let click = if self.click && self.transport {
+            let click = if (self.click || self.count_in.is_some()) && self.transport {
                 self.metro.sample_at(&self.timeline, start + i as u64) * self.click_gain
             } else {
                 0.0
@@ -1265,6 +1269,13 @@ impl EngineCore {
                 self.monitor_gain = gain.clamp(0.0, super::command::MAX_LEVEL_GAIN);
             }
             Command::TransportStart { at } => self.start_transport(at),
+            Command::CountIn { at, end } => {
+                self.start_transport(at);
+                for track in self.tracks.iter_mut() {
+                    track.set_held(true);
+                }
+                self.count_in = Some(end);
+            }
             Command::TransportStop => self.stop_transport(),
             Command::Stop => {
                 self.latch.all_off();
@@ -1287,6 +1298,7 @@ impl EngineCore {
     /// Bounded work: a handful of stores per track, nothing allocated.
     fn start_transport(&mut self, at: u64) {
         self.latch.all_off();
+        self.count_in = None;
         for t in 0..self.tracks.len() {
             if let Some(take) = self.tracks[t].take() {
                 let end = take.end.unwrap_or(at);
@@ -1316,6 +1328,7 @@ impl EngineCore {
     ///   pass is simply a layer that is silent for the rest of the loop - what was played stays.
     fn stop_transport(&mut self) {
         self.latch.all_off();
+        self.count_in = None;
         let now = self.out_pos;
         for t in 0..self.tracks.len() {
             if let Some(buffer) = self.tracks[t].take_pending_buffer() {

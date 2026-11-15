@@ -172,6 +172,11 @@ pub enum Command {
     /// there, so each one plays from its top again. A take queued for the same `at` behind it
     /// starts on that very downbeat - the order of arrival decides among equal timestamps.
     TransportStart { at: u64 },
+    /// A count-in before free looping starts: from `at` the clock runs and the click sounds -
+    /// whether the click is switched on or not, a count-in nobody hears is no count-in - while
+    /// every loop stays silent. A `TransportStart { at: end }` sent behind it ends it: bar 1 is
+    /// `end`, and that is where the take begins. `TransportStop` cancels it like any start.
+    CountIn { at: u64, end: u64 },
     /// Stop the transport: the clock stands at bar 1, the click and the loops are silent, the
     /// monitored inputs stay audible. Layers and play states are kept. A take that has not reached
     /// its end is dealt with so nothing half-made is left behind - see
@@ -193,7 +198,8 @@ impl Command {
             | Command::StopPlay { at, .. }
             | Command::ClearTrack { at, .. }
             | Command::ClearAll { at }
-            | Command::TransportStart { at } => Some(*at),
+            | Command::TransportStart { at }
+            | Command::CountIn { at, .. } => Some(*at),
             Command::LatchOverdub { .. }
             | Command::SetMonitor { .. }
             | Command::SetPan { .. }
@@ -256,6 +262,7 @@ impl Command {
             | Command::SetBusOutput { .. }
             | Command::SetTempo { .. }
             | Command::TransportStart { .. }
+            | Command::CountIn { .. }
             | Command::TransportStop
             | Command::Stop => None,
         }

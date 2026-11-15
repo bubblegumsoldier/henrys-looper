@@ -229,3 +229,85 @@ fn without_hold_the_transport_runs_from_the_start() {
     assert!(status.transport);
     assert_eq!(status.beat, 1);
 }
+
+// ---- the count-in of free looping ------------------------------------------------------------
+
+const BAR: u64 = 4 * 28_800;
+
+/// One bar of count-in, then the take: the click is heard during the count-in although the click
+/// is off, no loop sounds, and the first recorded sample is the input of exactly bar 1.
+#[test]
+fn after_a_count_in_the_take_starts_sample_exact_on_bar_one() {
+    let mut sim = held(spec(false), mono(fingerprint));
+    sim.run_to(10_000);
+    let at = 12_345u64;
+    let end = at + BAR;
+    sim.send(Command::CountIn { at, end });
+    sim.send(Command::TransportStart { at: end });
+    sim.send(Command::StartRecord { track: 0, at: end });
+    sim.send(Command::StopRecord { track: 0, at: end + 2 * BAR });
+    sim.send(Command::StartPlay { track: 0, at: end + 2 * BAR });
+    sim.run_to(end + 2 * BAR + R + 4 * BLOCK as u64);
+
+    assert!(sim.out_l[..at as usize].iter().all(|&s| s == 0.0));
+    assert_ne!(sim.out_l[at as usize + 1], 0.0, "Einzaehler-Klick auf der Eins");
+    assert_ne!(sim.out_l[(at + 28_800) as usize + 1], 0.0, "und auf Schlag 2");
+    assert!(
+        sim.out_l[end as usize + 1..(end + BAR) as usize].iter().all(|&s| s == 0.0),
+        "nach dem Einzaehler schweigt der ausgeschaltete Klick wieder"
+    );
+    let t = sim.core.track(0);
+    assert_eq!(t.origin(), end, "Takt 1 ist das Ende des Einzaehlers");
+    assert_eq!(t.loop_len(), 2 * BAR);
+    let content = layer(&sim, 0, 0);
+    assert_eq!(content[0], fingerprint(end + R), "erstes Sample genau auf Takt 1");
+    assert_eq!(content[1_000], fingerprint(end + R + 1_000));
+    let status = sim.latest_status().expect("Status");
+    assert!(status.transport);
+}
+
+/// Loops that exist stay silent during the count-in and start from their top on bar 1.
+#[test]
+fn existing_loops_wait_for_bar_one() {
+    // Four outputs, so the click (monitor bus) and the loop (main bus) are apart.
+    let mut sim = held(
+        SimSpec {
+            output_channels: 4,
+            ..spec(false)
+        },
+        mono(fingerprint),
+    );
+    sim.send(Command::TransportStart { at: 1_000 });
+    record_loop(&mut sim, 1_000, 10_000);
+    sim.send(Command::TransportStop);
+    sim.run_blocks(4);
+    let at = sim.pos() + 2_000;
+    let end = at + BAR;
+    sim.send(Command::CountIn { at, end });
+    sim.send(Command::TransportStart { at: end });
+    sim.run_to(end + 20_000);
+    // Monitor bus is the only one with the click; the main bus carries only the loop.
+    let main = &sim.buses[super::bus::Bus::Main.index()][0];
+    assert!(main[at as usize..end as usize].iter().all(|&s| s == 0.0), "kein Loop im Einzaehler");
+    assert!(main[end as usize..end as usize + 10_000].iter().any(|&s| s != 0.0), "ab Takt 1 klingt er");
+}
+
+/// Cancelled during the count-in: nothing recorded, the clock stands again, nothing fires later.
+#[test]
+fn a_cancelled_count_in_leaves_nothing_behind() {
+    let mut sim = held(spec(false), mono(fingerprint));
+    let at = 5_000u64;
+    let end = at + BAR;
+    sim.send(Command::CountIn { at, end });
+    sim.send(Command::TransportStart { at: end });
+    sim.send(Command::StartRecord { track: 0, at: end });
+    sim.send(Command::StopRecord { track: 0, at: end + BAR });
+    sim.run_to(at + BAR / 2);
+    sim.send(Command::TransportStop);
+    sim.run_to(end + 2 * BAR);
+    let status = sim.latest_status().expect("Status");
+    assert!(!status.transport, "die Uhr steht");
+    assert_eq!(sim.core.track(0).layer_count(), 0, "nichts aufgenommen");
+    assert_eq!(status.tracks[0].state, TrackState::Empty);
+    assert!(sim.out_l[(at + BAR / 2 + 2 * BLOCK as u64) as usize..].iter().all(|&s| s == 0.0));
+}
