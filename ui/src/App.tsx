@@ -108,6 +108,38 @@ export default function App() {
 
   return (
     <div className={`window${learn ? " learn-on" : ""}${IS_MAC ? " mac" : ""}`}>
+      {import.meta.env.DEV && (
+        // A development build (`tauri dev`) must never be mistaken for the owner's own app: the
+        // title bar hides the window title, so the whole window carries a frame and a label.
+        <div
+          aria-hidden
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 100000,
+            pointerEvents: "none",
+            border: "6px dashed #ff9f43",
+            boxSizing: "border-box",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              left: "50%",
+              bottom: 6,
+              transform: "translateX(-50%)",
+              padding: "4px 14px",
+              background: "#ff9f43",
+              color: "#111",
+              font: "700 13px/1.2 system-ui, sans-serif",
+              letterSpacing: "0.06em",
+              borderRadius: 4,
+            }}
+          >
+            DEV TEST BUILD · NOT YOUR LOOPER
+          </div>
+        </div>
+      )}
       <TitleBar
         mode={mode}
         setupOpen={setupOpen}
