@@ -31,7 +31,9 @@
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
-use super::bus::{BUS_CHANNELS, BUS_COUNT, Bus, BusOutput, BusRouting, BusSend, TrackSource};
+use super::bus::{
+    BUS_CHANNELS, BUS_COUNT, Bus, BusOutput, BusRouting, BusSend, OUT_METERS, TrackSource,
+};
 #[cfg(test)]
 use super::frame::Channels;
 use super::fx::{FxParam, FxPreset, FxSlot, FxStatus};
@@ -499,6 +501,14 @@ pub struct Status {
     /// Peak of each output bus, left and right, absolute values - measured after the bus volume,
     /// because a meter has to show what actually leaves the machine.
     pub bus_peak: [[f32; BUS_CHANNELS]; BUS_COUNT],
+    /// Peak of each **device** output channel - the first [`OUT_METERS`] of them - after both buses
+    /// were placed on it and before the safety limiter. This is the truth at the socket: what a
+    /// bus meter cannot show is the sum on a channel two buses share, and an over above 0 dBFS
+    /// here is what the limiter then had to bend.
+    pub out_peak: [f32; OUT_METERS],
+    /// Deepest gain reduction of the safety limiter per device channel since the last snapshot,
+    /// in dB: 0 while it did nothing, negative while it worked.
+    pub out_reduction_db: [f32; OUT_METERS],
     /// Volume of each output bus, linear.
     pub bus_gain: [f32; BUS_COUNT],
     /// Which device output channels each bus leaves on, already clamped to what the device has.
@@ -595,6 +605,18 @@ impl Status {
                 *c = c.max(*v);
             }
         }
+        for (c, e) in self.out_peak.iter_mut().zip(earlier.out_peak) {
+            *c = c.max(e);
+        }
+        for (c, e) in self.out_reduction_db.iter_mut().zip(earlier.out_reduction_db) {
+            *c = c.min(e);
+        }
+    }
+
+    /// The device output channels that are metered: as many as the device has, at most
+    /// [`OUT_METERS`].
+    pub fn out_meter_count(&self) -> usize {
+        (self.output_channels as usize).min(OUT_METERS)
     }
 }
 
@@ -952,11 +974,14 @@ mod tests {
     /// Then `stack`: one flag per track saying that layer 0 is only the placeholder of an empty
     /// first pass, so the display does not count a layer that is not there. It costs a whole
     /// alignment step per track - 2208 bytes, limit 2208.
+    ///
+    /// Then the output meters: peak and limiter reduction of eight device channels, because a bus
+    /// meter cannot show the sum on a socket two buses share - 64 bytes, 2272, limit 2272.
     #[test]
     fn the_status_snapshot_stays_small_enough_to_memcpy_in_a_callback() {
         let size = std::mem::size_of::<Status>();
         assert!(
-            size <= 2_208,
+            size <= 2_272,
             "Der Status ist auf {size} Bytes gewachsen - das wandert bei jedem Snapshot durch \
              den Audio-Callback."
         );

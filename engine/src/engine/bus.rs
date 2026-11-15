@@ -369,15 +369,23 @@ impl BusRouting {
         a.start < b.end && b.start < a.end
     }
 
-    /// Whether both buses leave on **exactly** the same channels - the normal case on a
-    /// two-output interface.
+    /// Whether the two buses are folded into **one** mix - true as soon as they share a single
+    /// device channel, which is what a two-output interface forces.
     ///
-    /// This is worth a name of its own, because the engine mixes differently then: one way out is
-    /// one mix, so every source is summed **once** whichever buses it is assigned to. Summing the
-    /// two buses on top of each other would put a track that goes to both 6 dB over a track that
-    /// goes to one, and would make plugging in a second output pair change the balance of the
-    /// first. See `process::render`.
+    /// This is worth a name of its own, because the engine mixes differently then: a channel that
+    /// carries both buses is one way out, and one way out is one mix, so every source is summed
+    /// **once** whichever buses it is assigned to. Summing the two buses on top of each other would
+    /// put a track that goes to both 6 dB over a track that goes to one, and would make plugging in
+    /// a second output pair change the balance of the first. The rule is per channel and therefore
+    /// holds for a partial overlap too: [`place_buses`] puts the one mix on every channel either bus
+    /// uses, exactly once. See `process::render`.
     pub fn collapsed(&self) -> bool {
+        self.overlaps()
+    }
+
+    /// Whether both buses leave on exactly the same channels - the normal case on a two-output
+    /// interface, as opposed to a partial overlap somebody chose.
+    pub fn identical(&self) -> bool {
         self.outs[0] == self.outs[1]
     }
 
@@ -398,10 +406,11 @@ pub fn routing_note(routing: &BusRouting, channels: usize) -> Option<String> {
     }
     let main = routing.get(Bus::Main);
     let monitor = routing.get(Bus::Monitor);
-    if !routing.collapsed() {
+    if !routing.identical() {
         return Some(format!(
-            "Main is on output {}, Monitor on output {} - they partly overlap, the shared \
-             channel is summed and the click goes out to the room as well. \
+            "Main is on output {}, Monitor on output {} - they partly overlap, so there is one \
+             mix at the Main level on every one of those channels, each source in it once, and \
+             the click goes out to the room as well. \
              To separate them, put Main on outputs 1-2 and Monitor on 3-4.",
             main.label(),
             monitor.label()
@@ -423,7 +432,8 @@ pub fn routing_note(routing: &BusRouting, channels: usize) -> Option<String> {
     Some(format!(
         "{head}: there is one way out and therefore one mix. Every source is in it exactly \
          once, so levels stay as they would be - but the click goes out to the room too, \
-         and the Monitor level has nothing of its own to control. \
+         the Main level sets the whole output and the Monitor level has nothing of its own \
+         to control. \
          With four outputs, put Main on 1-2 and Monitor on 3-4. \
          Stopgap with two: Main on output 1 and Monitor on output 2 puts the mix on the left \
          and the click on the right, to be split with a Y cable."
@@ -435,8 +445,11 @@ pub fn routing_note(routing: &BusRouting, channels: usize) -> Option<String> {
 /// This replaces the old `spread_frame`, which put the single bus on every device channel pair. It
 /// is the one place a bus becomes a socket, and it has exactly three properties worth stating:
 ///
-/// * **Overlap sums, it does not overwrite.** Two buses on the same pair is the normal case on a
-///   two-output interface, and there the musician must hear *both*, not whichever was written last.
+/// * **Every source reaches a socket once.** Buses that share a channel are one mix
+///   ([`BusRouting::collapsed`]): the engine has already summed every source once into Main and
+///   left Monitor silent, and here that one mix (Main plus whatever Monitor holds) is placed on
+///   every channel either bus uses - with Main's layout where Main is, with Monitor's where only
+///   Monitor is - and never twice on the same channel. Nothing is dropped and nothing is doubled.
 /// * **A bus of width 1 is folded to mono at half level**, the same fold the old code did for a
 ///   single-channel device: dropping one side would silence anything panned hard to it.
 /// * **Channels the device does not have are skipped**, not written past the end.
@@ -447,21 +460,185 @@ pub fn place_buses(buses: &[f32], out: &mut [f32], routing: &BusRouting) {
     for slot in out.iter_mut() {
         *slot = 0.0;
     }
-    for bus in Bus::ALL {
+    let side = |bus: Bus, fallback: f32| -> (f32, f32) {
         let base = bus.index() * BUS_CHANNELS;
-        let l = buses.get(base).copied().unwrap_or(0.0);
+        let l = buses.get(base).copied().unwrap_or(fallback);
         let r = buses.get(base + 1).copied().unwrap_or(l);
-        let target = routing.get(bus);
+        (l, r)
+    };
+    let write = |out: &mut [f32], target: BusOutput, (l, r): (f32, f32), skip: Option<BusOutput>| {
+        let free = |c: usize| skip.is_none_or(|s| !s.range().contains(&c));
         if target.width >= 2 {
+            for (c, v) in [(target.first, l), (target.first + 1, r)] {
+                if free(c) {
+                    if let Some(slot) = out.get_mut(c) {
+                        *slot += v;
+                    }
+                }
+            }
+        } else if free(target.first) {
             if let Some(slot) = out.get_mut(target.first) {
-                *slot += l;
+                *slot += (l + r) * 0.5;
             }
-            if let Some(slot) = out.get_mut(target.first + 1) {
-                *slot += r;
-            }
-        } else if let Some(slot) = out.get_mut(target.first) {
-            *slot += (l + r) * 0.5;
         }
+    };
+    let main = routing.get(Bus::Main);
+    let monitor = routing.get(Bus::Monitor);
+    if routing.collapsed() {
+        let (ml, mr) = side(Bus::Main, 0.0);
+        let (nl, nr) = side(Bus::Monitor, 0.0);
+        let one = (ml + nl, mr + nr);
+        write(out, main, one, None);
+        write(out, monitor, one, Some(main));
+    } else {
+        write(out, main, side(Bus::Main, 0.0), None);
+        write(out, monitor, side(Bus::Monitor, 0.0), None);
+    }
+}
+
+/// Device output channels that get a meter of their own in the status snapshot. Every channel is
+/// limited; only the first eight are metered, which covers every interface this is played on
+/// without making the snapshot grow with the device.
+pub const OUT_METERS: usize = 8;
+
+/// Where the safety limiter on every device channel starts to act: -0.3 dBFS.
+pub const LIMIT_THRESHOLD: f32 = 0.966_050_9;
+
+/// The soft clipper at the very end of [`OutputLimiter`], on its own: no state, no latency.
+///
+/// Below [`LIMIT_THRESHOLD`] the sample passes **bit for bit**; above it a `tanh` knee bends it
+/// towards full scale, which it approaches but never exceeds. The knee starts with slope 1, so
+/// there is no edge at the threshold - an over becomes a rounded peak instead of the hard digital
+/// crackle a plain clamp makes. A sample that is not a number at all becomes silence. On its own
+/// it is only a gentler clip; the limiter in front of it is what keeps it from having to work.
+#[inline(always)]
+pub fn safety_limit(x: f32) -> f32 {
+    let a = x.abs();
+    if a <= LIMIT_THRESHOLD {
+        return x;
+    }
+    if !x.is_finite() {
+        return if x.is_nan() { 0.0 } else { x.signum() };
+    }
+    let room = 1.0 - LIMIT_THRESHOLD;
+    let y = LIMIT_THRESHOLD + room * ((a - LIMIT_THRESHOLD) / room).tanh();
+    y.min(1.0).copysign(x)
+}
+
+/// How fast the limiter pulls the gain down once a sample is over: 0.5 ms time constant.
+const LIMIT_ATTACK_S: f32 = 0.000_5;
+/// How long it holds the reduction after the last over, so a low note between two of its peaks
+/// is not modulated: 10 ms.
+const LIMIT_HOLD_S: f32 = 0.010;
+/// How fast the gain comes back after the hold: 80 ms time constant.
+const LIMIT_RELEASE_S: f32 = 0.080;
+
+/// One device channel's limiter state.
+#[derive(Clone, Copy, Debug)]
+struct LimiterChannel {
+    /// The gain the overs ask for, held and then released towards 1.
+    target: f32,
+    /// The gain applied, following `target` down at the attack rate and up with it.
+    gain: f32,
+    /// Samples left before `target` may start to release.
+    hold: u32,
+}
+
+impl LimiterChannel {
+    const IDLE: Self = Self {
+        target: 1.0,
+        gain: 1.0,
+        hold: 0,
+    };
+}
+
+/// The safety limiter on every device output channel, in the output stage
+/// (`EngineCore::place_output`), after the buses have been placed on the sockets.
+///
+/// A peak limiter **without lookahead**, because lookahead is latency: it would delay every socket,
+/// and the looper's whole timing rests on a roundtrip that is measured once and then never moves.
+/// Per channel and per sample:
+///
+/// * A sample above [`LIMIT_THRESHOLD`] (-0.3 dBFS) asks for the gain that brings it down to the
+///   threshold. The lowest such gain is held for 10 ms and then released towards 1 with an 80 ms
+///   time constant; the applied gain follows it down within about half a millisecond. So an over
+///   turns the whole signal down for a moment - the waveform keeps its shape - instead of cutting
+///   its tops off.
+/// * Whatever is still over while the gain is on its way down goes through [`safety_limit`], the
+///   soft clipper: rounded, never above full scale.
+/// * Nothing over, and the gain fully back at 1: the sample passes **bit for bit**. The limiter is
+///   then not there.
+///
+/// The state is allocated when the engine is built; `process` neither allocates nor locks.
+#[derive(Clone, Debug)]
+pub struct OutputLimiter {
+    channels: Vec<LimiterChannel>,
+    attack: f32,
+    release: f32,
+    hold: u32,
+}
+
+impl OutputLimiter {
+    pub fn new(sample_rate: u32, channels: usize) -> Self {
+        // In f64 and rounded once: the same coefficient whether the compiler folds it from a
+        // constant rate or the engine computes it from the device's, so two limiters built for the
+        // same rate agree to the bit.
+        let rate = f64::from(sample_rate.max(1));
+        let coeff = |seconds: f32| (1.0 - (-1.0 / (f64::from(seconds) * rate)).exp()) as f32;
+        Self {
+            channels: vec![LimiterChannel::IDLE; channels],
+            attack: coeff(LIMIT_ATTACK_S),
+            release: coeff(LIMIT_RELEASE_S),
+            hold: (f64::from(LIMIT_HOLD_S) * rate).round() as u32,
+        }
+    }
+
+    /// One sample of device channel `channel`. A channel the limiter was not built for gets the
+    /// stateless soft clipper, which still never lets anything past full scale.
+    #[inline(always)]
+    pub fn process(&mut self, channel: usize, x: f32) -> f32 {
+        let Some(ch) = self.channels.get_mut(channel) else {
+            return safety_limit(x);
+        };
+        let a = x.abs();
+        if a > LIMIT_THRESHOLD && a.is_finite() {
+            let need = LIMIT_THRESHOLD / a;
+            if need <= ch.target {
+                ch.target = need;
+                ch.hold = self.hold;
+            }
+        }
+        if ch.target < 1.0 {
+            if ch.hold > 0 {
+                ch.hold -= 1;
+            } else {
+                ch.target += (1.0 - ch.target) * self.release;
+                // The last step home is taken at once: -0.009 dB is inaudible, and an exponential
+                // in f32 stalls a hair below 1 (the step falls under half an ulp) instead of
+                // arriving - the limiter would never be bit-transparent again.
+                if ch.target > 0.999 {
+                    ch.target = 1.0;
+                }
+            }
+        }
+        if ch.gain > ch.target {
+            ch.gain += (ch.target - ch.gain) * self.attack;
+            if ch.gain - ch.target < 1e-6 {
+                ch.gain = ch.target;
+            }
+        } else {
+            ch.gain = ch.target;
+        }
+        if ch.gain == 1.0 {
+            safety_limit(x)
+        } else {
+            safety_limit(x * ch.gain)
+        }
+    }
+
+    /// Whether every channel is idle - nothing over, gain fully back.
+    pub fn idle(&self) -> bool {
+        self.channels.iter().all(|c| c.gain == 1.0 && c.target == 1.0)
     }
 }
 
@@ -514,16 +691,18 @@ mod tests {
         assert_eq!(two.get(Bus::Monitor), BusOutput::pair(0));
         assert!(two.overlaps());
         assert!(two.collapsed(), "ein Weg hinaus ist eine Mischung");
+        assert!(two.identical());
         let note = routing_note(&two, 2).expect("zwei Ausgaenge werden erklaert");
         assert!(note.contains("four"), "{note}");
         assert!(note.contains("click"), "{note}");
         assert!(note.contains("exactly once"), "keine Verdopplung: {note}");
         assert!(note.contains("Y cable"), "der Notbehelf steht drin: {note}");
 
-        // A partial overlap is a routing somebody chose; it really does sum, and says so.
+        // A partial overlap is a routing somebody chose; it is one mix too, and says so.
         let odd = BusRouting::new(BusOutput::pair(0), BusOutput::pair(1));
         assert!(odd.overlaps());
-        assert!(!odd.collapsed());
+        assert!(odd.collapsed(), "ein geteilter Kanal reicht fuer eine Mischung");
+        assert!(!odd.identical());
         let note = routing_note(&odd, 4).expect("Ueberschneidung wird erklaert");
         assert!(note.contains("partly"), "{note}");
 
@@ -592,5 +771,95 @@ mod tests {
         place_buses(&[0.5, 0.5, 1.0, 1.0], &mut out, &routing);
         assert_eq!(out, [0.5, 0.5]);
         assert_eq!(routing.highest_channel(), 8);
+    }
+
+    /// A partial overlap, channel by channel: the shared channel carries the one mix once, the
+    /// channels only one bus uses carry it as well, nothing is added twice.
+    #[test]
+    fn a_partial_overlap_puts_the_one_mix_once_on_every_channel() {
+        // Main on 1-2, Monitor on 2-3: channel 2 is shared.
+        let routing = BusRouting::new(BusOutput::pair(0), BusOutput::pair(1));
+        let mut out = [9.0f32; 4];
+        place_buses(&[0.5, -0.25, 0.0, 0.0], &mut out, &routing);
+        assert_eq!(out, [0.5, -0.25, -0.25, 0.0], "Kanal 2 einmal, Kanal 3 die rechte Seite");
+
+        // Main folded onto 1, Monitor on 1-2: channel 1 is shared and gets Main's fold only.
+        let routing = BusRouting::new(BusOutput::mono(0), BusOutput::pair(0));
+        let mut out = [9.0f32; 2];
+        place_buses(&[0.5, 0.25, 0.0, 0.0], &mut out, &routing);
+        assert_eq!(out, [0.375, 0.25]);
+
+        // No overlap at all: each bus on its own channels, exactly as before.
+        let routing = BusRouting::new(BusOutput::pair(2), BusOutput::pair(0));
+        assert!(!routing.collapsed());
+        let mut out = [9.0f32; 4];
+        place_buses(&[0.5, 0.25, 0.125, 0.0625], &mut out, &routing);
+        assert_eq!(out, [0.125, 0.0625, 0.5, 0.25]);
+    }
+
+    /// Below the threshold the limiter is not there at all; above it the curve bends smoothly
+    /// towards full scale and never past it.
+    #[test]
+    fn the_safety_limiter_is_transparent_below_and_soft_above_its_threshold() {
+        assert!((20.0 * LIMIT_THRESHOLD.log10() + 0.3).abs() < 1e-4, "-0.3 dBFS");
+        let mut x = -LIMIT_THRESHOLD;
+        while x <= LIMIT_THRESHOLD {
+            assert_eq!(safety_limit(x).to_bits(), x.to_bits(), "bitgleich bei {x}");
+            x += 0.000_37;
+        }
+        assert_eq!(safety_limit(LIMIT_THRESHOLD), LIMIT_THRESHOLD);
+        // Monotonic, odd, inside full scale, and without a kink: the slope just above the
+        // threshold is still ~1, it only flattens further up.
+        let mut last = LIMIT_THRESHOLD;
+        let mut x = LIMIT_THRESHOLD;
+        for _ in 0..4000 {
+            x += 0.001;
+            let y = safety_limit(x);
+            assert!(y >= last && y <= 1.0 && y <= x, "bei {x}: {y}");
+            assert_eq!(safety_limit(-x), -y);
+            last = y;
+        }
+        let h = 1e-3;
+        let slope = (safety_limit(LIMIT_THRESHOLD + h) - LIMIT_THRESHOLD) / h;
+        assert!(slope > 0.95, "keine Kante an der Schwelle: Steigung {slope}");
+        assert!(safety_limit(1.35) > 0.99 && safety_limit(1.35) <= 1.0);
+        assert_eq!(safety_limit(f32::NAN), 0.0);
+        assert_eq!(safety_limit(f32::INFINITY), 1.0);
+        assert_eq!(safety_limit(f32::NEG_INFINITY), -1.0);
+    }
+
+    /// The limiter turns a sustained over down to the threshold within a millisecond, keeps the
+    /// waveform's shape while it does, and afterwards comes back to exactly 1 - bit for bit again.
+    #[test]
+    fn the_output_limiter_rides_the_gain_and_lets_go_completely() {
+        let rate = 48_000;
+        let mut lim = OutputLimiter::new(rate, 1);
+        let tone = |k: usize, amp: f32| amp * (std::f32::consts::TAU * 100.0 * k as f32 / 48_000.0).sin();
+        for k in 0..4_800 {
+            let x = tone(k, 0.9);
+            assert_eq!(lim.process(0, x).to_bits(), x.to_bits(), "unter der Schwelle bitgleich");
+        }
+        assert!(lim.idle());
+        // +3 dBFS for half a second: from the second period on nothing is above the threshold; the
+        // first peak, while the gain is still on its way down, is the soft clipper's.
+        let mut top = 0.0f32;
+        for k in 0..24_000 {
+            let y = lim.process(0, tone(k, 1.41));
+            assert!(y.abs() <= 1.0);
+            if k > 480 {
+                top = top.max(y.abs());
+            }
+        }
+        assert!(top <= LIMIT_THRESHOLD + 1e-5 && top > LIMIT_THRESHOLD - 0.01, "{top}");
+        assert!(!lim.idle());
+        // Quiet again: after the release the gain is exactly 1 and the samples pass untouched.
+        for k in 0..96_000 {
+            lim.process(0, tone(k, 0.5));
+        }
+        assert!(lim.idle(), "zwei Sekunden spaeter ist der Begrenzer wieder weg");
+        let x = tone(17, 0.5);
+        assert_eq!(lim.process(0, x).to_bits(), x.to_bits());
+        // A channel the limiter was not built for still never passes full scale.
+        assert_eq!(lim.process(5, 3.0), 1.0);
     }
 }

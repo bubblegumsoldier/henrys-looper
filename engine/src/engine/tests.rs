@@ -1298,12 +1298,14 @@ fn monitoring_and_playback_coexist_without_touching_the_recording() {
     sim.run_to(over_start + len + R + 4 * BLOCK as u64);
 
     // The output during the overdub is loop plus live input, sample for sample. The layer being
-    // recorded contributes nothing yet - its samples are still in the cable.
+    // recorded contributes nothing yet - its samples are still in the cable. Read before the
+    // safety limiter: the two add up to full scale at times, and what the limiter makes of that is
+    // `output_tests`' business.
     for i in 0..len {
         let pos = over_start + i;
         let idx = ((pos - origin) % len) as usize;
         assert_eq!(
-            sim.out_l[pos as usize],
+            sim.raw(0, pos),
             first[idx] + fingerprint(pos),
             "Loop plus Mithoeren bei Position {pos}"
         );
@@ -1693,7 +1695,7 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
     for i in 0..len {
         let pos = coloured_from + i;
         let dry = loop_content[((pos - origin) % len) as usize];
-        if sim.out_l[pos as usize] != dry {
+        if sim.raw(0, pos) != dry {
             different += 1;
         }
     }
@@ -1703,7 +1705,8 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
     );
 
     // Bypass: back to the bare loop, sample for sample. One second of settling, because the
-    // crossfade only becomes an exact zero once it is under -100 dB.
+    // crossfade only becomes an exact zero once it is under -100 dB. Read before the safety
+    // limiter, which the loud preset made work and which is still releasing a hair of it.
     sim.send(Command::SetFxBypass {
         track: 0,
         on: true,
@@ -1714,7 +1717,7 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
         let pos = bypassed_from + i;
         let dry = loop_content[((pos - origin) % len) as usize];
         assert_eq!(
-            sim.out_l[pos as usize], dry,
+            sim.raw(0, pos), dry,
             "Position {pos} ist im Bypass nicht bitgleich mit dem Loop"
         );
     }
@@ -2734,9 +2737,11 @@ fn two_output_channels_carry_both_buses_without_losing_or_doubling_anything() {
     for pos in play_at..play_at + window {
         let loop_value = content[((pos - start) % len) as usize];
         let click = metro.sample_at(&timeline, pos);
-        let want = (loop_value + click).clamp(-1.0, 1.0);
-        assert_eq!(sim.device(0, pos), want, "Ausgang 1 bei Position {pos}");
-        assert_eq!(sim.device(1, pos), want, "Ausgang 2 bei Position {pos}");
+        // Before the safety limiter, which `output_tests` covers: loop and click add up to full
+        // scale at times, and this test is about the sum.
+        let want = loop_value + click;
+        assert_eq!(sim.raw(0, pos), want, "Ausgang 1 bei Position {pos}");
+        assert_eq!(sim.raw(1, pos), want, "Ausgang 2 bei Position {pos}");
         if loop_value != 0.0 && click != 0.0 {
             both_heard += 1;
         }

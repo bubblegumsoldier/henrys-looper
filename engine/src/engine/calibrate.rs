@@ -93,7 +93,7 @@ use super::command::{
 use super::frame::TrackInput;
 use super::live::{TrackDef, resolve_tracks};
 use super::metro::Metronome;
-use super::bus::{BUS_SAMPLES, place_buses};
+use super::bus::BUS_SAMPLES;
 use super::process::{
     EngineConfig, EngineCore, check_loop, loop_capacity, measurement_routing,
 };
@@ -657,14 +657,12 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
                     sh_out.underruns.fetch_add(1, Ordering::Relaxed);
                 }
                 core.process(&in_scratch[..got], &mut out_scratch[..n * BUS_SAMPLES]);
-                let routing = core.routing();
                 let base = done * out_channels;
-                for (i, frame) in data[base..base + n * out_channels]
-                    .chunks_exact_mut(out_channels)
-                    .enumerate()
-                {
-                    place_buses(&out_scratch[i * BUS_SAMPLES..(i + 1) * BUS_SAMPLES], frame, &routing);
-                }
+                core.place_output(
+                    &out_scratch[..n * BUS_SAMPLES],
+                    &mut data[base..base + n * out_channels],
+                    out_channels,
+                );
                 done += n;
             }
         },

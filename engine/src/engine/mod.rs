@@ -73,3 +73,5 @@ mod source_tests;
 mod latch_tests;
 #[cfg(test)]
 mod midi_tests;
+#[cfg(test)]
+mod output_tests;

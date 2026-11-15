@@ -66,7 +66,7 @@ use super::command::{
 };
 use super::bus::{
     BUS_COUNT, BUS_SAMPLES, Bus, BusOutput, BusRouting, BusSend, MAX_BUS_GAIN, TrackSource,
-    place_buses, routing_note,
+    routing_note,
 };
 use super::frame::{Channels, TrackInput};
 use super::fx::{DelayNote, FxParam, FxPreset, FxSlot, FxStatus};
@@ -1413,17 +1413,15 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
                     &in_scratch[..got * in_channels],
                     &mut out_scratch[..n * BUS_SAMPLES],
                 );
-                // The one place a bus becomes a socket. The routing is read from the engine, which
-                // owns it, so a `SetBusOutput` takes effect on the very next block.
-                let routing = core.routing();
+                // The one place a bus becomes a socket: placed, metered and safety-limited by the
+                // engine, which owns the routing, so a `SetBusOutput` takes effect on the very next
+                // block.
                 let base = done * out_channels;
-                for (i, frame) in data[base..base + n * out_channels]
-                    .chunks_exact_mut(out_channels)
-                    .enumerate()
-                {
-                    let buses = &out_scratch[i * BUS_SAMPLES..(i + 1) * BUS_SAMPLES];
-                    place_buses(buses, frame, &routing);
-                }
+                core.place_output(
+                    &out_scratch[..n * BUS_SAMPLES],
+                    &mut data[base..base + n * out_channels],
+                    out_channels,
+                );
                 done += n;
             }
             stats_out.record_callback(t0);

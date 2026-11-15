@@ -217,6 +217,9 @@ pub struct Sim {
     /// Every device output channel, `out_l`/`out_r` being the first two of them. This is what a
     /// four-output test reads to show that nothing bleeds onto the other pair.
     pub dev: Vec<Vec<f32>>,
+    /// The same channels before the safety limiter: what the buses add up to on each socket. A
+    /// test about mixing reads this, a test about the limiter compares the two.
+    pub raw: Vec<Vec<f32>>,
     /// Each bus on its own, before it is placed on a socket: `buses[bus][channel]`. What a test
     /// asks when the question is "is the click on Main", not "what comes out of socket 3".
     pub buses: [[Vec<f32>; BUS_CHANNELS]; BUS_COUNT],
@@ -303,6 +306,7 @@ impl Sim {
             out_l: Vec::new(),
             out_r: Vec::new(),
             dev: vec![Vec::new(); output_channels],
+            raw: vec![Vec::new(); output_channels],
             buses: Default::default(),
             routing,
             output_channels,
@@ -391,6 +395,11 @@ impl Sim {
         self.dev[channel][pos as usize]
     }
 
+    /// One device output channel before the safety limiter, zero-based.
+    pub fn raw(&self, channel: usize, pos: u64) -> f32 {
+        self.raw[channel][pos as usize]
+    }
+
     /// How many output channels the simulated device has.
     pub fn output_channels(&self) -> usize {
         self.output_channels
@@ -440,7 +449,6 @@ impl Sim {
             });
         }
         self.core.process(&self.in_buf, &mut self.out_buf);
-        let routing = self.core.routing();
         for frame in self.out_buf.chunks_exact(BUS_SAMPLES) {
             for bus in Bus::ALL {
                 for c in 0..BUS_CHANNELS {
@@ -449,7 +457,12 @@ impl Sim {
             }
             // The same step the real output callback takes, so what a test reads out of `dev` is
             // what the driver would have been handed.
-            place_buses(frame, &mut self.dev_frame, &routing);
+            place_buses(frame, &mut self.dev_frame, &self.core.routing());
+            for (c, value) in self.dev_frame.iter().enumerate() {
+                self.raw[c].push(*value);
+            }
+            self.core
+                .place_output(frame, &mut self.dev_frame, self.output_channels);
             for (c, value) in self.dev_frame.iter().enumerate() {
                 self.dev[c].push(*value);
             }

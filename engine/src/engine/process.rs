@@ -130,7 +130,8 @@
 use crate::capture::{CaptureEndpoint, CaptureSlot};
 
 use super::bus::{
-    BUS_CHANNELS, BUS_COUNT, BUS_SAMPLES, Bus, BusOutput, BusRouting, MAX_BUS_GAIN, TrackSource,
+    BUS_CHANNELS, BUS_COUNT, BUS_SAMPLES, Bus, BusOutput, BusRouting, MAX_BUS_GAIN, OUT_METERS,
+    OutputLimiter, TrackSource, place_buses,
 };
 use super::command::{
     BUFFER_KINDS, BufferEndpoint, Command, CommandReceiver, MAX_TRACKS, Refusal, Status,
@@ -225,6 +226,13 @@ pub struct EngineCore {
     /// Peak of each bus, per channel, since the last snapshot - measured after the bus volume,
     /// because that is what actually leaves the machine.
     bus_peak: [[f32; BUS_CHANNELS]; BUS_COUNT],
+    /// Peak of each device output channel since the last snapshot, after the buses were placed
+    /// and before the safety limiter - see [`Self::place_output`].
+    out_peak: [f32; OUT_METERS],
+    /// Smallest ratio limited/unlimited per device channel since the last snapshot; 1 = untouched.
+    out_ratio: [f32; OUT_METERS],
+    /// The safety limiter on every device channel, its state allocated here, not in the callback.
+    limiter: OutputLimiter,
     ignored_commands: u64,
     refusal: Refusal,
     buffers_taken: [u64; BUFFER_KINDS],
@@ -304,6 +312,9 @@ impl EngineCore {
             status_interval: cfg.status_interval.max(1),
             since_status: 0,
             bus_peak: [[0.0; BUS_CHANNELS]; BUS_COUNT],
+            out_peak: [0.0; OUT_METERS],
+            out_ratio: [1.0; OUT_METERS],
+            limiter: OutputLimiter::new(cfg.timeline.sample_rate(), output_channels),
             ignored_commands: 0,
             refusal: Refusal::None,
             buffers_taken: [0; BUFFER_KINDS],
@@ -410,9 +421,9 @@ impl EngineCore {
     /// `output` is the **bus block** starting at `out_pos`: [`BUS_SAMPLES`] samples per frame,
     /// interleaved as `[main_l, main_r, monitor_l, monitor_r]`. It is fully overwritten. A stray
     /// partial frame at the end is left untouched rather than half a frame being produced. Which
-    /// device socket each bus ends up on is decided afterwards, by
-    /// [`super::bus::place_buses`] with [`EngineCore::routing`] - the engine mixes buses, the
-    /// callback wires them.
+    /// device socket each bus ends up on is decided afterwards, by [`Self::place_output`], which
+    /// every output callback calls right after this - placement, output meters and the safety
+    /// limiter in one step.
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) {
         self.refill_spares();
         self.collect_commands();
@@ -436,7 +447,7 @@ impl EngineCore {
         if tap {
             self.capture_midi();
         }
-        self.clamp_and_meter(output);
+        self.meter_buses(output);
         self.record_input(input, in_frames);
         self.record_sources(out_frames);
         if let Some(capture) = self.capture.as_deref_mut() {
@@ -1009,16 +1020,19 @@ impl EngineCore {
         }
     }
 
-    /// Clamp every bus channel into the usable range and meter each of them separately - a mix that
-    /// clips only on one side, or only in the headphones, has to show that where it happens.
+    /// Meter every bus channel separately - a mix that is loud only on one side, or only in the
+    /// headphones, has to show that where it happens.
+    ///
+    /// Nothing is clamped here any more. A bus is not a socket: on a two-output interface both
+    /// buses share one, and a per-bus clamp could neither see nor prevent an over of what really
+    /// leaves. The protection sits where the signal does leave, per device channel, in
+    /// [`Self::place_output`]; the bus meter shows the true level, above 0 dBFS included.
     #[inline]
-    fn clamp_and_meter(&mut self, output: &mut [f32]) {
+    fn meter_buses(&mut self, output: &[f32]) {
         let mut peak = [[0.0f32; BUS_CHANNELS]; BUS_COUNT];
-        for frame in output.chunks_exact_mut(BUS_SAMPLES) {
-            for (i, slot) in frame.iter_mut().enumerate() {
-                let v = slot.clamp(-1.0, 1.0);
-                *slot = v;
-                let a = v.abs();
+        for frame in output.chunks_exact(BUS_SAMPLES) {
+            for (i, &v) in frame.iter().enumerate() {
+                let a = meter_value(v);
                 let cell = &mut peak[i / BUS_CHANNELS][i % BUS_CHANNELS];
                 if a > *cell {
                     *cell = a;
@@ -1032,8 +1046,56 @@ impl EngineCore {
         }
     }
 
-    /// Where each bus leaves the machine. Read by the output callback right after [`Self::process`],
-    /// which is the only place a bus becomes a socket.
+    /// The output stage: put the bus block [`Self::process`] just produced on the device's
+    /// channels, meter every device channel, and run the safety limiter over it.
+    ///
+    /// `buses` is that bus block, `device` the interleaved device buffer of the same frame count
+    /// with `channels` samples per frame. This is the one place a bus becomes a socket, called by
+    /// every output callback right after `process`; the routing comes from the engine, so a
+    /// `SetBusOutput` takes effect on the very next block.
+    ///
+    /// Per device channel, in this order: the buses are placed ([`place_buses`] - buses that share
+    /// a channel are one mix there, every source once); the sum is metered - the only meter that
+    /// shows what the socket really gets; then the [`OutputLimiter`] turns anything above
+    /// -0.3 dBFS down so that an over never reaches the room or the headphones as hard digital
+    /// clipping, and how far it had to go is reported. While nothing is over it changes no bit. No
+    /// allocation, no lookahead, no latency. The recording is taken long before this, inside
+    /// `process`, and is never limited.
+    pub fn place_output(&mut self, buses: &[f32], device: &mut [f32], channels: usize) {
+        let channels = channels.max(1);
+        let routing = self.routing;
+        let mut peak = [0.0f32; OUT_METERS];
+        let mut ratio = [1.0f32; OUT_METERS];
+        for (bus_frame, dev_frame) in buses
+            .chunks_exact(BUS_SAMPLES)
+            .zip(device.chunks_exact_mut(channels))
+        {
+            place_buses(bus_frame, dev_frame, &routing);
+            for (c, slot) in dev_frame.iter_mut().enumerate() {
+                let x = *slot;
+                let y = self.limiter.process(c, x);
+                *slot = y;
+                if c < OUT_METERS {
+                    let a = meter_value(x);
+                    if a > peak[c] {
+                        peak[c] = a;
+                    }
+                    if a > 0.0 {
+                        let r = y.abs() / a;
+                        if r < ratio[c] {
+                            ratio[c] = r;
+                        }
+                    }
+                }
+            }
+        }
+        for c in 0..OUT_METERS {
+            self.out_peak[c] = self.out_peak[c].max(peak[c]);
+            self.out_ratio[c] = self.out_ratio[c].min(ratio[c]);
+        }
+    }
+
+    /// Where each bus leaves the machine - what [`Self::place_output`] places by.
     #[inline]
     pub fn routing(&self) -> BusRouting {
         self.routing
@@ -1760,6 +1822,14 @@ impl EngineCore {
             tracks,
             track_count: self.tracks.len() as u8,
             bus_peak: self.bus_peak,
+            out_peak: self.out_peak,
+            out_reduction_db: self.out_ratio.map(|r| {
+                if r >= 1.0 {
+                    0.0
+                } else {
+                    (20.0 * r.max(1e-6).log10()).min(0.0)
+                }
+            }),
             bus_gain: self.bus_gain,
             bus_out: self.routing,
             output_channels: self.output_channels.min(u8::MAX as usize) as u8,
@@ -1778,8 +1848,18 @@ impl EngineCore {
             late_events: self.late_events().min(u64::from(u32::MAX)) as u32,
         };
         self.bus_peak = [[0.0; BUS_CHANNELS]; BUS_COUNT];
+        self.out_peak = [0.0; OUT_METERS];
+        self.out_ratio = [1.0; OUT_METERS];
         self.status.push(status);
     }
+}
+
+/// What a meter makes of one sample: its magnitude, with anything that is not a number reported as
+/// a loud over (+24 dBFS) rather than passed on - an infinity would not survive the trip to the
+/// display, and a meter that falls silent on a broken signal would be lying.
+#[inline(always)]
+fn meter_value(v: f32) -> f32 {
+    if v.is_finite() { v.abs().min(16.0) } else { 16.0 }
 }
 
 /// One track's live input at one frame of the block, already stereo and scaled: one channel fanned
