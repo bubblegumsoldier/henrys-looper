@@ -564,6 +564,48 @@ fn name_and_last_seen_are_remembered_across_a_restart() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Two identical pad controllers: the system lists the second as "Pads #2" (`input::disambiguate`).
+/// It does not steal the first one's profile; connected once by hand it gets its own, learns into
+/// its own, and after a restart both come back to the right profile.
+#[test]
+fn two_identical_devices_get_a_profile_each() {
+    let (mut bridge, midi, dir) = bridge("twins");
+    std::fs::write(
+        dir.join("pads.yaml"),
+        "device: Pads\nbindings:\n  ch1.note36: {target: track.1.record}\n",
+    )
+    .unwrap();
+    midi.plug("Pads");
+    midi.plug("Pads #2");
+    bridge.scan();
+    let view = bridge.view();
+    assert_eq!(view.devices.iter().filter(|d| d.connected).count(), 1);
+    let twin = view.ports.iter().find(|p| p.name == "Pads #2").unwrap();
+    assert_eq!(twin.profile, None, "offered as a new input, not as the first one's");
+
+    let view = bridge.open("Pads #2").expect("connected");
+    assert_eq!(view.devices.iter().filter(|d| d.connected).count(), 2);
+    assert!(dir.join("pads-2.yaml").exists());
+    assert_eq!(device(&view, "Pads").state, DeviceState::Connected, "the first keeps its profile");
+
+    bridge.arm("track.2.record").expect("Adresse");
+    midi.send("Pads #2", press(36));
+    pump_learn(&mut bridge);
+    midi.send("Pads", press(36));
+    midi.send("Pads #2", press(36));
+    let mut results = pump_resolve(&mut bridge, &["a", "b"]);
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(results[0].1, Resolution::Action(MidiAction::Record { track: 0 }));
+    assert_eq!(results[1].1, Resolution::Action(MidiAction::Record { track: 1 }));
+
+    let mut again = MidiBridge::with(Box::new(midi.clone()), &dir);
+    again.scan();
+    let view = again.view();
+    assert_eq!(device(&view, "Pads").port.as_deref(), Some("Pads"));
+    assert_eq!(device(&view, "Pads #2").port.as_deref(), Some("Pads #2"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Deleting a profile disconnects the device, keeps the file aside and does not connect it again.
 #[test]
 fn a_deleted_profile_is_kept_aside_and_its_device_is_no_longer_taken() {

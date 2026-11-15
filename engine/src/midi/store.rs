@@ -140,11 +140,21 @@ impl ProfileStore {
     /// The profile meant for a port of that name: the longest matching `device:` wins, so
     /// "MPD218 Port A" is not taken by a profile for "MPD". Broken files take part - a broken
     /// profile for this device must be reported, not silently replaced by a fresh one.
+    ///
+    /// Two identical devices are told apart by the ` #2` the port list appends to the second
+    /// ([`super::input::disambiguate`]): a profile for "Pads #2" is only for that port, an exact
+    /// name beats a loose match, and so "Pads" and "Pads #2" each find their own profile.
     pub fn best_for_port(&self, port: &str) -> Option<&Path> {
-        self.entries
-            .iter()
-            .filter(|entry| Profile::new(entry.device.clone()).matches(port))
-            .max_by_key(|entry| entry.device.len())
+        let port_copy = copy_number(port);
+        let candidates = self.entries.iter().filter(|entry| {
+            Profile::new(entry.device.clone()).matches(port)
+                && copy_number(&entry.device).is_none_or(|n| port_copy == Some(n))
+        });
+        let exact = candidates
+            .clone()
+            .find(|entry| entry.device.trim().eq_ignore_ascii_case(port.trim()));
+        exact
+            .or_else(|| candidates.max_by_key(|entry| entry.device.len()))
             .map(|entry| entry.path.as_path())
     }
 
@@ -227,6 +237,12 @@ impl ProfileStore {
             backup,
         })
     }
+}
+
+/// `Some(2)` for "Pads #2" - the second of two identical devices.
+pub fn copy_number(name: &str) -> Option<u32> {
+    let (_, n) = name.trim_end().rsplit_once(" #")?;
+    n.parse().ok().filter(|n| *n >= 2)
 }
 
 /// Read one file into an entry. `None` only when it cannot be read at all.
@@ -445,6 +461,28 @@ bindings:\n  \
         assert_eq!(store.get(&path).unwrap().len(), 1);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(store.scan(), vec![StoreChange::Removed(path.clone())]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_identical_devices_each_find_their_own_profile() {
+        let dir = temp_dir("twins");
+        let mut store = ProfileStore::new(&dir);
+        let first = store.create("nanoKONTROL2").unwrap();
+        assert_eq!(store.best_for_port("nanoKONTROL2"), Some(first.as_path()));
+        // Only one profile so far: the second device may share it (the bridge decides whether).
+        assert_eq!(store.best_for_port("nanoKONTROL2 #2"), Some(first.as_path()));
+        let second = store.create("nanoKONTROL2 #2").unwrap();
+        assert_ne!(first, second);
+        assert_eq!(store.best_for_port("nanoKONTROL2 #2"), Some(second.as_path()));
+        assert_eq!(store.best_for_port("nanoKONTROL2"), Some(first.as_path()), "exact beats longer");
+        assert_eq!(store.best_for_port("nanoKONTROL2 #3"), Some(first.as_path()));
+        assert_eq!(copy_number("Pads #2"), Some(2));
+        assert_eq!(copy_number("Drum #1 Pad"), None);
+        assert_eq!(
+            crate::midi::input::disambiguate(&["A".into(), "B".into(), "A".into(), "A".into()]),
+            vec!["A", "B", "A #2", "A #3"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

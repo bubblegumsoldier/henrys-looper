@@ -615,6 +615,11 @@ impl MidiBridge {
                 let entry = self
                     .store
                     .best_for_port(name)
+                    // A profile another port already uses is not this port's: the second of two
+                    // identical devices shows up as a new input and gets one of its own.
+                    .filter(|path| {
+                        self.is_linked(name) || !self.links.iter().any(|l| l.profile == *path)
+                    })
                     .and_then(|path| self.store.get(path));
                 MidiPortView {
                     index,
@@ -638,6 +643,16 @@ impl MidiBridge {
             return Ok(self.view());
         }
         let path = match self.store.best_for_port(&name) {
+            // Taken by another port that is plugged in too - the second of two identical
+            // devices: it gets a profile of its own rather than taking the first one's away.
+            Some(path)
+                if self.links.iter().any(|l| {
+                    let other = l.port.name();
+                    l.profile == path && other != name && self.available.iter().any(|p| p == other)
+                }) =>
+            {
+                self.store.create(&name)?
+            }
             Some(path) => path.to_path_buf(),
             None => self.store.create(&name)?,
         };

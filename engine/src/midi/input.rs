@@ -93,21 +93,43 @@ pub fn refresh_system() {
 ///
 /// An endpoint without a name is left out: on macOS that is what a just-unplugged device looks like
 /// until the system has caught up, and it is nothing anybody could connect to.
+///
+/// Two identical controllers announce themselves with the same name. The second one is listed as
+/// `"<name> #2"`, the third as `"<name> #3"` ([`disambiguate`]), so each can be opened - and have a
+/// profile - of its own. Which physical device is "#2" follows the system's order and can change
+/// when they are replugged in a different order; there is nothing more stable to tell them apart by.
 pub fn list_ports() -> Result<Vec<PortInfo>, String> {
     refresh_system();
     let input = MidiInput::new(CLIENT).map_err(init_error)?;
-    Ok(input
+    let names: Vec<String> = input
         .ports()
         .iter()
-        .enumerate()
-        .map(|(index, port)| PortInfo {
-            index,
-            name: input
+        .map(|port| {
+            input
                 .port_name(port)
-                .unwrap_or_else(|_| "<name unreadable>".to_string()),
+                .unwrap_or_else(|_| "<name unreadable>".to_string())
         })
+        .collect();
+    Ok(disambiguate(&names)
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| PortInfo { index, name })
         .filter(|port| !port.name.trim().is_empty())
         .collect())
+}
+
+/// The second and every further port of the same name gets ` #2`, ` #3`, ... appended.
+pub fn disambiguate(names: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(names.len());
+    for (i, name) in names.iter().enumerate() {
+        let before = names[..i].iter().filter(|n| *n == name).count();
+        out.push(if before == 0 || name.trim().is_empty() {
+            name.clone()
+        } else {
+            format!("{name} #{}", before + 1)
+        });
+    }
+    out
 }
 
 /// What the callback writes into.
@@ -183,11 +205,15 @@ pub fn open_named(name: &str) -> Result<MidiIn, String> {
     let mut input = MidiInput::new(CLIENT).map_err(init_error)?;
     input.ignore(Ignore::All);
     let ports = input.ports();
-    let port = ports
+    let names: Vec<String> = ports
         .iter()
-        .find(|port| input.port_name(port).is_ok_and(|n| n == name))
-        .cloned()
+        .map(|port| input.port_name(port).unwrap_or_default())
+        .collect();
+    let index = disambiguate(&names)
+        .iter()
+        .position(|n| n == name)
         .ok_or_else(|| format!("MIDI input \"{name}\" is not available (any more)."))?;
+    let port = ports[index].clone();
     connect(input, &port, name.to_string())
 }
 
