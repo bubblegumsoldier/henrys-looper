@@ -286,7 +286,7 @@ function deviceLine(d: MidiDeviceView): string {
   switch (d.state) {
     case "connected":
       return d.inactive > 0
-        ? `connected · ${d.active} of ${d.bindings} bindings active`
+        ? `connected · ${d.active} of ${d.bindings} active`
         : `connected · ${plural(d.bindings, "binding")} active`;
     case "missing":
       return d.bindings === 0
