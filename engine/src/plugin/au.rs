@@ -14,8 +14,8 @@
 #![allow(non_upper_case_globals, non_snake_case, dead_code)]
 
 use std::ffi::{CStr, c_char, c_void};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::sel;
@@ -24,7 +24,7 @@ use objc2_foundation::NSSize;
 use super::cf::{self, CFStringRef, CFTypeRef};
 use super::editor::EditorWindow;
 use super::{Format, Kind, ParamInfo, PluginInfo, PluginInstance};
-use crate::engine::insert::InsertProcessor;
+use crate::engine::insert::{InsertProcessor, PluginTransport};
 use crate::engine::source::{BlockEvent, SourceProcessor, StereoOut};
 
 type OSStatus = i32;
@@ -150,6 +150,7 @@ const kAudioUnitProperty_StreamFormat: u32 = 8;
 const kAudioUnitProperty_Latency: u32 = 12;
 const kAudioUnitProperty_MaximumFramesPerSlice: u32 = 14;
 const kAudioUnitProperty_SetRenderCallback: u32 = 23;
+const kAudioUnitProperty_HostCallbacks: u32 = 27;
 const kAudioUnitProperty_CocoaUI: u32 = 31;
 const kAudioUnitProperty_ParameterStringFromValue: u32 = 33;
 
@@ -419,9 +420,17 @@ pub struct AuPlugin {
     processing: std::sync::Arc<AtomicBool>,
     /// Last values seen, to report what the plugin's own editor changed.
     seen: Mutex<Vec<f32>>,
+    /// The clock the unit asks for through its host callbacks. Owned here, not by the processor:
+    /// the callbacks' user data must stay valid for as long as the unit can call them, and a unit
+    /// may do that from its own view as well as from inside `AudioUnitRender`.
+    host_time: Arc<HostTime>,
 }
 
 pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
+    open(info).map(|plugin| Box::new(plugin) as Box<dyn PluginInstance>)
+}
+
+pub(super) fn open(info: &PluginInfo) -> Result<AuPlugin, String> {
     let desc = parse_id(&info.id).ok_or_else(|| format!("Not an Audio Unit id: {}", info.id))?;
     let component = unsafe { AudioComponentFindNext(std::ptr::null_mut(), &desc) };
     if component.is_null() {
@@ -447,12 +456,55 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
         editor: None,
         processing: std::sync::Arc::new(AtomicBool::new(false)),
         seen: Mutex::new(Vec::new()),
+        host_time: Arc::new(HostTime::default()),
     };
+    plugin.host_time.store(&PluginTransport::standing(48_000.0));
+    plugin.install_host_callbacks();
     plugin.read_params();
-    Ok(Box::new(plugin))
+    Ok(plugin)
 }
 
 impl AuPlugin {
+    /// Tell the unit where to ask for tempo, beat and transport. A unit that has no use for them
+    /// may refuse the property; that changes nothing for it.
+    fn install_host_callbacks(&self) {
+        let info = HostCallbackInfo::for_clock(&self.host_time);
+        unsafe {
+            AudioUnitSetProperty(
+                self.unit,
+                kAudioUnitProperty_HostCallbacks,
+                kAudioUnitScope_Global,
+                0,
+                &info as *const HostCallbackInfo as *const c_void,
+                std::mem::size_of::<HostCallbackInfo>() as u32,
+            );
+        }
+    }
+
+    /// The host callbacks as the unit itself hands them back - proof that it took them.
+    #[cfg(test)]
+    pub(super) fn host_callbacks(&self) -> Option<HostCallbackInfo> {
+        let mut info = HostCallbackInfo {
+            host_user_data: std::ptr::null_mut(),
+            beat_and_tempo: None,
+            musical_time_location: None,
+            transport_state: None,
+            transport_state2: None,
+        };
+        let mut size = std::mem::size_of::<HostCallbackInfo>() as u32;
+        let status = unsafe {
+            AudioUnitGetProperty(
+                self.unit,
+                kAudioUnitProperty_HostCallbacks,
+                kAudioUnitScope_Global,
+                0,
+                &mut info as *mut HostCallbackInfo as *mut c_void,
+                &mut size,
+            )
+        };
+        (status == 0).then_some(info)
+    }
+
     fn read_params(&mut self) {
         self.params.clear();
         let mut size = 0u32;
@@ -882,6 +934,9 @@ impl PluginInstance for AuPlugin {
         }
         self.initialized = true;
         unsafe { AudioUnitReset(self.unit, kAudioUnitScope_Global, 0) };
+        let transport = PluginTransport::standing(sample_rate);
+        self.host_time.store(&transport);
+        self.install_host_callbacks();
         self.processing.store(true, Ordering::Release);
         Ok(Box::new(AuProcessor {
             unit: self.unit,
@@ -889,6 +944,8 @@ impl PluginInstance for AuPlugin {
             outs,
             sample_time: 0.0,
             processing: self.processing.clone(),
+            host_time: self.host_time.clone(),
+            transport,
         }))
     }
 
@@ -940,12 +997,17 @@ impl PluginInstance for AuPlugin {
         }
         self.initialized = true;
         unsafe { AudioUnitReset(self.unit, kAudioUnitScope_Global, 0) };
+        let transport = PluginTransport::standing(sample_rate);
+        self.host_time.store(&transport);
+        self.install_host_callbacks();
         self.processing.store(true, Ordering::Release);
         Ok(Box::new(AuInstrument {
             unit: self.unit,
             outs,
             sample_time: 0.0,
             processing: self.processing.clone(),
+            host_time: self.host_time.clone(),
+            transport,
         }))
     }
 
@@ -1044,6 +1106,10 @@ struct AuProcessor {
     outs: u32,
     sample_time: f64,
     processing: std::sync::Arc<AtomicBool>,
+    host_time: Arc<HostTime>,
+    /// The clock for the next render: set by the engine before every call, moved on here after it
+    /// for callers that never set it.
+    transport: PluginTransport,
 }
 
 // The unit is driven from exactly one thread at a time on this side: the audio thread, between
@@ -1093,6 +1159,11 @@ unsafe extern "C" fn render_input(
 }
 
 impl InsertProcessor for AuProcessor {
+    fn set_transport(&mut self, transport: &PluginTransport) {
+        self.host_time.follow(&self.transport, transport);
+        self.transport = *transport;
+    }
+
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let n = left.len().min(right.len()).min(self.input.l.len());
         if n == 0 {
@@ -1128,9 +1199,11 @@ impl InsertProcessor for AuProcessor {
             ..Default::default()
         };
         let mut flags = 0u32;
+        self.host_time.store(&self.transport);
         let status =
             unsafe { AudioUnitRender(self.unit, &mut flags, &stamp, 0, n as u32, &mut list) };
         self.sample_time += n as f64;
+        self.transport = self.transport.advanced(n);
         if status != 0 {
             // Whatever went wrong, the dry signal is a better answer than half a buffer.
             left[..n].copy_from_slice(&self.input.l[..n]);
@@ -1159,6 +1232,9 @@ struct AuInstrument {
     outs: u32,
     sample_time: f64,
     processing: std::sync::Arc<AtomicBool>,
+    host_time: Arc<HostTime>,
+    /// See `AuProcessor::transport`.
+    transport: PluginTransport,
 }
 
 // Driven from the audio thread only, between `activate_instrument` and the drop - as AuProcessor.
@@ -1171,6 +1247,11 @@ impl Drop for AuInstrument {
 }
 
 impl SourceProcessor for AuInstrument {
+    fn set_transport(&mut self, transport: &PluginTransport) {
+        self.host_time.follow(&self.transport, transport);
+        self.transport = *transport;
+    }
+
     fn render(&mut self, events: &[BlockEvent], outs: &mut [StereoOut<'_>]) {
         let Some(out) = outs.first_mut() else {
             return;
@@ -1215,9 +1296,11 @@ impl SourceProcessor for AuInstrument {
             ..Default::default()
         };
         let mut flags = 0u32;
+        self.host_time.store(&self.transport);
         let status =
             unsafe { AudioUnitRender(self.unit, &mut flags, &stamp, 0, n as u32, &mut list) };
         self.sample_time += n as f64;
+        self.transport = self.transport.advanced(n);
         if status != 0 {
             out.l[..n].fill(0.0);
             out.r[..n].fill(0.0);
@@ -1238,4 +1321,216 @@ impl SourceProcessor for AuInstrument {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The clock, as an Audio Unit asks for it
+// ---------------------------------------------------------------------------------------------
+
+type BeatAndTempoProc = unsafe extern "C" fn(*mut c_void, *mut f64, *mut f64) -> OSStatus;
+type MusicalTimeLocationProc =
+    unsafe extern "C" fn(*mut c_void, *mut u32, *mut f32, *mut u32, *mut f64) -> OSStatus;
+type TransportStateProc =
+    unsafe extern "C" fn(*mut c_void, *mut u8, *mut u8, *mut f64, *mut u8, *mut f64, *mut f64)
+        -> OSStatus;
+type TransportState2Proc = unsafe extern "C" fn(
+    *mut c_void,
+    *mut u8,
+    *mut u8,
+    *mut u8,
+    *mut f64,
+    *mut u8,
+    *mut f64,
+    *mut f64,
+) -> OSStatus;
+
+/// `HostCallbackInfo` from `AudioUnitProperties.h`. `Boolean` is one byte.
+#[repr(C)]
+pub(super) struct HostCallbackInfo {
+    pub(super) host_user_data: *mut c_void,
+    pub(super) beat_and_tempo: Option<BeatAndTempoProc>,
+    pub(super) musical_time_location: Option<MusicalTimeLocationProc>,
+    pub(super) transport_state: Option<TransportStateProc>,
+    pub(super) transport_state2: Option<TransportState2Proc>,
+}
+
+impl HostCallbackInfo {
+    pub(super) fn for_clock(clock: &Arc<HostTime>) -> Self {
+        Self {
+            host_user_data: Arc::as_ptr(clock) as *mut c_void,
+            beat_and_tempo: Some(beat_and_tempo),
+            musical_time_location: Some(musical_time_location),
+            transport_state: Some(transport_state),
+            transport_state2: Some(transport_state2),
+        }
+    }
+}
+
+/// The engine's clock where the host callbacks can read it: atomics, because a unit may ask from
+/// its view's thread as well as from inside `AudioUnitRender`. Each field is read on its own, so a
+/// reader on another thread can see one block's tempo with the next block's position - harmless,
+/// and the audio thread itself, where nearly every question is asked, always sees one block.
+#[derive(Debug, Default)]
+pub(super) struct HostTime {
+    sample_rate: AtomicU64,
+    bpm: AtomicU64,
+    /// `beats_per_bar << 32 | beat_unit`.
+    signature: AtomicU64,
+    position: AtomicI64,
+    playing: AtomicBool,
+    /// The transport started, stopped or jumped since a unit last asked.
+    changed: AtomicBool,
+}
+
+impl HostTime {
+    pub(super) fn store(&self, t: &PluginTransport) {
+        self.sample_rate.store(t.sample_rate.to_bits(), Ordering::Relaxed);
+        self.bpm.store(t.bpm.to_bits(), Ordering::Relaxed);
+        self.signature.store(
+            u64::from(t.beats_per_bar) << 32 | u64::from(t.beat_unit),
+            Ordering::Relaxed,
+        );
+        self.position.store(t.position, Ordering::Relaxed);
+        self.playing.store(t.playing, Ordering::Relaxed);
+    }
+
+    /// The engine sent `next` where the processor expected `expected` (the last clock moved on by
+    /// what was rendered since): a start, a stop or a jump is a transport change.
+    pub(super) fn follow(&self, expected: &PluginTransport, next: &PluginTransport) {
+        if expected.playing != next.playing || expected.position != next.position {
+            self.changed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn load(&self) -> PluginTransport {
+        let signature = self.signature.load(Ordering::Relaxed);
+        PluginTransport {
+            sample_rate: f64::from_bits(self.sample_rate.load(Ordering::Relaxed)),
+            bpm: f64::from_bits(self.bpm.load(Ordering::Relaxed)),
+            beats_per_bar: (signature >> 32) as u32,
+            beat_unit: signature as u32,
+            playing: self.playing.load(Ordering::Relaxed),
+            position: self.position.load(Ordering::Relaxed),
+            continuous: 0,
+        }
+    }
+
+    fn take_changed(&self) -> bool {
+        self.changed.swap(false, Ordering::Relaxed)
+    }
+}
+
+/// Write `value` where the unit asked for it; every out pointer of these callbacks may be null.
+unsafe fn put<T>(out: *mut T, value: T) {
+    if !out.is_null() {
+        unsafe { *out = value };
+    }
+}
+
+unsafe fn clock<'a>(user: *mut c_void) -> Option<&'a HostTime> {
+    unsafe { (user as *const HostTime).as_ref() }
+}
+
+/// Current beat (in quarter notes since bar 1) and tempo.
+pub(super) unsafe extern "C" fn beat_and_tempo(
+    user: *mut c_void,
+    beat: *mut f64,
+    tempo: *mut f64,
+) -> OSStatus {
+    let Some(clock) = (unsafe { clock(user) }) else {
+        return -50; // paramErr
+    };
+    let t = clock.load();
+    unsafe {
+        put(beat, t.quarters());
+        put(tempo, t.bpm);
+    }
+    0
+}
+
+/// Samples to the next quarter note, the time signature, and the downbeat of the current bar in
+/// quarter notes.
+pub(super) unsafe extern "C" fn musical_time_location(
+    user: *mut c_void,
+    to_next_beat: *mut u32,
+    numerator: *mut f32,
+    denominator: *mut u32,
+    downbeat: *mut f64,
+) -> OSStatus {
+    let Some(clock) = (unsafe { clock(user) }) else {
+        return -50;
+    };
+    let t = clock.load();
+    let q = t.quarters();
+    let next = if t.playing {
+        ((q.ceil() - q) * t.samples_per_quarter()).round().max(0.0) as u32
+    } else {
+        0
+    };
+    unsafe {
+        put(to_next_beat, next);
+        put(numerator, t.beats_per_bar as f32);
+        put(denominator, t.beat_unit);
+        put(downbeat, t.bar_start_quarters());
+    }
+    0
+}
+
+/// Playing, whether that changed since the last question, the position in samples since bar 1,
+/// and no cycle - each track loops at its own length, so there is no single loop range.
+pub(super) unsafe extern "C" fn transport_state(
+    user: *mut c_void,
+    playing: *mut u8,
+    changed: *mut u8,
+    sample: *mut f64,
+    cycling: *mut u8,
+    cycle_start: *mut f64,
+    cycle_end: *mut f64,
+) -> OSStatus {
+    unsafe {
+        transport_state2(
+            user,
+            playing,
+            std::ptr::null_mut(),
+            changed,
+            sample,
+            cycling,
+            cycle_start,
+            cycle_end,
+        )
+    }
+}
+
+/// [`transport_state`] plus "recording", which is never set: a looper records into its own
+/// loops, not into the plugin's idea of a timeline.
+#[allow(clippy::too_many_arguments)]
+pub(super) unsafe extern "C" fn transport_state2(
+    user: *mut c_void,
+    playing: *mut u8,
+    recording: *mut u8,
+    changed: *mut u8,
+    sample: *mut f64,
+    cycling: *mut u8,
+    cycle_start: *mut f64,
+    cycle_end: *mut f64,
+) -> OSStatus {
+    let Some(clock) = (unsafe { clock(user) }) else {
+        return -50;
+    };
+    let t = clock.load();
+    let was_changed = if changed.is_null() {
+        false
+    } else {
+        clock.take_changed()
+    };
+    unsafe {
+        put(playing, u8::from(t.playing));
+        put(recording, 0);
+        put(changed, u8::from(was_changed));
+        put(sample, t.position as f64);
+        put(cycling, 0);
+        put(cycle_start, 0.0);
+        put(cycle_end, 0.0);
+    }
+    0
 }

@@ -77,6 +77,81 @@ const MESSAGES_PER_BLOCK: usize = 16;
 /// not allocate, lock or block - which the engine cannot enforce for foreign code, only ask for.
 pub trait InsertProcessor: Send {
     fn process(&mut self, left: &mut [f32], right: &mut [f32]);
+    /// Where the musical clock stands at the first frame of the next [`Self::process`] call. Set
+    /// by the rack right before every call; a processor that does not care ignores it.
+    fn set_transport(&mut self, transport: &PluginTransport) {
+        let _ = transport;
+    }
+}
+
+/// What a hosted plugin is told about the musical clock: tempo, time signature, whether it runs,
+/// and where it stands - all for the **first frame** of one block. A small `Copy` value the engine
+/// computes once per block (per [`MAX_BLOCK`] chunk) and hands to every insert and instrument, so
+/// the audio thread needs neither a lock nor an atomic to tell a plugin the time.
+///
+/// Positions count from bar 1 ([`super::timeline::Timeline::zero`]). While the transport stands
+/// they are 0 and `playing` is false; the tempo stays valid. During a count-in they are negative:
+/// bar 1 is the end of the count-in, so a plugin sees the pre-roll the way a DAW shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PluginTransport {
+    pub sample_rate: f64,
+    /// Quarter notes per minute.
+    pub bpm: f64,
+    pub beats_per_bar: u32,
+    pub beat_unit: u32,
+    pub playing: bool,
+    /// Frames since bar 1.
+    pub position: i64,
+    /// Frames since the engine started, whatever the transport did - a clock that never jumps.
+    pub continuous: u64,
+}
+
+impl PluginTransport {
+    /// A transport that stands at bar 1 - what a plugin sees before the engine told it anything.
+    pub fn standing(sample_rate: f64) -> Self {
+        Self {
+            sample_rate,
+            bpm: 120.0,
+            beats_per_bar: 4,
+            beat_unit: 4,
+            playing: false,
+            position: 0,
+            continuous: 0,
+        }
+    }
+
+    pub fn samples_per_quarter(&self) -> f64 {
+        self.sample_rate * 60.0 / self.bpm
+    }
+
+    /// Position in quarter notes since bar 1 (VST3 `projectTimeMusic`, AU "current beat").
+    pub fn quarters(&self) -> f64 {
+        self.position as f64 / self.samples_per_quarter()
+    }
+
+    /// Length of one bar in quarter notes: 3 in 3/4, 3.5 in 7/8.
+    pub fn bar_quarters(&self) -> f64 {
+        self.beats_per_bar as f64 * 4.0 / self.beat_unit as f64
+    }
+
+    /// Start of the bar the position lies in, in quarter notes (VST3 `barPositionMusic`, AU
+    /// "current measure downbeat"). Negative during a count-in.
+    pub fn bar_start_quarters(&self) -> f64 {
+        let bar = self.bar_quarters();
+        // A hair of tolerance: a downbeat computed as `n * 2.5` divided back must not land in the
+        // bar before it.
+        ((self.quarters() + 1e-9) / bar).floor() * bar
+    }
+
+    /// The same transport `frames` later: the position only moves while it runs.
+    #[must_use]
+    pub fn advanced(mut self, frames: usize) -> Self {
+        if self.playing {
+            self.position += frames as i64;
+        }
+        self.continuous += frames as u64;
+        self
+    }
 }
 
 /// The part of an insert both sides see: switches the control thread flips and numbers the audio
@@ -288,6 +363,8 @@ pub struct InsertRack {
     /// Inserts the audio thread had to forget because the retire queue was full. Leaking is the
     /// lesser evil: dropping a plugin here could take milliseconds.
     leaked: u64,
+    /// The clock at the first frame of the block being processed; set by the engine per block.
+    transport: PluginTransport,
 }
 
 impl InsertRack {
@@ -300,7 +377,14 @@ impl InsertRack {
             bus_scratch: [Block::new(), Block::new()],
             installed: 0,
             leaked: 0,
+            transport: PluginTransport::standing(48_000.0),
         }
+    }
+
+    /// The clock for the block that is processed next. Every insert gets it before its call.
+    #[inline]
+    pub fn set_transport(&mut self, transport: PluginTransport) {
+        self.transport = transport;
     }
 
     /// Whether anything is installed. With an empty rack the engine renders exactly as it did
@@ -413,23 +497,29 @@ impl InsertRack {
             return;
         };
         let block = &mut blocks[bus];
-        run_slots(slots, &mut block.l[..n], &mut block.r[..n]);
+        run_slots(slots, &mut block.l[..n], &mut block.r[..n], &self.transport);
     }
 
     /// Run a bus's inserts over its scratch block, the first `n` frames.
     #[inline]
     pub fn process_bus(&mut self, bus: usize, n: usize) {
         let block = &mut self.bus_scratch[bus];
-        run_slots(&mut self.buses[bus], &mut block.l[..n], &mut block.r[..n]);
+        run_slots(
+            &mut self.buses[bus],
+            &mut block.l[..n],
+            &mut block.r[..n],
+            &self.transport,
+        );
     }
 }
 
 #[inline]
-fn run_slots(slots: &mut Slots, l: &mut [f32], r: &mut [f32]) {
+fn run_slots(slots: &mut Slots, l: &mut [f32], r: &mut [f32], transport: &PluginTransport) {
     for insert in slots.iter_mut().flatten() {
         if insert.shared.bypass() {
             continue;
         }
+        insert.processor.set_transport(transport);
         let started = std::time::Instant::now();
         insert.processor.process(l, r);
         let ns = started.elapsed().as_nanos().min(u32::MAX as u128) as u32;

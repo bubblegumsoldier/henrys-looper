@@ -34,7 +34,7 @@ use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface};
 use super::cf::Bundle;
 use super::editor::EditorWindow;
 use super::{Format, Kind, ParamInfo, PluginInfo, PluginInstance};
-use crate::engine::insert::InsertProcessor;
+use crate::engine::insert::{InsertProcessor, PluginTransport};
 use crate::engine::source::{BlockEvent, SourceProcessor, StereoOut};
 
 /// Parameter changes queued between two blocks. A knob turned during one block produces one value,
@@ -1081,11 +1081,7 @@ impl Vst3Plugin {
         unsafe { self.processor.setProcessing(1) };
         self.active = true;
         let mut context: Box<ProcessContext> = Box::new(unsafe { std::mem::zeroed() });
-        context.sampleRate = sample_rate;
-        context.state = ProcessContext_::StatesAndFlags_::kPlaying as u32;
-        context.tempo = 120.0;
-        context.timeSigNumerator = 4;
-        context.timeSigDenominator = 4;
+        fill_context(&mut context, &PluginTransport::standing(sample_rate));
         Ok((consumer, context))
     }
 
@@ -1287,6 +1283,7 @@ impl PluginInstance for Vst3Plugin {
             outs: self.outs,
             has_input: self.has_input,
             context,
+            transport: PluginTransport::standing(sample_rate),
         }))
     }
 
@@ -1321,6 +1318,7 @@ impl PluginInstance for Vst3Plugin {
             outs: self.outs,
             max_block,
             context,
+            transport: PluginTransport::standing(sample_rate),
         }))
     }
 
@@ -1453,6 +1451,9 @@ struct Vst3Processor {
     outs: usize,
     has_input: bool,
     context: Box<ProcessContext>,
+    /// The clock for the next `process`: set by the engine before every call, moved on by the
+    /// processor itself after it for callers that never set it (the scan's probe, the tests).
+    transport: PluginTransport,
 }
 
 // Driven by one thread at a time: the audio thread while it is installed.
@@ -1469,6 +1470,10 @@ impl Drop for Vst3Processor {
 }
 
 impl InsertProcessor for Vst3Processor {
+    fn set_transport(&mut self, transport: &PluginTransport) {
+        self.transport = *transport;
+    }
+
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
         let n = left.len().min(right.len()).min(self.in_l.len());
         if n == 0 {
@@ -1512,6 +1517,7 @@ impl InsertProcessor for Vst3Processor {
             .as_com_ref::<IParameterChanges>()
             .map(|c| c.as_ptr())
             .unwrap_or(std::ptr::null_mut());
+        fill_context(&mut self.context, &self.transport);
         let mut data = ProcessData {
             processMode: ProcessModes_::kRealtime as int32,
             symbolicSampleSize: SymbolicSampleSizes_::kSample32 as int32,
@@ -1527,8 +1533,7 @@ impl InsertProcessor for Vst3Processor {
             processContext: &mut *self.context,
         };
         let result = unsafe { self.processor.process(&mut data) };
-        self.context.projectTimeSamples += n as i64;
-        self.context.continousTimeSamples += n as i64;
+        self.transport = self.transport.advanced(n);
         if result != kResultOk {
             // Dry rather than half a buffer of whatever.
             if self.ins == 2 {
@@ -1560,6 +1565,8 @@ struct Vst3Instrument {
     outs: usize,
     max_block: usize,
     context: Box<ProcessContext>,
+    /// See `Vst3Processor::transport`.
+    transport: PluginTransport,
 }
 
 // Driven by one thread at a time: the audio thread while it is installed.
@@ -1573,6 +1580,34 @@ impl Drop for Vst3Instrument {
             *home = Some(c);
         }
     }
+}
+
+/// Write the engine's clock into the `ProcessContext` a plugin reads in `process`.
+///
+/// Tempo, time signature, musical position and bar start are always valid - also while the
+/// transport stands, where the position is bar 1 and `kPlaying` is not set. No cycle is reported:
+/// each track has a loop of its own length, so there is no single loop range to name.
+pub(super) fn fill_context(context: &mut ProcessContext, t: &PluginTransport) {
+    use ProcessContext_::StatesAndFlags_ as F;
+    let mut state = F::kTempoValid
+        | F::kTimeSigValid
+        | F::kProjectTimeMusicValid
+        | F::kBarPositionValid
+        | F::kContTimeValid;
+    if t.playing {
+        state |= F::kPlaying;
+    }
+    context.state = state as u32;
+    context.sampleRate = t.sample_rate;
+    context.projectTimeSamples = t.position;
+    context.continousTimeSamples = t.continuous as i64;
+    context.projectTimeMusic = t.quarters();
+    context.barPositionMusic = t.bar_start_quarters();
+    context.cycleStartMusic = 0.0;
+    context.cycleEndMusic = 0.0;
+    context.tempo = t.bpm;
+    context.timeSigNumerator = t.beats_per_bar as int32;
+    context.timeSigDenominator = t.beat_unit as int32;
 }
 
 fn note_event(offset: i32, kind: EventTypes, body: Event__type0) -> Event {
@@ -1684,6 +1719,10 @@ impl Vst3Instrument {
 }
 
 impl SourceProcessor for Vst3Instrument {
+    fn set_transport(&mut self, transport: &PluginTransport) {
+        self.transport = *transport;
+    }
+
     fn render(&mut self, events: &[BlockEvent], outs: &mut [StereoOut<'_>]) {
         let Some(out) = outs.first_mut() else {
             return;
@@ -1723,6 +1762,7 @@ impl SourceProcessor for Vst3Instrument {
             .as_com_ref::<IEventList>()
             .map(|e| e.as_ptr())
             .unwrap_or(std::ptr::null_mut());
+        fill_context(&mut self.context, &self.transport);
         let mut data = ProcessData {
             processMode: ProcessModes_::kRealtime as int32,
             symbolicSampleSize: SymbolicSampleSizes_::kSample32 as int32,
@@ -1738,8 +1778,7 @@ impl SourceProcessor for Vst3Instrument {
             processContext: &mut *self.context,
         };
         let result = unsafe { self.processor.process(&mut data) };
-        self.context.projectTimeSamples += n as i64;
-        self.context.continousTimeSamples += n as i64;
+        self.transport = self.transport.advanced(n);
         if result != kResultOk {
             out.l[..n].fill(0.0);
             out.r[..n].fill(0.0);

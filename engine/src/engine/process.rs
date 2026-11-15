@@ -137,7 +137,7 @@ use super::command::{
     StatusSender, TrackStatus,
 };
 use super::frame::{Channels, Frame};
-use super::insert::{InsertEndpoint, InsertRack, MAX_BLOCK, Spread};
+use super::insert::{InsertEndpoint, InsertRack, MAX_BLOCK, PluginTransport, Spread};
 use super::latch::Latches;
 use super::metro::Metronome;
 use super::source::{HostClock, SourceEndpoint, SourceRack, place_event};
@@ -525,6 +525,9 @@ impl EngineCore {
     /// instrument reports as latency.
     fn render_sources(&mut self, frames: usize) {
         let clock = self.clock.take();
+        // For the whole call: a transport start or stop inside it reaches the instruments with the
+        // next call, whose first frame is on the new clock.
+        let transport = self.plugin_transport(self.out_pos);
         let Some(rack) = self.sources.as_deref_mut() else {
             return;
         };
@@ -544,6 +547,7 @@ impl EngineCore {
             // Without a clock there is no "when": everything sounds at the top of this block.
             None => rack.gather(|_| start),
         }
+        rack.set_transport(transport);
         rack.render(start, frames);
         for (t, track) in self.tracks.iter_mut().enumerate() {
             if track.is_instrument() {
@@ -590,6 +594,29 @@ impl EngineCore {
                     capture.live_frame(t, pos, frame, track, live, collapsed);
                 }
             }
+        }
+    }
+
+    /// What a hosted plugin is told about the clock at output position `pos`: see
+    /// [`PluginTransport`]. While the transport stands it is bar 1 and not playing; during a
+    /// count-in the position counts towards the end of the count-in, which becomes bar 1.
+    #[inline]
+    fn plugin_transport(&self, pos: u64) -> PluginTransport {
+        let (playing, position) = if self.transport {
+            let origin = self.count_in.unwrap_or(self.timeline.zero());
+            (true, pos as i64 - origin as i64)
+        } else {
+            (false, 0)
+        };
+        let signature = self.timeline.signature();
+        PluginTransport {
+            sample_rate: f64::from(self.timeline.sample_rate()),
+            bpm: self.timeline.bpm(),
+            beats_per_bar: signature.beats_per_bar,
+            beat_unit: signature.beat_unit,
+            playing,
+            position,
+            continuous: pos,
         }
     }
 
@@ -830,10 +857,14 @@ impl EngineCore {
         let channels = self.input_channels;
         let monitor_gain = self.monitor_gain;
         let collapsed = self.routing.collapsed();
+        let transport = self.plugin_transport(start);
         let sources = self.sources.as_deref();
         let Some(rack) = self.inserts.as_deref_mut() else {
             return;
         };
+        // Commands split the block before it gets here, so the clock is the same for every frame
+        // of this piece; the plugins are told where it stands at the first one.
+        rack.set_transport(transport);
         let mut capture = self.capture.as_deref_mut().and_then(CaptureSlot::session);
         for bus in rack.bus_scratch.iter_mut() {
             bus.clear(n);

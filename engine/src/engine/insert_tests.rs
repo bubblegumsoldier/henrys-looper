@@ -390,3 +390,258 @@ fn with_split_buses_the_inserts_process_main() {
     assert_eq!(sim.bus(Bus::Monitor, 300), Frame::mono(0.5));
     let _ = silence;
 }
+
+// ---------------------------------------------------------------------------------------------
+// The clock a hosted plugin is told (`PluginTransport`)
+// ---------------------------------------------------------------------------------------------
+
+mod clock {
+    use std::sync::{Arc, Mutex};
+
+    use super::super::command::Command;
+    use super::super::insert::{InsertProcessor, InsertTarget, MAX_BLOCK, PluginTransport};
+    use super::super::sim::{Sim, SimSpec, silence};
+    use super::super::source::{
+        BlockEvent, Instrument, InstrumentMsg, SourceProcessor, SourceShared, StereoOut,
+        source_channel,
+    };
+    use super::super::timeline::TimeSignature;
+    use super::{install, spec, with_rack};
+
+    /// Every call a plugin got: the clock it was told right before, and how many frames it ran.
+    type Log = Arc<Mutex<Vec<(PluginTransport, usize)>>>;
+
+    struct Watch {
+        log: Log,
+        told: Option<PluginTransport>,
+    }
+
+    impl Watch {
+        fn new() -> (Self, Log) {
+            let log = Log::default();
+            (
+                Self {
+                    log: log.clone(),
+                    told: None,
+                },
+                log,
+            )
+        }
+
+        fn note(&mut self, n: usize) {
+            let told = self.told.take().expect("vor jedem Aufruf wird die Uhr gesetzt");
+            self.log.lock().unwrap().push((told, n));
+        }
+    }
+
+    impl InsertProcessor for Watch {
+        fn set_transport(&mut self, transport: &PluginTransport) {
+            self.told = Some(*transport);
+        }
+        fn process(&mut self, left: &mut [f32], _right: &mut [f32]) {
+            self.note(left.len());
+        }
+    }
+
+    impl SourceProcessor for Watch {
+        fn set_transport(&mut self, transport: &PluginTransport) {
+            self.told = Some(*transport);
+        }
+        fn render(&mut self, _events: &[BlockEvent], outs: &mut [StereoOut<'_>]) {
+            self.note(outs[0].l.len());
+        }
+    }
+
+    const BIG_BLOCK: usize = 2_500;
+
+    fn three_four() -> SimSpec {
+        SimSpec {
+            bpm: 90.0,
+            signature: TimeSignature::new(3, 4),
+            // Larger than MAX_BLOCK, so the clock has to move on from chunk to chunk.
+            block: BIG_BLOCK,
+            ..spec()
+        }
+    }
+
+    fn calls(log: &Log) -> Vec<(PluginTransport, usize)> {
+        log.lock().unwrap().clone()
+    }
+
+    /// The calls form one gapless run of frames, each one told the clock of its own first frame.
+    fn assert_gapless(calls: &[(PluginTransport, usize)]) {
+        for pair in calls.windows(2) {
+            let ((a, n), (b, _)) = (pair[0], pair[1]);
+            assert_eq!(b.continuous, a.continuous + n as u64, "lueckenlos: {a:?} -> {b:?}");
+            assert!(n <= MAX_BLOCK);
+        }
+    }
+
+    /// 90 BPM in 3/4: a quarter is 32 000 frames, a bar 96 000.
+    const QUARTER: f64 = 32_000.0;
+
+    #[test]
+    fn an_insert_hears_tempo_signature_and_a_sample_exact_position() {
+        let (mut sim, mut tx) = with_rack(three_four(), silence());
+        sim.core.hold_transport();
+        let (watch, log) = Watch::new();
+        install(&mut tx, InsertTarget::Track(0), 0, watch, 0);
+        sim.run_to(20_000);
+
+        // Standing: bar 1, not playing - and the tempo is valid all the same.
+        let standing = calls(&log);
+        assert!(!standing.is_empty());
+        assert_gapless(&standing);
+        assert!(standing.iter().any(|&(_, n)| n == MAX_BLOCK), "in Stuecke geschnitten");
+        for (t, _) in &standing {
+            assert_eq!((t.bpm, t.beats_per_bar, t.beat_unit), (90.0, 3, 4));
+            assert_eq!(t.sample_rate, 48_000.0);
+            assert!(!t.playing);
+            assert_eq!(t.position, 0);
+            assert_eq!(t.quarters(), 0.0);
+        }
+
+        // Start: the press is bar 1, and from there the position is the frame count since it.
+        let at = 23_456;
+        sim.send(Command::TransportStart { at });
+        sim.run_to(at + 250_000);
+        let all = calls(&log);
+        assert_gapless(&all);
+        let first = all
+            .iter()
+            .find(|(t, _)| t.continuous == at)
+            .expect("ein Aufruf beginnt genau am Start");
+        assert!(first.0.playing);
+        assert_eq!(first.0.position, 0, "springt beim Start auf 0");
+        for (t, _) in &all {
+            if t.continuous < at {
+                assert!(!t.playing && t.position == 0, "vor dem Start: {t:?}");
+            } else {
+                assert!(t.playing);
+                assert_eq!(t.position, (t.continuous - at) as i64, "sample-genau: {t:?}");
+                let q = t.position as f64 / QUARTER;
+                assert!((t.quarters() - q).abs() < 1e-12);
+                assert_eq!(t.bar_start_quarters(), (q / 3.0).floor() * 3.0, "{t:?}");
+            }
+        }
+        // The second bar begins at 3 quarters - 3/4, not 4/4.
+        assert!(all.iter().any(|(t, _)| t.bar_start_quarters() == 3.0));
+
+        // Stop: untimed, so it acts at the top of the next block; from there on bar 1 again.
+        let before = all.len();
+        sim.send(Command::TransportStop);
+        sim.run_to(sim.pos() + 8 * BIG_BLOCK as u64);
+        let after = calls(&log);
+        assert_gapless(&after);
+        let stopped = &after[before..];
+        assert!(!stopped.is_empty());
+        for (t, _) in stopped {
+            assert!(!t.playing, "steht: {t:?}");
+            assert_eq!(t.position, 0);
+            assert_eq!(t.bpm, 90.0);
+        }
+
+        // Started again: back to 0, not where it stopped.
+        let again = sim.pos() + 3_000;
+        sim.send(Command::TransportStart { at: again });
+        sim.run_to(again + 10_000);
+        let restarted = calls(&log);
+        let (t, _) = restarted
+            .iter()
+            .find(|(t, _)| t.continuous == again)
+            .expect("Aufruf am zweiten Start");
+        assert!(t.playing);
+        assert_eq!(t.position, 0);
+    }
+
+    /// During a count-in the clock runs towards bar 1: the position is negative and reaches 0
+    /// exactly where the count-in ends, without a jump.
+    #[test]
+    fn a_count_in_counts_up_to_bar_one() {
+        let (mut sim, mut tx) = with_rack(three_four(), silence());
+        sim.core.hold_transport();
+        let (watch, log) = Watch::new();
+        install(&mut tx, InsertTarget::Track(0), 0, watch, 0);
+        let at = 10_000;
+        let end = at + 96_000;
+        sim.send(Command::CountIn { at, end });
+        sim.send(Command::TransportStart { at: end });
+        sim.run_to(end + 20_000);
+        let all = calls(&log);
+        assert_gapless(&all);
+        let mut saw_count_in = false;
+        for (t, _) in &all {
+            if t.continuous < at {
+                assert!(!t.playing);
+            } else {
+                assert!(t.playing);
+                assert_eq!(t.position, t.continuous as i64 - end as i64, "{t:?}");
+                if t.position < 0 {
+                    saw_count_in = true;
+                    assert_eq!(t.bar_start_quarters(), -3.0, "der Vorzaehltakt ist Takt 0");
+                }
+            }
+        }
+        assert!(saw_count_in);
+        assert!(all.iter().any(|(t, _)| t.continuous == end && t.position == 0));
+    }
+
+    /// A tempo change (or a score loaded with its own tempo, which arrives as the same command)
+    /// reaches the plugins with the next block.
+    #[test]
+    fn a_tempo_change_reaches_the_plugins() {
+        let (mut sim, mut tx) = with_rack(three_four(), silence());
+        let (watch, log) = Watch::new();
+        install(&mut tx, InsertTarget::Track(0), 0, watch, 0);
+        sim.run_to(2 * BIG_BLOCK as u64);
+        sim.send(Command::SetTempo {
+            bpm: 133.0,
+            signature: TimeSignature::new(7, 8),
+            layer_frames: 48_000 * 4,
+        });
+        sim.run_to(sim.pos() + 2 * BIG_BLOCK as u64);
+        let last = calls(&log).last().copied().unwrap().0;
+        assert_eq!((last.bpm, last.beats_per_bar, last.beat_unit), (133.0, 7, 8));
+        assert_eq!(last.bar_quarters(), 3.5);
+    }
+
+    /// An instrument is told the clock too, chunk by chunk within one long process call.
+    #[test]
+    fn an_instrument_hears_the_clock_chunk_by_chunk() {
+        let mut sim = Sim::new(three_four(), silence());
+        sim.core.hold_transport();
+        let (mut instruments, _feeds, endpoint) = source_channel(16);
+        sim.core.attach_sources(endpoint, BIG_BLOCK);
+        let (watch, log) = Watch::new();
+        instruments
+            .send(InstrumentMsg::Install {
+                track: 0,
+                instrument: Instrument::new(Box::new(watch), SourceShared::new(0)),
+            })
+            .unwrap();
+        // Instruments render a whole process call before its commands act, so they learn of a
+        // start at the next call; from there the position is exact.
+        let at = 4 * BIG_BLOCK as u64 + 700;
+        let next_call = 5 * BIG_BLOCK as u64;
+        sim.send(Command::TransportStart { at });
+        sim.run_to(at + 3 * BIG_BLOCK as u64);
+        let all = calls(&log);
+        assert_gapless(&all);
+        assert!(all.iter().any(|&(_, n)| n == MAX_BLOCK), "in Stuecke geschnitten");
+        for (t, _) in &all {
+            assert_eq!((t.bpm, t.beats_per_bar), (90.0, 3));
+            if t.continuous < next_call {
+                assert!(!t.playing && t.position == 0);
+            } else {
+                assert!(t.playing);
+                assert_eq!(t.position, (t.continuous - at) as i64);
+            }
+        }
+        let first = (next_call - at) as i64;
+        assert!(all.iter().any(|(t, _)| t.position == first), "erster Aufruf nach dem Start");
+        assert!(
+            all.iter().any(|(t, _)| t.position == first + MAX_BLOCK as i64),
+            "das zweite Stueck desselben Aufrufs ist weitergezaehlt"
+        );
+    }
+}

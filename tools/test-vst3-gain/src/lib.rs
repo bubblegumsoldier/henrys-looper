@@ -7,6 +7,11 @@
 //!
 //! Behaviour: `out = gain * in` delayed by `LATENCY` frames, stereo in and out. Parameter 0 is the
 //! gain, normalised 0..1, default 1.
+//!
+//! Parameter [`PROBE_PARAM`] (hidden, a switch) turns the plugin into a probe of the host's
+//! `ProcessContext`: instead of audio, the first [`PROBE_FIELDS`] frames of each block carry what
+//! the host said - field `k` as an `f64`, its low 32 bits in `out_l[k]` and its high 32 bits in
+//! `out_r[k]` (`f32::from_bits`), so nothing is rounded on the way. See [`probe_fields`].
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
@@ -21,6 +26,37 @@ use vst3::{Class, ComRef, ComWrapper, uid};
 
 /// Frames of delay the plugin adds and reports.
 pub const LATENCY: usize = 64;
+/// The hidden switch that turns the plugin into a probe of the `ProcessContext`.
+pub const PROBE_PARAM: u32 = 1;
+/// Fields a probe block carries, in the order of [`probe_fields`].
+pub const PROBE_FIELDS: usize = 12;
+
+/// What a probe block reports, field by field: tempo, time signature numerator and denominator,
+/// `projectTimeMusic`, `barPositionMusic`, `projectTimeSamples`, playing (0/1), whether tempo,
+/// time signature, musical time and bar position are all flagged valid (0/1), the sample rate,
+/// `continousTimeSamples`, whether a cycle is flagged active (0/1), and 1 if there was a context.
+pub fn probe_fields(context: *const ProcessContext) -> [f64; PROBE_FIELDS] {
+    use ProcessContext_::StatesAndFlags_ as F;
+    let Some(c) = (unsafe { context.as_ref() }) else {
+        return [0.0; PROBE_FIELDS];
+    };
+    let valid = (F::kTempoValid | F::kTimeSigValid | F::kProjectTimeMusicValid | F::kBarPositionValid)
+        as u32;
+    [
+        c.tempo,
+        c.timeSigNumerator as f64,
+        c.timeSigDenominator as f64,
+        c.projectTimeMusic,
+        c.barPositionMusic,
+        c.projectTimeSamples as f64,
+        (c.state & F::kPlaying as u32 != 0) as u8 as f64,
+        (c.state & valid == valid) as u8 as f64,
+        c.sampleRate,
+        c.continousTimeSamples as f64,
+        (c.state & F::kCycleActive as u32 != 0) as u8 as f64,
+        1.0,
+    ]
+}
 const NAME: &str = "Looper Test Gain";
 
 fn copy_cstring(src: &str, dst: &mut [c_char]) {
@@ -57,6 +93,7 @@ unsafe fn read_gain(stream: *mut IBStream) -> Option<f64> {
 
 struct Processor {
     gain: AtomicU64,
+    probe: Cell<bool>,
     line: RefCell<Vec<[f32; 2]>>,
     pos: Cell<usize>,
 }
@@ -193,13 +230,16 @@ impl IAudioProcessorTrait for Processor {
         let data = unsafe { &*data };
         if let Some(changes) = unsafe { ComRef::from_raw(data.inputParameterChanges) } {
             for i in 0..unsafe { changes.getParameterCount() } {
-                if let Some(queue) = unsafe { ComRef::from_raw(changes.getParameterData(i)) }
-                    && unsafe { queue.getParameterId() } == 0
-                {
+                if let Some(queue) = unsafe { ComRef::from_raw(changes.getParameterData(i)) } {
                     let n = unsafe { queue.getPointCount() };
                     let (mut offset, mut value) = (0, 0.0);
-                    if unsafe { queue.getPoint(n - 1, &mut offset, &mut value) } == kResultTrue {
-                        self.gain.store(value.to_bits(), Ordering::Relaxed);
+                    if unsafe { queue.getPoint(n - 1, &mut offset, &mut value) } != kResultTrue {
+                        continue;
+                    }
+                    match unsafe { queue.getParameterId() } {
+                        0 => self.gain.store(value.to_bits(), Ordering::Relaxed),
+                        PROBE_PARAM => self.probe.set(value >= 0.5),
+                        _ => {}
                     }
                 }
             }
@@ -223,6 +263,15 @@ impl IAudioProcessorTrait for Processor {
                 slice::from_raw_parts_mut(o[1], n),
             )
         };
+        if self.probe.get() {
+            let fields = probe_fields(data.processContext);
+            for k in 0..n {
+                let bits = fields.get(k).map_or(0, |f| f.to_bits());
+                out_l[k] = f32::from_bits(bits as u32);
+                out_r[k] = f32::from_bits((bits >> 32) as u32);
+            }
+            return kResultOk;
+        }
         let mut line = self.line.borrow_mut();
         let mut pos = self.pos.get();
         for k in 0..n {
@@ -248,6 +297,7 @@ impl IProcessContextRequirementsTrait for Processor {
 
 struct Controller {
     gain: Cell<f64>,
+    probe: Cell<f64>,
 }
 
 impl Class for Controller {
@@ -281,9 +331,21 @@ impl IEditControllerTrait for Controller {
         kResultOk
     }
     unsafe fn getParameterCount(&self) -> i32 {
-        1
+        2
     }
     unsafe fn getParameterInfo(&self, index: i32, info: *mut ParameterInfo) -> tresult {
+        if index == PROBE_PARAM as i32 {
+            let info = unsafe { &mut *info };
+            info.id = PROBE_PARAM;
+            copy_wstring("Probe", &mut info.title);
+            copy_wstring("Probe", &mut info.shortTitle);
+            copy_wstring("", &mut info.units);
+            info.stepCount = 1;
+            info.defaultNormalizedValue = 0.0;
+            info.unitId = 0;
+            info.flags = ParameterInfo_::ParameterFlags_::kIsHidden as i32;
+            return kResultOk;
+        }
         if index != 0 {
             return kInvalidArgument;
         }
@@ -315,13 +377,18 @@ impl IEditControllerTrait for Controller {
         v
     }
     unsafe fn getParamNormalized(&self, id: u32) -> f64 {
-        if id == 0 { self.gain.get() } else { 0.0 }
+        match id {
+            0 => self.gain.get(),
+            PROBE_PARAM => self.probe.get(),
+            _ => 0.0,
+        }
     }
     unsafe fn setParamNormalized(&self, id: u32, value: f64) -> tresult {
-        if id != 0 {
-            return kInvalidArgument;
+        match id {
+            0 => self.gain.set(value),
+            PROBE_PARAM => self.probe.set(value),
+            _ => return kInvalidArgument,
         }
-        self.gain.set(value);
         kResultOk
     }
     unsafe fn setComponentHandler(&self, _handler: *mut IComponentHandler) -> tresult {
@@ -367,12 +434,14 @@ impl IPluginFactoryTrait for Factory {
         let instance = match unsafe { *(cid as *const TUID) } {
             Processor::CID => ComWrapper::new(Processor {
                 gain: AtomicU64::new(1.0f64.to_bits()),
+                probe: Cell::new(false),
                 line: RefCell::new(vec![[0.0; 2]; LATENCY]),
                 pos: Cell::new(0),
             })
             .to_com_ptr::<FUnknown>(),
             Controller::CID => ComWrapper::new(Controller {
                 gain: Cell::new(1.0),
+                probe: Cell::new(0.0),
             })
             .to_com_ptr::<FUnknown>(),
             _ => None,

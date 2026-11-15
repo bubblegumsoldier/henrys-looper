@@ -347,6 +347,233 @@ fn the_test_vst3_behaves_exactly_as_built() {
     assert_eq!(l[64], 0.5, "der geladene Zustand gilt auch im Prozessor");
 }
 
+/// What the test VST3 read from its `ProcessContext` in one block, with its probe switched on
+/// (see `tools/test-vst3-gain`): field `k` as an `f64`, split over `l[k]` and `r[k]`.
+#[cfg(target_os = "macos")]
+fn probe(
+    processor: &mut dyn crate::engine::insert::InsertProcessor,
+    transport: Option<crate::engine::insert::PluginTransport>,
+    frames: usize,
+) -> Probed {
+    if let Some(t) = transport {
+        processor.set_transport(&t);
+    }
+    let mut l = vec![0.0f32; frames];
+    let mut r = vec![0.0f32; frames];
+    processor.process(&mut l, &mut r);
+    let field =
+        |k: usize| f64::from_bits(u64::from(l[k].to_bits()) | u64::from(r[k].to_bits()) << 32);
+    Probed {
+        tempo: field(0),
+        numerator: field(1),
+        denominator: field(2),
+        quarters: field(3),
+        bar: field(4),
+        samples: field(5),
+        playing: field(6) == 1.0,
+        valid: field(7) == 1.0,
+        sample_rate: field(8),
+        continuous: field(9),
+        cycling: field(10) == 1.0,
+        context: field(11) == 1.0,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct Probed {
+    tempo: f64,
+    numerator: f64,
+    denominator: f64,
+    quarters: f64,
+    bar: f64,
+    samples: f64,
+    playing: bool,
+    valid: bool,
+    sample_rate: f64,
+    continuous: f64,
+    cycling: bool,
+    context: bool,
+}
+
+/// The test VST3 as a probe: what the engine's clock says is exactly what the plugin reads in its
+/// `ProcessContext` - tempo, a 3/4 signature, the position in samples and quarters, the bar start,
+/// playing or not - and between two calls that are not told anything the position moves on by
+/// exactly the frames processed.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_test_vst3_reads_the_engines_clock_in_its_process_context() {
+    use crate::engine::insert::PluginTransport;
+    const PROBE_PARAM: u32 = 1;
+
+    let Some(bundle) = fixture_bundle() else {
+        return;
+    };
+    let info = super::vst3::enumerate(&bundle).unwrap().remove(0);
+    let mut plugin = super::load(&info).expect("laedt");
+    assert!(
+        plugin.params().iter().all(|p| p.id != PROBE_PARAM),
+        "der Messschalter ist verborgen"
+    );
+    plugin.set_param(PROBE_PARAM, 1.0);
+    let mut processor = plugin.activate(48_000.0, 256).expect("startet");
+
+    // Nobody told it anything yet (the scan's probe): a standing clock at 120, flagged valid.
+    let p = probe(processor.as_mut(), None, 64);
+    assert!(p.context, "es gibt einen ProcessContext");
+    assert_eq!((p.tempo, p.samples, p.playing, p.valid), (120.0, 0.0, false, true));
+
+    // 90 BPM in 3/4, standing: bar 1, not playing, the tempo valid all the same.
+    let standing = PluginTransport {
+        sample_rate: 48_000.0,
+        bpm: 90.0,
+        beats_per_bar: 3,
+        beat_unit: 4,
+        playing: false,
+        position: 0,
+        continuous: 1_000,
+    };
+    let p = probe(processor.as_mut(), Some(standing), 64);
+    assert_eq!((p.tempo, p.numerator, p.denominator), (90.0, 3.0, 4.0));
+    assert_eq!((p.quarters, p.bar, p.samples), (0.0, 0.0, 0.0));
+    assert!(!p.playing && p.valid && !p.cycling);
+    assert_eq!((p.sample_rate, p.continuous), (48_000.0, 1_000.0));
+    // Standing, the next call stays where it is; only the continuous clock moves.
+    let p = probe(processor.as_mut(), None, 64);
+    assert_eq!((p.samples, p.continuous), (0.0, 1_064.0));
+
+    // Started: position 0, playing; then it grows by exactly the frames processed.
+    let started = PluginTransport {
+        playing: true,
+        position: 0,
+        continuous: 5_000,
+        ..standing
+    };
+    let p = probe(processor.as_mut(), Some(started), 100);
+    assert!(p.playing);
+    assert_eq!((p.samples, p.quarters), (0.0, 0.0));
+    let p = probe(processor.as_mut(), None, 64);
+    assert_eq!((p.samples, p.continuous), (100.0, 5_100.0), "sample-genau weitergezaehlt");
+    assert!((p.quarters - 100.0 / 32_000.0).abs() < 1e-12);
+
+    // In the second bar of 3/4: 3.125 quarters, the bar began at 3.
+    let p = probe(
+        processor.as_mut(),
+        Some(PluginTransport {
+            position: 100_000,
+            continuous: 105_000,
+            ..started
+        }),
+        64,
+    );
+    assert_eq!((p.samples, p.quarters, p.bar), (100_000.0, 3.125, 3.0));
+
+    // A count-in: one bar before bar 1.
+    let p = probe(
+        processor.as_mut(),
+        Some(PluginTransport {
+            position: -32_000,
+            ..started
+        }),
+        64,
+    );
+    assert_eq!((p.quarters, p.bar), (-1.0, -3.0));
+
+    // Stopped again: bar 1, not playing, tempo still there.
+    let p = probe(processor.as_mut(), Some(standing), 64);
+    assert!(!p.playing);
+    assert_eq!((p.samples, p.tempo), (0.0, 90.0));
+}
+
+/// Audio Units ask for the clock through host callbacks. Apple's units do not show what they read,
+/// so this proves the part that can be proven: the unit took the callbacks (it hands them back),
+/// and called the way a unit calls them, they answer with the clock the engine set for the block.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_audio_unit_gets_host_callbacks_that_answer_with_the_engines_clock() {
+    use super::PluginInstance;
+    use crate::engine::insert::PluginTransport;
+    let Some(info) = apple_au("dely") else {
+        return;
+    };
+    let mut plugin = super::au::open(&info).expect("AUDelay laedt");
+    let mut processor = plugin.activate(48_000.0, 256).expect("startet");
+    let cb = plugin.host_callbacks().expect("die Unit gibt die Callbacks zurueck");
+    let user = cb.host_user_data;
+    assert!(!user.is_null());
+    let (beat_and_tempo, location, state, state2) = (
+        cb.beat_and_tempo.expect("Beat und Tempo"),
+        cb.musical_time_location.expect("Taktposition"),
+        cb.transport_state.expect("Transport"),
+        cb.transport_state2.expect("Transport 2"),
+    );
+
+    let t = PluginTransport {
+        sample_rate: 48_000.0,
+        bpm: 90.0,
+        beats_per_bar: 3,
+        beat_unit: 4,
+        playing: true,
+        position: 100_000,
+        continuous: 105_000,
+    };
+    processor.set_transport(&t);
+    let _ = run(processor.as_mut(), 256, 256, |_| (0.0, 0.0));
+
+    let (mut beat, mut tempo) = (0.0, 0.0);
+    assert_eq!(unsafe { beat_and_tempo(user, &mut beat, &mut tempo) }, 0);
+    assert_eq!((beat, tempo), (3.125, 90.0), "Stand am Anfang des Blocks");
+
+    let (mut next, mut num, mut den, mut downbeat) = (0u32, 0f32, 0u32, 0.0);
+    assert_eq!(unsafe { location(user, &mut next, &mut num, &mut den, &mut downbeat) }, 0);
+    assert_eq!((num, den, downbeat), (3.0, 4, 3.0));
+    assert_eq!(next, 28_000, "bis zur naechsten Viertel: 4 * 32 000 - 100 000");
+
+    let (mut playing, mut changed, mut sample, mut cycling) = (0u8, 0u8, 0.0, 1u8);
+    let (mut cs, mut ce) = (1.0, 1.0);
+    let st = unsafe {
+        state(user, &mut playing, &mut changed, &mut sample, &mut cycling, &mut cs, &mut ce)
+    };
+    assert_eq!(st, 0);
+    assert_eq!((playing, sample, cycling), (1, 100_000.0, 0));
+    assert_eq!(changed, 1, "der Start ist eine Transport-Aenderung");
+    let mut recording = 1u8;
+    let st = unsafe {
+        state2(
+            user,
+            &mut playing,
+            &mut recording,
+            &mut changed,
+            &mut sample,
+            &mut cycling,
+            &mut cs,
+            &mut ce,
+        )
+    };
+    assert_eq!(st, 0);
+    assert_eq!((recording, changed), (0, 0), "einmal gemeldet, dann nicht mehr");
+    // Every out pointer may be null.
+    let (null, none) = (std::ptr::null_mut::<u8>(), std::ptr::null_mut::<f64>());
+    assert_eq!(unsafe { state2(user, null, null, null, none, null, none, none) }, 0);
+
+    // The transport stops: position 0, not playing, the tempo still valid.
+    processor.set_transport(&PluginTransport {
+        playing: false,
+        position: 0,
+        ..t
+    });
+    let _ = run(processor.as_mut(), 256, 256, |_| (0.0, 0.0));
+    assert_eq!(unsafe { beat_and_tempo(user, &mut beat, &mut tempo) }, 0);
+    assert_eq!((beat, tempo), (0.0, 90.0));
+    unsafe { state(user, &mut playing, &mut changed, &mut sample, null, none, none) };
+    assert_eq!((playing, changed, sample), (0, 1, 0.0));
+    unsafe { location(user, &mut next, &mut num, &mut den, &mut downbeat) };
+    assert_eq!((next, downbeat), (0, 0.0));
+
+    drop(processor);
+    plugin.deactivate();
+}
+
 /// The real VST3 in the engine's track slot: its reported latency is read ahead on the loop, so
 /// the loop through the plugin lands on exactly the samples it lands on without it.
 #[cfg(target_os = "macos")]

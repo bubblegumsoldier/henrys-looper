@@ -67,7 +67,7 @@ use std::sync::{Arc, Mutex};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::command::MAX_TRACKS;
-use super::insert::MAX_BLOCK;
+use super::insert::{MAX_BLOCK, PluginTransport};
 use super::timeline::Timeline;
 use super::track::MAX_LAYERS;
 
@@ -434,6 +434,11 @@ pub struct StereoOut<'a> {
 /// `outs` as it has. It must not allocate, lock or block.
 pub trait SourceProcessor: Send {
     fn render(&mut self, events: &[BlockEvent], outs: &mut [StereoOut<'_>]);
+    /// Where the musical clock stands at the first frame of the next [`Self::render`] call. Set by
+    /// the rack right before every call; see [`PluginTransport`].
+    fn set_transport(&mut self, transport: &PluginTransport) {
+        let _ = transport;
+    }
     /// How many output buses this instrument has.
     fn buses(&self) -> usize {
         1
@@ -750,6 +755,8 @@ pub struct SourceRack {
     /// Events lost because a track's waiting list was full.
     dropped: u64,
     leaked: u64,
+    /// The clock at the first frame of the next [`SourceRack::render`]; set by the engine.
+    transport: PluginTransport,
 }
 
 impl SourceRack {
@@ -782,7 +789,15 @@ impl SourceRack {
             late: 0,
             dropped: 0,
             leaked: 0,
+            transport: PluginTransport::standing(48_000.0),
         }
+    }
+
+    /// The clock at the first frame of the next [`SourceRack::render`]. Each chunk of that call
+    /// hands its instruments the clock moved on to the chunk's own first frame.
+    #[inline]
+    pub fn set_transport(&mut self, transport: PluginTransport) {
+        self.transport = transport;
     }
 
     pub fn capacity(&self) -> usize {
@@ -1036,6 +1051,9 @@ impl SourceRack {
                     }
                     let mut packed: [StereoOut<'_>; MAX_SOURCE_BUSES] =
                         outs.map(|o| o.unwrap_or(StereoOut { l: &mut [], r: &mut [] }));
+                    instrument
+                        .processor
+                        .set_transport(&self.transport.advanced(done));
                     instrument
                         .processor
                         .render(&self.scratch, &mut packed[..buses]);
