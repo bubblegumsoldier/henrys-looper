@@ -665,7 +665,7 @@ function TrackPanel({ doc, errors, editable, setSel, edit, onIssue, index }: Pro
               value={t.latency === undefined ? "" : String(t.latency)}
               width={90}
               unit="frames"
-              placeholder="default"
+              placeholder="auto"
               disabled={!editable}
               check={(v) => (v.trim() === "" || (/^\d+$/.test(v.trim()) && Number(v) <= 96000) ? null : "0 to 96000, empty = engine default")}
               onCommit={(v) => patch({ latency: v.trim() === "" ? undefined : Number(v) })}

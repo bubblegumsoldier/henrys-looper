@@ -30,7 +30,8 @@
 .hl-arr .menu > button:hover:not(:disabled) { background: var(--accent-soft); }
 .hl-arr .menu > button:disabled { color: var(--tx-4); }
 .hl-arr .menu-h { padding: 8px 9px 3px; font-size: var(--fs-10); font-weight: var(--fw-semibold); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--tx-3); border-top: 1px solid var(--line-2); margin-top: 4px; }
-.hl-arr .field.countin { width: 40px; height: var(--ctl-h-s); padding: 0 6px; }
+.hl-arr .toolbar .lbl { white-space: nowrap; }
+.hl-arr .field.countin { flex: none; width: 40px; height: var(--ctl-h-s); padding: 0 6px; }
 .hl-arr .field.countin input { text-align: center; }
 .hl-arr .field.countin input::-webkit-inner-spin-button { display: none; }
 
@@ -41,6 +42,7 @@
 /* --- toolbar extras ---------------------------------------------------------------------------- */
 .hl-arr .zoom { width: 70px; height: 4px; accent-color: var(--tx-2); }
 .hl-arr .lockpill {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto;
   display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; margin-left: 6px;
   border-radius: var(--r-pill); font-size: var(--fs-11); font-weight: var(--fw-semibold); white-space: nowrap;
   color: var(--st-armed); background: var(--hatch-armed), rgba(247, 208, 70, .06); border: 1px dashed var(--st-armed-line);

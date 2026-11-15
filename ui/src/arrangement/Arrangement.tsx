@@ -301,14 +301,14 @@ export function Arrangement({ onGoto, actions }: Props) {
     );
 
   const banner = locked ? (
-    <span className="lockpill">
+    <span className="lockpill" title="While the score plays, the arrangement cannot be edited. Click a section marker to jump there.">
       <i className="ic ic-lock" />
-      Score is playing — arrangement locked
+      Playing — arrangement locked
     </span>
   ) : !state.inSync && doc ? (
-    <button className="lockpill warn" onClick={() => setView("text")}>
+    <button className="lockpill warn" onClick={() => setView("text")} title="The text has errors. The grid shows the last valid version and is read-only until the text is fixed (or undone).">
       <i className="ic ic-warn" />
-      Text has errors — grid shows the last valid version, read-only
+      Text has errors — grid read-only
     </button>
   ) : null;
 
