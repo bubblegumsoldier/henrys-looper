@@ -153,10 +153,13 @@ function StripImpl({ track: t, selected, implicitMute, onSelect, actions }: Prop
             <InstrumentSlot track={t.name} />
           </>
         )}
-        <span className="caps">
-          Inserts
-          {fx && <PresetMenu track={i} preset={fx.preset} actions={actions} />}
-        </span>
+        {/* An instrument strip has no room for a second caption: its preset is in the inspector. */}
+        {!t.instrument && (
+          <span className="caps">
+            Inserts
+            {fx && <PresetMenu track={i} preset={fx.preset} actions={actions} />}
+          </span>
+        )}
         {fx && (
           <div className="fxrow">
             <span className={`fxl${fx.bypass ? " byp" : ""}`}>

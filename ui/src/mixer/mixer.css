@@ -58,7 +58,8 @@ button.ins.plug:not(:disabled):hover { color: var(--tx-2); border-color: var(--l
 .strip .zone .caps .grow { flex: 1; }
 .strip .zone .caps .panic { font-size: 8.5px; letter-spacing: var(--tracking-caps); text-transform: uppercase; font-weight: var(--fw-semibold); color: var(--tx-4); padding: 0 3px; border-radius: 3px; }
 .strip .zone .caps .panic:hover { color: var(--st-rec); background: rgba(255,92,108,.10); }
-.ins.plug.inst { margin-bottom: 2px; }
+.strip .zone > .ins, .strip .zone > .fxrow, .strip .zone > .caps { flex-shrink: 0; }
+.ins.plug.inst { margin-bottom: 1px; }
 .ins.plug.full.inst .pname { font-weight: var(--fw-semibold); }
 
 /* --- buses zone -------------------------------------------------------------------------------- */

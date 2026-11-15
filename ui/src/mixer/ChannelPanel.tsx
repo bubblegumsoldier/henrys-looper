@@ -58,7 +58,7 @@ export function ChannelPanel() {
           {track.name}
         </h2>
         <div className="sub">
-          {T.input} {track.input_channels.join("–")} · {track.channels === 2 ? T.stereo : T.mono} · {T.latency}{" "}
+          {track.instrument ? T.instrument : `${T.input} ${track.input_channels.join("–")}`} · {track.channels === 2 ? T.stereo : T.mono} · {T.latency}{" "}
           {ms(measured).toFixed(1)} ms {track.latency_inherited ? "default" : "measured"} + {ms(track.latency_trim).toFixed(1)} ms
         </div>
       </div>

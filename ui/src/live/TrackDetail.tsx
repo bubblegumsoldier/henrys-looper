@@ -153,7 +153,7 @@ export function TrackDetail({ track, color, actions, defaultLatency, onClose }: 
       <div className="insp-h">
         <div className="kicker">
           <span className="caps">
-            Track {i + 1} · {T.input} {track.input_channels.join("–")} · {track.channels_label === "stereo" ? T.stereo : T.mono}
+            Track {i + 1} · {track.instrument ? T.instrument : `${T.input} ${track.input_channels.join("–")}`} · {track.channels_label === "stereo" ? T.stereo : T.mono}
           </span>
           <button className="btn sq ghost" onClick={onClose} title="Close · Esc">
             <Icon name="x" />
