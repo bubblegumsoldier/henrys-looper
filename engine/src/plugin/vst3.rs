@@ -35,6 +35,7 @@ use super::cf::Bundle;
 use super::editor::EditorWindow;
 use super::{Format, Kind, ParamInfo, PluginInfo, PluginInstance};
 use crate::engine::insert::InsertProcessor;
+use crate::engine::source::{BlockEvent, SourceProcessor, StereoOut};
 
 /// Parameter changes queued between two blocks. A knob turned during one block produces one value,
 /// so this only has to cover many *different* parameters at once.
@@ -550,10 +551,32 @@ impl IPlugFrameTrait for Frame {
 // Parameter changes for one block, preallocated
 // ---------------------------------------------------------------------------------------------
 
+/// Points one parameter can carry through one block. Enough for a pedal pressed and released and
+/// a few bend steps; more are folded into the last point, so the final value always arrives.
+const POINTS_PER_PARAM: usize = 16;
+
 #[derive(Default)]
 struct ValueQueue {
     id: Cell<ParamID>,
-    value: Cell<f64>,
+    points: [Cell<(i32, f64)>; POINTS_PER_PARAM],
+    count: Cell<usize>,
+}
+
+impl ValueQueue {
+    /// Append a point. Offsets arrive in order; one at the offset of the last point, or one that
+    /// does not fit any more, replaces the last point.
+    fn push(&self, offset: i32, value: f64) {
+        let n = self.count.get();
+        if n > 0 {
+            let (last, _) = self.points[n - 1].get();
+            if last >= offset || n == POINTS_PER_PARAM {
+                self.points[n - 1].set((last.max(offset), value));
+                return;
+            }
+        }
+        self.points[n].set((offset, value));
+        self.count.set(n + 1);
+    }
 }
 
 impl Class for ValueQueue {
@@ -566,7 +589,7 @@ impl IParamValueQueueTrait for ValueQueue {
     }
 
     unsafe fn getPointCount(&self) -> int32 {
-        1
+        self.count.get() as int32
     }
 
     unsafe fn getPoint(
@@ -575,15 +598,16 @@ impl IParamValueQueueTrait for ValueQueue {
         sampleOffset: *mut int32,
         value: *mut ParamValue,
     ) -> tresult {
-        if index != 0 {
+        if index < 0 || index as usize >= self.count.get() {
             return kInvalidArgument;
         }
+        let (offset, v) = self.points[index as usize].get();
         unsafe {
             if !sampleOffset.is_null() {
-                *sampleOffset = 0;
+                *sampleOffset = offset;
             }
             if !value.is_null() {
-                *value = self.value.get();
+                *value = v;
             }
         }
         kResultOk
@@ -620,18 +644,24 @@ impl Changes {
         }
     }
 
-    /// Add or overwrite the value of one parameter for this block.
+    /// Add or overwrite the value of one parameter at the start of this block.
     fn set(&self, id: u32, value: f64) {
+        self.point(id, 0, value);
+    }
+
+    /// Add a value of one parameter `offset` frames into this block. Calls come in offset order.
+    fn point(&self, id: u32, offset: i32, value: f64) {
         let n = self.count.get();
         for w in &self.wrappers[..n] {
             if w.id.get() == id {
-                w.value.set(value);
+                w.push(offset, value);
                 return;
             }
         }
         if n < self.wrappers.len() {
             self.wrappers[n].id.set(id);
-            self.wrappers[n].value.set(value);
+            self.wrappers[n].count.set(0);
+            self.wrappers[n].push(offset, value);
             self.count.set(n + 1);
         }
     }
@@ -653,6 +683,77 @@ impl IParameterChangesTrait for Changes {
         std::ptr::null_mut()
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Note events for one block, preallocated
+// ---------------------------------------------------------------------------------------------
+
+/// Note events one block can carry to an instrument. As many as a track's event stage holds
+/// ([`crate::engine::source::PENDING_EVENTS`]); what does not fit is dropped.
+const EVENTS_PER_BLOCK: usize = 512;
+
+/// The `IEventList` handed to an instrument's `process`. Its storage is allocated once; filling it
+/// on the audio thread never allocates.
+struct EventList {
+    events: RefCell<Vec<Event>>,
+}
+
+impl Class for EventList {
+    type Interfaces = (IEventList,);
+}
+
+impl EventList {
+    fn new() -> Self {
+        Self {
+            events: RefCell::new(Vec::with_capacity(EVENTS_PER_BLOCK)),
+        }
+    }
+
+    fn clear(&self) {
+        self.events.borrow_mut().clear();
+    }
+
+    /// `false` when the block is full.
+    fn push(&self, event: Event) -> bool {
+        let mut events = self.events.borrow_mut();
+        if events.len() >= EVENTS_PER_BLOCK {
+            return false;
+        }
+        events.push(event);
+        true
+    }
+}
+
+impl IEventListTrait for EventList {
+    unsafe fn getEventCount(&self) -> int32 {
+        self.events.borrow().len() as int32
+    }
+
+    unsafe fn getEvent(&self, index: int32, e: *mut Event) -> tresult {
+        let events = self.events.borrow();
+        match events.get(index.max(0) as usize) {
+            Some(event) if index >= 0 && !e.is_null() => {
+                unsafe { *e = *event };
+                kResultOk
+            }
+            _ => kInvalidArgument,
+        }
+    }
+
+    unsafe fn addEvent(&self, e: *mut Event) -> tresult {
+        if e.is_null() {
+            return kInvalidArgument;
+        }
+        if self.push(unsafe { *e }) { kResultOk } else { kResultFalse }
+    }
+}
+
+/// MIDI controllers a VST3 instrument can map to parameters (`IMidiMapping`): CC 0-127, channel
+/// pressure (`kAfterTouch` = 128) and pitch bend (`kPitchBend` = 129).
+const MAPPED_CONTROLLERS: usize = ControllerNumbers_::kPitchBend as usize + 1;
+
+/// Which parameter each controller of each channel is mapped to, `kNoParamId` where none.
+type MidiMap = [[ParamID; MAPPED_CONTROLLERS]; 16];
 
 // ---------------------------------------------------------------------------------------------
 // The instance
@@ -679,6 +780,8 @@ pub struct Vst3Plugin {
     ins: usize,
     outs: usize,
     has_input: bool,
+    /// An instrument whose event input bus 0 is switched on.
+    has_events: bool,
     active: bool,
     view: Option<ComPtr<IPlugView>>,
     window: Rc<RefCell<Option<EditorWindow>>>,
@@ -798,13 +901,19 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
     if n_out == 0 {
         return Err(format!("\"{}\" has no audio output.", info.name));
     }
-    // Main buses on, everything else (side-chains, extra outputs) off.
+    // Main buses on, everything else (side-chains, extra outputs) off. An instrument gets no audio
+    // at all - its inputs, if it has any, are side-chains - but its first event input: the notes.
+    let instrument = info.kind == Kind::Instrument;
     for i in 0..n_in {
-        unsafe { component.activateBus(audio, input, i, (i == 0) as TBool) };
+        unsafe { component.activateBus(audio, input, i, (i == 0 && !instrument) as TBool) };
     }
     for i in 0..n_out {
         unsafe { component.activateBus(audio, output, i, (i == 0) as TBool) };
     }
+    let event = MediaTypes_::kEvent as MediaType;
+    let has_events = instrument
+        && unsafe { component.getBusCount(event, input) } > 0
+        && unsafe { component.activateBus(event, input, 0, 1) } == kResultOk;
     let (ins, outs) = arrange(&processor, n_in, n_out);
 
     Ok(Box::new(Vst3Plugin {
@@ -823,7 +932,8 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
         _handler: handler,
         ins,
         outs,
-        has_input: n_in > 0,
+        has_input: n_in > 0 && !instrument,
+        has_events,
         active: false,
         view: None,
         window: Rc::new(RefCell::new(None)),
@@ -934,6 +1044,74 @@ impl Vst3Plugin {
             self.processor.process(&mut data);
             self.component.setActive(0);
         }
+    }
+
+    /// `setupProcessing`, `setActive`, `setProcessing`: everything both audio paths need before the
+    /// first `process`. Hands out the queue's consumer and a transport for the processor.
+    fn start(
+        &mut self,
+        sample_rate: f64,
+        max_block: usize,
+    ) -> Result<(Consumer<(u32, f64)>, Box<ProcessContext>), String> {
+        if self.active {
+            return Err("The plugin is already running.".to_string());
+        }
+        let consumer = self
+            .pending_consumer
+            .take()
+            .or_else(|| self.consumer_home.lock().unwrap().take())
+            .ok_or_else(|| "The plugin is still running elsewhere.".to_string())?;
+        let mut setup = ProcessSetup {
+            processMode: ProcessModes_::kRealtime as int32,
+            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as int32,
+            maxSamplesPerBlock: max_block as int32,
+            sampleRate: sample_rate,
+        };
+        if unsafe { self.processor.setupProcessing(&mut setup) } != kResultOk {
+            *self.consumer_home.lock().unwrap() = Some(consumer);
+            return Err(format!(
+                "\"{}\" does not run at {sample_rate} Hz with blocks of {max_block}.",
+                self.info.name
+            ));
+        }
+        if unsafe { self.component.setActive(1) } != kResultOk {
+            *self.consumer_home.lock().unwrap() = Some(consumer);
+            return Err(format!("\"{}\" could not be started.", self.info.name));
+        }
+        unsafe { self.processor.setProcessing(1) };
+        self.active = true;
+        let mut context: Box<ProcessContext> = Box::new(unsafe { std::mem::zeroed() });
+        context.sampleRate = sample_rate;
+        context.state = ProcessContext_::StatesAndFlags_::kPlaying as u32;
+        context.tempo = 120.0;
+        context.timeSigNumerator = 4;
+        context.timeSigDenominator = 4;
+        Ok((consumer, context))
+    }
+
+    /// Ask the controller which parameter each MIDI controller of event bus 0 drives. Built on
+    /// the control thread when the instrument starts; the audio thread only looks it up.
+    fn midi_map(&self) -> Box<MidiMap> {
+        let mut map = Box::new([[kNoParamId; MAPPED_CONTROLLERS]; 16]);
+        let Some(mapping) = self
+            .controller
+            .as_ref()
+            .and_then(|c| c.cast::<IMidiMapping>())
+        else {
+            return map;
+        };
+        for (channel, row) in map.iter_mut().enumerate() {
+            for (cc, slot) in row.iter_mut().enumerate() {
+                let mut id: ParamID = kNoParamId;
+                let r = unsafe {
+                    mapping.getMidiControllerAssignment(0, channel as int16, cc as CtrlNumber, &mut id)
+                };
+                if r == kResultTrue {
+                    *slot = id;
+                }
+            }
+        }
+        map
     }
 
     fn close_view(&mut self) {
@@ -1089,39 +1267,13 @@ impl PluginInstance for Vst3Plugin {
         sample_rate: f64,
         max_block: usize,
     ) -> Result<Box<dyn InsertProcessor>, String> {
-        if self.active {
-            return Err("The plugin is already running.".to_string());
-        }
-        let consumer = self
-            .pending_consumer
-            .take()
-            .or_else(|| self.consumer_home.lock().unwrap().take())
-            .ok_or_else(|| "The plugin is still running elsewhere.".to_string())?;
-        let mut setup = ProcessSetup {
-            processMode: ProcessModes_::kRealtime as int32,
-            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as int32,
-            maxSamplesPerBlock: max_block as int32,
-            sampleRate: sample_rate,
-        };
-        if unsafe { self.processor.setupProcessing(&mut setup) } != kResultOk {
-            *self.consumer_home.lock().unwrap() = Some(consumer);
+        if self.info.kind == Kind::Instrument {
             return Err(format!(
-                "\"{}\" does not run at {sample_rate} Hz with blocks of {max_block}.",
+                "\"{}\" is an instrument. Choose it as a track's input (Setup, Input: Instrument).",
                 self.info.name
             ));
         }
-        if unsafe { self.component.setActive(1) } != kResultOk {
-            *self.consumer_home.lock().unwrap() = Some(consumer);
-            return Err(format!("\"{}\" could not be started.", self.info.name));
-        }
-        unsafe { self.processor.setProcessing(1) };
-        self.active = true;
-        let mut context: Box<ProcessContext> = Box::new(unsafe { std::mem::zeroed() });
-        context.sampleRate = sample_rate;
-        context.state = ProcessContext_::StatesAndFlags_::kPlaying as u32;
-        context.tempo = 120.0;
-        context.timeSigNumerator = 4;
-        context.timeSigDenominator = 4;
+        let (consumer, context) = self.start(sample_rate, max_block)?;
         Ok(Box::new(Vst3Processor {
             processor: self.processor.clone(),
             consumer: Some(consumer),
@@ -1134,6 +1286,40 @@ impl PluginInstance for Vst3Plugin {
             ins: self.ins,
             outs: self.outs,
             has_input: self.has_input,
+            context,
+        }))
+    }
+
+    /// The instrument path: no audio in, the main output in stereo (or mono), notes through the
+    /// event bus as `IEventList`, and the controllers the plugin maps through `IMidiMapping` as
+    /// sample-accurate parameter changes - VST3 has no MIDI controllers of its own.
+    fn activate_instrument(
+        &mut self,
+        sample_rate: f64,
+        max_block: usize,
+    ) -> Result<Box<dyn SourceProcessor>, String> {
+        if self.info.kind != Kind::Instrument {
+            return Err(format!("\"{}\" is not an instrument.", self.info.name));
+        }
+        if !self.has_events {
+            return Err(format!(
+                "\"{}\" has no MIDI input, so it cannot be played.",
+                self.info.name
+            ));
+        }
+        let map = self.midi_map();
+        let (consumer, context) = self.start(sample_rate, max_block)?;
+        Ok(Box::new(Vst3Instrument {
+            processor: self.processor.clone(),
+            consumer: Some(consumer),
+            home: self.consumer_home.clone(),
+            changes: ComWrapper::new(Changes::new()),
+            events: ComWrapper::new(EventList::new()),
+            map,
+            held: [[0; 2]; 16],
+            out_ptrs: [std::ptr::null_mut(); 2],
+            outs: self.outs,
+            max_block,
             context,
         }))
     }
@@ -1353,6 +1539,215 @@ impl InsertProcessor for Vst3Processor {
         }
         if self.outs == 1 {
             right[..n].copy_from_slice(&left[..n]);
+        }
+    }
+}
+
+/// The audio side of a VST3 instrument. Turns the raw MIDI of one block into what VST3 speaks:
+/// note on/off and poly pressure as events, controllers, channel pressure and pitch bend as
+/// parameter changes on the parameters the plugin mapped them to.
+struct Vst3Instrument {
+    processor: ComPtr<IAudioProcessor>,
+    consumer: Option<Consumer<(u32, f64)>>,
+    /// Where the consumer goes back when this processor is dropped, for the next activation.
+    home: Arc<Mutex<Option<Consumer<(u32, f64)>>>>,
+    changes: ComWrapper<Changes>,
+    events: ComWrapper<EventList>,
+    map: Box<MidiMap>,
+    /// Notes this instrument was sent and not yet released, per channel - for "all notes off".
+    held: [[u64; 2]; 16],
+    out_ptrs: [*mut f32; 2],
+    outs: usize,
+    max_block: usize,
+    context: Box<ProcessContext>,
+}
+
+// Driven by one thread at a time: the audio thread while it is installed.
+unsafe impl Send for Vst3Instrument {}
+
+impl Drop for Vst3Instrument {
+    fn drop(&mut self) {
+        if let Some(c) = self.consumer.take()
+            && let Ok(mut home) = self.home.lock()
+        {
+            *home = Some(c);
+        }
+    }
+}
+
+fn note_event(offset: i32, kind: EventTypes, body: Event__type0) -> Event {
+    Event {
+        busIndex: 0,
+        sampleOffset: offset,
+        ppqPosition: 0.0,
+        flags: Event_::EventFlags_::kIsLive as u16,
+        r#type: kind as u16,
+        __field0: body,
+    }
+}
+
+use Event_::EventTypes;
+use Event_::EventTypes_::{kNoteOffEvent, kNoteOnEvent, kPolyPressureEvent};
+
+impl Vst3Instrument {
+    fn note_on(&mut self, offset: i32, channel: u8, pitch: u8, velocity: u8) {
+        let body = Event__type0 {
+            noteOn: NoteOnEvent {
+                channel: channel as int16,
+                pitch: pitch as int16,
+                tuning: 0.0,
+                velocity: velocity as f32 / 127.0,
+                length: 0,
+                noteId: -1,
+            },
+        };
+        if self.events.push(note_event(offset, kNoteOnEvent, body)) {
+            self.held[channel as usize][(pitch / 64) as usize] |= 1 << (pitch % 64);
+        }
+    }
+
+    fn note_off(&mut self, offset: i32, channel: u8, pitch: u8, velocity: u8) {
+        let body = Event__type0 {
+            noteOff: NoteOffEvent {
+                channel: channel as int16,
+                pitch: pitch as int16,
+                velocity: velocity as f32 / 127.0,
+                noteId: -1,
+                tuning: 0.0,
+            },
+        };
+        if self.events.push(note_event(offset, kNoteOffEvent, body)) {
+            self.held[channel as usize][(pitch / 64) as usize] &= !(1 << (pitch % 64));
+        }
+    }
+
+    /// VST3 knows no "all notes off" message: end every note this instrument still has on
+    /// `channel` with a note off of its own.
+    fn all_notes_off(&mut self, offset: i32, channel: u8) {
+        for word in 0..2 {
+            let mut bits = self.held[channel as usize][word];
+            while bits != 0 {
+                let b = bits.trailing_zeros() as u8;
+                bits &= bits - 1;
+                self.note_off(offset, channel, word as u8 * 64 + b, 0);
+            }
+        }
+    }
+
+    fn controller(&self, offset: i32, channel: u8, controller: usize, value: f64) {
+        let id = self.map[channel as usize][controller];
+        if id != kNoParamId {
+            self.changes.point(id, offset, value);
+        }
+    }
+
+    fn translate(&mut self, offset: i32, msg: [u8; 3]) {
+        let channel = msg[0] & 0x0F;
+        let (d1, d2) = (msg[1] & 0x7F, msg[2] & 0x7F);
+        match msg[0] & 0xF0 {
+            0x90 if d2 > 0 => self.note_on(offset, channel, d1, d2),
+            0x80 | 0x90 => self.note_off(offset, channel, d1, d2),
+            0xA0 => {
+                let body = Event__type0 {
+                    polyPressure: PolyPressureEvent {
+                        channel: channel as int16,
+                        pitch: d1 as int16,
+                        pressure: d2 as f32 / 127.0,
+                        noteId: -1,
+                    },
+                };
+                self.events.push(note_event(offset, kPolyPressureEvent, body));
+            }
+            0xB0 => {
+                if d1 as i32 == ControllerNumbers_::kCtrlAllNotesOff as i32
+                    || d1 as i32 == ControllerNumbers_::kCtrlAllSoundsOff as i32
+                {
+                    self.all_notes_off(offset, channel);
+                }
+                self.controller(offset, channel, d1 as usize, d2 as f64 / 127.0);
+            }
+            0xD0 => self.controller(
+                offset,
+                channel,
+                ControllerNumbers_::kAfterTouch as usize,
+                d1 as f64 / 127.0,
+            ),
+            0xE0 => self.controller(
+                offset,
+                channel,
+                ControllerNumbers_::kPitchBend as usize,
+                ((d2 as u32) << 7 | d1 as u32) as f64 / 16383.0,
+            ),
+            _ => {}
+        }
+    }
+}
+
+impl SourceProcessor for Vst3Instrument {
+    fn render(&mut self, events: &[BlockEvent], outs: &mut [StereoOut<'_>]) {
+        let Some(out) = outs.first_mut() else {
+            return;
+        };
+        let n = out.l.len().min(out.r.len()).min(self.max_block);
+        if n == 0 {
+            return;
+        }
+        self.events.clear();
+        self.changes.count.set(0);
+        if let Some(consumer) = self.consumer.as_mut() {
+            for _ in 0..CHANGES_PER_BLOCK * 4 {
+                match consumer.pop() {
+                    Ok((id, value)) => self.changes.set(id, value),
+                    Err(_) => break,
+                }
+            }
+        }
+        for e in events {
+            self.translate(e.offset.min(n as u32 - 1) as i32, e.msg);
+        }
+        self.out_ptrs = [out.l.as_mut_ptr(), out.r.as_mut_ptr()];
+        let mut output = AudioBusBuffers {
+            numChannels: self.outs as int32,
+            silenceFlags: 0,
+            __field0: AudioBusBuffers__type0 {
+                channelBuffers32: self.out_ptrs.as_mut_ptr(),
+            },
+        };
+        let changes = self
+            .changes
+            .as_com_ref::<IParameterChanges>()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null_mut());
+        let list = self
+            .events
+            .as_com_ref::<IEventList>()
+            .map(|e| e.as_ptr())
+            .unwrap_or(std::ptr::null_mut());
+        let mut data = ProcessData {
+            processMode: ProcessModes_::kRealtime as int32,
+            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as int32,
+            numSamples: n as int32,
+            numInputs: 0,
+            numOutputs: 1,
+            inputs: std::ptr::null_mut(),
+            outputs: &mut output,
+            inputParameterChanges: changes,
+            outputParameterChanges: std::ptr::null_mut(),
+            inputEvents: list,
+            outputEvents: std::ptr::null_mut(),
+            processContext: &mut *self.context,
+        };
+        let result = unsafe { self.processor.process(&mut data) };
+        self.context.projectTimeSamples += n as i64;
+        self.context.continousTimeSamples += n as i64;
+        if result != kResultOk {
+            out.l[..n].fill(0.0);
+            out.r[..n].fill(0.0);
+            return;
+        }
+        if self.outs == 1 {
+            let (l, r) = (&out.l[..n], &mut out.r[..n]);
+            r.copy_from_slice(l);
         }
     }
 }

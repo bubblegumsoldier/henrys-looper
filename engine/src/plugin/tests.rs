@@ -237,38 +237,57 @@ pub(crate) fn fixture_bundle() -> Option<std::path::PathBuf> {
     use std::sync::OnceLock;
     static BUNDLE: OnceLock<Option<PathBuf>> = OnceLock::new();
     BUNDLE
-        .get_or_init(|| {
-            let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.to_path_buf();
-            let target = root.join("target").join("fixtures");
-            let dylib = target.join("debug").join("libtest_vst3_gain.dylib");
-            let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-            let built = std::process::Command::new(cargo)
-                .args(["build", "--quiet", "-p", "test-vst3-gain", "--target-dir"])
-                .arg(&target)
-                .current_dir(&root)
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !built || !dylib.exists() {
-                eprintln!("uebersprungen: das Test-VST3 liess sich nicht bauen");
-                return None;
-            }
-            let dir = std::env::temp_dir().join(format!("looper-vst3-{}", std::process::id()));
-            let bundle = dir.join("LooperTestGain.vst3");
-            let macos = bundle.join("Contents").join("MacOS");
-            std::fs::create_dir_all(&macos).ok()?;
-            std::fs::copy(&dylib, macos.join("LooperTestGain")).ok()?;
-            std::fs::write(
-                bundle.join("Contents").join("Info.plist"),
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
-                 <key>CFBundleExecutable</key><string>LooperTestGain</string>\
-                 <key>CFBundleIdentifier</key><string>de.henrys-looper.test-gain</string>\
-                 <key>CFBundlePackageType</key><string>BNDL</string></dict></plist>\n",
-            )
-            .ok()?;
-            Some(bundle)
-        })
+        .get_or_init(|| build_fixture("test-vst3-gain", "LooperTestGain"))
         .clone()
+}
+
+/// The test instrument (`tools/test-vst3-sine`), bundled the same way.
+#[cfg(target_os = "macos")]
+pub(crate) fn sine_bundle() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+    static BUNDLE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BUNDLE
+        .get_or_init(|| build_fixture("test-vst3-sine", "LooperTestSine"))
+        .clone()
+}
+
+#[cfg(target_os = "macos")]
+fn build_fixture(package: &str, bundle_name: &str) -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.to_path_buf();
+    let target = root.join("target").join("fixtures");
+    let dylib = target
+        .join("debug")
+        .join(format!("lib{}.dylib", package.replace('-', "_")));
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let built = std::process::Command::new(cargo)
+        .args(["build", "--quiet", "-p", package, "--target-dir"])
+        .arg(&target)
+        .current_dir(&root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !built || !dylib.exists() {
+        eprintln!("uebersprungen: das Test-VST3 {package} liess sich nicht bauen");
+        return None;
+    }
+    let dir = std::env::temp_dir().join(format!("looper-vst3-{}", std::process::id()));
+    let bundle = dir.join(format!("{bundle_name}.vst3"));
+    let macos = bundle.join("Contents").join("MacOS");
+    std::fs::create_dir_all(&macos).ok()?;
+    std::fs::copy(&dylib, macos.join(bundle_name)).ok()?;
+    std::fs::write(
+        bundle.join("Contents").join("Info.plist"),
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+             <key>CFBundleExecutable</key><string>{bundle_name}</string>\
+             <key>CFBundleIdentifier</key><string>de.henrys-looper.{package}</string>\
+             <key>CFBundlePackageType</key><string>BNDL</string></dict></plist>\n"
+        ),
+    )
+    .ok()?;
+    Some(bundle)
 }
 
 /// The test VST3, with numbers that are known exactly: gain 1, a reported latency of 64 frames that
@@ -475,4 +494,210 @@ fn apples_dls_synth_plays_a_note_at_its_offset() {
     );
     drop(synth);
     plugin.deactivate();
+}
+
+/// The test instrument (`tools/test-vst3-sine`) with one note source, rendered block by block.
+#[cfg(target_os = "macos")]
+struct SineRig {
+    plugin: Box<dyn super::PluginInstance>,
+    synth: Option<Box<dyn crate::engine::source::SourceProcessor>>,
+    l: Vec<f32>,
+    r: Vec<f32>,
+}
+
+#[cfg(target_os = "macos")]
+impl SineRig {
+    fn new(name: &str, block: usize) -> Option<Self> {
+        let bundle = sine_bundle()?;
+        let info = super::vst3::enumerate(&bundle)
+            .expect("Bundle laesst sich lesen")
+            .into_iter()
+            .find(|i| i.name == name)
+            .expect("Klasse vorhanden");
+        let mut plugin = super::load(&info).expect("laedt");
+        let synth = plugin.activate_instrument(48_000.0, 512).expect("startet");
+        Some(Self {
+            plugin,
+            synth: Some(synth),
+            l: vec![0.0; block],
+            r: vec![0.0; block],
+        })
+    }
+
+    fn render(&mut self, events: &[(u32, [u8; 3])]) -> &[f32] {
+        use crate::engine::source::{BlockEvent, StereoOut};
+        let events: Vec<BlockEvent> = events
+            .iter()
+            .map(|&(offset, msg)| BlockEvent { offset, msg })
+            .collect();
+        self.l.fill(0.0);
+        self.r.fill(0.0);
+        self.synth.as_mut().unwrap().render(
+            &events,
+            &mut [StereoOut {
+                l: &mut self.l,
+                r: &mut self.r,
+            }],
+        );
+        assert_eq!(self.l, self.r, "mono Synth, beide Seiten gleich");
+        &self.l
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn first_sound(x: &[f32]) -> Option<usize> {
+    x.iter().position(|s| *s != 0.0)
+}
+
+#[cfg(target_os = "macos")]
+fn peak(x: &[f32]) -> f32 {
+    x.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+}
+
+/// A VST3 instrument is found as one, passes the probe, and plays exactly: a note on at an offset
+/// sounds from that sample (velocity scales it, the pitch is right), a note off at an offset ends it
+/// on that sample, nothing sounds before any note.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_vst3_instrument_plays_notes_on_the_sample() {
+    let Some(bundle) = sine_bundle() else {
+        return;
+    };
+    let infos = super::vst3::enumerate(&bundle).expect("Bundle laesst sich lesen");
+    assert_eq!(infos.len(), 2);
+    assert!(infos.iter().all(|i| i.kind == Kind::Instrument), "{infos:?}");
+    let probed = scan::probe_one(infos[0].clone());
+    assert_eq!(probed.status, scan::Status::Ok, "{:?}", probed.message);
+    assert_eq!(probed.params, 2);
+
+    let Some(mut rig) = SineRig::new("Looper Test Sine", 256) else {
+        return;
+    };
+    assert!(
+        rig.plugin.activate(48_000.0, 256).is_err(),
+        "ein Instrument ist kein Insert"
+    );
+    assert_eq!(rig.plugin.latency(), 0);
+    assert!(first_sound(rig.render(&[])).is_none(), "ohne Note still");
+
+    // A at 440 Hz, full velocity, at offset 100: sample 100 is sin(0) = 0, sample 101 the first
+    // step of the sine.
+    let out = rig.render(&[(100, [0x90, 69, 127])]).to_vec();
+    assert_eq!(first_sound(&out), Some(101), "genau ab dem Offset");
+    let step = std::f64::consts::TAU * 440.0 / 48_000.0;
+    let expect = |k: usize| (0.25 * (step * k as f64).sin()) as f32;
+    for k in 0..156 {
+        assert!((out[100 + k] - expect(k)).abs() < 1e-5, "Sinus bei {k}: {}", out[100 + k]);
+    }
+
+    // Off at offset 50 of the next block: sound up to 49, silence from 50.
+    let out = rig.render(&[(50, [0x80, 69, 0])]).to_vec();
+    assert!(out[..50].iter().any(|s| *s != 0.0));
+    assert!(out[50..].iter().all(|s| *s == 0.0), "Note-off auf dem Sample");
+    assert!(first_sound(rig.render(&[])).is_none());
+
+    // Half the velocity, half the level; a note on with velocity 0 is a note off.
+    let out = rig.render(&[(0, [0x91, 69, 64])]).to_vec();
+    assert!((peak(&out) - 0.25 * 64.0 / 127.0).abs() < 1e-3, "Velocity: {}", peak(&out));
+    let out = rig.render(&[(10, [0x91, 69, 0])]).to_vec();
+    assert!(out[10..].iter().all(|s| *s == 0.0), "Note-on mit Velocity 0");
+}
+
+/// The sustain pedal reaches a VST3 instrument as the parameter the plugin mapped CC 64 to
+/// (`IMidiMapping`), at its sample offset: a note released while the pedal is down keeps sounding,
+/// and stops on the sample the pedal comes up.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_vst3_instruments_sustain_pedal_holds_notes() {
+    let Some(mut rig) = SineRig::new("Looper Test Sine", 256) else {
+        return;
+    };
+    rig.render(&[(0, [0x90, 60, 100]), (5, [0xB0, 64, 127]), (20, [0x80, 60, 0])]);
+    for _ in 0..4 {
+        let out = rig.render(&[]);
+        assert!(out.iter().any(|s| *s != 0.0), "das Pedal haelt die Note");
+    }
+    let out = rig.render(&[(30, [0xB0, 64, 0])]).to_vec();
+    assert!(out[..30].iter().any(|s| *s != 0.0));
+    assert!(out[30..].iter().all(|s| *s == 0.0), "Pedal hoch, Note aus - auf dem Sample");
+
+    // Pedal on another channel: the plugin maps CC 64 of every channel.
+    rig.render(&[(0, [0xB3, 64, 127]), (1, [0x93, 72, 90]), (2, [0x83, 72, 0])]);
+    assert!(rig.render(&[]).iter().any(|s| *s != 0.0));
+    rig.render(&[(0, [0xB3, 64, 0])]);
+    assert!(first_sound(rig.render(&[])).is_none());
+
+    // Controllers the plugin did not map change nothing and break nothing.
+    rig.render(&[(0, [0xB0, 1, 127]), (0, [0xE0, 0, 127]), (0, [0xD0, 50, 0])]);
+    assert!(first_sound(rig.render(&[])).is_none());
+}
+
+/// Panic on a VST3 instrument: what the track's note tracker sends (`NoteTracker::release`) ends
+/// everything - and "all notes off" (CC 123) alone, which VST3 itself does not know, also ends every
+/// note the host sent on that channel.
+#[cfg(target_os = "macos")]
+#[test]
+fn panic_silences_a_vst3_instrument() {
+    use crate::engine::source::NoteTracker;
+    let Some(mut rig) = SineRig::new("Looper Test Sine", 128) else {
+        return;
+    };
+    let mut tracker = NoteTracker::default();
+    let played = [[0x90, 60, 100], [0xB0, 64, 127], [0x90, 64, 100], [0x80, 60, 0]];
+    for m in played {
+        tracker.note(m);
+    }
+    let events: Vec<(u32, [u8; 3])> = played.iter().map(|&m| (0, m)).collect();
+    rig.render(&events);
+    assert!(rig.render(&[]).iter().any(|s| *s != 0.0));
+    let mut release = Vec::new();
+    tracker.release(|m| release.push((7u32, m)));
+    let out = rig.render(&release).to_vec();
+    assert!(out[7..].iter().all(|s| *s == 0.0), "Panic aus dem Notentracker");
+
+    // Only CC 123, nothing else: the host's own "all notes off" for VST3.
+    rig.render(&[(0, [0x92, 50, 100]), (0, [0x92, 55, 100]), (0, [0x90, 57, 100])]);
+    let out = rig.render(&[(40, [0xB2, 123, 0])]).to_vec();
+    assert!(out[40..].iter().any(|s| *s != 0.0), "Kanal 1 klingt weiter");
+    let out = rig.render(&[(3, [0xB0, 123, 0])]).to_vec();
+    assert!(out[3..].iter().all(|s| *s == 0.0), "CC 123 beendet alles auf seinem Kanal");
+}
+
+/// A VST3 instrument's latency is reported (and is its real delay), its state round-trips, and it
+/// starts again after a deactivate.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_vst3_instruments_latency_and_state() {
+    let Some(mut rig) = SineRig::new("Looper Test Sine Latency", 256) else {
+        return;
+    };
+    assert_eq!(rig.plugin.latency(), 32, "gemeldete Latenz");
+    let out = rig.render(&[(0, [0x90, 69, 127])]).to_vec();
+    assert_eq!(first_sound(&out), Some(33), "um genau die gemeldete Latenz verzoegert");
+
+    // Volume (parameter 1) through the queue, then saved and restored into a fresh instance.
+    rig.plugin.set_param(1, 0.5);
+    rig.render(&[]);
+    let out = rig.render(&[]).to_vec();
+    assert!((peak(&out) - 0.125).abs() < 1e-3, "Lautstaerke halb: {}", peak(&out));
+    let state = rig.plugin.save_state().expect("Zustand");
+    drop(rig.synth.take());
+    rig.plugin.deactivate();
+
+    let Some(mut fresh) = SineRig::new("Looper Test Sine Latency", 256) else {
+        return;
+    };
+    drop(fresh.synth.take());
+    fresh.plugin.deactivate();
+    fresh.plugin.load_state(&state).expect("Zustand zurueck");
+    assert_eq!(fresh.plugin.param(1), 0.5, "der Controller kennt den Zustand");
+    fresh.synth = Some(
+        fresh
+            .plugin
+            .activate_instrument(44_100.0, 512)
+            .expect("startet erneut"),
+    );
+    fresh.render(&[(0, [0x90, 69, 127])]);
+    let out = fresh.render(&[]).to_vec();
+    assert!((peak(&out) - 0.125).abs() < 1e-3, "Zustand gilt im Prozessor: {}", peak(&out));
 }

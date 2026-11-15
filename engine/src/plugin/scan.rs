@@ -51,7 +51,8 @@ pub enum Status {
     Crashed,
     /// Did not finish in time.
     Timeout,
-    /// An instrument that cannot be played yet (VST3 for now). Playable instruments are `ok`.
+    /// An instrument that could not be played by the version that scanned it. Only found in old
+    /// caches; such entries are probed again. Playable instruments are `ok`.
     Instrument,
 }
 
@@ -250,9 +251,9 @@ pub fn scan(exe: &Path, full: bool, mut progress: impl FnMut(&str)) -> Vec<Scann
     for candidate in candidates() {
         let key = candidate.key();
         let found = match old.entries.get(&key) {
-            // Audio Unit instruments were listed as "not yet" before they could be played; probe
-            // them again instead of trusting that verdict.
-            Some(known) if !known.iter().any(was_unplayable_au) => known.clone(),
+            // Instruments were listed as "not yet" before they could be played (Audio Units, then
+            // VST3); probe them again instead of trusting that verdict.
+            Some(known) if !known.iter().any(was_unplayable) => known.clone(),
             _ => {
                 progress(&candidate.label());
                 probe_in_child(exe, &candidate)
@@ -269,8 +270,8 @@ pub fn scan(exe: &Path, full: bool, mut progress: impl FnMut(&str)) -> Vec<Scann
     out
 }
 
-fn was_unplayable_au(s: &Scanned) -> bool {
-    s.status == Status::Instrument && s.info.format == Format::Au
+fn was_unplayable(s: &Scanned) -> bool {
+    s.status == Status::Instrument
 }
 
 /// What the cache knows, without probing anything. For a fast start.
@@ -457,18 +458,9 @@ pub fn probe_one(info: PluginInfo) -> Scanned {
     }
 }
 
-/// Load an instrument, start it at 48 kHz and play a chord through it. VST3 instruments are listed
-/// as "not yet".
+/// Load an instrument, start it at 48 kHz and play a chord through it, with the sustain pedal and a
+/// pitch bend on the way - what any keyboard sends in its first seconds.
 pub fn probe_instrument(info: PluginInfo) -> Scanned {
-    if info.format == Format::Vst3 {
-        return Scanned {
-            info,
-            status: Status::Instrument,
-            message: Some("VST3 instruments cannot be played yet.".to_string()),
-            latency: 0,
-            params: 0,
-        };
-    }
     let result = (|| {
         use crate::engine::source::{BlockEvent, StereoOut};
         let mut plugin = super::load(&info)?;
@@ -491,6 +483,33 @@ pub fn probe_instrument(info: PluginInfo) -> Scanned {
                     }),
                     _ => {}
                 }
+            }
+            match block {
+                2 => events.extend([
+                    BlockEvent {
+                        offset: 10,
+                        msg: [0xB0, 64, 127],
+                    },
+                    BlockEvent {
+                        offset: 100,
+                        msg: [0xE0, 0, 80],
+                    },
+                ]),
+                6 => events.extend([
+                    BlockEvent {
+                        offset: 0,
+                        msg: [0xB0, 64, 0],
+                    },
+                    BlockEvent {
+                        offset: 0,
+                        msg: [0xE0, 0, 64],
+                    },
+                ]),
+                7 => events.push(BlockEvent {
+                    offset: 0,
+                    msg: [0xB0, 123, 0],
+                }),
+                _ => {}
             }
             l.fill(0.0);
             r.fill(0.0);

@@ -136,14 +136,7 @@ pub trait PluginInstance {
         max_block: usize,
     ) -> Result<Box<dyn SourceProcessor>, String> {
         let _ = (sample_rate, max_block);
-        Err(match (self.info().kind, self.info().format) {
-            (Kind::Instrument, Format::Vst3) => format!(
-                "\"{}\" is a VST3 instrument; those cannot be played yet - its Audio Unit \
-                 version can, if it has one.",
-                self.info().name
-            ),
-            _ => format!("\"{}\" is not an instrument.", self.info().name),
-        })
+        Err(format!("\"{}\" is not an instrument.", self.info().name))
     }
     /// Stop audio. Only to be called once the processor from [`Self::activate`] (or
     /// [`Self::activate_instrument`]) is dropped.
