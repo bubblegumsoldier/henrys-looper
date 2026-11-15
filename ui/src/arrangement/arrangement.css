@@ -77,8 +77,18 @@
 .hl-arr .sec .t .id { overflow: hidden; text-overflow: ellipsis; }
 .hl-arr .sec:hover:not(.sel) { background: linear-gradient(to bottom, #272d38, #1f242c); }
 .hl-arr .sec.lifted { opacity: .45; }
-.hl-arr .sec.loopsec { overflow: visible; }
-.hl-arr .sec.loopsec .t { overflow: hidden; }
+.hl-arr .sec.loops { overflow: visible; }
+.hl-arr .sec.loops .t { overflow: hidden; }
+.hl-arr .sec .rep {
+  position: absolute; right: -2px; bottom: -21px; width: 7px; height: 20px; pointer-events: none;
+  background:
+    radial-gradient(circle, var(--st-armed) 1.4px, transparent 1.6px) 0 4px / 3px 4px no-repeat,
+    radial-gradient(circle, var(--st-armed) 1.4px, transparent 1.6px) 0 11px / 3px 4px no-repeat,
+    linear-gradient(var(--st-armed), var(--st-armed)) 4px 0 / 1px 100% no-repeat,
+    linear-gradient(var(--st-armed), var(--st-armed)) 6px 0 / 1.5px 100% no-repeat;
+}
+/* A section's MIDI badge sits on the marker's top edge, clear of the name on a wide marker. */
+.hl-arr .sec[data-midi-key]::after { top: -8px; right: 4px; }
 /* A section a bar or two wide: the number gives way to the name, and the last one - nothing to its
    right but empty ruler - lets the name run out over the free space instead of cutting it to "…". */
 .hl-arr .sec.narrow { padding: 4px 2px 0 4px; }
@@ -204,3 +214,6 @@
 .hl-arr .code-host .cm-editor.cm-focused { outline: none; }
 .hl-arr .code-host .cm-content { user-select: text; }
 .hl-arr .pv-c { min-width: 6px; }
+/* A marker too narrow for its badge anchors it on the left, so it runs to the right instead of
+   over the badge of the section before. */
+.hl-arr .sec.narrow[data-midi-key]::after { right: auto; left: 0; }

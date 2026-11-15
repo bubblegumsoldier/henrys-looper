@@ -402,7 +402,7 @@ pub fn routing_note(routing: &BusRouting, channels: usize) -> Option<String> {
         return Some(format!(
             "Main is on output {}, Monitor on output {} - they partly overlap, the shared \
              channel is summed and the click goes out to the room as well. \
-             Cleanly separated e.g. with --bus-out main:1-2 --bus-out monitor:3-4.",
+             To separate them, put Main on outputs 1-2 and Monitor on 3-4.",
             main.label(),
             monitor.label()
         ));
@@ -424,9 +424,9 @@ pub fn routing_note(routing: &BusRouting, channels: usize) -> Option<String> {
         "{head}: there is one way out and therefore one mix. Every source is in it exactly \
          once, so levels stay as they would be - but the click goes out to the room too, \
          and the Monitor level has nothing of its own to control. \
-         With four outputs: --bus-out main:1-2 --bus-out monitor:3-4. \
-         Stopgap with two: --bus-out main:1 --bus-out monitor:2 puts the mix on the left and \
-         the click on the right, to be split with a Y-cable."
+         With four outputs, put Main on 1-2 and Monitor on 3-4. \
+         Stopgap with two: Main on output 1 and Monitor on output 2 puts the mix on the left \
+         and the click on the right, to be split with a Y cable."
     ))
 }
 

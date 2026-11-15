@@ -247,7 +247,7 @@ export function Grid({ doc, errors, editable, run, sel, setSel, zoom, edit, onGo
             narrow && "narrow",
             narrow && i === doc.sections.length - 1 && "last",
             picked.has(i) && "sel",
-            !auto && "loopsec",
+            !auto && "loops",
             sounding && run.section === i && "cur",
             run.armedSection === i && run.armed && "armed",
             errs.sections.has(i) && "err",
@@ -301,6 +301,10 @@ export function Grid({ doc, errors, editable, run, sel, setSel, zoom, edit, onGo
                   </>
                 )}
               </div>
+              {/* The repeat sign of a section that loops until Release. An element, not the
+                  design's `.loopsec::after`: that pseudo-element is also where a MIDI badge is
+                  drawn, and the two ended up as one mangled box. */}
+              {!auto && <i className="rep" aria-hidden="true" />}
               {editable && <div className="edge" onPointerDown={(e) => onEdgeDown(e, i)} title="Drag to change the length" />}
             </div>
           );

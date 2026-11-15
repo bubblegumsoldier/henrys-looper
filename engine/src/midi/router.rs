@@ -257,6 +257,10 @@ impl TrackLayout {
 
     /// Address -> index, or an English sentence saying why not.
     pub fn resolve(&self, reference: &TrackRef) -> Result<usize, String> {
+        // No tracks at all means no engine: say that, not "the session has no tracks".
+        if self.names.is_empty() {
+            return Err("The engine is not running - start it first.".to_string());
+        }
         match reference {
             TrackRef::Index(index) if *index < self.names.len() => Ok(*index),
             TrackRef::Index(index) => Err(format!(
