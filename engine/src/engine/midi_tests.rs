@@ -702,3 +702,71 @@ fn a_recording_writes_the_tracks_midi_file() {
     assert_eq!(json["tracks"][0]["midi"], "01 keys.mid");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A score drives a MIDI loop through its states exactly as an audio loop: record, overdub, play,
+/// stop - the runner's commands, the engine's states, and nothing left sounding when it stops.
+#[test]
+fn a_score_records_overdubs_plays_and_stops_a_midi_loop() {
+    use crate::engine::runner::Runner;
+    use crate::engine::timeline::{TimeSignature, Timeline};
+    let section = |id: &str, state: &str| {
+        format!("  - id: {id}\n    bars: 2\n    autorelease: true\n    tracks:\n      keys: {state}\n")
+    };
+    let yaml = format!(
+        "bpm: 100\ntime_signature: 4/4\ntracks:\n  keys: {{input: instrument, loop: midi}}\nsections:\n{}{}{}{}",
+        section("rec", "record"),
+        section("dub", "overdub"),
+        section("play", "play"),
+        section("stop", "stop"),
+    );
+    let score = crate::score::compile_score(&yaml).expect("Partitur");
+    assert!(crate::score::score_notes(&yaml).is_empty(), "loop: midi ist kein Hinweis mehr");
+    let mut rig = rig();
+    let timeline = Timeline::new(48_000, 100.0, TimeSignature::new(4, 4));
+    let mut runner = Runner::new(score, timeline, BLOCK as u32).expect("Runner");
+    for cmd in super::runner::setup_commands(runner.score()) {
+        rig.sim.send(cmd);
+    }
+    rig.sim.send(Command::SetLoopKind {
+        track: 0,
+        midi: true,
+    });
+    runner.start(0);
+    for cmd in runner.take_commands() {
+        rig.sim.send(cmd);
+    }
+    let first = runner.armed_at().expect("armiert").1;
+    let bar = |n: u64| timeline.bar_start(first + n);
+    let step = |rig: &mut Rig, runner: &mut Runner, to: u64| {
+        while rig.sim.pos() < to {
+            rig.sim.step();
+            runner.tick(rig.sim.pos());
+            for cmd in runner.take_commands() {
+                rig.sim.send(cmd);
+            }
+        }
+    };
+    step(&mut rig, &mut runner, bar(0) + 5_000);
+    let at = bar(0) + 10_000;
+    step(&mut rig, &mut runner, at + OUT);
+    play(&mut rig, at, [0x90, 60, 100]);
+    step(&mut rig, &mut runner, at + 2_000 + OUT);
+    play(&mut rig, at + 2_000, [0x80, 60, 0]);
+    step(&mut rig, &mut runner, bar(2) + 5_000);
+    assert_eq!(rig.sim.core.track(0).state(bar(2)), TrackState::Overdub);
+    let at = bar(2) + 30_000;
+    step(&mut rig, &mut runner, at + OUT);
+    play(&mut rig, at, [0x90, 64, 100]);
+    step(&mut rig, &mut runner, at + 2_000 + OUT);
+    play(&mut rig, at + 2_000, [0x80, 64, 0]);
+    step(&mut rig, &mut runner, bar(6));
+    let track = rig.sim.core.track(0);
+    assert_eq!(track.layer_count(), 2);
+    assert_eq!(track.loop_len(), bar(2) - bar(0));
+    let got = sent(&rig, bar(4), bar(6));
+    assert!(got.contains(&(bar(4) + 10_000, [0x90, 60, 100])), "{got:?}");
+    assert!(got.contains(&(bar(4) + 30_000, [0x90, 64, 100])), "{got:?}");
+    step(&mut rig, &mut runner, bar(7));
+    assert!(sent(&rig, bar(6) + 1_000, bar(7)).is_empty());
+    assert!(sounding(&rig).is_empty());
+}
