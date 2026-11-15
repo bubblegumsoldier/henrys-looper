@@ -265,6 +265,8 @@ enum Request {
     ListDevices(Sender<Result<DeviceReport, String>>),
     Start(Box<StartConfig>, Sender<Result<EngineInfo, String>>),
     Stop(Sender<Result<(), String>>),
+    /// What the running engine opened, or `None` - for a page that was reloaded while it runs.
+    Info(Sender<Result<Option<EngineInfo>, String>>),
     Act(Action, Sender<Result<(), String>>),
     ScoreLoad(String, Option<u32>, Sender<Result<ScoreLoaded, String>>),
     ScoreAct(ScoreAction, Sender<Result<String, String>>),
@@ -325,6 +327,10 @@ impl EngineHandle {
 
     pub fn stop(&self) -> Result<(), String> {
         self.call(Request::Stop)
+    }
+
+    pub fn info(&self) -> Result<Option<EngineInfo>, String> {
+        self.call(Request::Info)
     }
 
     pub fn act(&self, action: Action) -> Result<(), String> {
@@ -490,6 +496,9 @@ fn handle(
                     let _ = reply.send(Err(e));
                 }
             }
+        }
+        Request::Info(reply) => {
+            let _ = reply.send(Ok(session.as_ref().map(|s| s.info.clone())));
         }
         Request::Stop(reply) => {
             if session.is_none() {

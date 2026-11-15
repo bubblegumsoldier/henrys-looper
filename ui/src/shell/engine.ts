@@ -35,6 +35,14 @@ export function useEngine(): EngineState {
 // device facts on `looper://engine`, and every view showing them follows.
 if (insideTauri()) {
   void listen<EngineInfo>("looper://engine", (e) => set({ info: e.payload }));
+  // A reload of the page (or a dev hot reload) while the engine keeps running would otherwise lose
+  // the device facts until the next start: the status pill showed "48 kHz" without the buffer.
+  api
+    .engineInfo()
+    .then((info) => {
+      if (info && !state.info) set({ info });
+    })
+    .catch(() => undefined);
 }
 
 export function startEngine(config: StartConfig): Promise<boolean> {

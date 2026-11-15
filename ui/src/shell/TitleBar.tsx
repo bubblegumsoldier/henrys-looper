@@ -167,10 +167,14 @@ export function TitleBar({ mode, setupOpen, onMode, onSetup, enginePanelOpen, on
         {T.midiLearn}
       </button>
       {locked && (
-        <span className="pill hide-narrow" title="While a score runs in Live, the arrangement cannot be edited">
+        <button
+          className="pill hide-narrow lockpill"
+          onClick={() => onMode("arrangement")}
+          title="While the score runs, the arrangement can be looked at but not edited - press Stop all to edit it again. Click to view it."
+        >
           <Icon name="lock" size={11} />
           Arrangement locked
-        </span>
+        </button>
       )}
       <StatusPill facts={facts} open={enginePanelOpen} onClick={onEnginePanel} />
       <button

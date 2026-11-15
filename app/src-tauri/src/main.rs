@@ -69,6 +69,14 @@ fn app_info() -> AppInfo {
     host::app_info()
 }
 
+/// What the running engine opened (device, rate, buffer), or `null` when it is stopped. A page
+/// reloaded while the engine runs asks this instead of waiting for the next `engine_start`.
+#[tauri::command]
+async fn engine_info(engine: State<'_, EngineHandle>) -> Result<Option<EngineInfo>, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.info()).await
+}
+
 /// Every host, device and supported configuration. Safe at any time - it opens nothing.
 #[tauri::command]
 async fn list_devices(engine: State<'_, EngineHandle>) -> Result<DeviceReport, String> {
@@ -895,6 +903,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             list_devices,
+            engine_info,
             engine_start,
             engine_stop,
             track_record,

@@ -75,6 +75,8 @@ export const api = {
   appInfo: () => call<AppInfo>("app_info"),
   listDevices: () => call<DeviceReport>("list_devices"),
   engineStart: (config: StartConfig) => call<EngineInfo>("engine_start", { config }),
+  /** What the running engine opened, or null - asked once when the page (re)loads. */
+  engineInfo: () => call<EngineInfo | null>("engine_info"),
   engineStop: () => call<void>("engine_stop"),
 
   // --- per track (zero-based index into the status event's `tracks`) --------

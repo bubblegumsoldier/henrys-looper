@@ -26,15 +26,20 @@ export function Alarm() {
 
 const FADE_MS = 6000;
 
-export function Ticker() {
+/**
+ * `feed`: this instance turns the engine's sentences into notes. Exactly one ticker does that (the
+ * one in the title bar, always mounted); a second one - in the Arrangement's status bar, where the
+ * title bar has no room next to the transport - only shows.
+ */
+export function Ticker({ feed = true }: { feed?: boolean } = {}) {
   const notes = useNotes();
   const [now, setNow] = useState(Date.now());
 
   // The engine's own sentence about the last thing that happened.
   const message = useStatusSlice((s) => s.message);
   useEffect(() => {
-    if (message) note(message, "engine");
-  }, [message]);
+    if (feed && message) note(message, "engine");
+  }, [feed, message]);
 
   useEffect(() => {
     if (notes.length === 0) return;

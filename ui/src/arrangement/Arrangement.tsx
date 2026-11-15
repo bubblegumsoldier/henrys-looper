@@ -27,6 +27,7 @@ import type { ScoreActions } from "./scoreActions";
 import { useScoreFile } from "../scoreFile";
 import { docStore, useDoc, useEngineTracks, useRun } from "./useDoc";
 import "./arrangement.css";
+import { Ticker } from "../shell/Toasts";
 import { ChannelPanel, Mixer, MixerToggle, mixerEditorClass, selectChannelByName, useMixer } from "../mixer";
 
 type View = "grid" | "text";
@@ -505,7 +506,9 @@ export function Arrangement({ onGoto, actions }: Props) {
               <span>YAML · UTF-8</span>
             </>
           )}
-          <div className="grow" />
+          <div className="grow statusbar-ticker">
+            <Ticker feed={false} />
+          </div>
           {validity}
           <span>{run.engine ? `Engine running · ${Math.round(run.sampleRate / 100) / 10} kHz` : "Engine off"}</span>
         </div>
