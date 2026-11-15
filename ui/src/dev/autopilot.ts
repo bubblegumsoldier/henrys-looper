@@ -28,6 +28,7 @@ import { setLearnMode, setMidiFocus, setMidiView } from "../midi/store";
 import type { MidiProfileAction } from "../midi/types";
 import { updateScoreFile } from "../scoreFile";
 import { setMixer, type MixerState } from "../mixer/store";
+import { currentStatus } from "../status";
 
 type Step = Record<string, unknown> & { do: string };
 
@@ -104,6 +105,12 @@ async function runStep(step: Step): Promise<void> {
         e instanceof HTMLInputElement || e instanceof HTMLSelectElement ? `[${e.value}]` : e.innerText;
       const text = els.map(shown).join("\n----\n");
       await invoke("dev_dump", { path: String(step.path), text });
+      return;
+    }
+    case "status": {
+      // The newest status event as JSON - meters, clock, the runner - into a file:
+      // {"do": "status", "path": "/private/tmp/…/status.json"}
+      await invoke("dev_dump", { path: String(step.path), text: JSON.stringify(currentStatus(), null, 1) });
       return;
     }
     case "frame": {
