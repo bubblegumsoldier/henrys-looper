@@ -83,9 +83,9 @@ pub const MAX_COUNT_IN_BARS: u32 = 8;
 /// `host.rs`) and a MIDI pad (`midi::Target::moves_transport`) run into the same wall for the same
 /// reason, and two wordings would suggest two rules. See `docs/architektur.md` section 10.
 pub const TRANSPORT_BELONGS_TO_SCORE: &str =
-    "Die Partitur laeuft - sie schickt die Aufnahme- und Wiedergabekommandos selbst. \
-     Von Hand geht das erst nach \"Alles stoppen\". Pegel, Panorama, Ebenen und \
-     Effekte lassen sich waehrenddessen weiter einstellen.";
+    "The score is running - it sends the Record and Play commands itself. \
+     Manual transport works again after \"Stop all\". Level, pan, layers and \
+     effects stay adjustable meanwhile.";
 
 /// What the runner is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,11 +105,11 @@ pub enum Phase {
 impl Phase {
     pub fn label(self) -> &'static str {
         match self {
-            Phase::Idle => "bereit",
-            Phase::CountIn => "Einzaehler",
-            Phase::Running => "laeuft",
-            Phase::Finished => "Ende",
-            Phase::Stopped => "gestoppt",
+            Phase::Idle => "ready",
+            Phase::CountIn => "count-in",
+            Phase::Running => "running",
+            Phase::Finished => "end",
+            Phase::Stopped => "stopped",
         }
     }
 
@@ -211,7 +211,7 @@ pub struct RunnerView {
     pub pass: u32,
     /// Target state per track, in track order.
     pub tracks: Vec<ScoreState>,
-    /// German description of an armed change plus its lead, or `None`.
+    /// Description of an armed change plus its lead, or `None`.
     pub armed: Option<ArmedView>,
     /// Bars of count-in the next start plays.
     pub count_in_bars: u32,
@@ -233,22 +233,14 @@ pub struct ArmedView {
 }
 
 impl ArmedView {
-    /// `Wechsel armiert: "voice_2" in 5 Takten`, or the count-in equivalent.
+    /// `Switch armed: "voice_2" in 5 bars`, or the count-in equivalent.
     pub fn text(&self) -> String {
         let head = if self.count_in {
-            "Einzaehler: Start".to_string()
+            "Count-in: start".to_string()
         } else {
-            format!("Wechsel armiert: \"{}\"", self.label)
+            format!("Switch armed: \"{}\"", self.label)
         };
-        match (self.bars, self.beats) {
-            (0, 0) => format!("{head} jetzt"),
-            (0, 1) => format!("{head} in 1 Schlag"),
-            (0, b) => format!("{head} in {b} Schlaegen"),
-            (1, 0) => format!("{head} in 1 Takt"),
-            (t, 0) => format!("{head} in {t} Takten"),
-            (1, b) => format!("{head} in 1 Takt und {b} Schlaegen"),
-            (t, b) => format!("{head} in {t} Takten und {b} Schlaegen"),
-        }
+        format!("{head} {}", lead_text(self.bars, self.beats))
     }
 }
 
@@ -265,7 +257,7 @@ pub struct Runner {
     armed: Option<Armed>,
     /// Commands waiting to be handed to the engine, oldest first.
     out: Vec<Command>,
-    /// Latest German sentence for the display.
+    /// Latest sentence for the display.
     message: String,
     /// Sentences the runner produced on its own, at a section boundary - nobody pressed anything,
     /// so no command reply carries them. Collected until the caller takes them.
@@ -279,11 +271,11 @@ impl Runner {
     /// every layer buffer has to be allocated at.
     pub fn new(score: CompiledScore, timeline: Timeline, buffer_frames: u32) -> Result<Self, String> {
         if score.sections.is_empty() {
-            return Err("Die Partitur hat keine einzige Sektion.".to_string());
+            return Err("The score has no sections.".to_string());
         }
         if score.tracks.len() > MAX_TRACKS {
             return Err(format!(
-                "Die Partitur nennt {} Tracks, die Engine kann hoechstens {MAX_TRACKS}.",
+                "The score names {} tracks; the engine can run at most {MAX_TRACKS}.",
                 score.tracks.len()
             ));
         }
@@ -397,7 +389,7 @@ impl Runner {
         self.sched.bars
     }
 
-    /// Latest German sentence about what happened.
+    /// Latest sentence about what happened.
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -432,7 +424,7 @@ impl Runner {
             return self.message.clone();
         }
         if self.phase != Phase::Idle {
-            self.message = "Die Partitur laeuft schon.".to_string();
+            self.message = "The score is already running.".to_string();
             return self.message.clone();
         }
         // The count-in begins on the first bar line the audio thread can still be told about in
@@ -444,11 +436,10 @@ impl Runner {
         self.phase = Phase::CountIn;
         self.arm(Target::Section(0), first, first_bar);
         self.message = format!(
-            "Einzaehler: {} Takt{} Klick, dann \"{}\" ab Takt {}.",
+            "Count-in: {} bar{} of click, then \"{}\".",
             self.count_in_bars,
-            if self.count_in_bars == 1 { "" } else { "e" },
+            if self.count_in_bars == 1 { "" } else { "s" },
             self.plans[0].id,
-            first_bar + 1
         );
         self.message.clone()
     }
@@ -459,13 +450,13 @@ impl Runner {
     /// only reports how far away it is.
     pub fn next(&mut self, est: u64) -> String {
         self.message = match self.phase {
-            Phase::Idle => "Die Partitur laeuft noch nicht - erst starten.".to_string(),
-            Phase::Finished | Phase::Stopped => "Die Partitur ist zu Ende.".to_string(),
+            Phase::Idle => "The score is not running yet - press Start first.".to_string(),
+            Phase::Finished | Phase::Stopped => "The score has ended.".to_string(),
             Phase::CountIn | Phase::Running => match self.armed.clone() {
                 Some(armed) => {
                     let (bars, beats) = self.sched.distance(est, armed.at);
                     format!(
-                        "Es ist schon ein Wechsel nach \"{}\" armiert ({}).",
+                        "A switch to \"{}\" is already armed ({}).",
                         self.target_label(armed.target),
                         lead_text(bars, beats)
                     )
@@ -485,17 +476,17 @@ impl Runner {
     pub fn goto(&mut self, index: usize, est: u64) -> String {
         self.message = if index >= self.plans.len() {
             format!(
-                "Sektion {} gibt es nicht. Vorhanden: 1 bis {}.",
+                "There is no section {}. Sections: 1 to {}.",
                 index + 1,
                 self.plans.len()
             )
         } else {
             match self.phase {
-                Phase::Idle => "Die Partitur laeuft noch nicht - erst starten.".to_string(),
-                Phase::Finished | Phase::Stopped => "Die Partitur ist zu Ende.".to_string(),
+                Phase::Idle => "The score is not running yet - press Start first.".to_string(),
+                Phase::Finished | Phase::Stopped => "The score has ended.".to_string(),
                 Phase::CountIn | Phase::Running => match self.armed.clone() {
                     Some(armed) => format!(
-                        "Es ist schon ein Wechsel nach \"{}\" armiert - der Sprung geht erst danach.",
+                        "A switch to \"{}\" is already armed - jump again once it has happened.",
                         self.target_label(armed.target)
                     ),
                     None => self.arm_next(est, Some(index)),
@@ -559,16 +550,18 @@ impl Runner {
                     }
                 }
                 format!(
-                    " Der armierte Wechsel nach \"{}\" lag schon in der Engine und wird an Takt {} ebenfalls gestoppt.",
+                    " The armed switch to \"{}\" was already in the engine; it is silenced where it lands.",
                     self.target_label(armed.target),
-                    armed.at_bar + 1
                 )
             }
             None => String::new(),
         };
         self.phase = Phase::Stopped;
         self.current = None;
-        self.message = format!("Alles gestoppt ({stopped} Tracks).{note}");
+        self.message = format!(
+            "Stopped all ({stopped} track{}).{note}",
+            if stopped == 1 { "" } else { "s" }
+        );
         self.message.clone()
     }
 
@@ -652,16 +645,16 @@ impl Runner {
                 self.phase = Phase::Running;
                 self.apply_monitor(index);
                 self.message = format!(
-                    "Sektion {}/{} \"{}\" laeuft, {} Takt{}{}.",
+                    "Section {}/{} \"{}\": {} bar{}{}.",
                     index + 1,
                     self.plans.len(),
                     self.plans[index].id,
                     self.plans[index].bars,
-                    if self.plans[index].bars == 1 { "" } else { "e" },
+                    if self.plans[index].bars == 1 { "" } else { "s" },
                     if self.plans[index].autorelease {
                         ""
                     } else {
-                        ", loopt bis zum Release"
+                        ", loops until Release"
                     }
                 );
                 self.notices.push(self.message.clone());
@@ -683,7 +676,7 @@ impl Runner {
                 }
                 self.current = None;
                 self.phase = Phase::Finished;
-                self.message = "Partitur zu Ende - alle Tracks still.".to_string();
+                self.message = "End of the score - all tracks silent.".to_string();
                 self.notices.push(self.message.clone());
             }
         }
@@ -766,7 +759,7 @@ impl Runner {
     fn target_label(&self, target: Target) -> String {
         match target {
             Target::Section(i) => self.plans[i].id.clone(),
-            Target::End => "Ende".to_string(),
+            Target::End => "End".to_string(),
         }
     }
 
@@ -799,9 +792,10 @@ impl Runner {
     ///
     /// Two things are added on top of the raw grid: the head start every command needs, and the end
     /// of any take that is still running - see the module comment for why a take is never cut.
-    fn change_position(&self, est: u64, current: Placement) -> (u64, u64) {
-        let timeline = self.sched.timeline;
-        let earliest = est + self.sched.guard;
+    ///
+    /// Returns the sample, the bar index, and whether a running take pushed the change further
+    /// than the section's own grid would have put it.
+    fn change_position(&self, est: u64, current: Placement) -> (u64, u64, bool) {
         // The first bar a change may fall on: no earlier than the bar a running take ends in.
         let min_bar = self
             .tracks
@@ -810,6 +804,16 @@ impl Runner {
             .map(|t| t.take_end_bar)
             .max()
             .unwrap_or(0);
+        let (at, at_bar) = self.grid_position(est, current, min_bar);
+        let (_, free_bar) = self.grid_position(est, current, 0);
+        (at, at_bar, at_bar > free_bar)
+    }
+
+    /// The first point of the current section's quantisation grid at or after `est` plus the head
+    /// start, and not before bar `min_bar`.
+    fn grid_position(&self, est: u64, current: Placement, min_bar: u64) -> (u64, u64) {
+        let timeline = self.sched.timeline;
+        let earliest = est + self.sched.guard;
         match self.plans[current.index].quantize {
             Quantize::Bar => {
                 let at_bar = timeline
@@ -842,33 +846,35 @@ impl Runner {
     /// Arm the section after the current one, or the one `to` names.
     fn arm_next(&mut self, est: u64, to: Option<usize>) -> String {
         let Some(current) = self.current else {
-            return "Es laeuft noch keine Sektion.".to_string();
+            return "No section is playing yet.".to_string();
         };
-        let (at, at_bar) = self.change_position(est, current);
+        let (at, at_bar, pushed) = self.change_position(est, current);
         let target = match to {
             Some(index) => Target::Section(index),
             None if current.index + 1 < self.plans.len() => Target::Section(current.index + 1),
             None => Target::End,
         };
-        let cut = self.tracks.iter().any(|t| {
-            t.take_end != 0
-                && t.take_end_bar
-                    > self
-                        .sched
-                        .timeline
-                        .bar_index_at(self.sched.timeline.bar_start_at_or_after(est + self.sched.guard))
-        });
         self.arm(target, at, at_bar);
         let (bars, beats) = self.sched.distance(est, at);
-        let note = if cut {
-            " (nach der laufenden Aufnahme - ein Take wird nie mittendrin abgeschnitten)"
+        // Where the switch lands, said in the section's own terms. The absolute bar index is no
+        // use to a musician: it counts from whenever the engine was started, count-in included,
+        // and a section that loops makes "bar 44 of a 41-bar arrangement" look like an error.
+        let id = &self.plans[current.index].id;
+        let len = current.bars.max(1) as u64;
+        let rel = at_bar.saturating_sub(current.start_bar);
+        let place = if rel % len == 0 {
+            format!("at the end of pass {} of \"{id}\"", rel / len)
+        } else {
+            format!("at bar {} of \"{id}\" (pass {})", rel % len + 1, rel / len + 1)
+        };
+        let note = if pushed {
+            " - after the take that is still recording; a take is never cut short"
         } else {
             ""
         };
         format!(
-            "Wechsel nach \"{}\" armiert: Takt {}, {}{note}.",
+            "Switch to \"{}\" armed {place}, {}{note}.",
             self.target_label(target),
-            at_bar + 1,
             lead_text(bars, beats)
         )
     }
@@ -930,7 +936,21 @@ impl Runner {
                         // section - the engine treats `StartOverdub` on an empty track that way.
                         (start, end, true)
                     } else {
-                        let at = Scheduler::loop_grid_at_or_after(t.origin, t.len, start);
+                        // The grid point that *is* this section's start, even when it lies a few
+                        // samples before the bar line: `origin + n * len` and the bar line are
+                        // rounded separately and drift apart by up to a sample per pass. Asking
+                        // strictly "at or after `start`" would then skip to the *next* grid point
+                        // and start the layer a whole loop late - the first pass of the section
+                        // would be lost and a release pushed a pass further (seen in Henry's
+                        // score: "in 14 bars" in bar 3 of an eight-bar section). Half a beat of
+                        // slack is far more than the drift and far less than any real loop length,
+                        // which is always whole bars.
+                        let slack = (self.sched.timeline.samples_per_beat() / 2.0) as u64;
+                        let at = Scheduler::loop_grid_at_or_after(
+                            t.origin,
+                            t.len,
+                            start.saturating_sub(slack),
+                        );
                         // One whole pass, unless the section is genuinely shorter than the loop.
                         // The comparison is in **bars**, for the same rounding reason.
                         let stop = if plan.bars >= t.len_bars { at + t.len } else { end };
@@ -991,16 +1011,16 @@ impl Runner {
     }
 }
 
-/// `in 5 Takten`, `in 1 Takt und 2 Schlaegen`, `jetzt`.
+/// `in 5 bars`, `in 1 bar and 2 beats`, `now`.
 fn lead_text(bars: u32, beats: u32) -> String {
+    let beats_text = |b: u32| if b == 1 { "1 beat".to_string() } else { format!("{b} beats") };
     match (bars, beats) {
-        (0, 0) => "jetzt".to_string(),
-        (0, 1) => "in 1 Schlag".to_string(),
-        (0, b) => format!("in {b} Schlaegen"),
-        (1, 0) => "in 1 Takt".to_string(),
-        (t, 0) => format!("in {t} Takten"),
-        (1, b) => format!("in 1 Takt und {b} Schlaegen"),
-        (t, b) => format!("in {t} Takten und {b} Schlaegen"),
+        (0, 0) => "now".to_string(),
+        (0, b) => format!("in {}", beats_text(b)),
+        (1, 0) => "in 1 bar".to_string(),
+        (t, 0) => format!("in {t} bars"),
+        (1, b) => format!("in 1 bar and {}", beats_text(b)),
+        (t, b) => format!("in {t} bars and {}", beats_text(b)),
     }
 }
 
@@ -1054,8 +1074,8 @@ pub fn setup_commands(score: &CompiledScore) -> Vec<Command> {
 pub fn check_tracks(score: &CompiledScore, running: &[TrackDef]) -> Result<(), String> {
     if score.tracks.len() != running.len() {
         return Err(format!(
-            "Die Partitur hat {} Tracks, die laufende Engine {}. Tracks lassen sich nicht im \
-             laufenden Betrieb umbauen - erst die Engine beenden, dann mit dieser Partitur starten.",
+            "The score has {} tracks, the running engine {}. Tracks cannot be rebuilt while the \
+             engine runs - stop the engine, then start it with this score.",
             score.tracks.len(),
             running.len()
         ));
@@ -1063,8 +1083,8 @@ pub fn check_tracks(score: &CompiledScore, running: &[TrackDef]) -> Result<(), S
     for (want, have) in score.tracks.iter().zip(running) {
         if want.name != have.name {
             return Err(format!(
-                "Track {} heisst in der Partitur \"{}\", in der laufenden Engine \"{}\". \
-                 Erst die Engine beenden, dann mit dieser Partitur starten.",
+                "Track {} is called \"{}\" in the score but \"{}\" in the running engine. \
+                 Stop the engine, then start it with this score.",
                 want.index + 1,
                 want.name,
                 have.name
@@ -1072,9 +1092,9 @@ pub fn check_tracks(score: &CompiledScore, running: &[TrackDef]) -> Result<(), S
         }
         if want.track_input() != have.input {
             return Err(format!(
-                "Track \"{}\" hoert in der Partitur auf Eingang {}, in der laufenden Engine auf {}. \
-                 Eine Eingangsaenderung im laufenden Betrieb wuerde den naechsten Take auf die \
-                 falsche Quelle legen - erst die Engine beenden.",
+                "Track \"{}\" listens to input {} in the score but to {} in the running engine. \
+                 Changing an input while the engine runs would record the next take from the \
+                 wrong source - stop the engine first.",
                 want.name,
                 want.track_input().label(),
                 have.input.label()

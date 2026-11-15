@@ -137,7 +137,7 @@ fn the_count_in_runs_once_before_the_first_section() {
     assert_eq!(drive.runner.phase(), Phase::CountIn);
     let armed = drive.runner.view(0).armed.expect("die erste Sektion ist armiert");
     assert!(armed.count_in, "der Einzaehler ist als solcher erkennbar");
-    assert!(armed.text().contains("Einzaehler"), "{}", armed.text());
+    assert!(armed.text().contains("Count-in"), "{}", armed.text());
 
     // Definition: the count-in occupies the first bar the command queue can still be told about in
     // time, and the section starts one bar after that. So the lead is a full bar plus the rest of
@@ -311,9 +311,9 @@ sections:
 
     // Release inside bar 13 (counted from the first section): the change lands on bar 14.
     let message = drive.release();
-    assert!(message.contains("armiert"), "{message}");
+    assert!(message.contains("armed"), "{message}");
     let armed = drive.runner.view(drive.pos).armed.expect("armiert");
-    assert!(armed.text().starts_with("Wechsel armiert"), "{}", armed.text());
+    assert!(armed.text().starts_with("Switch armed"), "{}", armed.text());
     let (at, _) = drive.runner.armed_at().expect("armiert");
     assert_eq!(at, drive.at_bar(13), "naechste Taktgrenze");
 
@@ -385,11 +385,11 @@ fn pressing_release_twice_skips_nothing() {
     assert_eq!(drive.section(), Some(3));
 
     let first = drive.release();
-    assert!(first.contains("armiert"), "{first}");
+    assert!(first.contains("armed"), "{first}");
     let after_first = drive.commands.len();
     let second = drive.release();
     assert!(
-        second.contains("schon ein Wechsel"),
+        second.contains("already armed"),
         "der zweite Druck meldet den armierten Wechsel: {second}"
     );
     assert_eq!(
@@ -434,7 +434,7 @@ sections:
     drive.to(drive.at_bar(3) + 1_000);
     let message = drive.release();
     assert!(
-        message.contains("laufenden Aufnahme"),
+        message.contains("still recording"),
         "die Meldung erklaert die Verschiebung: {message}"
     );
     let (at, _) = drive.runner.armed_at().expect("armiert");
@@ -466,19 +466,19 @@ fn goto_jumps_and_is_refused_while_something_is_armed() {
     // During an `autorelease` section the follow-up is already armed.
     drive.to(drive.at_bar(1));
     let refused = drive.goto(4);
-    assert!(refused.contains("schon ein Wechsel"), "{refused}");
+    assert!(refused.contains("already armed"), "{refused}");
 
     // In the looping section 3 nothing is armed, so the jump goes through.
     drive.to(drive.at_bar(8 * 3) + 1_000);
     assert_eq!(drive.section(), Some(3));
     let ok = drive.goto(5);
-    assert!(ok.contains("ende"), "springt zur letzten Sektion: {ok}");
+    assert!(ok.contains("\"ende\""), "springt zur letzten Sektion: {ok}");
     drive.to(drive.at_bar(8 * 4));
     assert_eq!(drive.section(), Some(5), "Sektion 4 wurde uebersprungen");
 
     // An index the score does not have is refused by name.
     let bad = drive.goto(99);
-    assert!(bad.contains("gibt es nicht"), "{bad}");
+    assert!(bad.contains("no section 100"), "{bad}");
 }
 
 /// Stopping ends the run and silences every track that was sounding.
@@ -491,7 +491,7 @@ fn stop_all_silences_everything_and_ends_the_run() {
 
     let before = drive.commands.len();
     let message = drive.stop_all();
-    assert!(message.contains("Alles gestoppt"), "{message}");
+    assert!(message.contains("Stopped all"), "{message}");
     assert_eq!(drive.runner.phase(), Phase::Stopped);
     assert!(drive.commands.len() > before, "es wurde etwas gestoppt");
     assert!(
@@ -502,7 +502,7 @@ fn stop_all_silences_everything_and_ends_the_run() {
         "nur Stopps und Mithoeren aus: {:?}",
         &drive.commands[before..]
     );
-    assert!(drive.release().contains("zu Ende"));
+    assert!(drive.release().contains("has ended"));
 }
 
 /// Stopping while a change is armed cannot recall the armed commands, so it neutralises them where
@@ -518,7 +518,7 @@ fn stopping_while_a_change_is_armed_neutralises_it_where_it_lands() {
 
     let before = drive.commands.len();
     let message = drive.stop_all();
-    assert!(message.contains("armierte Wechsel"), "{message}");
+    assert!(message.contains("armed switch"), "{message}");
     let after: Vec<Command> = drive.commands[before..].to_vec();
     assert!(
         after.contains(&Command::ClearTrack {
@@ -865,8 +865,8 @@ fn a_score_is_refused_against_a_different_running_track_layout() {
 
     let too_few = vec![TrackDef::mono("gitarre", 1)];
     let err = check_tracks(&score, &too_few).expect_err("eine andere Anzahl");
-    assert!(err.contains("2 Tracks"), "{err}");
-    assert!(err.contains("beenden"), "die Meldung sagt, was zu tun ist: {err}");
+    assert!(err.contains("2 tracks"), "{err}");
+    assert!(err.contains("stop the engine"), "die Meldung sagt, was zu tun ist: {err}");
 
     let renamed = vec![TrackDef::mono("gitarre", 1), TrackDef::mono("stimme", 0)];
     let err = check_tracks(&score, &renamed).expect_err("anderer Name");
@@ -874,8 +874,8 @@ fn a_score_is_refused_against_a_different_running_track_layout() {
 
     let rewired = vec![TrackDef::mono("gitarre", 1), TrackDef::mono("voice", 3)];
     let err = check_tracks(&score, &rewired).expect_err("anderer Eingang");
-    assert!(err.contains("Eingang"), "{err}");
-    assert!(err.contains("falsche Quelle"), "{err}");
+    assert!(err.contains("input"), "{err}");
+    assert!(err.contains("wrong source"), "{err}");
 }
 
 /// Impossible scores are refused before anything is scheduled.
@@ -887,7 +887,7 @@ fn impossible_scores_are_refused_at_construction() {
     let err = Runner::new(score, timeline, BLOCK)
         .err()
         .expect("ohne Sektion");
-    assert!(err.contains("keine einzige Sektion"), "{err}");
+    assert!(err.contains("no sections"), "{err}");
 
     // The compiler already refuses more than `MAX_TRACKS` tracks; the runner carries the same
     // ceiling so a score reaching it from anywhere else cannot overflow the status snapshot.
@@ -901,7 +901,7 @@ fn impossible_scores_are_refused_at_construction() {
     let err = Runner::new(score, timeline, BLOCK)
         .err()
         .expect("zu viele Tracks");
-    assert!(err.contains("hoechstens"), "{err}");
+    assert!(err.contains("at most"), "{err}");
 }
 
 /// The position estimate the runner hands to the scheduler is the scheduler's own - one piece of
@@ -918,14 +918,14 @@ fn the_position_estimate_is_the_schedulers() {
 
 /// The buttons say something sensible before the first start and after the last section.
 #[test]
-fn the_buttons_answer_in_german_before_the_start_and_after_the_end() {
+fn the_buttons_answer_before_the_start_and_after_the_end() {
     let mut runner = runner_for(HENRY);
-    assert!(runner.next(0).contains("noch nicht"));
-    assert!(runner.goto(2, 0).contains("noch nicht"));
+    assert!(runner.next(0).contains("not running yet"));
+    assert!(runner.goto(2, 0).contains("not running yet"));
     assert!(runner.take_commands().is_empty());
 
     runner.start(0);
-    assert!(runner.start(0).contains("laeuft schon"));
+    assert!(runner.start(0).contains("already running"));
     assert_eq!(runner.phase(), Phase::CountIn);
 }
 
@@ -1017,7 +1017,7 @@ fn stop_all_during_a_take_keeps_the_track_silent_after_the_takes_planned_end() {
 
     let message = live.runner.stop_all(live.sim.pos());
     live.pump();
-    assert!(message.contains("Alles gestoppt"), "{message}");
+    assert!(message.contains("Stopped all"), "{message}");
 
     // Well past the bar the take would have ended on.
     let past = live.bar(6);
@@ -1047,7 +1047,7 @@ fn stop_all_just_before_a_take_ends_keeps_the_track_silent() {
 fn a_finished_score_can_be_rewound_and_played_again() {
     let mut live = Live::new(ONE_TAKE);
     live.run_to(live.bar(1));
-    assert!(live.runner.start(live.sim.pos()).contains("laeuft schon"));
+    assert!(live.runner.start(live.sim.pos()).contains("already running"));
     live.runner.stop_all(live.sim.pos());
     live.pump();
     assert!(
@@ -1131,10 +1131,10 @@ fn every_section_start_and_the_end_are_announced_once() {
     drive.to(drive.at_bar(8 * 5 + 2) + 1_000);
     notices.extend(drive.runner.take_notices());
     assert_eq!(notices.len(), 7, "{notices:#?}");
-    assert!(notices[0].starts_with("Sektion 1/6 \"gitarre_rec\" laeuft"), "{}", notices[0]);
-    assert!(notices[3].contains("loopt bis zum Release"), "{}", notices[3]);
-    assert!(notices[5].starts_with("Sektion 6/6 \"ende\" laeuft, 1 Takt,"), "{}", notices[5]);
-    assert!(notices[6].starts_with("Partitur zu Ende"), "{}", notices[6]);
+    assert!(notices[0].starts_with("Section 1/6 \"gitarre_rec\""), "{}", notices[0]);
+    assert!(notices[3].contains("loops until Release"), "{}", notices[3]);
+    assert!(notices[5].starts_with("Section 6/6 \"ende\": 1 bar,"), "{}", notices[5]);
+    assert!(notices[6].starts_with("End of the score"), "{}", notices[6]);
     assert!(drive.runner.take_notices().is_empty(), "abgeholt ist abgeholt");
 }
 
@@ -1205,4 +1205,52 @@ fn a_score_sets_up_pan_buses_and_latency_of_every_track() {
     assert_eq!(keys.monitor_send, BusSend::MONITOR, "nicht genannt heisst: Vorgabe");
     assert_eq!(keys.latency, TrackLatency::INHERITED);
     assert_eq!(status.refusal, Refusal::None);
+}
+
+/// Henry's score, started at many different points of the engine's timeline: in bar 3 of the
+/// looping section "voice_3" (overdub on top of an eight-bar loop), Release must arm the switch for
+/// the end of the *first* pass - six bars away - and the overdub must start with the section.
+///
+/// Regression: the loop grid `origin + n * len` and the section's bar line are rounded separately.
+/// When the grid point fell a sample *before* the bar line, the overdub was put on the next grid
+/// point - a whole loop late - and Release was pushed behind that late take: "in 14 bars" in an
+/// eight-bar section (screenshot live-score-armed, ticker "Takt 44, in 15 Takten").
+#[test]
+fn release_in_a_looping_overdub_section_lands_at_the_end_of_the_first_pass() {
+    let timeline = runner_for(HENRY).scheduler().timeline;
+    for start_bar in 0..80u64 {
+        let mut runner = runner_for(HENRY);
+        let est = timeline.bar_start(start_bar);
+        runner.start(est);
+        let first_bar = runner.armed_at().expect("armed").1;
+        let mut drive = Drive { commands: runner.take_commands(), first_bar, runner, pos: est };
+        let section_start = drive.at_bar(24);
+        drive.to(drive.at_bar(26) + 100);
+        assert_eq!(drive.section(), Some(3), "start {start_bar}");
+
+        let overdubs: Vec<u64> = drive
+            .of(1)
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::StartOverdub { at, .. } => Some(at),
+                _ => None,
+            })
+            .collect();
+        let last = *overdubs.last().expect("voice_3 overdubs");
+        assert!(
+            last.abs_diff(section_start) < 16,
+            "start {start_bar}: die Ebene beginnt mit der Sektion ({last} vs {section_start})"
+        );
+
+        let message = drive.release();
+        let (_, at_bar) = drive.runner.armed_at().expect("armed");
+        assert_eq!(at_bar, first_bar + 32, "start {start_bar}: {message}");
+        let armed = drive.runner.view(drive.pos).armed.expect("armed");
+        assert_eq!((armed.bars, armed.beats), (6, 0), "start {start_bar}");
+        assert_eq!(
+            message,
+            "Switch to \"alles\" armed at the end of pass 1 of \"voice_3\", in 6 bars.",
+            "start {start_bar}"
+        );
+    }
 }
