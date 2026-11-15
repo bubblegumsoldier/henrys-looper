@@ -235,7 +235,7 @@ export function TextView(p: Props) {
   const errorLines = useMemo(() => new Set(p.errors.map((e) => e.line).filter((l): l is number => !!l)), [p.errors]);
 
   return (
-    <div className="arr-main">
+    <div className="main">
       <div className="code-host" ref={host} data-error-lines={[...errorLines].join(",")} />
       <aside className="insp">
         <div className="insp-h">

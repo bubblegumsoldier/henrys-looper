@@ -1,14 +1,15 @@
 //! The words and icons of the arrangement editor.
 //!
 //! Every state has a fixed colour (`--st-*`), a fixed icon and a fixed word, and colour alone never
-//! carries the meaning (design/tokens.css). The words are the usual DAW terms. When a central
-//! glossary lands in `ui/src`, this file should import from it instead of defining its own.
+//! carries the meaning (design/tokens.css). Words and icons come from the central glossary
+//! (`shell/terms.ts`); this file only adds the grid's keyboard letters.
 
+import { SCORE_STATE, SCORE_STATE_KIND, STATE_ICON } from "../shell/terms";
 import type { ScoreState } from "../types";
 
 export interface StateLook {
   /** CSS modifier of `.clip`, `.st`, the picker. */
-  cls: "rec" | "dub" | "play" | "stop" | "hear";
+  cls: string;
   /** Icon class from icons.css. */
   icon: string;
   word: string;
@@ -16,13 +17,14 @@ export interface StateLook {
   key: string;
 }
 
-export const STATE_LOOK: Record<ScoreState, StateLook> = {
-  record: { cls: "rec", icon: "ic-rec", word: "Record", key: "R" },
-  overdub: { cls: "dub", icon: "ic-dub", word: "Overdub", key: "O" },
-  play: { cls: "play", icon: "ic-play", word: "Play", key: "P" },
-  stop: { cls: "stop", icon: "ic-stop", word: "Stop", key: "S" },
-  hear_through: { cls: "hear", icon: "ic-hear", word: "Monitor", key: "M" },
-};
+const KEY: Record<ScoreState, string> = { record: "R", overdub: "O", play: "P", stop: "S", hear_through: "M" };
+
+export const STATE_LOOK = Object.fromEntries(
+  (Object.keys(KEY) as ScoreState[]).map((s) => [
+    s,
+    { cls: SCORE_STATE_KIND[s], icon: `ic-${STATE_ICON[SCORE_STATE_KIND[s]]}`, word: SCORE_STATE[s], key: KEY[s] },
+  ]),
+) as Record<ScoreState, StateLook>;
 
 /** Picker order, as in the mockup: record, overdub, play, stop, monitor. */
 export const STATES: ScoreState[] = ["record", "overdub", "play", "stop", "hear_through"];

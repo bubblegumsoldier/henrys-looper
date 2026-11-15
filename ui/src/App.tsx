@@ -7,8 +7,8 @@
 //!  └──────────────────────────────────────────────────── toasts, popovers ───┘
 //! ```
 //!
-//! **Arrangement** is where a song is written (today: the score editor and block preview; next
-//! stage: grid, inspector, mixer). **Live** is the stage: big, readable from across the room,
+//! **Arrangement** is where a song is written (grid, inspector and YAML text of one document;
+//! the mixer is a later stage). **Live** is the stage: big, readable from across the room,
 //! every control reachable by MIDI. **Setup** is reachable from the gear at any time; with the
 //! engine stopped it is where the app opens, and starting the engine from it switches to Live.
 //!
@@ -56,8 +56,9 @@ export default function App() {
 
   useScoreModelSync();
   useWindowTitle();
-  // Arrangement embeds the score view, whose transport listens to the same keys.
-  useScoreKeys(setupOpen || mode === "live");
+  // Space / N start or release, Shift+S stops - in every mode: the arrangement has no transport of
+  // its own any more, the title bar is the transport.
+  useScoreKeys(true);
 
   useEffect(() => {
     if (error) fail(error);

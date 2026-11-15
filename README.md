@@ -28,8 +28,8 @@ Webserver. Drei Threads, klar getrennt.
 ```
  Oberfläche (Tauri + WebView)              Rust-Prozess
  ┌────────────────────────┐   invoke    ┌──────────────────────────────────────┐
- │ Editor │ Blockvorschau │ ◄─────────► │ Steuer-Thread ──► Runner             │
- │        │ MIDI-Monitor  │   emit      │       │ lock-freie Queues            │
+ │ Arrangement │ Live     │ ◄─────────► │ Steuer-Thread ──► Runner             │
+ │ Setup       │ MIDI     │   emit      │       │ lock-freie Queues            │
  └────────────────────────┘             │       ▼                              │
                                         │ Audio-Thread (Echtzeit)              │
                                         │ Mixer · Tracks · Layer · Klick       │
@@ -102,6 +102,26 @@ bekannte Controller verbinden sich beim Start und beim Anstecken selbst, jede Be
 gespeichert, Kommentare in der Datei bleiben erhalten). Ohne Controller testen:
 `cargo run -p looper-engine --example midi-virtual -- "Testpad"` legt einen virtuellen
 CoreMIDI-Eingang an und sendet Befehle von stdin (`note 36`, `cc 3 64`, `quit`).
+
+## Arrangement in der App
+
+Die Partitur lässt sich vollständig grafisch arrangieren (Modus **Arrangement**): ein Raster aus
+Sektionen × Spuren, rechts der Inspektor. **Grid | Text (YAML)** sind zwei Sichten desselben
+Dokuments — was im Raster passiert, steht sofort im Text (kanonisch formatiert, Kommentare
+bleiben am Element), Getipptes erscheint nach einer kurzen Pause im Raster. ⌘Z/⇧⌘Z gelten für
+beide Sichten gemeinsam. Ist der Text fehlerhaft, zeigt das Raster den letzten gültigen Stand
+schreibgeschützt.
+
+- Clip anklicken (⇧ = Rechteck, ⌘ = einzeln dazu), dann `R` Record · `O` Overdub · `P` Play ·
+  `S` Stop · `M` Monitor; Pfeiltasten wandern, `⌫` setzt auf die Vorlage zurück.
+- Sektionsmarker: ziehen = verschieben, rechte Kante ziehen = Takte, Doppelklick = umbenennen
+  (`repeat:` zieht mit, `transport.goto.<n>` wird beim Verschieben umnummeriert); ⌘D dupliziert.
+- Spurkopf: ziehen = umsortieren, Doppelklick = umbenennen (Zustände und `track.<name>.*`
+  ziehen mit), Mithören/Busse als Schalter, Pan am Knopf.
+- **File** (Neu, Öffnen, Zuletzt, Sichern) und **Load** (mit Einzähler) in der Werkzeugleiste.
+  Läuft eine Partitur, ist das Arrangement gesperrt; ein Klick auf einen Sektionsmarker springt.
+
+Die Logik dahinter (Bearbeitungsoperationen, Verweise, Undo) testet `npm test` in `ui/` (vitest).
 
 ## Benutzen
 

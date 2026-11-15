@@ -23,10 +23,9 @@ import * as ops from "./ops";
 import { secondsPerBar, totalBars } from "./resolve";
 import { NONE, moveFocus, prune, type Selection } from "./selection";
 import { TextView } from "./TextView";
+import type { ScoreActions } from "./scoreActions";
+import { useScoreFile } from "../scoreFile";
 import { docStore, useDoc, useEngineTracks, useRun } from "./useDoc";
-import "./design-tokens.css";
-import "./design-icons.css";
-import "./design-app.css";
 import "./arrangement.css";
 
 type View = "grid" | "text";
@@ -65,11 +64,95 @@ function typing(target: EventTarget | null): boolean {
 interface Props {
   /** Jump the running score to a section (0-based). */
   onGoto: (section: number) => void;
-  onSave: () => void;
-  fileName: string | null;
+  actions: ScoreActions;
 }
 
-export function Arrangement({ onGoto, onSave, fileName }: Props) {
+/** New, Open, recent files, Save, Save as - one menu, so the toolbar keeps the mockup's order. */
+function FileMenu({ actions }: { actions: ScoreActions }) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: PointerEvent) => {
+      if (!(e.target as HTMLElement).closest?.(".filemenu")) setOpen(false);
+    };
+    window.addEventListener("pointerdown", close);
+    return () => window.removeEventListener("pointerdown", close);
+  }, [open]);
+  const act = (f: () => Promise<void>) => () => {
+    setOpen(false);
+    void f();
+  };
+  return (
+    <div className="filemenu">
+      <button className={`btn s${open ? " on" : ""}`} onClick={() => setOpen(!open)} title="Score file">
+        <i className="ic ic-folder" />
+        File
+        <i className="ic ic-chev-d" />
+      </button>
+      {open && (
+        <div className="menu">
+          <button onClick={act(actions.newScore)}>
+            New<kbd>{MOD_LABEL}N</kbd>
+          </button>
+          <button onClick={act(actions.openFile)}>
+            Open…<kbd>{MOD_LABEL}O</kbd>
+          </button>
+          <button onClick={act(actions.save)}>
+            Save<kbd>{MOD_LABEL}S</kbd>
+          </button>
+          <button onClick={act(actions.saveAs)}>
+            Save as…<kbd>⇧{MOD_LABEL}S</kbd>
+          </button>
+          {actions.recent.length > 0 && <div className="menu-h">Recent</div>}
+          {actions.recent.map((r) => (
+            <button key={r.path} disabled={!r.exists} title={r.path} onClick={act(() => actions.openRecent(r.path))}>
+              {r.name}
+              {r.exists ? "" : " (missing)"}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Count-in and Load: hands the score to the runner. */
+function LoadControls({ actions, ok, locked }: { actions: ScoreActions; ok: boolean; locked: boolean }) {
+  return (
+    <>
+      <span className="lbl" title="Bars of click before the first section (1 to 8)">
+        Count-in
+      </span>
+      <span className="field countin">
+        <input
+          type="number"
+          min={1}
+          max={8}
+          value={actions.countIn}
+          disabled={locked}
+          onChange={(e) => actions.setCountIn(Number(e.target.value))}
+          title="Bars of click before the first section (1 to 8)"
+        />
+      </span>
+      <button
+        className={`btn s${actions.stale ? " accent" : ""}`}
+        disabled={!ok || locked || actions.loading}
+        onClick={() => void actions.load()}
+        title={
+          actions.stale
+            ? "The score changed since it was loaded — load it again. Needs a running engine with empty tracks."
+            : "Load the score into the runner. Needs a running engine with empty tracks."
+        }
+      >
+        <i className="ic ic-target" />
+        {actions.stale ? "Reload" : "Load"}
+      </button>
+    </>
+  );
+}
+
+export function Arrangement({ onGoto, actions }: Props) {
+  const fileName = useScoreFile().name;
   const state = useDoc();
   const run = useRun();
   const engineTracks = useEngineTracks();
@@ -305,6 +388,9 @@ export function Arrangement({ onGoto, onSave, fileName }: Props) {
                 <i className="ic ic-plus" />
               </button>
               <div className="sep" />
+              <FileMenu actions={actions} />
+              <LoadControls actions={actions} ok={state.inSync && errors.length === 0 && !!doc} locked={locked} />
+              <div className="sep" />
               <button className={`btn s${inspector ? " on" : ""}`} onClick={() => setInspector(!inspector)}>
                 <i className="ic ic-split" />
                 Inspector
@@ -319,17 +405,19 @@ export function Arrangement({ onGoto, onSave, fileName }: Props) {
               <div className="grow" />
               <span className="lbl">Both views edit the same score — changes show up in the grid at once.</span>
               <div className="sep" />
-              <button className="btn s" onClick={onSave} title={`Save (${MOD_LABEL}+S)`}>
+              <FileMenu actions={actions} />
+              <button className="btn s" onClick={() => void actions.save()} title={`Save (${MOD_LABEL}+S)`}>
                 <i className="ic ic-save" />
                 Save
               </button>
+              <LoadControls actions={actions} ok={state.inSync && errors.length === 0 && !!doc} locked={locked} />
             </>
           )}
         </div>
 
         {view === "grid" ? (
-          <div className={`arr-main${inspector ? "" : " no-insp"}`}>
-            <div className="arr-editor">
+          <div className={`main${inspector ? "" : " no-insp"}`}>
+            <div className="editor">
               {doc ? (
                 <Grid
                   doc={doc}
