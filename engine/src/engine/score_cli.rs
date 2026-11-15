@@ -133,6 +133,27 @@ pub fn track_defs(score: &CompiledScore) -> Vec<TrackDef> {
         .collect()
 }
 
+/// A score with instrument tracks is played in the app, not here: the command line neither listens
+/// to a MIDI keyboard for an instrument nor hosts the instrument plugin, and a track that would
+/// silently stay silent for a whole song is worse than a sentence before it starts.
+pub fn refuse_instruments(score: &CompiledScore) -> Result<(), String> {
+    let names: Vec<&str> = score
+        .tracks
+        .iter()
+        .filter(|t| t.is_instrument())
+        .map(|t| t.name.as_str())
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "The score has instrument tracks ({}: 'input: instrument'). The command line plays audio \
+         inputs only - it does not host instrument plugins or listen to a MIDI keyboard for them. \
+         Play this score in the app; '--check' shows it here without a device.",
+        names.join(", ")
+    ))
+}
+
 /// The header: which section, where inside it, and what is armed.
 fn section_line(runner: &Runner, view: &super::runner::RunnerView, status: &Status) -> String {
     let head = match view.section {
@@ -278,9 +299,13 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
 
     if opts.check {
         print_score(&score, &defs, opts.latency_frames, 48_000);
+        for note in crate::score::score_notes(&std::fs::read_to_string(&opts.file).unwrap_or_default()) {
+            println!("Note: {note}");
+        }
         println!("\nScore compiled, no errors. No device opened, no sound.");
         return Ok(());
     }
+    refuse_instruments(&score)?;
 
     let setup = audio::open_duplex(dev)?;
     let rate = setup.sample_rate();

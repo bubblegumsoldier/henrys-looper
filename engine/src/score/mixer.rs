@@ -195,6 +195,26 @@ pub struct TrackMixSource {
     pub delay: Option<DelayLine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverb: Option<ReverbLine>,
+    /// The instrument plugin of an instrument track, by plugin id (`au:aumu:dls :appl`). Only the
+    /// id: the plugin's state stays on this computer (`instruments.json`, by track name).
+    /// **Absent means "keep what the track has"** - unlike the fader fields, because a score
+    /// written before this field existed must not take anybody's piano away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument: Option<String>,
+    /// The effect plugins of the track's insert slots, in slot order, by plugin id. Like
+    /// `instrument`: only ids, the states stay in `plugin-rack.json`; absent keeps what the track
+    /// has, `inserts: []` empties the slots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inserts: Option<Vec<InsertLine>>,
+}
+
+/// One effect plugin of `inserts: [...]`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InsertLine {
+    pub plugin: String,
+    /// Absent means `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bypass: Option<bool>,
 }
 
 /// The whole section.
@@ -322,6 +342,20 @@ impl TrackMixSource {
             .as_deref()
             .and_then(parse_preset)
             .unwrap_or(FxPreset::Dry)
+    }
+
+    /// True when the entry names plugins (instrument or inserts).
+    pub fn has_plugins(&self) -> bool {
+        self.instrument.is_some() || self.inserts.is_some()
+    }
+
+    /// The same entry without the plugin fields - what the free mode's `mixer.json` keeps (the
+    /// plugins have their own files there).
+    #[must_use]
+    pub fn without_plugins(mut self) -> Self {
+        self.instrument = None;
+        self.inserts = None;
+        self
     }
 
     /// True when the entry says anything about the effect chain beyond its preset.

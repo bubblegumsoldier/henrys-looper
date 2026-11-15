@@ -14,7 +14,8 @@ use std::collections::HashMap;
 use super::error::{ScoreError, ScoreIssue, allowed, suggest, suggest_or_list};
 use super::map::OrderedMap;
 use super::model::{
-    MidiBindingSource, MidiKind, ScoreSource, SectionSource, TrackSource, TrackState,
+    GRID_NAMES, InstrumentSource, LoopKind, MidiBindingSource, MidiKind, ScoreSource,
+    SectionSource, TrackSource, TrackState,
 };
 use super::yaml::{Entry, Node, NodeKind, Pos, parse_document};
 use crate::engine::bus::BusSend;
@@ -34,15 +35,20 @@ const ROOT_FIELDS: [&str; 8] = [
     "sections",
     "mixer",
 ];
-const TRACK_FIELDS: [&str; 7] = [
+const TRACK_FIELDS: [&str; 10] = [
     "input",
+    "midi",
     "pan",
     "monitor",
     "latency",
     "latency_trim",
     "bus",
     "monitor_bus",
+    "loop",
+    "grid",
 ];
+const TRACK_MIDI_FIELDS: [&str; 3] = ["device", "channel", "notes"];
+const CLIP_FIELDS: [&str; 2] = ["state", "grid"];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
 /// Fields one binding may carry. The *keys* of `midi:` are not a closed list any more - any address
 /// of the parameter tree does, and the two Ableton-era names `next_section` and `stop_all` are
@@ -91,25 +97,51 @@ const BEAT_UNITS: [u32; 6] = [1, 2, 4, 8, 16, 32];
 /// Parse and validate, without resolving `repeat:`. [`super::compile_score`] is this plus
 /// `compile.rs`.
 pub fn read_score(yaml_text: &str) -> Result<ScoreSource, ScoreError> {
-    let document = parse_document(yaml_text)?;
+    read_score_noted(yaml_text).0
+}
+
+/// [`read_score`] plus the notes: things that are written correctly but do nothing yet (`loop:
+/// midi`, `grid:`). They never make a score fail - the format is fixed before the engine has the
+/// feature, so a file written today keeps working when it arrives.
+pub fn read_score_noted(yaml_text: &str) -> (Result<ScoreSource, ScoreError>, Vec<ScoreIssue>) {
+    let document = match parse_document(yaml_text) {
+        Ok(document) => document,
+        Err(error) => return (Err(error), Vec::new()),
+    };
     let mut reader = Reader::default();
     let score = reader.read_root(&document);
+    let notes = reader.notes;
     if reader.issues.is_empty() {
         // Only a clean read produces a score; anything else would hand the compiler half a file.
-        score.ok_or_else(|| {
+        let score = score.ok_or_else(|| {
             ScoreError::single(ScoreIssue::new(None, "The score could not be read."))
-        })
+        });
+        (score, notes)
     } else {
-        Err(ScoreError::new(reader.issues))
+        (Err(ScoreError::new(reader.issues)), notes)
     }
+}
+
+/// Only the notes of a score (see [`read_score_noted`]), sorted by position. Empty when the text
+/// does not parse at all.
+pub fn score_notes(yaml_text: &str) -> Vec<ScoreIssue> {
+    let mut notes = read_score_noted(yaml_text).1;
+    notes.sort_by_key(|n| (n.line.is_none(), n.line.unwrap_or(0), n.column.unwrap_or(0)));
+    notes
 }
 
 #[derive(Default)]
 struct Reader {
     issues: Vec<ScoreIssue>,
+    /// Not errors: written correctly, not supported by the engine yet.
+    notes: Vec<ScoreIssue>,
 }
 
 impl Reader {
+    fn note(&mut self, pos: Option<Pos>, message: impl Into<String>) {
+        self.notes.push(ScoreIssue::new(pos, message));
+    }
+
     fn error(&mut self, pos: Option<Pos>, message: impl Into<String>) {
         self.issues.push(ScoreIssue::new(pos, message));
     }
@@ -362,9 +394,14 @@ impl Reader {
             .and_then(|node| self.read_midi(node, &track_names, sections.len()))
             .unwrap_or_default();
         // Optional, and absent from every score written before it existed.
+        let instrument_tracks: Vec<&str> = tracks
+            .iter()
+            .filter(|(_, t)| t.instrument.is_some())
+            .map(|(name, _)| name)
+            .collect();
         let mixer = fields
             .get("mixer")
-            .and_then(|node| self.read_mixer(node, &track_names));
+            .and_then(|node| self.read_mixer(node, &track_names, &instrument_tracks));
 
         Some(ScoreSource {
             title,
@@ -504,7 +541,8 @@ impl Reader {
                         Some(node.pos),
                         format!("Track '{name}' has no 'input'."),
                         "A track names its input channel on the interface, 1-based: 'input: 1' \
-                         for mono, 'input: [3, 4]' for stereo.",
+                         for mono, 'input: [3, 4]' for stereo - or 'input: instrument' for an \
+                         instrument plugin played over MIDI.",
                     );
                 }
                 None
@@ -547,11 +585,52 @@ impl Reader {
             Some(node) => self.read_bus_send(name, "bus", node),
             None => Some(BusSend::BOTH),
         };
+        let is_instrument = matches!(input, Some(InputSpec::Instrument));
         let monitor_bus = match fields.get("monitor_bus") {
             Some(node) => self.read_bus_send(name, "monitor_bus", node),
+            // An instrument's "live input" is music, not a voice the PA already carries: it is
+            // heard in the room as well, as the engine does it for a setup track.
+            None if is_instrument => Some(BusSend::BOTH),
             None => Some(BusSend::MONITOR),
         };
-        let (input, input_right) = input?;
+        let midi = match fields.get("midi") {
+            Some(node) => {
+                if input.is_some() && !is_instrument {
+                    self.error_with(
+                        Some(node.pos),
+                        format!("Track '{name}' has 'midi', but it records an audio input."),
+                        "'midi' says which keyboard plays an instrument track; write \
+                         'input: instrument' or remove 'midi'.",
+                    );
+                    None
+                } else {
+                    self.read_track_midi(name, node).map(Some)
+                }
+            }
+            None => Some(None),
+        };
+        // An instrument track's compensation is not a cable: the engine knows it exactly (output
+        // latency, one block and the plugin's own), so only the surcharge may be written.
+        if is_instrument && let Some(node) = fields.get("latency") {
+            self.error_with(
+                Some(node.pos),
+                format!("Track '{name}' is an instrument track and has no measured 'latency'."),
+                "Its compensation is automatic (output latency + one block + the plugin's own); \
+                 use 'latency_trim' to shift it by ear.",
+            );
+        }
+        let loop_kind = match fields.get("loop") {
+            Some(node) => self.read_loop_kind(name, node, input.is_some() && !is_instrument),
+            None => Some(LoopKind::Audio),
+        };
+        let grid = match fields.get("grid") {
+            Some(node) => self.read_grid(&format!("'grid' of Track '{name}'"), node).map(Some),
+            None => Some(None),
+        };
+        let (input, input_right, instrument) = match input? {
+            InputSpec::Channels(left, right) => (left, right, None),
+            InputSpec::Instrument => (0, None, Some(midi?.unwrap_or_default())),
+        };
         Some(TrackSource {
             input,
             input_right,
@@ -561,7 +640,165 @@ impl Reader {
             latency_trim: latency_trim?,
             bus: bus?.name().to_string(),
             monitor_bus: monitor_bus?.name().to_string(),
+            instrument,
+            loop_kind: loop_kind?,
+            grid: grid?,
         })
+    }
+
+    /// `midi: {device: "KeyLab 49", channel: 1, notes: 36-51}` of an instrument track.
+    fn read_track_midi(&mut self, name: &str, node: &Node<'_>) -> Option<InstrumentSource> {
+        let what = format!("'midi' of Track '{name}'");
+        let entries = self.as_map(node, &what)?;
+        let fields = self.index_fields(entries, &TRACK_MIDI_FIELDS, &[], &what);
+        let mut out = InstrumentSource::default();
+        let mut ok = true;
+        if let Some(node) = fields.get("device") {
+            match self.as_str(node, &format!("'device' in {what}")) {
+                Some(text) if !text.trim().is_empty() => out.device = Some(text.to_string()),
+                Some(_) => {
+                    self.error_with(
+                        Some(node.pos),
+                        format!("'device' in {what} is empty."),
+                        "Name the MIDI device (or a unique part of its name), or leave 'device' \
+                         out to listen to every device.",
+                    );
+                    ok = false;
+                }
+                None => ok = false,
+            }
+        }
+        if let Some(node) = fields.get("channel") {
+            match &node.kind {
+                NodeKind::Str(text) if text.as_ref() == "all" => {}
+                NodeKind::Int(_) => match self.as_int(node, &format!("'channel' in {what}"), 1, 16) {
+                    Some(c) => out.channel = Some(c as u8),
+                    None => ok = false,
+                },
+                _ => {
+                    self.error_with(
+                        Some(node.pos),
+                        format!("'channel' in {what} must be 1 to 16 or 'all', found: {}.", node.describe()),
+                        "e.g. 'channel: 1', or 'channel: all' (the same as leaving it out).",
+                    );
+                    ok = false;
+                }
+            }
+        }
+        if let Some(node) = fields.get("notes") {
+            match self.read_note_range(&format!("'notes' in {what}"), node) {
+                Some((low, high)) => {
+                    out.note_low = Some(low);
+                    out.note_high = Some(high);
+                }
+                None => ok = false,
+            }
+        }
+        ok.then_some(out)
+    }
+
+    /// `notes: 36-51` - the lowest and the highest key, MIDI note numbers, both included.
+    fn read_note_range(&mut self, what: &str, node: &Node<'_>) -> Option<(u8, u8)> {
+        let hint = "Write the lowest and the highest key as MIDI note numbers, e.g. 'notes: 36-51' \
+                    (C1 to D#2 on most pads); leave 'notes' out for all keys.";
+        let text = match &node.kind {
+            NodeKind::Str(text) => text.to_string(),
+            _ => {
+                self.error_with(
+                    Some(node.pos),
+                    format!("{what} must be a range like 36-51, found: {}.", node.describe()),
+                    hint,
+                );
+                return None;
+            }
+        };
+        let parsed = text.split_once('-').and_then(|(a, b)| {
+            Some((a.trim().parse::<u8>().ok()?, b.trim().parse::<u8>().ok()?))
+        });
+        match parsed {
+            Some((low, high)) if low <= high && high <= 127 => Some((low, high)),
+            Some((low, high)) if low > high => {
+                self.error_with(
+                    Some(node.pos),
+                    format!("{what}: '{text}' goes downwards."),
+                    format!("Write the lower key first: '{high}-{low}'."),
+                );
+                None
+            }
+            _ => {
+                self.error_with(
+                    Some(node.pos),
+                    format!("{what}: '{text}' is not a range of MIDI notes (0 to 127)."),
+                    hint,
+                );
+                None
+            }
+        }
+    }
+
+    /// `loop: audio|midi`. `midi` is reserved: it needs an instrument track, and until the engine
+    /// stores notes it is a note, not an error.
+    fn read_loop_kind(&mut self, name: &str, node: &Node<'_>, audio_input: bool) -> Option<LoopKind> {
+        let what = format!("'loop' of Track '{name}'");
+        let text = self.as_str(node, &what)?;
+        let kind = match text {
+            "audio" => LoopKind::Audio,
+            "midi" => LoopKind::Midi,
+            _ => {
+                self.error_with(
+                    Some(node.pos),
+                    format!("{what}: '{text}' is not a loop kind."),
+                    suggest_or_list(text, &["audio", "midi"]),
+                );
+                return None;
+            }
+        };
+        if kind == LoopKind::Midi {
+            if audio_input {
+                self.error_with(
+                    Some(node.pos),
+                    format!("{what}: a MIDI loop needs an instrument track."),
+                    "Only an instrument track plays notes; write 'input: instrument' or 'loop: audio'.",
+                );
+                return None;
+            }
+            self.note(
+                Some(node.pos),
+                format!(
+                    "Track '{name}': 'loop: midi' is not supported yet - the track records its \
+                     sound (audio) for now."
+                ),
+            );
+        }
+        Some(kind)
+    }
+
+    /// `grid: 1/16` - reserved for the quantisation of MIDI takes; checked, noted, no effect.
+    fn read_grid(&mut self, what: &str, node: &Node<'_>) -> Option<String> {
+        let text = match &node.kind {
+            NodeKind::Str(text) => text.to_string(),
+            _ => {
+                self.error_with(
+                    Some(node.pos),
+                    format!("{what} must be a note value, found: {}.", node.describe()),
+                    allowed(&GRID_NAMES),
+                );
+                return None;
+            }
+        };
+        if !GRID_NAMES.contains(&text.as_str()) {
+            self.error_with(
+                Some(node.pos),
+                format!("{what}: '{text}' is not a note grid."),
+                suggest_or_list(&text, &GRID_NAMES),
+            );
+            return None;
+        }
+        self.note(
+            Some(node.pos),
+            format!("{what} is not supported yet - notes are not quantised for now."),
+        );
+        Some(text)
     }
 
     /// `bus: monitor`, `bus: main+monitor`, `bus: none` - which output buses a source is heard on.
@@ -591,9 +828,19 @@ impl Reader {
     /// A list of exactly two entries and nothing else: one entry is a mono track written oddly, and
     /// three would be a surround format the engine does not have. Both get their own sentence
     /// rather than being quietly truncated.
-    fn read_track_input(&mut self, name: &str, node: &Node<'_>) -> Option<(u32, Option<u32>)> {
+    fn read_track_input(&mut self, name: &str, node: &Node<'_>) -> Option<InputSpec> {
         let what = format!("'input' of Track '{name}'");
         match &node.kind {
+            NodeKind::Str(text) if text.as_ref() == "instrument" => Some(InputSpec::Instrument),
+            NodeKind::Str(text) => {
+                self.error_with(
+                    Some(node.pos),
+                    format!("{what}: '{text}' is not an input."),
+                    "An input channel of the interface, 1-based ('input: 1', 'input: [3, 4]'), \
+                     or 'input: instrument'.",
+                );
+                None
+            }
             NodeKind::Seq(items) => {
                 if items.len() != 2 {
                     self.error_with(
@@ -620,9 +867,12 @@ impl Reader {
                     );
                     return None;
                 }
-                Some((left, Some(right)))
+                Some(InputSpec::Channels(left, Some(right)))
             }
-            _ => Some((self.as_int(node, &what, 1, MAX_INPUT_CHANNEL)?, None)),
+            _ => Some(InputSpec::Channels(
+                self.as_int(node, &what, 1, MAX_INPUT_CHANNEL)?,
+                None,
+            )),
         }
     }
 
@@ -963,7 +1213,7 @@ impl Reader {
             );
         }
 
-        let tracks = fields
+        let (tracks, grids) = fields
             .get("tracks")
             .and_then(|node| self.read_section_tracks(id, node, track_names))
             .unwrap_or_default();
@@ -976,6 +1226,7 @@ impl Reader {
                 autorelease,
                 quantize,
                 tracks,
+                grids,
                 source_line: Some(node.pos.line),
             },
             repeat_node.map(|node| node.pos),
@@ -1003,9 +1254,10 @@ impl Reader {
         section: &str,
         node: &Node<'_>,
         track_names: &[&str],
-    ) -> Option<OrderedMap<TrackState>> {
+    ) -> Option<(OrderedMap<TrackState>, OrderedMap<String>)> {
         let entries = self.as_map(node, &format!("'tracks' in Section '{section}'"))?;
         let mut states = OrderedMap::new();
+        let mut grids = OrderedMap::new();
         let state_names = TrackState::names();
         for entry in entries {
             let Some(name) = entry.key.as_str() else {
@@ -1037,12 +1289,39 @@ impl Reader {
                 );
                 continue;
             }
-            let Some(text) = entry.value.as_str() else {
+            // `voice: record`, or - with a clip setting - `keys: {state: play, grid: 1/16}`.
+            let state_node = match &entry.value.kind {
+                NodeKind::Map(fields) => {
+                    let what = format!("Track '{name}' in Section '{section}'");
+                    let fields = self.index_fields(fields, &CLIP_FIELDS, &[], &what);
+                    if let Some(node) = fields.get("grid")
+                        && let Some(grid) = self.read_grid(&format!("'grid' of {what}"), node)
+                    {
+                        grids.insert(name, grid);
+                    }
+                    match fields.get("state") {
+                        Some(node) => *node,
+                        None => {
+                            self.error_with(
+                                Some(entry.value.pos),
+                                format!("{what} has no 'state'."),
+                                format!(
+                                    "With a clip setting the state is written out: \
+                                     '{name}: {{state: play, grid: 1/16}}'."
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                _ => &entry.value,
+            };
+            let Some(text) = state_node.as_str() else {
                 self.error_with(
-                    Some(entry.value.pos),
+                    Some(state_node.pos),
                     format!(
                         "The state of Track '{name}' in Section '{section}' must be text, found: {}.",
-                        entry.value.describe()
+                        state_node.describe()
                     ),
                     allowed(&state_names),
                 );
@@ -1051,13 +1330,13 @@ impl Reader {
             match TrackState::parse(text) {
                 Some(state) => states.insert(name, state),
                 None => self.error_with(
-                    Some(entry.value.pos),
+                    Some(state_node.pos),
                     format!("Unknown state '{text}' for Track '{name}' in Section '{section}'."),
                     suggest_or_list(text, &state_names),
                 ),
             }
         }
-        Some(states)
+        Some((states, grids))
     }
 
     /// `repeat:` must name an existing section, and the graph it spans must be acyclic.
@@ -1121,6 +1400,13 @@ impl Reader {
             }
         }
     }
+}
+
+/// What `input:` says.
+enum InputSpec {
+    /// 1-based left (or only) channel, and the right one of a stereo pair.
+    Channels(u32, Option<u32>),
+    Instrument,
 }
 
 fn required_hint(field: &str) -> &'static str {

@@ -172,6 +172,9 @@ struct TrackRun {
     name: String,
     /// Whether the score allows this track to be monitored at all.
     can_monitor: bool,
+    /// An instrument track: heard whenever it is played (unless the score says monitor: false,
+    /// which the engine was started with), so the sections never switch its monitoring.
+    instrument: bool,
     /// What the last scheduled section asks of it.
     target: ScoreState,
     /// Whether the runner believes the track is audible once that section has begun.
@@ -306,6 +309,7 @@ impl Runner {
             .map(|track| TrackRun {
                 name: track.name.clone(),
                 can_monitor: track.monitor,
+                instrument: track.is_instrument(),
                 // Before anything is scheduled every track is silent and empty, which is exactly
                 // the state a freshly started engine is in.
                 target: ScoreState::Stop,
@@ -770,6 +774,9 @@ impl Runner {
     /// Monitoring is untimed, so it is only ever changed here - when the engine has reached the
     /// boundary - and only when it really differs from what the engine was last told.
     fn set_monitor(&mut self, track: usize, on: bool) {
+        if self.tracks[track].instrument {
+            return;
+        }
         let on = on && self.tracks[track].can_monitor;
         if self.tracks[track].monitor == on {
             return;
@@ -1054,7 +1061,12 @@ pub fn setup_commands(score: &CompiledScore) -> Vec<Command> {
             track,
             latency: spec.track_latency(),
         });
-        out.push(Command::SetMonitor { track, on: false });
+        // An instrument track keeps the monitoring it was started with: heard, unless the score
+        // says monitor: false (the host starts the engine that way). The engine would ignore
+        // the command anyway.
+        if !spec.is_instrument() {
+            out.push(Command::SetMonitor { track, on: false });
+        }
     }
     out
 }

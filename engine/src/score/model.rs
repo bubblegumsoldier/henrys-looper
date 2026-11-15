@@ -161,7 +161,71 @@ pub struct TrackSource {
     /// hearing him twice is worse than not hearing him through the looper at all.
     #[serde(default = "default_monitor_bus")]
     pub monitor_bus: String,
+    /// `input: instrument`: the track is played by an instrument plugin over MIDI, not by an input
+    /// channel (`input` is then 0). Which MIDI device, channel and keys play it is `midi:`; which
+    /// plugin it is stands in `mixer.tracks.<name>.instrument`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument: Option<InstrumentSource>,
+    /// What a take of this track stores: `audio` (the default, and the only one the engine has) or
+    /// `midi` (reserved: the notes, for an instrument track - parsed and checked, not played yet).
+    #[serde(default, rename = "loop", skip_serializing_if = "LoopKind::is_audio")]
+    pub loop_kind: LoopKind,
+    /// Note grid a later quantisation will snap a MIDI take to (`none`, `1/4`, `1/8`, `1/16`,
+    /// `1/8t`, `1/16t`). Reserved: parsed and checked, no effect yet. Not to be confused with a
+    /// section's `quantize:`, which is about *when a section changes*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<String>,
 }
+
+/// How an instrument track is played: which MIDI device, which channel, which keys.
+///
+/// ```yaml
+/// tracks:
+///   keys:  {input: instrument, midi: {device: "KeyLab 49", channel: 1}}
+///   drums: {input: instrument, midi: {device: "MPD218", channel: 10, notes: 36-51}}
+/// ```
+///
+/// Everything is optional: no device means every connected one, no channel every channel, no
+/// `notes` all 128 keys.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstrumentSource {
+    /// MIDI input port, by name or a unique part of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// 1..=16; `None` is `all`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+    /// Lowest and highest key (MIDI note numbers) - `notes: 36-51`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_low: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_high: Option<u8>,
+}
+
+/// What a take stores. See [`TrackSource::loop_kind`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopKind {
+    #[default]
+    Audio,
+    Midi,
+}
+
+impl LoopKind {
+    pub fn is_audio(&self) -> bool {
+        *self == LoopKind::Audio
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LoopKind::Audio => "audio",
+            LoopKind::Midi => "midi",
+        }
+    }
+}
+
+/// The words `grid:` accepts, coarse to fine, triplets last.
+pub const GRID_NAMES: [&str; 6] = ["none", "1/4", "1/8", "1/16", "1/8t", "1/16t"];
 
 fn default_true() -> bool {
     true
@@ -253,6 +317,10 @@ pub struct SectionSource {
     pub quantize: Option<Quantize>,
     #[serde(default)]
     pub tracks: OrderedMap<TrackState>,
+    /// Per-clip note grid (`keys: {state: play, grid: 1/16}`), overriding the track's `grid:`.
+    /// Reserved like the track's own: parsed and checked, no effect yet.
+    #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
+    pub grids: OrderedMap<String>,
     /// 1-based line the section starts on. Not part of the written format - the reader fills it in
     /// so the block preview can point back at the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -319,9 +387,22 @@ pub struct CompiledTrack {
     /// Which output buses the monitored live input of this track goes to.
     #[serde(default = "default_monitor_bus")]
     pub monitor_bus: String,
+    /// Present on an instrument track (`input: instrument`); `input`/`input_channel` are 0 then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument: Option<InstrumentSource>,
+    /// Reserved, see [`TrackSource::loop_kind`].
+    #[serde(default, rename = "loop", skip_serializing_if = "LoopKind::is_audio")]
+    pub loop_kind: LoopKind,
+    /// Reserved, see [`TrackSource::grid`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<String>,
 }
 
 impl CompiledTrack {
+    pub fn is_instrument(&self) -> bool {
+        self.instrument.is_some()
+    }
+
     /// The loop routing in the form the engine wants it. The compiler has already refused anything
     /// that does not parse, so an unreadable value here can only mean a hand-edited compiled score
     /// and falls back to "heard everywhere" rather than to silence.
@@ -344,6 +425,9 @@ impl CompiledTrack {
 
     /// The input in the form the engine wants it.
     pub fn track_input(&self) -> TrackInput {
+        if self.instrument.is_some() {
+            return TrackInput::Instrument;
+        }
         match self.input_channel_right {
             Some(right) => TrackInput::Stereo {
                 left: self.input_channel as usize,

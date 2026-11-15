@@ -28,10 +28,11 @@ use super::compile_score;
 use super::error::{ScoreError, ScoreIssue};
 use super::map::OrderedMap;
 use super::mixer::{
-    BandLine, BusLevels, CompLine, DelayLine, HighPassLine, ReverbLine, SwitchLine, TrackMixSource,
+    BandLine, BusLevels, CompLine, DelayLine, HighPassLine, InsertLine, ReverbLine, SwitchLine,
+    TrackMixSource,
 };
-use super::model::{CompiledScore, TrackState};
-use super::read::read_score;
+use super::model::{CompiledScore, InstrumentSource, TrackState};
+use super::read::{read_score, score_notes};
 use super::yaml::{Node, NodeKind, Pos, parse_document};
 use crate::engine::schedule::Quantize;
 
@@ -69,8 +70,14 @@ impl Comments {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocTrack {
     pub name: String,
-    /// 1-based input, the left one of a stereo pair.
+    /// 1-based input, the left one of a stereo pair. 0 on an instrument track.
     pub input: u32,
+    /// `input: instrument` - played by an instrument plugin over MIDI.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub instrument: bool,
+    /// `midi: {device, channel, notes}` of an instrument track.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub midi: Option<InstrumentSource>,
     /// 1-based right input of a stereo track; `None` for mono.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_right: Option<u32>,
@@ -86,6 +93,12 @@ pub struct DocTrack {
     pub bus: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor_bus: Option<String>,
+    /// `loop: audio|midi`, as written (reserved).
+    #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
+    pub loop_kind: Option<String>,
+    /// `grid: 1/16`, as written (reserved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<String>,
     #[serde(default, skip_serializing_if = "Comments::is_empty")]
     pub comments: Comments,
     /// 1-based source line. Output only; ignored when a document comes back from the UI.
@@ -99,6 +112,8 @@ impl DocTrack {
         Self {
             name: name.into(),
             input,
+            instrument: false,
+            midi: None,
             input_right: None,
             pan: None,
             monitor: None,
@@ -106,9 +121,19 @@ impl DocTrack {
             latency_trim: None,
             bus: None,
             monitor_bus: None,
+            loop_kind: None,
+            grid: None,
             comments: Comments::default(),
             line: None,
         }
+    }
+
+    /// An instrument track played from `midi` (every device, channel and key when `None`).
+    pub fn instrument(name: impl Into<String>, midi: Option<InstrumentSource>) -> Self {
+        let mut track = Self::new(name, 0);
+        track.instrument = true;
+        track.midi = midi.filter(|m| *m != InstrumentSource::default());
+        track
     }
 }
 
@@ -142,6 +167,9 @@ pub struct DocMidiBinding {
 pub struct DocSectionTrack {
     pub track: String,
     pub state: TrackState,
+    /// The clip's own note grid (`{state: play, grid: 1/16}`), reserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<String>,
     #[serde(default, skip_serializing_if = "Comments::is_empty")]
     pub comments: Comments,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -384,6 +412,8 @@ pub struct ParseOutcome {
     /// Every key's position in the text - also when the text has errors, as far as it parses.
     pub locations: Vec<Location>,
     pub errors: Vec<ModelIssue>,
+    /// Not errors: what is written correctly but does nothing yet (`loop: midi`, `grid:`).
+    pub notes: Vec<ModelIssue>,
 }
 
 /// Answer of [`render_doc_outcome`]: the canonical text, always, and the compiler's verdict on it.
@@ -398,6 +428,8 @@ pub struct RenderOutcome {
     pub locations: Vec<Location>,
     /// Positions refer to `yaml`.
     pub errors: Vec<ModelIssue>,
+    /// See [`ParseOutcome::notes`]; positions refer to `yaml`.
+    pub notes: Vec<ModelIssue>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -421,6 +453,7 @@ pub fn parse_doc_outcome(text: &str) -> ParseOutcome {
     let locations = parse_document(text)
         .map(|tree| locate(&tree))
         .unwrap_or_default();
+    let notes = map_issues(&score_notes(text), &locations);
     match parse_doc(text) {
         Ok(doc) => ParseOutcome {
             ok: true,
@@ -428,6 +461,7 @@ pub fn parse_doc_outcome(text: &str) -> ParseOutcome {
             doc: Some(doc),
             locations,
             errors: Vec::new(),
+            notes,
         },
         Err(error) => ParseOutcome {
             ok: false,
@@ -435,6 +469,7 @@ pub fn parse_doc_outcome(text: &str) -> ParseOutcome {
             score: None,
             errors: map_issues(&error.issues, &locations),
             locations,
+            notes,
         },
     }
 }
@@ -523,8 +558,12 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                             t.input = int(&items[0]).unwrap_or(0) as u32;
                                             t.input_right = int(&items[1]).map(|i| i as u32);
                                         }
+                                        NodeKind::Str(_) => t.instrument = true,
                                         _ => t.input = int(v).unwrap_or(0) as u32,
                                     },
+                                    "midi" => t.midi = Some(track_midi(v)),
+                                    "loop" => t.loop_kind = text_of(v),
+                                    "grid" => t.grid = text_of(v),
                                     "pan" => t.pan = number(v),
                                     "monitor" => t.monitor = boolean(v),
                                     "latency" => t.latency = int(v).map(|i| i as u32),
@@ -607,8 +646,20 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                 "tracks" => {
                                     if let NodeKind::Map(states) = &v.kind {
                                         for state in states {
-                                            let (Some(track), Some(word)) =
-                                                (state.key.as_str(), state.value.as_str())
+                                            // `voice: record` or `keys: {state: play, grid: 1/16}`.
+                                            let (word, grid) = match &state.value.kind {
+                                                NodeKind::Map(fields) => {
+                                                    let get = |k: &str| {
+                                                        fields
+                                                            .iter()
+                                                            .find(|f| f.key.as_str() == Some(k))
+                                                            .and_then(|f| f.value.as_str())
+                                                    };
+                                                    (get("state"), get("grid").map(str::to_string))
+                                                }
+                                                _ => (state.value.as_str(), None),
+                                            };
+                                            let (Some(track), Some(word)) = (state.key.as_str(), word)
                                             else {
                                                 continue;
                                             };
@@ -622,6 +673,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                             s.tracks.push(DocSectionTrack {
                                                 track: track.to_string(),
                                                 state: parsed,
+                                                grid,
                                                 comments: Comments::default(),
                                                 line: Some(state.key.pos.line),
                                             });
@@ -640,6 +692,29 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
         }
     }
     doc
+}
+
+/// `midi: {device, channel, notes}` of a track, from a tree the reader has already accepted.
+fn track_midi(node: &Node<'_>) -> InstrumentSource {
+    let mut out = InstrumentSource::default();
+    let NodeKind::Map(fields) = &node.kind else {
+        return out;
+    };
+    for field in fields {
+        let v = &field.value;
+        match field.key.as_str().unwrap_or("") {
+            "device" => out.device = text_of(v),
+            "channel" => out.channel = int(v).map(|c| c as u8),
+            "notes" => {
+                if let Some((low, high)) = v.as_str().and_then(|t| t.split_once('-')) {
+                    out.note_low = low.trim().parse().ok();
+                    out.note_high = high.trim().parse().ok();
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn build_mixer(node: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> DocMixer {
@@ -709,6 +784,26 @@ fn read_mix_field(mix: &mut TrackMixSource, field: &str, value: &Node<'_>) {
         "mute" => mix.mute = boolean(value),
         "preset" => mix.preset = text_of(value),
         "bypass" => mix.bypass = boolean(value),
+        "instrument" => mix.instrument = text_of(value),
+        "inserts" => {
+            if let NodeKind::Seq(items) = &value.kind {
+                mix.inserts = Some(
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let NodeKind::Map(fields) = &item.kind else { return None };
+                            let get = |k: &str| {
+                                fields.iter().find(|f| f.key.as_str() == Some(k)).map(|f| &f.value)
+                            };
+                            Some(InsertLine {
+                                plugin: get("plugin").and_then(text_of)?,
+                                bypass: get("bypass").and_then(boolean),
+                            })
+                        })
+                        .collect(),
+                );
+            }
+        }
         "high_pass" => {
             mix.high_pass = Some(HighPassLine {
                 on: on(),
@@ -1308,11 +1403,15 @@ pub fn render_doc(doc: &ScoreDoc) -> String {
             if !section.tracks.is_empty() {
                 w.line(2, "tracks:", &field("tracks"));
                 for state in &section.tracks {
-                    w.line(
-                        3,
-                        &format!("{}: {}", scalar(&state.track), state.state.as_str()),
-                        &state.comments,
-                    );
+                    let value = match &state.grid {
+                        Some(grid) => format!(
+                            "{{state: {}, grid: {}}}",
+                            state.state.as_str(),
+                            flow_scalar(grid)
+                        ),
+                        None => state.state.as_str().to_string(),
+                    };
+                    w.line(3, &format!("{}: {value}", scalar(&state.track)), &state.comments);
                 }
             } else if !field("tracks").is_empty() {
                 w.line(2, "tracks: {}", &field("tracks"));
@@ -1340,6 +1439,7 @@ pub fn render_doc_outcome(doc: &ScoreDoc) -> RenderOutcome {
     let locations = parse_document(&yaml)
         .map(|tree| locate(&tree))
         .unwrap_or_default();
+    let notes = map_issues(&score_notes(&yaml), &locations);
     match compile_score(&yaml) {
         Ok(score) => {
             let refreshed = parse_doc(&yaml).unwrap_or_else(|_| {
@@ -1354,6 +1454,7 @@ pub fn render_doc_outcome(doc: &ScoreDoc) -> RenderOutcome {
                 score: Some(score),
                 locations,
                 errors: Vec::new(),
+                notes,
             }
         }
         Err(error) => {
@@ -1366,6 +1467,7 @@ pub fn render_doc_outcome(doc: &ScoreDoc) -> RenderOutcome {
                 doc: copy,
                 score: None,
                 locations,
+                notes,
             }
         }
     }
@@ -1448,7 +1550,9 @@ fn render_mixer(w: &mut Writer<'_>, mixer: &DocMixer, comments: &Comments) {
     for entry in &mixer.tracks {
         let key = scalar(&entry.track);
         let lines = mix_lines(&entry.mix);
-        let simple = !entry.mix.has_effect_lines() && entry.field_comments.is_empty();
+        let simple = !entry.mix.has_effect_lines()
+            && !entry.mix.has_plugins()
+            && entry.field_comments.is_empty();
         if simple {
             let parts: Vec<String> = lines.iter().map(|(k, v)| format!("{k}: {v}")).collect();
             w.line(2, &format!("{key}: {{{}}}", parts.join(", ")), &entry.comments);
@@ -1480,6 +1584,9 @@ fn mix_lines(mix: &TrackMixSource) -> Vec<(&'static str, String)> {
     }
     if let Some(mute) = mix.mute {
         out.push(("mute", mute.to_string()));
+    }
+    if let Some(instrument) = &mix.instrument {
+        out.push(("instrument", flow_scalar(instrument)));
     }
     if let Some(preset) = &mix.preset {
         out.push(("preset", flow_scalar(preset)));
@@ -1537,14 +1644,41 @@ fn mix_lines(mix: &TrackMixSource) -> Vec<(&'static str, String)> {
             ]),
         ));
     }
+    // Last: the plugins sit after the built-in chain in the signal path.
+    if let Some(inserts) = &mix.inserts {
+        let items: Vec<String> = inserts
+            .iter()
+            .map(|i| {
+                flow(vec![
+                    ("plugin", Some(flow_scalar(&i.plugin))),
+                    ("bypass", b(i.bypass)),
+                ])
+            })
+            .collect();
+        out.push(("inserts", format!("[{}]", items.join(", "))));
+    }
     out
 }
 
 fn track_flow(track: &DocTrack) -> String {
     let mut fields = Vec::new();
     match track.input_right {
+        _ if track.instrument => fields.push("input: instrument".to_string()),
         Some(right) => fields.push(format!("input: [{}, {right}]", track.input)),
         None => fields.push(format!("input: {}", track.input)),
+    }
+    if let Some(midi) = &track.midi {
+        let mut parts = Vec::new();
+        if let Some(device) = &midi.device {
+            parts.push(format!("device: {}", flow_scalar(device)));
+        }
+        if let Some(channel) = midi.channel {
+            parts.push(format!("channel: {channel}"));
+        }
+        if let (Some(low), Some(high)) = (midi.note_low, midi.note_high) {
+            parts.push(format!("notes: {low}-{high}"));
+        }
+        fields.push(format!("midi: {{{}}}", parts.join(", ")));
     }
     if let Some(pan) = track.pan {
         fields.push(format!("pan: {}", num(pan)));
@@ -1563,6 +1697,12 @@ fn track_flow(track: &DocTrack) -> String {
     }
     if let Some(bus) = &track.monitor_bus {
         fields.push(format!("monitor_bus: {}", flow_scalar(bus)));
+    }
+    if let Some(kind) = &track.loop_kind {
+        fields.push(format!("loop: {}", flow_scalar(kind)));
+    }
+    if let Some(grid) = &track.grid {
+        fields.push(format!("grid: {}", flow_scalar(grid)));
     }
     format!("{{{}}}", fields.join(", "))
 }
@@ -1676,9 +1816,7 @@ fn quoted(text: &str) -> String {
 /// voice and a guitar when there are none, and three sections that show the three things a score
 /// does - record a loop, stack a layer, play it out.
 pub fn template(tracks: &[(String, u32, Option<u32>)]) -> String {
-    let tracks: Vec<DocTrack> = if tracks.is_empty() {
-        vec![DocTrack::new("voice", 1), DocTrack::new("guitar", 2)]
-    } else {
+    template_with(
         tracks
             .iter()
             .map(|(name, input, right)| {
@@ -1686,12 +1824,41 @@ pub fn template(tracks: &[(String, u32, Option<u32>)]) -> String {
                 t.input_right = *right;
                 t
             })
-            .collect()
+            .collect(),
+        Vec::new(),
+    )
+}
+
+/// The same with tracks as the document has them - instrument tracks included - and, for those,
+/// the instrument plugin each one plays (track name, plugin id), which goes into `mixer:`.
+pub fn template_with(tracks: Vec<DocTrack>, instruments: Vec<(String, String)>) -> String {
+    let tracks: Vec<DocTrack> = if tracks.is_empty() {
+        vec![DocTrack::new("voice", 1), DocTrack::new("guitar", 2)]
+    } else {
+        tracks
     };
+    let mixer = (!instruments.is_empty()).then(|| DocMixer {
+        buses: None,
+        tracks: tracks
+            .iter()
+            .filter_map(|t| {
+                let (_, id) = instruments.iter().find(|(name, _)| *name == t.name)?;
+                Some(DocMixerTrack::new(
+                    t.name.clone(),
+                    TrackMixSource {
+                        instrument: Some(id.clone()),
+                        ..TrackMixSource::default()
+                    },
+                ))
+            })
+            .collect(),
+        field_comments: OrderedMap::new(),
+    });
     let first = tracks[0].name.clone();
     let state = |track: &str, state: TrackState| DocSectionTrack {
         track: track.to_string(),
         state,
+        grid: None,
         comments: Comments::default(),
         line: None,
     };
@@ -1707,7 +1874,8 @@ pub fn template(tracks: &[(String, u32, Option<u32>)]) -> String {
     layer.bars = Some(4);
     layer.autorelease = Some(false);
     layer.tracks = vec![state(&first, TrackState::Overdub)];
-    for track in tracks.iter().skip(1) {
+    // An instrument track is heard anyway; `hear_through` would say nothing about it.
+    for track in tracks.iter().skip(1).filter(|t| !t.instrument) {
         layer.tracks.push(state(&track.name, TrackState::HearThrough));
     }
     layer.comments.before =
@@ -1727,7 +1895,7 @@ pub fn template(tracks: &[(String, u32, Option<u32>)]) -> String {
         tracks,
         midi: Vec::new(),
         sections: vec![intro, layer, outro],
-        mixer: None,
+        mixer,
         header: vec![
             "Henrys Looper score. Each section states what every track does;".to_string(),
             "a track a section does not name is stopped.".to_string(),

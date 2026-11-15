@@ -5,20 +5,27 @@ use super::super::error::{suggest_or_list};
 use super::super::map::OrderedMap;
 use super::super::mixer::{
     BAND_KIND_NAMES, BandLine, BusLevels, CompLine, DB_MAX, DELAY_NOTE_NAMES, DelayLine,
-    HighPassLine, MixerSource, PRESET_NAMES, ReverbLine, SwitchLine, TrackMixSource,
+    HighPassLine, InsertLine, MixerSource, PRESET_NAMES, ReverbLine, SwitchLine, TrackMixSource,
 };
+use crate::engine::insert::MAX_INSERTS;
 use super::super::yaml::Node;
 use super::Reader;
 
 pub(super) const MIXER_FIELDS: [&str; 2] = ["buses", "tracks"];
 pub(super) const BUS_FIELDS: [&str; 4] = ["main", "monitor", "click", "inputs"];
-pub(super) const TRACK_MIX_FIELDS: [&str; 12] = [
+pub(super) const TRACK_MIX_FIELDS: [&str; 14] = [
     "gain", "mute", "preset", "bypass", "high_pass", "eq", "band1", "band2", "band3", "comp",
-    "delay", "reverb",
+    "delay", "reverb", "instrument", "inserts",
 ];
+const INSERT_FIELDS: [&str; 2] = ["plugin", "bypass"];
 
 impl Reader {
-    pub(super) fn read_mixer(&mut self, node: &Node<'_>, track_names: &[&str]) -> Option<MixerSource> {
+    pub(super) fn read_mixer(
+        &mut self,
+        node: &Node<'_>,
+        track_names: &[&str],
+        instrument_tracks: &[&str],
+    ) -> Option<MixerSource> {
         let entries = self.as_map(node, "'mixer'")?;
         let fields = self.index_fields(entries, &MIXER_FIELDS, &[], "'mixer'");
         let buses = fields.get("buses").and_then(|n| self.read_bus_levels(n));
@@ -50,7 +57,9 @@ impl Reader {
                     );
                     continue;
                 }
-                if let Some(mix) = self.read_track_mix(name, &entry.value) {
+                if let Some(mix) =
+                    self.read_track_mix(name, &entry.value, instrument_tracks.contains(&name))
+                {
                     tracks.insert(name, mix);
                 }
             }
@@ -114,7 +123,12 @@ impl Reader {
         })
     }
 
-    fn read_track_mix(&mut self, name: &str, node: &Node<'_>) -> Option<TrackMixSource> {
+    fn read_track_mix(
+        &mut self,
+        name: &str,
+        node: &Node<'_>,
+        instrument_track: bool,
+    ) -> Option<TrackMixSource> {
         let what = format!("the mixer entry of '{name}'");
         let entries = self.as_map(node, &what)?;
         let fields = self.index_fields(entries, &TRACK_MIX_FIELDS, &[], &what);
@@ -131,6 +145,20 @@ impl Reader {
         }
         if let Some(n) = fields.get("bypass") {
             out.bypass = self.as_bool(n, &field("bypass"));
+        }
+        if let Some(n) = fields.get("instrument") {
+            out.instrument = self.read_plugin_id(n, &field("instrument"));
+            if out.instrument.is_some() && !instrument_track {
+                self.error_with(
+                    Some(n.pos),
+                    format!("{} names an instrument, but '{name}' records an audio input.", field("instrument")),
+                    format!("Only an instrument track plays one: write 'input: instrument' for '{name}' under 'tracks', or remove 'instrument'."),
+                );
+                out.instrument = None;
+            }
+        }
+        if let Some(n) = fields.get("inserts") {
+            out.inserts = self.read_inserts(n, &field("inserts"));
         }
         if let Some(n) = fields.get("high_pass") {
             out.high_pass = self.read_line(n, &field("high_pass"), &["on", "hz"], |r, key, v, w| {
@@ -228,6 +256,72 @@ impl Reader {
             });
         }
         Some(out)
+    }
+
+    /// A plugin id as the plugin list writes it (`au:aufx:dely:appl`, `vst3:...`). Only checked for
+    /// being text: whether it is installed is a question for the computer the score is played on,
+    /// and a score must stay readable on one that does not have it.
+    fn read_plugin_id(&mut self, node: &Node<'_>, what: &str) -> Option<String> {
+        let text = self.as_str(node, what)?;
+        if text.trim().is_empty() {
+            self.error_with(
+                Some(node.pos),
+                format!("{what} is empty."),
+                "Write the plugin's id as the plugin list shows it, e.g. \"au:aumu:dls :appl\".",
+            );
+            return None;
+        }
+        Some(text.to_string())
+    }
+
+    /// `inserts: [{plugin: "au:aufx:dely:appl", bypass: false}, ...]`, slot order, at most
+    /// [`MAX_INSERTS`].
+    fn read_inserts(&mut self, node: &Node<'_>, what: &str) -> Option<Vec<InsertLine>> {
+        let items = self.as_seq(node, what)?;
+        if items.len() > MAX_INSERTS {
+            self.error_with(
+                Some(node.pos),
+                format!("{what} lists {} plugins; a track has {MAX_INSERTS} slots.", items.len()),
+                format!("List at most {MAX_INSERTS}."),
+            );
+            return None;
+        }
+        let mut out = Vec::with_capacity(items.len());
+        let mut ok = true;
+        for (i, item) in items.iter().enumerate() {
+            let label = format!("plugin {} of {what}", i + 1);
+            let Some(entries) = self.as_map(item, &label) else {
+                ok = false;
+                continue;
+            };
+            let fields = self.index_fields(entries, &INSERT_FIELDS, &[], &label);
+            let plugin = match fields.get("plugin") {
+                Some(n) => self.read_plugin_id(n, &format!("'plugin' of {label}")),
+                None => {
+                    self.error_with(
+                        Some(item.pos),
+                        format!("{label} has no 'plugin'."),
+                        "e.g. '{plugin: \"au:aufx:dely:appl\", bypass: false}'.",
+                    );
+                    None
+                }
+            };
+            let bypass = match fields.get("bypass") {
+                Some(n) => match self.as_bool(n, &format!("'bypass' of {label}")) {
+                    Some(b) => Some(b),
+                    None => {
+                        ok = false;
+                        None
+                    }
+                },
+                None => None,
+            };
+            match plugin {
+                Some(plugin) => out.push(InsertLine { plugin, bypass }),
+                None => ok = false,
+            }
+        }
+        ok.then_some(out)
     }
 
     /// One effect line: a mapping of known fields, each read by `field` into a line of its own and
