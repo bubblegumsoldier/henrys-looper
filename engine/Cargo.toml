@@ -37,7 +37,19 @@ rtrb = "0.4.0"
 saphyr-parser = "0.0.12"
 serde = { version = "1", features = ["derive"] }
 strsim = "0.11.1"
-
-[dev-dependencies]
-# Only to prove in a test that the compiled score serialises to the documented JSON shape.
+# The plugin scan cache (`src/plugin/scan.rs`) and the line protocol of the scan child process.
+# Was already a dev-dependency for the score tests.
 serde_json = "1"
+
+# Plugin hosting (`src/plugin/`), macOS only for now:
+#   * `vst3` - bindings generated from the Steinberg VST 3 headers, MIT/Apache-2.0. The SDK headers
+#     themselves are MIT since VST 3.8 (October 2025), so there is no licence question left.
+#   * `objc2`, `objc2-foundation`, `objc2-app-kit` - the plugin editor window (an NSWindow around
+#     the plugin's own NSView) and the Cocoa view of an Audio Unit. All three are already in the
+#     dependency tree through cpal and Tauri. Audio Units themselves are driven through the plain
+#     AudioToolbox C API, declared in `plugin/au.rs`.
+[target.'cfg(target_os = "macos")'.dependencies]
+vst3 = "0.3.0"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry", "NSBundle", "NSURL", "NSThread", "NSDate", "NSRunLoop", "NSObjCRuntime"] }
+objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSView", "NSResponder", "NSApplication", "NSRunningApplication", "NSGraphics", "NSEvent"] }

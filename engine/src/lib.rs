@@ -18,6 +18,7 @@ pub mod engine;
 pub mod latency;
 pub mod meter;
 pub mod midi;
+pub mod plugin;
 pub mod score;
 pub mod soak;
 

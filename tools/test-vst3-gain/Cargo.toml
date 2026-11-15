@@ -1,0 +1,14 @@
+[package]
+name = "test-vst3-gain"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "A minimal VST3 effect for the host tests: gain, a fixed latency, state."
+
+# Built as a plain dynamic library; the engine's VST3 test wraps it into a `.vst3` bundle in a
+# temporary folder (`engine/src/plugin/tests.rs`), so nothing has to be installed anywhere.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+vst3 = "0.3.0"

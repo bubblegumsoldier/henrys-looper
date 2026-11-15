@@ -13,7 +13,8 @@ use looper_engine::engine::calibrate::CalibrateOpts;
 use looper_engine::engine::live::LiveOpts;
 use looper_engine::engine::score_cli::ScoreOpts;
 use looper_engine::midi::cli::MidiOpts;
-use looper_engine::{click, duplex, engine, latency, midi, soak};
+use looper_engine::plugin::cli::PluginOpts;
+use looper_engine::{click, duplex, engine, latency, midi, plugin, soak};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -125,6 +126,11 @@ enum Command {
         #[command(flatten)]
         calibrate: CalibrateOpts,
     },
+    /// Plugins (VST3, Audio Units): scan, probe one offline, open its editor window
+    Plugins {
+        #[command(subcommand)]
+        plugins: PluginOpts,
+    },
 }
 
 #[cfg(test)]
@@ -141,6 +147,12 @@ mod cli_tests {
 }
 
 fn main() -> ExitCode {
+    // The plugin scan starts this executable as a child to load one plugin at a time; a plugin
+    // that crashes takes the child down, not the scan. See `plugin::scan`.
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = plugin::scan::probe_main(&args) {
+        return ExitCode::from(code as u8);
+    }
     let cli = Cli::parse();
     let result = match &cli.command {
         Command::List => audio::cmd_list(),
@@ -153,6 +165,7 @@ fn main() -> ExitCode {
         Command::Fxbench { rate, seconds } => engine::fx::bench::cmd_fxbench(*rate, *seconds),
         Command::Midi { midi } => midi::cli::cmd_midi(midi),
         Command::Calibrate { dev, calibrate } => engine::calibrate::cmd_calibrate(dev, calibrate),
+        Command::Plugins { plugins } => plugin::cli::cmd_plugins(plugins),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

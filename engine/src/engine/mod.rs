@@ -54,7 +54,7 @@ pub mod timeline;
 pub mod track;
 
 #[cfg(test)]
-mod sim;
+pub(crate) mod sim;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
