@@ -462,6 +462,8 @@ pub enum Target {
     Transport,
     Click,
     ClearAll,
+    /// Undo the newest take over all tracks (`global.undo`) - one foot switch, no track to pick.
+    UndoLast,
     Tempo,
     /// Tap tempo: every press is one beat; the host turns the gaps into a BPM. A button, so a foot
     /// switch can set the tempo of free looping.
@@ -483,6 +485,8 @@ pub enum Target {
     Play(TrackRef),
     StopTrack(TrackRef),
     ClearTrack(TrackRef),
+    /// Undo on this track: the running take, or else its newest layer (`track.<t>.undo`).
+    Undo(TrackRef),
     Monitor(TrackRef),
     Pan(TrackRef),
     /// The channel fader, linear `0..=MAX_TRACK_GAIN` (+12 dB), on a dB-stepped fader curve.
@@ -539,6 +543,8 @@ impl Target {
             | Target::Play(_)
             | Target::StopTrack(_)
             | Target::ClearTrack(_)
+            | Target::Undo(_)
+            | Target::UndoLast
             | Target::Panic
             | Target::InstrumentPanic(_)
             | Target::LayerRemove(..)
@@ -587,6 +593,7 @@ impl Target {
             | Target::Play(t)
             | Target::StopTrack(t)
             | Target::ClearTrack(t)
+            | Target::Undo(t)
             | Target::Monitor(t)
             | Target::Pan(t)
             | Target::Gain(t)
@@ -614,6 +621,7 @@ impl Target {
             | Target::ScoreGoto(_)
             | Target::Click
             | Target::ClearAll
+            | Target::UndoLast
             | Target::Transport
             | Target::Tempo
             | Target::TapTempo
@@ -638,6 +646,7 @@ impl Target {
             Target::Play(_) => Target::Play(t),
             Target::StopTrack(_) => Target::StopTrack(t),
             Target::ClearTrack(_) => Target::ClearTrack(t),
+            Target::Undo(_) => Target::Undo(t),
             Target::Monitor(_) => Target::Monitor(t),
             Target::Pan(_) => Target::Pan(t),
             Target::Gain(_) => Target::Gain(t),
@@ -694,6 +703,8 @@ impl Target {
                 | Target::Play(_)
                 | Target::StopTrack(_)
                 | Target::ClearTrack(_)
+                | Target::Undo(_)
+                | Target::UndoLast
                 | Target::ClearAll
                 | Target::Transport
                 | Target::Tempo
@@ -725,6 +736,8 @@ impl Target {
             Target::Play(t) => format!("{}: Play", track(t)),
             Target::StopTrack(t) => format!("{}: Stop", track(t)),
             Target::ClearTrack(t) => format!("{}: Clear", track(t)),
+            Target::Undo(t) => format!("{}: Undo", track(t)),
+            Target::UndoLast => "Undo last take".to_string(),
             Target::BusGain(bus) => format!("Volume {}", bus_word(*bus)),
             Target::Monitor(t) => format!("{}: Monitor", track(t)),
             Target::Pan(t) => format!("{}: Pan", track(t)),
@@ -791,6 +804,7 @@ impl Target {
             ["transport", "goto", n] => Ok(Target::ScoreGoto(one_based(n, "section")?)),
             ["global", "click"] => Ok(Target::Click),
             ["global", "clear_all"] => Ok(Target::ClearAll),
+            ["global", "undo"] => Ok(Target::UndoLast),
             ["global", "tempo"] => Ok(Target::Tempo),
             ["global", "tap_tempo"] => Ok(Target::TapTempo),
             ["global", "click_gain"] => Ok(Target::ClickGain),
@@ -822,6 +836,7 @@ fn parse_track(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, 
         ["play"] => Ok(Target::Play(track)),
         ["stop"] => Ok(Target::StopTrack(track)),
         ["clear"] => Ok(Target::ClearTrack(track)),
+        ["undo"] => Ok(Target::Undo(track)),
         ["monitor"] => Ok(Target::Monitor(track)),
         ["pan"] => Ok(Target::Pan(track)),
         ["gain"] => Ok(Target::Gain(track)),
@@ -1000,6 +1015,8 @@ impl fmt::Display for Target {
             Target::Play(t) => write!(f, "track.{t}.play"),
             Target::StopTrack(t) => write!(f, "track.{t}.stop"),
             Target::ClearTrack(t) => write!(f, "track.{t}.clear"),
+            Target::Undo(t) => write!(f, "track.{t}.undo"),
+            Target::UndoLast => f.write_str("global.undo"),
             Target::Monitor(t) => write!(f, "track.{t}.monitor"),
             Target::Pan(t) => write!(f, "track.{t}.pan"),
             Target::Gain(t) => write!(f, "track.{t}.gain"),
@@ -1096,6 +1113,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
         Target::Transport,
         Target::Click,
         Target::ClearAll,
+        Target::UndoLast,
         Target::Tempo,
         Target::TapTempo,
         Target::Quantize(Quantize::Bar),
@@ -1111,6 +1129,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
             Target::Play(t()),
             Target::StopTrack(t()),
             Target::ClearTrack(t()),
+            Target::Undo(t()),
             Target::Monitor(t()),
             Target::Pan(t()),
             Target::Gain(t()),

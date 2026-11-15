@@ -299,3 +299,68 @@ fn a_latched_overdub_on_an_empty_track_records_first_and_then_layers() {
     assert_eq!(t.layer_count(), 3);
     assert_eq!(content(&sim, 2)[0], fingerprint(input_of(pass(2))));
 }
+
+// ---- undo ------------------------------------------------------------------------------------
+
+/// Undo removes exactly the newest layer; every other layer stays sample for sample as it was.
+#[test]
+fn undo_removes_exactly_the_newest_layer() {
+    let mut sim = Sim::new(spec(), mono(fingerprint));
+    record_loop(&mut sim);
+    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.run_to(pass(2) + L / 2);
+    sim.send(Command::LatchOverdub { track: 0, on: false });
+    run_past_pass(&mut sim, 2);
+    assert_eq!(sim.core.track(0).layer_count(), 3);
+    let before: Vec<Vec<f32>> = (0..2).map(|l| content(&sim, l)).collect();
+
+    sim.send(Command::UndoLayer { track: 0 });
+    sim.run_blocks(2);
+    let t = sim.core.track(0);
+    assert_eq!(t.layer_count(), 2);
+    assert_eq!(t.loop_len(), L, "die Loop-Geometrie bleibt");
+    for (l, layer) in before.iter().enumerate() {
+        assert_eq!(&content(&sim, l), layer, "Ebene {l} unveraendert");
+    }
+    // Twice more: the track is empty, and its grid is gone with it.
+    sim.send(Command::UndoLayer { track: 0 });
+    sim.send(Command::UndoLayer { track: 0 });
+    sim.run_blocks(2);
+    let t = sim.core.track(0);
+    assert_eq!(t.layer_count(), 0);
+    assert_eq!(t.loop_len(), 0);
+    assert!(!t.playing());
+}
+
+/// Undo during a continuous overdub drops the running pass and ends the overdub; what was done
+/// before stays.
+#[test]
+fn undo_during_a_latched_overdub_drops_the_running_pass_and_ends_it() {
+    let mut sim = Sim::new(spec(), mono(fingerprint));
+    record_loop(&mut sim);
+    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.run_to(input_of(pass(2)) + L / 2);
+    assert_eq!(sim.core.track(0).layer_count(), 3, "Durchlauf 2 laeuft");
+    sim.send(Command::UndoLayer { track: 0 });
+    sim.run_to(input_of(pass(5)));
+    let t = sim.core.track(0);
+    assert_eq!(t.layer_count(), 2, "Aufnahme + Durchlauf 1");
+    assert!(t.take().is_none(), "kein weiterer Durchlauf");
+    assert!(!latched(&mut sim));
+    assert_eq!(content(&sim, 1)[0], fingerprint(input_of(pass(1))));
+}
+
+/// Undo during the first recording leaves the track empty, as if nothing had been pressed.
+#[test]
+fn undo_during_the_first_recording_leaves_the_track_empty() {
+    let mut sim = Sim::new(spec(), mono(fingerprint));
+    record_loop(&mut sim);
+    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.run_to(input_of(pass(0)) + L / 2);
+    sim.send(Command::UndoLayer { track: 0 });
+    sim.run_to(input_of(pass(3)));
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(sim.core.track(0).layer_count(), 0);
+    assert_eq!(status.tracks[0].state, super::track::TrackState::Empty);
+    assert!(!status.tracks[0].latched);
+}

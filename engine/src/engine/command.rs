@@ -127,6 +127,10 @@ pub enum Command {
     },
     /// Remove one layer; its buffer travels back to the control thread.
     RemoveLayer { track: usize, layer: usize },
+    /// The looper's undo: throw away what this track recorded last. A take that is running (or
+    /// armed, or queued) is cancelled together with its layer - in a continuous overdub that ends
+    /// it; otherwise the newest layer goes. The last layer leaves the track empty. Untimed.
+    UndoLayer { track: usize },
     /// Metronome on or off. The click grid keeps running either way.
     SetClick { on: bool },
     /// Volume of the click, linear, clamped to `0..=MAX_LEVEL_GAIN`. Untimed: a level, not an event.
@@ -213,6 +217,7 @@ impl Command {
             | Command::SetLayerMute { .. }
             | Command::SetLayerGain { .. }
             | Command::RemoveLayer { .. }
+            | Command::UndoLayer { .. }
             | Command::SetClick { .. }
             | Command::SetClickGain { .. }
             | Command::SetMonitorGain { .. }
@@ -248,6 +253,7 @@ impl Command {
             | Command::SetLayerMute { track, .. }
             | Command::SetLayerGain { track, .. }
             | Command::RemoveLayer { track, .. }
+            | Command::UndoLayer { track }
             | Command::SetFxBypass { track, .. }
             | Command::SetFxEnabled { track, .. }
             | Command::SetFxParam { track, .. }

@@ -74,6 +74,10 @@ pub enum MidiAction {
     Play { track: usize },
     StopTrack { track: usize },
     ClearTrack { track: usize },
+    /// Undo on one track.
+    Undo { track: usize },
+    /// Undo the newest take over all tracks.
+    UndoLast,
     Monitor { track: usize, on: bool },
     Pan { track: usize, pan: f32 },
     /// The channel fader, linear.
@@ -138,6 +142,8 @@ impl MidiAction {
                 | MidiAction::Play { .. }
                 | MidiAction::StopTrack { .. }
                 | MidiAction::ClearTrack { .. }
+                | MidiAction::Undo { .. }
+                | MidiAction::UndoLast
                 | MidiAction::ClearAll
                 | MidiAction::Transport
                 | MidiAction::Tempo(_)
@@ -470,6 +476,7 @@ impl Router {
             Target::ClearAll => MidiAction::ClearAll,
             Target::Transport => MidiAction::Transport,
             Target::TapTempo => MidiAction::TapTempo,
+            Target::UndoLast => MidiAction::UndoLast,
             Target::Panic => MidiAction::Panic { track: None },
             Target::InstrumentPanic(_) => MidiAction::Panic { track: Some(track) },
             Target::Quantize(quantize) => MidiAction::SetQuantize(*quantize),
@@ -478,6 +485,7 @@ impl Router {
             Target::Play(_) => MidiAction::Play { track },
             Target::StopTrack(_) => MidiAction::StopTrack { track },
             Target::ClearTrack(_) => MidiAction::ClearTrack { track },
+            Target::Undo(_) => MidiAction::Undo { track },
             Target::LayerRemove(_, layer) => MidiAction::LayerRemove {
                 track,
                 layer: *layer,

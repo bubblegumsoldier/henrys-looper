@@ -1238,6 +1238,7 @@ impl EngineCore {
                     None => self.refuse(Refusal::NoSuchTarget),
                 }
             }
+            Command::UndoLayer { track } => self.undo_layer(track),
             Command::SetClick { on } => self.click = on,
             Command::SetTempo {
                 bpm,
@@ -1381,6 +1382,26 @@ impl EngineCore {
             self.tracks[t].set_held(true);
         }
         self.transport = false;
+    }
+
+    /// [`Command::UndoLayer`]: the newest thing on this track goes - a queued take, a running one
+    /// with its layer, or else the newest finished layer. Bounded: a few stores, at most two
+    /// buffers handed back.
+    fn undo_layer(&mut self, track: usize) {
+        self.latch.set(track, false);
+        // A take queued behind one that is finishing is the newest thing; only it goes.
+        if let Some(buffer) = self.tracks[track].take_pending_buffer() {
+            self.buffers.retire(buffer);
+            return;
+        }
+        if let Some(take) = self.tracks[track].take() {
+            self.discard_take(track, take.defines_loop);
+            return;
+        }
+        match self.tracks[track].pop_layer() {
+            Some(buffer) => self.buffers.retire(buffer),
+            None => self.refuse(Refusal::NoSuchTarget),
+        }
     }
 
     /// Throw away the running take of one track together with the layer it was writing.

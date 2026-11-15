@@ -264,6 +264,11 @@ impl Scheduler {
         self.pending = [None; MAX_TRACKS];
     }
 
+    /// Forget the countdown of one track - its take was undone.
+    pub fn disarm_track(&mut self, track: usize) {
+        self.disarm(track);
+    }
+
     fn disarm(&mut self, track: usize) {
         if let Some(slot) = self.pending.get_mut(track) {
             *slot = None;
