@@ -680,7 +680,11 @@ function BusCard({
           deaf: false,
         };
       });
-  const collapsed = rows.length === 2 && rows[0].channel === rows[1].channel && rows[0].width === rows[1].width;
+  // One shared channel is enough for one mix (`BusRouting::collapsed` in the engine).
+  const collapsed =
+    rows.length === 2 &&
+    rows[0].channel < rows[1].channel + rows[1].width &&
+    rows[1].channel < rows[0].channel + rows[0].width;
 
   const setOut = (row: Row, channel: number, width: number) => {
     if (running) run(() => api.busOutput(row.id, channel, width));

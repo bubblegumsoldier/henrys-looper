@@ -147,6 +147,19 @@ export type BusId = "main" | "monitor";
 /** Which of a track's two sources a bus assignment is about. */
 export type TrackSourceId = "loop" | "monitor";
 
+/** One device output channel: the sum on the socket, before the safety limiter. */
+export interface OutputMeter {
+  /** Device output channel, one-based, as printed on the interface. */
+  channel: number;
+  /** Peak since the last event, linear; above 1 is an over. */
+  peak: number;
+  dbfs: number | null;
+  /** Deepest gain reduction of the safety limiter since the last event, dB; 0 = untouched. */
+  reduction_db: number;
+  /** The bus volume to turn down: "Main", "Monitor", "Main/Monitor" (shared: Main counts), or "". */
+  buses: string;
+}
+
 /** One output bus: where it goes, how loud it is, and what leaves on it. */
 export interface BusStatus {
   id: BusId;
@@ -335,13 +348,20 @@ export interface LooperStatus {
   /** Output channels the device really has - what a routing selector may offer. */
   output_channels: number;
   /**
-   * True while both buses leave on exactly the same channels, which is what a two-output
-   * interface forces. There is then one mix: every source is heard once, the click included, and
-   * the monitor volume has nothing to regulate on its own.
+   * True while the two buses share at least one device channel - always on a two-output
+   * interface. There is then one mix on every channel either bus uses: every source is heard
+   * once, the click included, the Main volume sets it and the Monitor volume has nothing to
+   * regulate on its own.
    */
   buses_collapsed: boolean;
   /** German sentence explaining an overlapping routing, or null when the buses are apart. */
   bus_note: string | null;
+  /**
+   * One entry per device output channel (at most eight): what the socket really gets, after the
+   * buses were placed on it and before the safety limiter. The only meter that shows an over of
+   * the sum.
+   */
+  outputs: OutputMeter[];
 
   tracks: LooperTrackStatus[];
   /** What the runner is doing, or null while no score is loaded. */
@@ -395,6 +415,7 @@ export const IDLE_STATUS: LooperStatus = {
   output_channels: 0,
   buses_collapsed: false,
   bus_note: null,
+  outputs: [],
   tracks: [],
   xruns: 0,
   fifo_underruns: 0,

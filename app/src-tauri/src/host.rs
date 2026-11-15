@@ -87,7 +87,7 @@ use crate::midi::{BindingOptions, MidiBridge, MidiOutcome, MidiPortView, MidiSav
 use crate::proto::{
     AppInfo, BusOutConfig, CalibrateConfig, NoticeEvent, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
     DeviceReport, EngineInfo, HostInfo, InstrumentInput, OverdubMode, QuantizeName, ScoreLoaded,
-    StartConfig, StatusEvent, TrackConfig, bus_events, dbfs, score_event, track_event,
+    StartConfig, StatusEvent, TrackConfig, bus_events, dbfs, output_events, score_event, track_event,
 };
 use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tracks};
 
@@ -2554,6 +2554,7 @@ impl Session {
             output_channels: u32::from(status.output_channels),
             buses_collapsed: status.bus_out.collapsed(),
             bus_note: routing_note(&status.bus_out, status.output_channels as usize),
+            outputs: output_events(status),
             tracks: self
                 .tracks
                 .iter()

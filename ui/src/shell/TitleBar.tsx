@@ -19,6 +19,7 @@ import { Icon } from "./Icon";
 import { useEngine } from "./engine";
 import { Ticker } from "./Toasts";
 import { ClickSwitch } from "./ClickSwitch";
+import { OutputClip } from "./OutputClip";
 import { RecordingBadge } from "../recording/RecordingBadge";
 import { isDirty, useScoreFile } from "../scoreFile";
 import {
@@ -174,6 +175,7 @@ export function TitleBar({ mode, setupOpen, onMode, onSetup, enginePanelOpen, on
           Arrangement locked
         </button>
       )}
+      <OutputClip onOpen={() => !enginePanelOpen && onEnginePanel()} />
       <StatusPill facts={facts} open={enginePanelOpen} onClick={onEnginePanel} />
       <button
         className={`btn sq ghost${setupOpen ? " on" : ""}`}

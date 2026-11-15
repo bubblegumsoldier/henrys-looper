@@ -234,6 +234,9 @@ input.range:disabled { opacity: .4; }
 .busrow .nm { display: inline-flex; align-items: center; gap: 6px; font-weight: var(--fw-semibold); }
 .busrow .nm .ic { --ic: 14px; color: var(--tx-2); }
 .busrow .gain { min-width: 0; }
+.busrow .warn-text { color: var(--warn); font-size: var(--fs-11); }
+.engine-pop .out-note { font-size: var(--fs-11); line-height: 1.45; max-width: 560px; }
+.out-clip { cursor: pointer; white-space: nowrap; }
 
 /* =============================================================================================
    LIVE

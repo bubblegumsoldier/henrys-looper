@@ -132,6 +132,14 @@ export const T = {
   panicShort: "Panic",
   main: "Main",
   monitorBus: "Monitor",
+  outputs: "Outputs",
+  outputChannel: "Output",
+  limiting: "Limiter",
+  outputClip: "Clip",
+  sharedOutputHint:
+    "Main and Monitor share these outputs, so they are one mix: every track, the click and monitoring are in it exactly once, and the Main volume sets the level of all of it. The Monitor volume has no effect here.",
+  limiterHint:
+    "Safety limiter at -0.3 dBFS on every output: below that it changes nothing; above, it turns the output down for a moment instead of letting it clip. The meters show the level before it.",
   saved: "saved",
   unsaved: "unsaved",
 

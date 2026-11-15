@@ -1,5 +1,6 @@
 //! The status pill's popover: what the engine opened, every counter that should be zero, the two
-//! bus volumes with their meters, the grid, the click, "clear all" and the engine switch.
+//! bus volumes with their meters, the output meters per device channel (the sum on the socket and
+//! what the safety limiter took off), the grid, the click, "clear all" and the engine switch.
 //!
 //! These are the global controls of the old Live header and bus strip. The stage mockup has no
 //! place for them, and they are not stage controls - but they must stay one click away (turning
@@ -8,7 +9,7 @@
 import { useEffect, useRef } from "react";
 import { api } from "../api";
 import { busGainAddress, GLOBAL, quantizeAddress } from "../midi/addresses";
-import { useStatusSlice } from "../status";
+import { useStatusEffect, useStatusSlice } from "../status";
 import { HMeter } from "../live/HMeter";
 import { currentConfig } from "../setup/config";
 import { Icon } from "./Icon";
@@ -28,6 +29,8 @@ interface Counters {
   quantize: "bar" | "loop";
   click: boolean;
   buses: string;
+  /** `channel:buses` per device output channel - what the output rows are built from. */
+  outputs: string;
 }
 
 function pick(s: LooperStatus): Counters {
@@ -42,6 +45,7 @@ function pick(s: LooperStatus): Counters {
     quantize: s.quantize,
     click: s.click,
     buses: s.buses.map((b) => `${b.id}:${b.gain}:${b.channel_label}`).join("|") + (s.buses_collapsed ? "!" : ""),
+    outputs: (s.outputs ?? []).map((o) => `${o.channel}:${o.buses}`).join("|"),
   };
 }
 
@@ -56,7 +60,8 @@ function same(a: Counters, b: Counters): boolean {
     a.maxMs === b.maxMs &&
     a.quantize === b.quantize &&
     a.click === b.click &&
-    a.buses === b.buses
+    a.buses === b.buses &&
+    a.outputs === b.outputs
   );
 }
 
@@ -97,6 +102,36 @@ function LevelRow({
 }
 
 const peaks = (id: BusId) => (s: LooperStatus) => s.buses.find((b) => b.id === id)?.peaks ?? [0, 0];
+const outPeak = (channel: number) => (s: LooperStatus) => [s.outputs?.find((o) => o.channel === channel)?.peak ?? 0];
+
+/** How long the limiter readout keeps its deepest value, so a short reduction can be read. */
+const REDUCTION_HOLD_MS = 1500;
+
+/**
+ * What the safety limiter is taking off one output, e.g. "Limiter −2.1 dB", held for a moment;
+ * empty while it does nothing. Written straight into the DOM, like a meter readout.
+ */
+function Reduction({ channel }: { channel: number }) {
+  const el = useRef<HTMLSpanElement | null>(null);
+  const held = useRef({ db: 0, at: -Infinity, text: "" });
+  useStatusEffect((s) => {
+    const now = performance.now();
+    const db = Math.min(0, s.outputs?.find((o) => o.channel === channel)?.reduction_db ?? 0);
+    const h = held.current;
+    if (db < -0.05 && (db <= h.db || now - h.at > REDUCTION_HOLD_MS)) {
+      h.db = db;
+      h.at = now;
+    } else if (now - h.at > REDUCTION_HOLD_MS) {
+      h.db = 0;
+    }
+    const text = h.db < -0.05 ? `${T.limiting} −${Math.abs(h.db).toFixed(1)} dB` : "";
+    if (text !== h.text && el.current) {
+      el.current.textContent = text;
+      h.text = text;
+    }
+  });
+  return <span className="num warn-text" ref={el} />;
+}
 
 export function EnginePanel({ onClose, onSetup }: { onClose: () => void; onSetup: () => void }) {
   const c = useStatusSlice(pick, same);
@@ -128,6 +163,12 @@ export function EnginePanel({ onClose, onSetup }: { onClose: () => void; onSetup
         })
     : [];
   const collapsed = c.buses.endsWith("!");
+  const outputs = c.outputs
+    ? c.outputs.split("|").map((entry) => {
+        const [channel, on] = entry.split(":");
+        return { channel: Number(channel), on };
+      })
+    : [];
   const other = c.quantize === "loop" ? "bar" : "loop";
 
   return (
@@ -201,7 +242,27 @@ export function EnginePanel({ onClose, onSetup }: { onClose: () => void; onSetup
                 <HMeter pick={peaks(b.id)} channels={2} className="grow" />
               </div>
             ))}
+            {collapsed && <div className="dim out-note">{T.sharedOutputHint}</div>}
           </div>
+
+          {outputs.length > 0 && (
+            <div className="pop-s">
+              <div className="caps" title={T.limiterHint}>
+                {T.outputs}
+              </div>
+              {outputs.map((o) => (
+                <div className="busrow" key={o.channel} title={T.limiterHint}>
+                  <span className="nm">
+                    <Icon name="speaker" />
+                    {T.outputChannel} {o.channel}
+                    <span className="dim2">{o.on || "unused"}</span>
+                  </span>
+                  <Reduction channel={o.channel} />
+                  <HMeter pick={outPeak(o.channel)} channels={1} className="grow" />
+                </div>
+              ))}
+            </div>
+          )}
 
           <div className="pop-s">
             <div className="caps">Levels</div>

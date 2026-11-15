@@ -894,12 +894,17 @@ pub struct StatusEvent {
     pub buses: Vec<BusStatusEvent>,
     /// How many output channels the device really has - what a routing selector may offer.
     pub output_channels: u32,
-    /// True while both buses leave on exactly the same channels, which is what a two-output
-    /// interface forces. There is then one mix: every source is heard once, the click included, and
-    /// the monitor volume has nothing to regulate on its own.
+    /// True while the two buses share at least one device channel - always on a two-output
+    /// interface. There is then one mix on every channel either bus uses: every source is heard
+    /// once, the click included, the Main volume sets it and the Monitor volume has nothing to
+    /// regulate on its own.
     pub buses_collapsed: bool,
     /// The German sentence explaining an overlapping routing, or `null` when the buses are apart.
     pub bus_note: Option<String>,
+    /// One entry per device output channel (at most eight): what the socket really gets, after
+    /// the buses were placed on it and before the safety limiter. The only meter that can show an
+    /// over of the sum.
+    pub outputs: Vec<OutputMeterEvent>,
 
     pub tracks: Vec<TrackStatusEvent>,
 
@@ -969,6 +974,7 @@ impl StatusEvent {
             output_channels: 0,
             buses_collapsed: false,
             bus_note: None,
+            outputs: Vec::new(),
             tracks: Vec::new(),
             score: None,
             xruns: 0,
@@ -1006,6 +1012,47 @@ pub struct BusStatusEvent {
     pub peaks: Vec<f32>,
     /// True for the bus the click is on. Hard-wired, and the reason the buses exist.
     pub has_click: bool,
+}
+
+/// One device output channel in the status event.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub struct OutputMeterEvent {
+    /// Device output channel, **one-based**, as printed on the interface.
+    pub channel: u32,
+    /// Peak since the last event, linear, before the safety limiter - above 1.0 is an over.
+    pub peak: f32,
+    pub dbfs: Option<f64>,
+    /// Deepest gain reduction of the safety limiter since the last event, dB; 0 = untouched.
+    pub reduction_db: f32,
+    /// Which bus volume to turn down when this channel is too loud: `Main`, `Monitor`, or
+    /// `Main/Monitor` when the two share it (then it is the Main volume that counts), empty when
+    /// no bus leaves here.
+    pub buses: String,
+}
+
+/// The device output channels, from the engine snapshot.
+pub fn output_events(status: &Status) -> Vec<OutputMeterEvent> {
+    let main = status.bus_out.get(Bus::Main).range();
+    let monitor = status.bus_out.get(Bus::Monitor).range();
+    (0..status.out_meter_count())
+        .map(|c| {
+            let buses = match (main.contains(&c), monitor.contains(&c)) {
+                (true, true) => "Main/Monitor",
+                (true, false) => "Main",
+                (false, true) => "Monitor",
+                (false, false) => "",
+            };
+            let peak = status.out_peak[c];
+            OutputMeterEvent {
+                channel: c as u32 + 1,
+                peak,
+                dbfs: dbfs(peak),
+                reduction_db: status.out_reduction_db[c],
+                buses: buses.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// Both buses, from the engine snapshot.
@@ -2073,6 +2120,7 @@ mod tests {
                 "output_dbfs",
                 "output_peak",
                 "output_peaks",
+                "outputs",
                 "overdub_mode",
                 "pos",
                 "quantize",
@@ -2796,6 +2844,42 @@ mod tests {
         let buses = bus_events(&status);
         assert!(buses.iter().all(|b| b.has_click));
         assert!(status.bus_out.collapsed());
+    }
+
+    /// One output meter per device channel, saying which bus to turn down - and the over of the
+    /// sum, above 1.0, comes through as it is.
+    #[test]
+    fn the_output_meters_name_the_channel_and_the_bus_behind_it() {
+        let mut status = Status {
+            bus_out: BusRouting::default_for(2),
+            output_channels: 2,
+            ..Default::default()
+        };
+        status.out_peak[0] = 1.3;
+        status.out_reduction_db[0] = -2.3;
+        let outs = output_events(&status);
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs[0].channel, 1);
+        assert_eq!(outs[0].buses, "Main/Monitor");
+        assert!(outs[0].dbfs.expect("Pegel") > 2.0);
+        assert_eq!(outs[0].reduction_db, -2.3);
+        assert_eq!(outs[1].dbfs, None);
+
+        let four = Status {
+            bus_out: BusRouting::default_for(4),
+            output_channels: 4,
+            ..Default::default()
+        };
+        let outs = output_events(&four);
+        let names: Vec<&str> = outs.iter().map(|o| o.buses.as_str()).collect();
+        assert_eq!(names, ["Main", "Main", "Monitor", "Monitor"]);
+
+        // A device with more channels than there are meters gets the first eight.
+        let many = Status {
+            output_channels: 16,
+            ..Default::default()
+        };
+        assert_eq!(output_events(&many).len(), 8);
     }
 
     /// What the setup screen sends, and what happens when it names a socket the device has not got.
