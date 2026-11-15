@@ -518,7 +518,7 @@ mod tests {
         assert!(note.contains("four"), "{note}");
         assert!(note.contains("click"), "{note}");
         assert!(note.contains("exactly once"), "keine Verdopplung: {note}");
-        assert!(note.contains("Y-cable"), "der Notbehelf steht drin: {note}");
+        assert!(note.contains("Y cable"), "der Notbehelf steht drin: {note}");
 
         // A partial overlap is a routing somebody chose; it really does sum, and says so.
         let odd = BusRouting::new(BusOutput::pair(0), BusOutput::pair(1));
