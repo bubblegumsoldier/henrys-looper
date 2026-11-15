@@ -95,6 +95,15 @@ export const api = {
    */
   trackBus: (track: number, source: TrackSourceId, bus: BusId, on: boolean) =>
     call<void>("track_bus", { track, source, bus, on }),
+  /**
+   * The channel fader, linear 0 to `MAX_TRACK_GAIN` (+12 dB). After the effect chain and the
+   * plugin inserts, before the panner; smoothed by the engine, so a jump does not click.
+   */
+  trackGain: (track: number, gain: number) => call<void>("track_gain", { track, gain }),
+  /** Channel mute, both buses. Listening only - recording stays dry. */
+  trackMute: (track: number, on: boolean) => call<void>("track_mute", { track, on }),
+  /** Channel solo. While any track is soloed, every other one is silent on both buses. */
+  trackSolo: (track: number, on: boolean) => call<void>("track_solo", { track, on }),
 
   /**
    * What this track subtracts while recording, in frames.

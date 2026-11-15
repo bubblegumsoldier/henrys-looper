@@ -80,6 +80,15 @@ pub enum Command {
     /// Untimed - a pan is a mix decision, not a musical event, and it is set before a take rather
     /// than during one.
     SetPan { track: usize, pan: f32 },
+    /// The channel fader, linear, clamped to `0..=MAX_TRACK_GAIN` (+12 dB). After the chain and
+    /// the plugin inserts, before the panner; smoothed, so a jump is a short ramp, not a click.
+    /// Untimed, and like every channel-strip command it never reaches a recording.
+    SetTrackGain { track: usize, gain: f32 },
+    /// Channel mute: the strip is held at silence on both buses. Listening only.
+    SetTrackMute { track: usize, on: bool },
+    /// Channel solo: while any track is soloed, every track that is not is held at silence.
+    /// Listening only - a soloed-away track records exactly what it would have recorded.
+    SetTrackSolo { track: usize, on: bool },
     /// Which output buses one source of one track feeds. Untimed and deliberately harmless: it
     /// changes the output stage only, never a layer buffer, so it can be pressed during a take.
     SetTrackSend {
@@ -159,6 +168,9 @@ impl Command {
             | Command::ClearAll { at } => Some(*at),
             Command::SetMonitor { .. }
             | Command::SetPan { .. }
+            | Command::SetTrackGain { .. }
+            | Command::SetTrackMute { .. }
+            | Command::SetTrackSolo { .. }
             | Command::SetTrackSend { .. }
             | Command::SetBusGain { .. }
             | Command::SetBusOutput { .. }
@@ -189,6 +201,9 @@ impl Command {
             | Command::ClearTrack { track, .. }
             | Command::SetMonitor { track, .. }
             | Command::SetPan { track, .. }
+            | Command::SetTrackGain { track, .. }
+            | Command::SetTrackMute { track, .. }
+            | Command::SetTrackSolo { track, .. }
             | Command::SetTrackSend { track, .. }
             | Command::SetTrackLatency { track, .. }
             | Command::SetLayerMute { track, .. }
@@ -300,6 +315,14 @@ pub struct TrackStatus {
     /// State of this track's effect chain: what is on, which preset, and the parameters behind
     /// it. Fixed size and `Copy`, like everything else that crosses the thread boundary.
     pub fx: FxStatus,
+    /// The channel fader, linear (1.0 is 0 dB).
+    pub gain: f32,
+    pub muted: bool,
+    pub soloed: bool,
+    /// Peak of what this strip sends, left and right: post-fader, post-panner, the louder of the
+    /// two buses per side, monitored input included. What a mixer's channel meter shows - unlike
+    /// `output_peak`, which measures the take.
+    pub strip_peak: [f32; 2],
 }
 
 impl Default for TrackStatus {
@@ -326,6 +349,10 @@ impl Default for TrackStatus {
             latency: TrackLatency::INHERITED,
             latency_frames: 0,
             fx: FxStatus::default(),
+            gain: 1.0,
+            muted: false,
+            soloed: false,
+            strip_peak: [0.0; 2],
         }
     }
 }
@@ -773,11 +800,15 @@ mod tests {
     /// against a budget of 2667 - and the queue of 1024 slots costs 1.7 MB, allocated once in the
     /// control thread. The limit is pinned so the next addition has to be a decision rather than
     /// an accident.
+    ///
+    /// The channel strip was such a decision: fader, mute, solo and a stereo strip meter are 16
+    /// bytes per track, 128 for eight - 1816 in all. The limit moved from 1792 to 1920; a mixer
+    /// whose meter does not move with its fader is worth a hundred bytes per snapshot.
     #[test]
     fn the_status_snapshot_stays_small_enough_to_memcpy_in_a_callback() {
         let size = std::mem::size_of::<Status>();
         assert!(
-            size <= 1_792,
+            size <= 1_920,
             "Der Status ist auf {size} Bytes gewachsen - das wandert bei jedem Snapshot durch \
              den Audio-Callback."
         );

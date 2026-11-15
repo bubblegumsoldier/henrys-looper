@@ -225,6 +225,9 @@ pub struct EngineCore {
     /// Plugin insert slots, if the host attached any (`super::insert`). `None` for the CLI and for
     /// every test that predates plugins - they render exactly as before.
     inserts: Option<Box<InsertRack>>,
+    /// True while at least one track is soloed; every other track is then held at silence.
+    /// Recomputed on a solo command, never per sample.
+    any_solo: bool,
 }
 
 impl EngineCore {
@@ -271,6 +274,7 @@ impl EngineCore {
             buffers_taken: [0; BUFFER_KINDS],
             stopped: false,
             inserts: None,
+            any_solo: false,
         }
     }
 
@@ -658,14 +662,21 @@ impl EngineCore {
                 monitor.l[..n].copy_from_slice(&main.l[..n]);
                 monitor.r[..n].copy_from_slice(&main.r[..n]);
             }
+            // Fader and panner, frame by frame: the fader's smoother advances once per frame and
+            // serves both buses, exactly as in the frame path.
             let [scratch_main, scratch_monitor] = &rack.track_scratch[t];
             let [bus_main, bus_monitor] = &mut rack.bus_scratch;
-            for (src, dst) in [(scratch_main, bus_main), (scratch_monitor, bus_monitor)] {
-                for i in 0..n {
-                    let placed = track.place(Frame::new(src.l[i], src.r[i]));
-                    dst.l[i] += placed.l;
-                    dst.r[i] += placed.r;
-                }
+            for i in 0..n {
+                let g = track.fader_next();
+                let main = track.strip(Frame::new(scratch_main.l[i], scratch_main.r[i]), g);
+                let monitor =
+                    track.strip(Frame::new(scratch_monitor.l[i], scratch_monitor.r[i]), g);
+                bus_main.l[i] += main.l;
+                bus_main.r[i] += main.r;
+                bus_monitor.l[i] += monitor.l;
+                bus_monitor.r[i] += monitor.r;
+                track.note_strip_peak(main);
+                track.note_strip_peak(monitor);
             }
         }
         for b in 0..BUS_COUNT {
@@ -883,6 +894,24 @@ impl EngineCore {
             }
             Command::SetMonitor { track, on } => self.tracks[track].set_monitor(on),
             Command::SetPan { track, pan } => self.tracks[track].set_pan(pan),
+            // The channel strip: a few stores and a new smoother target. Listening only - nothing
+            // here reaches `record_input`, so a muted or soloed-away track records as before.
+            Command::SetTrackGain { track, gain } => {
+                let any = self.any_solo;
+                self.tracks[track].set_gain(gain, any);
+            }
+            Command::SetTrackMute { track, on } => {
+                let any = self.any_solo;
+                self.tracks[track].set_muted(on, any);
+            }
+            Command::SetTrackSolo { track, on } => {
+                self.tracks[track].set_soloed(on);
+                self.any_solo = self.tracks.iter().any(Track::soloed);
+                let any = self.any_solo;
+                for t in self.tracks.iter_mut() {
+                    t.retarget(any);
+                }
+            }
             // The three bus commands are pure output-stage changes: a few bytes each, nothing
             // allocated, and nothing that can reach a layer buffer. That is what makes them safe to
             // press while a take is running.
@@ -1109,6 +1138,10 @@ impl EngineCore {
                 latency: track.latency(),
                 latency_frames: track.latency_frames().min(u32::MAX as u64) as u32,
                 fx: track.fx_status(),
+                gain: track.gain(),
+                muted: track.muted(),
+                soloed: track.soloed(),
+                strip_peak: track.take_strip_peak(),
             };
         }
         let status = Status {

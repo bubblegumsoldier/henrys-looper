@@ -44,8 +44,11 @@
 //!   binding written as `track.vocals.record` is matched to the element through its
 //!   `resolved_address`, which the backend computes from the running session.
 //! * The kinds: a *trigger* fires (record, preset, band shape), a *switch* has on/off (monitor,
-//!   effect on), a *range* has a value (pan, gain, fx knobs, tempo). The address decides the kind;
-//!   the element does not have to say.
+//!   effect on, channel mute and solo), a *range* has a value (pan, channel fader
+//!   `track.N.gain`, layer gain, fx knobs, click and monitor level, tempo). The address decides
+//!   the kind; the element does not have to say.
+//! * A drawn control that is not a native input (the mixer's knobs and faders, `mixer/controls`)
+//!   carries the attribute on the element that is dragged, so it is the thing that gets the badge.
 //! * An address the backend does not know is refused when it is armed, with a sentence. A new kind
 //!   of thing to control therefore needs a new `Target` in `target.rs` first.
 //!
@@ -75,6 +78,10 @@ export const GLOBAL = {
   click: "global.click",
   clearAll: "global.clear_all",
   tempo: "global.tempo",
+  /** Click volume - on the Monitor bus strip of the mixer. */
+  clickGain: "global.click_gain",
+  /** Volume of every monitored live input. */
+  monitorGain: "global.monitor_gain",
 } as const;
 
 /** Volume of one output bus - the fader that moves the headphones without moving the room. */
@@ -105,6 +112,9 @@ export type TrackPart =
   | "clear"
   | "monitor"
   | "pan"
+  | "gain"
+  | "mute"
+  | "solo"
   | "latency_trim";
 
 export function trackAddress(track: number, part: TrackPart): string {

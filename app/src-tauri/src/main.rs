@@ -147,6 +147,27 @@ async fn track_pan(track: usize, pan: f32, engine: State<'_, EngineHandle>) -> R
     act(engine, Action::SetPan { track, pan }).await
 }
 
+/// The channel fader of one track, linear: 0.0 is silence, 1.0 is 0 dB, the top is +12 dB
+/// (`MAX_TRACK_GAIN`). After the effect chain and the plugin inserts, before the panner; smoothed
+/// in the engine, so a jump is a short ramp. Never reaches a recording.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_gain(track: usize, gain: f32, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::SetTrackGain { track, gain }).await
+}
+
+/// Channel mute: the track is silent on both buses. Listening only - it still records.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_mute(track: usize, on: bool, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::SetTrackMute { track, on }).await
+}
+
+/// Channel solo: while any track is soloed, only soloed tracks are heard. Listening only - a
+/// track that is soloed away records exactly what it would have recorded. The click stays.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_solo(track: usize, on: bool, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::SetTrackSolo { track, on }).await
+}
+
 /// Which output buses one source of a track is heard on.
 ///
 /// `source` is `loop` (the recorded layers) or `monitor` (the live input while monitoring is on);
@@ -857,6 +878,9 @@ fn main() {
             track_clear,
             track_monitor,
             track_pan,
+            track_gain,
+            track_mute,
+            track_solo,
             track_bus,
             bus_gain,
             bus_output,

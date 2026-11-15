@@ -98,8 +98,17 @@
 
 use super::bus::{BUS_COUNT, Bus, BusSend};
 use super::frame::{Channels, Frame, TrackInput, pan_gains};
+use super::fx::smooth::Smoothed;
 use super::fx::{Chain, FxParam, FxPreset, FxSlot, FxStatus};
 use super::insert::Spread;
+
+/// Upper end of a channel fader, linear: +12 dB. Enough to lift a quiet take to the level of the
+/// others; more is a gain-staging problem the fader should not hide.
+pub const MAX_TRACK_GAIN: f32 = 3.981_071_7;
+
+/// Time constant of the fader smoother. Mute and solo ride on the same ramp, so a switch is a
+/// 10 ms fade rather than a click - short enough to feel instant, long enough to be silent.
+const FADER_MS: f32 = 10.0;
 
 /// Hard ceiling of layers per track. Not a pre-allocation: layers are allocated one at a time in
 /// loop length. It exists so a runaway overdub hits a clear German message instead of the memory
@@ -341,6 +350,18 @@ pub struct Track {
     latency_frames: u64,
     /// Frames the loop is read ahead to make up for plugin latency. See [`Track::render_unpanned`].
     playback_advance: u64,
+    /// The channel fader, linear `0..=MAX_TRACK_GAIN`. After the chain and the plugin inserts,
+    /// before the panner - the place a DAW channel strip has it. Never reaches a recording.
+    gain: f32,
+    /// Channel mute and solo. Listening only: what is recorded is the raw input either way.
+    muted: bool,
+    soloed: bool,
+    /// What actually multiplies the strip: `gain`, or 0 while muted or soloed away. One smoother
+    /// for all three, so fader moves, mute and solo are click-free alike. At rest it is exactly
+    /// the target, so a fader at 1.0 multiplies by exactly 1.0 - bit-identical to no fader.
+    audible: Smoothed,
+    /// Peak of what this strip sends, post-fader and post-panner, the louder bus per side.
+    strip_peak: [f32; 2],
 }
 
 impl Track {
@@ -373,7 +394,86 @@ impl Track {
             // Resolved by `EngineCore::new`, which is the only place that knows the default.
             latency_frames: 0,
             playback_advance: 0,
+            gain: 1.0,
+            muted: false,
+            soloed: false,
+            audible: Smoothed::new(1.0, FADER_MS, sample_rate),
+            strip_peak: [0.0; 2],
         }
+    }
+
+    /// The channel fader, linear.
+    #[inline]
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
+
+    #[inline]
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    #[inline]
+    pub fn soloed(&self) -> bool {
+        self.soloed
+    }
+
+    /// New fader value; anything that is not a finite number is ignored rather than let into the
+    /// audio path. `any_solo` is the engine-wide answer to "is any track soloed".
+    #[inline]
+    pub fn set_gain(&mut self, gain: f32, any_solo: bool) {
+        if gain.is_finite() {
+            self.gain = gain.clamp(0.0, MAX_TRACK_GAIN);
+        }
+        self.retarget(any_solo);
+    }
+
+    #[inline]
+    pub fn set_muted(&mut self, on: bool, any_solo: bool) {
+        self.muted = on;
+        self.retarget(any_solo);
+    }
+
+    /// Only the flag; the engine retargets every track afterwards, because a solo changes what
+    /// the others may be heard at.
+    #[inline]
+    pub fn set_soloed(&mut self, on: bool) {
+        self.soloed = on;
+    }
+
+    /// Point the smoother at what this strip should be heard at now.
+    #[inline]
+    pub fn retarget(&mut self, any_solo: bool) {
+        let silenced = self.muted || (any_solo && !self.soloed);
+        self.audible.set(if silenced { 0.0 } else { self.gain });
+    }
+
+    /// Advance the fader by one frame and return its factor. Called exactly once per frame,
+    /// however many buses the strip feeds.
+    #[inline(always)]
+    pub fn fader_next(&mut self) -> f32 {
+        self.audible.next()
+    }
+
+    /// Fader, then panner, for one bus frame. `g` is this frame's [`Track::fader_next`].
+    #[inline(always)]
+    pub fn strip(&self, wet: Frame, g: f32) -> Frame {
+        self.place(Frame::new(wet.l * g, wet.r * g))
+    }
+
+    #[inline]
+    pub fn note_strip_peak(&mut self, frame: Frame) {
+        for c in 0..2 {
+            let magnitude = frame.channel(c).abs();
+            if magnitude > self.strip_peak[c] {
+                self.strip_peak[c] = magnitude;
+            }
+        }
+    }
+
+    #[inline]
+    pub fn take_strip_peak(&mut self) -> [f32; 2] {
+        std::mem::replace(&mut self.strip_peak, [0.0; 2])
     }
 
     /// A mono track on one input channel, centred. The shorthand the tests and the mono default
@@ -530,7 +630,11 @@ impl Track {
     #[inline]
     pub fn render(&mut self, pos: u64, monitor: Frame, collapsed: bool) -> [Frame; BUS_COUNT] {
         let (wet, _) = self.render_unpanned(pos, monitor, collapsed);
-        [self.place(wet[0]), self.place(wet[1])]
+        let g = self.fader_next();
+        let out = [self.strip(wet[0], g), self.strip(wet[1], g)];
+        self.note_strip_peak(out[0]);
+        self.note_strip_peak(out[1]);
+        out
     }
 
     /// Apply this track's panner to one frame. The last step of the channel strip.
@@ -1054,6 +1158,10 @@ impl Track {
         // started with, not to some blanket value.
         self.loop_send = self.loop_send_default;
         self.monitor_send = self.monitor_send_default;
+        // The channel fader, mute and solo are left where they are. They are the mix the musician
+        // is riding *now*, set by ear on the mixer rather than written into a setup, and "clear
+        // all" means "record the song again", not "throw away the balance". There is no start
+        // value to go back to either - unlike the pan, no configuration names a fader.
     }
 }
 

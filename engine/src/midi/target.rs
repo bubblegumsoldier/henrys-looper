@@ -12,6 +12,8 @@
 //! global.click                       Klick an/aus
 //! track.1.record                     Aufnahme auf Track 1
 //! track.stimme.monitor               Mithoeren auf dem Track namens "stimme"
+//! track.1.gain                       Kanal-Fader von Track 1
+//! track.1.mute / track.1.solo        Kanal stumm / solo
 //! track.1.layer.2.gain               Lautstaerke der zweiten Ebene
 //! track.1.fx.bypass                  ganze Effektkette umgehen
 //! track.1.fx.reverb.on               Hall an/aus
@@ -59,6 +61,8 @@
 use std::fmt;
 
 use crate::engine::bus::{Bus, MAX_BUS_GAIN, TrackSource};
+use crate::engine::command::MAX_LEVEL_GAIN;
+use crate::engine::track::MAX_TRACK_GAIN;
 use crate::engine::fx::{EQ_BANDS, FxParam, FxPreset, FxSlot};
 use crate::engine::fx::{BandKind, DelayNote};
 use crate::engine::schedule::Quantize;
@@ -109,7 +113,15 @@ pub enum Curve {
     /// Equal *factors*. Right for frequencies and times: from 20 Hz to 20 kHz linearly, the whole
     /// bass register would sit in the first two of 127 steps.
     Logarithmic,
+    /// A mixing-desk fader on a linear gain: controller 0 is silence, 1..127 are equal steps in
+    /// **dB** from [`FADER_FLOOR_DB`] up to the range's top. Equal steps in gain would spend half
+    /// the travel on the top 6 dB; equal steps in dB is what a fader feels like. With the top at
+    /// +12 dB, unity (0 dB) lands exactly on controller 106.
+    Fader,
 }
+
+/// Bottom of a [`Curve::Fader`] above silence: controller 1.
+pub const FADER_FLOOR_DB: f32 = -60.0;
 
 /// A continuous target's range, and how a controller's 0..127 lands in it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,6 +137,15 @@ impl Range {
             min,
             max,
             curve: Curve::Linear,
+        }
+    }
+
+    /// A fader from silence (`min`, normally 0) to `max`, in dB steps. See [`Curve::Fader`].
+    pub const fn fader(min: f32, max: f32) -> Self {
+        Self {
+            min,
+            max,
+            curve: Curve::Fader,
         }
     }
 
@@ -173,6 +194,11 @@ impl Range {
                 std::cmp::Ordering::Greater => (f32::from(cc) - 64.0) / 63.0 * self.max,
             };
         }
+        if self.curve == Curve::Fader && self.max > 0.0 {
+            let top = 20.0 * self.max.log10();
+            let db = FADER_FLOOR_DB + f32::from(cc - 1) * (top - FADER_FLOOR_DB) / 126.0;
+            return 10f32.powf(db / 20.0).clamp(self.min.min(self.max), self.max);
+        }
         let t = f32::from(cc) / 127.0;
         match self.curve {
             Curve::Linear => self.min + t * (self.max - self.min),
@@ -181,7 +207,7 @@ impl Range {
             Curve::Logarithmic if self.min > 0.0 && self.max > 0.0 => {
                 self.min * (self.max / self.min).powf(t)
             }
-            Curve::Logarithmic => self.min + t * (self.max - self.min),
+            Curve::Logarithmic | Curve::Fader => self.min + t * (self.max - self.min),
         }
     }
 
@@ -199,6 +225,19 @@ impl Range {
             } else {
                 64.0 + 63.0 * value / self.max
             };
+        }
+        if self.curve == Curve::Fader && self.max > 0.0 {
+            let top = 20.0 * self.max.log10();
+            let floor = 10f32.powf(FADER_FLOOR_DB / 20.0);
+            if value <= 0.0 {
+                return 0.0;
+            }
+            if value < floor {
+                // Between silence and the floor: the stretch between controller 0 and 1.
+                return value / floor;
+            }
+            let db = 20.0 * value.log10();
+            return (1.0 + (db - FADER_FLOOR_DB) / (top - FADER_FLOOR_DB) * 126.0).clamp(0.0, 127.0);
         }
         let t = match self.curve {
             Curve::Logarithmic if self.min > 0.0 && self.max > 0.0 && self.max != self.min => {
@@ -399,6 +438,10 @@ pub enum Target {
     /// Volume of one output bus. The obvious thing to put on a fader: turning the headphones down
     /// mid-song without touching the room is half the reason there are two buses.
     BusGain(Bus),
+    /// Volume of the click, linear `0..=MAX_LEVEL_GAIN`. On the monitor bus only.
+    ClickGain,
+    /// Volume of every monitored live input, linear `0..=MAX_LEVEL_GAIN`. Output side only.
+    MonitorGain,
 
     // ---- per track -------------------------------------------------------------------------
     Record(TrackRef),
@@ -408,6 +451,11 @@ pub enum Target {
     ClearTrack(TrackRef),
     Monitor(TrackRef),
     Pan(TrackRef),
+    /// The channel fader, linear `0..=MAX_TRACK_GAIN` (+12 dB), on a dB-stepped fader curve.
+    Gain(TrackRef),
+    /// Channel mute and solo. Listening only - neither reaches a recording.
+    Mute(TrackRef),
+    Solo(TrackRef),
     /// Whether one source of a track (its loop or its monitored input) is heard on one bus. One
     /// address per source *and* per bus, rather than one address carrying a set: a pad is a
     /// switch, and "geht dieser Track auf den Saal" is the question a musician actually presses.
@@ -453,6 +501,8 @@ impl Target {
 
             Target::Click
             | Target::Monitor(_)
+            | Target::Mute(_)
+            | Target::Solo(_)
             | Target::LayerMute(..)
             | Target::Send(..)
             | Target::FxBypass(_)
@@ -464,6 +514,11 @@ impl Target {
             Target::LayerGain(..) => Control::Range(Range::linear(0.0, 4.0)),
             // `engine::bus::MAX_BUS_GAIN`, the same headroom a layer gain has.
             Target::BusGain(_) => Control::Range(Range::linear(0.0, MAX_BUS_GAIN)),
+            Target::ClickGain | Target::MonitorGain => {
+                Control::Range(Range::linear(0.0, MAX_LEVEL_GAIN))
+            }
+            // Silence at 0, then dB steps from -60 to +12; unity on controller 106.
+            Target::Gain(_) => Control::Range(Range::fader(0.0, MAX_TRACK_GAIN)),
             // The tempo the score compiler and `Timeline::validate` both accept.
             Target::Tempo => Control::Range(Range::linear(20.0, 400.0)),
             Target::LatencyTrim(_) => {
@@ -483,6 +538,9 @@ impl Target {
             | Target::ClearTrack(t)
             | Target::Monitor(t)
             | Target::Pan(t)
+            | Target::Gain(t)
+            | Target::Mute(t)
+            | Target::Solo(t)
             | Target::Send(t, ..)
             | Target::LatencyTrim(t)
             | Target::LayerMute(t, _)
@@ -502,6 +560,8 @@ impl Target {
             | Target::ClearAll
             | Target::Tempo
             | Target::BusGain(_)
+            | Target::ClickGain
+            | Target::MonitorGain
             | Target::Quantize(_) => None,
         }
     }
@@ -521,6 +581,9 @@ impl Target {
             Target::ClearTrack(_) => Target::ClearTrack(t),
             Target::Monitor(_) => Target::Monitor(t),
             Target::Pan(_) => Target::Pan(t),
+            Target::Gain(_) => Target::Gain(t),
+            Target::Mute(_) => Target::Mute(t),
+            Target::Solo(_) => Target::Solo(t),
             Target::Send(_, source, bus) => Target::Send(t, source, bus),
             Target::LatencyTrim(_) => Target::LatencyTrim(t),
             Target::LayerMute(_, l) => Target::LayerMute(t, l),
@@ -595,6 +658,11 @@ impl Target {
             Target::BusGain(bus) => format!("Volume {}", bus_word(*bus)),
             Target::Monitor(t) => format!("{}: Monitor", track(t)),
             Target::Pan(t) => format!("{}: Pan", track(t)),
+            Target::Gain(t) => format!("{}: Channel fader", track(t)),
+            Target::Mute(t) => format!("{}: Mute", track(t)),
+            Target::Solo(t) => format!("{}: Solo", track(t)),
+            Target::ClickGain => "Click volume".to_string(),
+            Target::MonitorGain => "Monitoring volume".to_string(),
             Target::Send(t, source, bus) => format!(
                 "{}: {} to {}",
                 track(t),
@@ -645,6 +713,8 @@ impl Target {
             ["global", "click"] => Ok(Target::Click),
             ["global", "clear_all"] => Ok(Target::ClearAll),
             ["global", "tempo"] => Ok(Target::Tempo),
+            ["global", "click_gain"] => Ok(Target::ClickGain),
+            ["global", "monitor_gain"] => Ok(Target::MonitorGain),
             ["global", "quantize", "bar"] => Ok(Target::Quantize(Quantize::Bar)),
             ["global", "quantize", "loop"] => Ok(Target::Quantize(Quantize::Loop)),
             ["global", "bus", name, "gain"] => match Bus::parse(name) {
@@ -669,6 +739,9 @@ fn parse_track(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, 
         ["clear"] => Ok(Target::ClearTrack(track)),
         ["monitor"] => Ok(Target::Monitor(track)),
         ["pan"] => Ok(Target::Pan(track)),
+        ["gain"] => Ok(Target::Gain(track)),
+        ["mute"] => Ok(Target::Mute(track)),
+        ["solo"] => Ok(Target::Solo(track)),
         ["bus", name] => match Bus::parse(name) {
             Some(bus) => Ok(Target::Send(track, TrackSource::Loop, bus)),
             None => Err(bus_unknown(address, name)),
@@ -804,6 +877,11 @@ impl fmt::Display for Target {
             Target::ClearTrack(t) => write!(f, "track.{t}.clear"),
             Target::Monitor(t) => write!(f, "track.{t}.monitor"),
             Target::Pan(t) => write!(f, "track.{t}.pan"),
+            Target::Gain(t) => write!(f, "track.{t}.gain"),
+            Target::Mute(t) => write!(f, "track.{t}.mute"),
+            Target::Solo(t) => write!(f, "track.{t}.solo"),
+            Target::ClickGain => f.write_str("global.click_gain"),
+            Target::MonitorGain => f.write_str("global.monitor_gain"),
             Target::Send(t, TrackSource::Loop, bus) => write!(f, "track.{t}.bus.{}", bus.name()),
             Target::Send(t, TrackSource::Monitor, bus) => {
                 write!(f, "track.{t}.monitor_bus.{}", bus.name())
@@ -889,6 +967,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
         Target::Quantize(Quantize::Loop),
     ]);
     out.extend(Bus::ALL.into_iter().map(Target::BusGain));
+    out.extend([Target::ClickGain, Target::MonitorGain]);
     for track in 0..tracks {
         let t = || TrackRef::Index(track);
         out.extend([
@@ -899,6 +978,9 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
             Target::ClearTrack(t()),
             Target::Monitor(t()),
             Target::Pan(t()),
+            Target::Gain(t()),
+            Target::Mute(t()),
+            Target::Solo(t()),
             Target::LatencyTrim(t()),
         ]);
         for source in TrackSource::ALL {

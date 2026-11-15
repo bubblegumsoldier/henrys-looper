@@ -47,6 +47,7 @@ use looper_engine::engine::frame::{Channels, TrackInput};
 use looper_engine::engine::fx::{FxParam, FxPreset, FxSlot};
 use looper_engine::engine::live::MAX_LATENCY_FRAMES;
 use looper_engine::engine::live::TrackDef;
+use looper_engine::engine::track::MAX_TRACK_GAIN;
 use looper_engine::engine::bus::BUS_SAMPLES;
 use looper_engine::engine::process::{
     EngineConfig, EngineCore, loop_capacity, max_latency, max_memory_bytes, spare_channels,
@@ -120,6 +121,11 @@ pub enum Action {
     SetMonitor { track: usize, on: bool },
     /// Where a track sits between the speakers: -1.0 hard left, 0.0 centre, +1.0 hard right.
     SetPan { track: usize, pan: f32 },
+    /// The channel fader, linear `0..=MAX_TRACK_GAIN` (+12 dB). After the chain and the inserts.
+    SetTrackGain { track: usize, gain: f32 },
+    /// Channel mute and solo. Listening only - what is recorded stays the raw input.
+    SetTrackMute { track: usize, on: bool },
+    SetTrackSolo { track: usize, on: bool },
     /// Which output buses one source of a track (its loop or its monitored input) is heard on.
     SetTrackSend {
         track: usize,
@@ -230,6 +236,9 @@ impl Action {
             | Action::ClearTrack { track }
             | Action::SetMonitor { track, .. }
             | Action::SetPan { track, .. }
+            | Action::SetTrackGain { track, .. }
+            | Action::SetTrackMute { track, .. }
+            | Action::SetTrackSolo { track, .. }
             | Action::SetTrackSend { track, .. }
             | Action::SetTrackBus { track, .. }
             | Action::SetTrackLatency { track, .. }
@@ -652,6 +661,13 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
             MidiIntent::Session(Action::SetMonitor { track, on })
         }
         MidiAction::Pan { track, pan } => MidiIntent::Session(Action::SetPan { track, pan }),
+        MidiAction::Gain { track, gain } => {
+            MidiIntent::Session(Action::SetTrackGain { track, gain })
+        }
+        MidiAction::Mute { track, on } => MidiIntent::Session(Action::SetTrackMute { track, on }),
+        MidiAction::Solo { track, on } => MidiIntent::Session(Action::SetTrackSolo { track, on }),
+        MidiAction::ClickGain(gain) => MidiIntent::Session(Action::SetClickGain { gain }),
+        MidiAction::MonitorGain(gain) => MidiIntent::Session(Action::SetMonitorGain { gain }),
         MidiAction::Send {
             track,
             source,
@@ -865,6 +881,12 @@ impl ParamState for SessionState<'_> {
                 let index = self.index(track)?;
                 Some(self.session.tracks[index].latency.trim as f32)
             }
+            Target::Gain(track) => {
+                let index = self.index(track)?;
+                Some(self.session.status_of(index).gain)
+            }
+            Target::ClickGain => self.session.last.map(|(status, _)| status.click_gain),
+            Target::MonitorGain => self.session.last.map(|(status, _)| status.monitor_gain),
             Target::LayerGain(track, layer) => {
                 let index = self.index(track)?;
                 self.session.tracks[index].gains.get(*layer).copied()
@@ -895,6 +917,14 @@ impl ParamState for SessionState<'_> {
                     return None;
                 }
                 Some(status.muted_mask & (1 << layer) != 0)
+            }
+            Target::Mute(track) => {
+                let index = self.index(track)?;
+                Some(self.session.status_of(index).muted)
+            }
+            Target::Solo(track) => {
+                let index = self.index(track)?;
+                Some(self.session.status_of(index).soloed)
             }
             Target::FxBypass(track) => Some(self.fx(track)?.bypass),
             Target::FxEnabled(track, slot) => {
@@ -2151,6 +2181,35 @@ impl Session {
                 self.cmd.send(Command::SetPan { track, pan })?;
                 // No message: a knob being turned is not news, and a sentence per mouse move would
                 // make the status line flicker. The new value comes back in the status.
+                Ok(())
+            }
+            // The channel strip. Like the pan, no message per fader move; mute and solo are presses
+            // and say what they did. None of the three is reset by a score load or "clear all":
+            // they are the live balance, not part of the setup (see `Track::restore_defaults`).
+            Action::SetTrackGain { track, gain } => {
+                if !gain.is_finite() || !(0.0..=MAX_TRACK_GAIN).contains(&gain) {
+                    return Err(format!(
+                        "The channel fader goes from 0.0 (silence) to {MAX_TRACK_GAIN:.2} (+12 dB)."
+                    ));
+                }
+                self.cmd.send(Command::SetTrackGain { track, gain })
+            }
+            Action::SetTrackMute { track, on } => {
+                self.cmd.send(Command::SetTrackMute { track, on })?;
+                self.message = Some(format!(
+                    "\"{}\": {}.",
+                    self.tracks[track].name,
+                    if on { "muted" } else { "unmuted" }
+                ));
+                Ok(())
+            }
+            Action::SetTrackSolo { track, on } => {
+                self.cmd.send(Command::SetTrackSolo { track, on })?;
+                self.message = Some(format!(
+                    "\"{}\": solo {}.",
+                    self.tracks[track].name,
+                    if on { "on" } else { "off" }
+                ));
                 Ok(())
             }
             // The three bus actions stay available while a score runs: they are mix decisions, and

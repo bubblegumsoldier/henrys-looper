@@ -69,6 +69,11 @@ pub enum MidiAction {
     ClearTrack { track: usize },
     Monitor { track: usize, on: bool },
     Pan { track: usize, pan: f32 },
+    /// The channel fader, linear.
+    Gain { track: usize, gain: f32 },
+    /// Channel mute and solo - listening only.
+    Mute { track: usize, on: bool },
+    Solo { track: usize, on: bool },
     /// One source of one track on or off one bus. The router carries the whole resulting send, not
     /// just the bit, because a `BusSend` is what the engine takes - and the bit it changed was
     /// computed against the state the engine reported, so no private copy can drift.
@@ -79,6 +84,9 @@ pub enum MidiAction {
     },
     /// Volume of one output bus, linear.
     BusGain { bus: Bus, gain: f32 },
+    /// Click volume and the volume of every monitored input, linear.
+    ClickGain(f32),
+    MonitorGain(f32),
     /// The manual half of the latency compensation, in frames. The measured half belongs to
     /// `calibrate` and is not touched from here.
     LatencyTrim { track: usize, trim: i32 },
@@ -128,6 +136,11 @@ impl MidiAction {
             MidiAction::Click(on) => Command::SetClick { on },
             MidiAction::Monitor { track, on } => Command::SetMonitor { track, on },
             MidiAction::Pan { track, pan } => Command::SetPan { track, pan },
+            MidiAction::Gain { track, gain } => Command::SetTrackGain { track, gain },
+            MidiAction::Mute { track, on } => Command::SetTrackMute { track, on },
+            MidiAction::Solo { track, on } => Command::SetTrackSolo { track, on },
+            MidiAction::ClickGain(gain) => Command::SetClickGain { gain },
+            MidiAction::MonitorGain(gain) => Command::SetMonitorGain { gain },
             MidiAction::Send {
                 track,
                 source,
@@ -514,6 +527,8 @@ impl Router {
         Resolution::Action(match &binding.target {
             Target::Click => MidiAction::Click(on),
             Target::Monitor(_) => MidiAction::Monitor { track, on },
+            Target::Mute(_) => MidiAction::Mute { track, on },
+            Target::Solo(_) => MidiAction::Solo { track, on },
             Target::Send(_, source, bus) => {
                 // The switch is one bus of a two-bus set, so the set has to be read back before the
                 // bit is flipped - otherwise switching Main off would also throw Monitor away.
@@ -592,6 +607,9 @@ impl Router {
         let value = range.value_of(event.value7());
         Resolution::Action(match &binding.target {
             Target::Pan(_) => MidiAction::Pan { track, pan: value },
+            Target::Gain(_) => MidiAction::Gain { track, gain: value },
+            Target::ClickGain => MidiAction::ClickGain(value),
+            Target::MonitorGain => MidiAction::MonitorGain(value),
             Target::BusGain(bus) => MidiAction::BusGain { bus: *bus, gain: value },
             Target::LayerGain(_, layer) => MidiAction::LayerGain {
                 track,

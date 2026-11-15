@@ -1282,3 +1282,114 @@ fn a_knob_on_the_monitor_volume_lands_on_the_engine_command() {
         }
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The channel strip and the two levels: fader, mute, solo, click and monitor volume
+// ---------------------------------------------------------------------------------------------
+
+/// The five addresses the mixer carries in `data-midi`, parsed and printed back unchanged.
+#[test]
+fn the_strip_addresses_round_trip() {
+    for (address, target) in [
+        ("track.1.gain", Target::Gain(TrackRef::Index(0))),
+        ("track.2.mute", Target::Mute(TrackRef::Index(1))),
+        ("track.3.solo", Target::Solo(TrackRef::Index(2))),
+        ("global.click_gain", Target::ClickGain),
+        ("global.monitor_gain", Target::MonitorGain),
+    ] {
+        assert_eq!(Target::parse(address).expect(address), target);
+        assert_eq!(target.to_string(), address);
+    }
+    assert_eq!(
+        Target::parse("track.stimme.solo").unwrap(),
+        Target::Solo(TrackRef::Name("stimme".to_string()))
+    );
+    assert!(matches!(Target::Mute(TrackRef::Index(0)).control(), Control::Switch));
+    assert!(matches!(Target::Solo(TrackRef::Index(0)).control(), Control::Switch));
+    let catalogue = catalogue(2, 0, 0);
+    for t in [
+        Target::Gain(TrackRef::Index(1)),
+        Target::Mute(TrackRef::Index(1)),
+        Target::Solo(TrackRef::Index(1)),
+        Target::ClickGain,
+        Target::MonitorGain,
+    ] {
+        assert!(catalogue.contains(&t), "{t} fehlt im Katalog");
+    }
+    // Renaming a target onto another track keeps what it is.
+    assert_eq!(
+        Target::Gain(TrackRef::Name("stimme".into())).with_track(TrackRef::Index(0)),
+        Target::Gain(TrackRef::Index(0))
+    );
+}
+
+/// A fader feels like a fader: silence at the bottom, equal dB steps above it, unity exactly on
+/// controller 106 and +12 dB at the top - and `cc_of` is its inverse, which the pickup needs.
+#[test]
+fn the_channel_fader_has_a_db_taper_with_unity_on_106() {
+    use crate::engine::track::MAX_TRACK_GAIN;
+    use crate::midi::target::FADER_FLOOR_DB;
+    let Control::Range(range) = Target::Gain(TrackRef::Index(0)).control() else {
+        panic!("ein Wert");
+    };
+    assert_eq!(range.value_of(0), 0.0);
+    assert_eq!(range.value_of(127), MAX_TRACK_GAIN);
+    assert_eq!(range.value_of(106), 1.0, "0 dB genau auf 106");
+    let db = |cc: u8| 20.0 * range.value_of(cc).log10();
+    assert!((db(1) - FADER_FLOOR_DB).abs() < 1e-3);
+    // Equal dB per step: 72 dB over 126 steps.
+    assert!(((db(51) - db(50)) - 72.0 / 126.0).abs() < 1e-3);
+    for cc in [1u8, 20, 64, 106, 126] {
+        let back = range.cc_of(range.value_of(cc));
+        assert!((back - f32::from(cc)).abs() < 1e-2, "{cc} -> {back}");
+    }
+    assert_eq!(range.cc_of(0.0), 0.0);
+}
+
+/// Knobs on the fader and the two levels, pads on mute and solo, all ending in engine commands.
+#[test]
+fn the_strip_bindings_land_on_the_engine_commands() {
+    let mut router = router_with(vec![
+        (
+            "ch1.cc7",
+            Binding::new(Target::Gain(TrackRef::Index(1))).with_takeover(Takeover::Jump),
+        ),
+        (
+            "ch1.cc8",
+            Binding::new(Target::ClickGain).with_takeover(Takeover::Jump),
+        ),
+        (
+            "ch1.cc9",
+            Binding::new(Target::MonitorGain).with_takeover(Takeover::Jump),
+        ),
+        ("ch1.note40", Binding::new(Target::Mute(TrackRef::Index(0)))),
+        ("ch1.note41", Binding::new(Target::Solo(TrackRef::Index(1)))),
+    ]);
+    let layout = layout();
+    let ctx = Context::bare(&layout);
+
+    let fader = router.resolve(&cc(7, 106), &ctx).action().expect("Aktion");
+    assert_eq!(fader, MidiAction::Gain { track: 1, gain: 1.0 });
+    assert_eq!(
+        fader.command(),
+        Some(Command::SetTrackGain { track: 1, gain: 1.0 })
+    );
+    let click = router.resolve(&cc(8, 0), &ctx).action().expect("Aktion");
+    assert_eq!(click.command(), Some(Command::SetClickGain { gain: 0.0 }));
+    let monitor = router.resolve(&cc(9, 127), &ctx).action().expect("Aktion");
+    assert_eq!(
+        monitor.command(),
+        Some(Command::SetMonitorGain {
+            gain: crate::engine::command::MAX_LEVEL_GAIN
+        })
+    );
+
+    let mute = router.resolve(&press(40), &ctx).action().expect("Aktion");
+    assert_eq!(mute.command(), Some(Command::SetTrackMute { track: 0, on: true }));
+    let solo = router.resolve(&press(41), &ctx).action().expect("Aktion");
+    assert_eq!(solo.command(), Some(Command::SetTrackSolo { track: 1, on: true }));
+    // A toggle: the second press switches it off again.
+    router.resolve(&release(41), &ctx);
+    let solo = router.resolve(&press(41), &ctx).action().expect("Aktion");
+    assert_eq!(solo.command(), Some(Command::SetTrackSolo { track: 1, on: false }));
+}

@@ -227,6 +227,22 @@ export interface LooperTrackStatus {
   pending_beats: number;
   /** This track's effect chain. It sits in the playback path; what is recorded is always dry. */
   fx: FxStatus;
+
+  // --- channel fader ----------------------------------------------------------
+  // After the chain and the plugin inserts, before the panner: what a DAW calls the channel fader.
+  // Listening only - a take is always recorded dry from the input.
+  /** Linear, 0 to `MAX_TRACK_GAIN` (+12 dB). 1.0 is 0 dB. */
+  gain: number;
+  /** The same in decibels; null at -inf. */
+  gain_db: number | null;
+  /** Channel mute: silent on both buses. Layers keep their own mutes. */
+  muted: boolean;
+  /** Channel solo: while any track is soloed, the others fall silent on both buses. */
+  soloed: boolean;
+  /** What this strip sends, post-fader and post-pan, left and right (monitored input included). */
+  strip_peaks: number[];
+  /** Louder side of that. */
+  strip_peak: number;
 }
 
 /** Event `looper://status`, pushed about twenty times a second while the engine runs. */

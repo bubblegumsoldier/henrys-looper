@@ -59,3 +59,5 @@ pub(crate) mod sim;
 mod tests;
 #[cfg(test)]
 mod insert_tests;
+#[cfg(test)]
+mod fader_tests;

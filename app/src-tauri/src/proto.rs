@@ -580,6 +580,20 @@ pub struct TrackStatusEvent {
     /// Position in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
     pub pan: f32,
 
+    // --- channel strip ------------------------------------------------------------------------
+    /// The channel fader, linear: 0.0 silence, 1.0 is 0 dB, at most `MAX_TRACK_GAIN` (+12 dB).
+    pub gain: f32,
+    /// The same in dB; null at silence, where there is no number.
+    pub gain_db: Option<f64>,
+    /// Channel mute and solo. Listening only - neither changes what is recorded.
+    pub muted: bool,
+    pub soloed: bool,
+    /// Louder side of what this strip sends: post-fader, post-panner, monitored input included.
+    /// What a mixer's channel meter shows; `output_peak` measures the take instead.
+    pub strip_peak: f32,
+    /// Left and right of that, always two entries.
+    pub strip_peaks: Vec<f32>,
+
     // --- output buses -------------------------------------------------------------------------
     // Two switches per source rather than one word, because that is how they are operated: "geht
     // dieser Track in den Saal" is a question with a yes and a no, and a select with four entries
@@ -867,6 +881,12 @@ pub fn track_event(
         channels: ts.channels as u32,
         channels_label: if ts.channels >= 2 { "stereo" } else { "mono" }.to_string(),
         pan: ts.pan,
+        gain: ts.gain,
+        gain_db: dbfs(ts.gain),
+        muted: ts.muted,
+        soloed: ts.soloed,
+        strip_peak: ts.strip_peak[0].max(ts.strip_peak[1]),
+        strip_peaks: ts.strip_peak.to_vec(),
         bus_main: ts.loop_send.on(Bus::Main),
         bus_monitor: ts.loop_send.on(Bus::Monitor),
         monitor_bus_main: ts.monitor_send.on(Bus::Main),
@@ -1588,7 +1608,38 @@ mod tests {
             latency_frames: 827,
             // A track nobody has touched: chain bypassed, everything off, "trocken".
             fx: FxStatus::default(),
+            // Fader at unity, neither muted nor soloed; the strip sends half scale on the left.
+            gain: 1.0,
+            muted: false,
+            soloed: false,
+            strip_peak: [0.5, 0.25],
         }
+    }
+
+    /// The channel strip travels as the UI draws it: linear gain and its dB, the two switches and a
+    /// stereo strip meter; silence has no dB number.
+    #[test]
+    fn the_channel_strip_is_on_the_wire() {
+        let event = track_event(0, "stimme", &sample_status(), &[], RATE, Lead::default());
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["gain"], 1.0);
+        assert_eq!(json["gain_db"], 0.0);
+        assert_eq!(json["muted"], false);
+        assert_eq!(json["soloed"], false);
+        assert_eq!(json["strip_peak"], 0.5);
+        assert_eq!(json["strip_peaks"], serde_json::json!([0.5, 0.25]));
+
+        let quiet = TrackStatus {
+            gain: 0.0,
+            muted: true,
+            soloed: true,
+            ..sample_status()
+        };
+        let json = serde_json::to_value(track_event(0, "stimme", &quiet, &[], RATE, Lead::default()))
+            .unwrap();
+        assert!(json["gain_db"].is_null(), "Stille hat keine dB-Zahl");
+        assert_eq!(json["muted"], true);
+        assert_eq!(json["soloed"], true);
     }
 
     /// A stereo track on inputs 3 and 4, placed a little to the left.
@@ -1867,6 +1918,8 @@ mod tests {
                 "channels_label",
                 "filled_samples",
                 "fx",
+                "gain",
+                "gain_db",
                 "index",
                 "input_channel",
                 "input_channels",
@@ -1884,6 +1937,7 @@ mod tests {
                 "monitor",
                 "monitor_bus_main",
                 "monitor_bus_monitor",
+                "muted",
                 "name",
                 "output_dbfs",
                 "output_peak",
@@ -1894,8 +1948,11 @@ mod tests {
                 "pending_kind",
                 "pending_label",
                 "playing",
+                "soloed",
                 "state",
                 "state_label",
+                "strip_peak",
+                "strip_peaks",
             ]
         );
         assert_eq!(
