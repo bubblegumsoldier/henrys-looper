@@ -6,6 +6,7 @@
 //! and the buttons become Start/Stop of the clock (`transport.toggle`, Space), the grid and the
 //! click.
 
+import { setConfig } from "../setup/config";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { FREE_TRANSPORT, GLOBAL, TRANSPORT, quantizeAddress } from "../midi/addresses";
@@ -224,6 +225,15 @@ export function ReleasePanel({ score, compiled, clock, tracks }: Props) {
   );
 }
 
+/** Off -> 1 bar -> 2 bars -> off, kept for the next start like every other setting. */
+function cycleCountIn(current: number): void {
+  const next = current === 0 ? 1 : current === 1 ? 2 : 0;
+  run(async () => {
+    await api.setCountIn(next);
+    setConfig((c) => ({ ...c, count_in_bars: next }));
+  });
+}
+
 /** Without a score: the next thing the looper will do by itself, plus grid and click. */
 function FreePanel({ clock, tracks }: { clock: Clock; tracks: LooperTrackStatus[] }) {
   const waiting = tracks
@@ -240,8 +250,32 @@ function FreePanel({ clock, tracks }: { clock: Clock; tracks: LooperTrackStatus[
             <Icon name="loop" />
             {T.loop}
           </span>
+          <div className="grow" />
+          <button
+            className={`cin-btn${clock.countInBars > 0 ? " on" : ""}`}
+            onClick={() => cycleCountIn(clock.countInBars)}
+            title="Bars of click before a take that starts the standing clock (R or O). Space starts without one. Click to switch: off · 1 bar · 2 bars."
+          >
+            <Icon name="metro" />
+            {T.countIn}: {clock.countInBars === 0 ? "off" : clock.countInBars === 1 ? "1 bar" : `${clock.countInBars} bars`}
+          </button>
         </div>
-        {!clock.transport ? (
+        {clock.countingIn && first ? (
+          <>
+            <div className="state">
+              <Icon name="metro" />
+              {T.countIn}
+            </div>
+            <div className="to">
+              <span>then</span>
+              {STATE_WORD[PENDING[first.pending_kind!]]} {first.name}
+            </div>
+            <div className="when">
+              {T.bar.toLowerCase()} 1 in <b>{countdown(first.pending_bars, first.pending_beats)}</b> · R or Space cancels
+            </div>
+            <Countdown barsLeft={first.pending_bars} />
+          </>
+        ) : !clock.transport ? (
           <>
             <div className="state">
               <Icon name="stop" />
@@ -252,7 +286,8 @@ function FreePanel({ clock, tracks }: { clock: Clock; tracks: LooperTrackStatus[
               {T.bar.toLowerCase()} 1
             </div>
             <div className="when">
-              Press <b>{T.transportStart}</b> or Space · <b>R</b> records from bar 1
+              Press <b>{T.transportStart}</b> or Space · <b>R</b> records{" "}
+              {clock.countInBars > 0 ? `after ${clock.countInBars} bar${clock.countInBars === 1 ? "" : "s"} of count-in` : "from bar 1"}
             </div>
             <div className="countdown placeholder" />
           </>

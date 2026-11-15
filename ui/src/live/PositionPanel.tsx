@@ -24,6 +24,10 @@ export interface Clock {
   quantize: "bar" | "loop";
   /** Whether the clock runs. While it stands nothing on this panel may count or light up. */
   transport: boolean;
+  /** Free looping: bars of count-in before a take on a standing clock (0 = off). */
+  countInBars: number;
+  /** A free-looping count-in is running. */
+  countingIn: boolean;
 }
 
 interface Props {

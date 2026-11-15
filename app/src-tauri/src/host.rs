@@ -58,7 +58,7 @@ use looper_engine::engine::process::{
     spare_slots_for, total_channels,
 };
 use looper_engine::engine::runner::{
-    DEFAULT_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
+    DEFAULT_COUNT_IN_BARS, MAX_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
 };
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
@@ -243,6 +243,8 @@ pub enum Action {
     Panic { track: Option<usize> },
     /// What `O` does in free looping: stay on until pressed again, or one pass.
     SetOverdubMode { mode: OverdubMode },
+    /// Bars of count-in before a take that starts the standing clock of free looping (0 = off).
+    SetCountIn { bars: u32 },
 
     // --- effects. They act on playback and monitoring; the recording stays dry. ---------------
     /// Whole chain of one track out of the signal path (bit-identical pass-through) or back in.
@@ -344,7 +346,8 @@ impl Action {
             | Action::SetTempo { .. }
             | Action::TapTempo
             | Action::SetQuantize { .. }
-            | Action::SetOverdubMode { .. } => None,
+            | Action::SetOverdubMode { .. }
+            | Action::SetCountIn { .. } => None,
         }
     }
 }
@@ -1682,6 +1685,8 @@ struct Session {
     score_yaml: Option<String>,
     /// Tap tempo, whichever way the taps come in.
     taps: TapTempo,
+    /// End (bar 1) of a running free-looping count-in.
+    count_in: Option<u64>,
     /// The engine's end of the MIDI routing queue (`looper_engine::engine::source`).
     feeds: FeedSender,
     /// Per track, in engine order: what plays it, if it is an instrument track.
@@ -2040,6 +2045,7 @@ impl Session {
             section_watch: SectionWatch::default(),
             score_yaml: None,
             taps: TapTempo::default(),
+            count_in: None,
             feeds,
             routes: vec![TrackRoute::NONE; instrument_inputs.len()],
             instrument_inputs,
@@ -2320,6 +2326,8 @@ impl Session {
                 .samples_to_secs(self.scheduler.timeline.span_bars(0, self.scheduler.bars)),
             quantize: QuantizeName::from(self.scheduler.quantize),
             overdub_mode: self.config.overdub_mode,
+            count_in_bars: self.config.count_in_bars,
+            counting_in: self.count_in.is_some_and(|end| status.pos < end),
             sample_rate: rate,
             latency_frames: self.info.latency_frames,
             click: status.click,
@@ -2653,6 +2661,11 @@ impl Session {
     /// its grid when it reaches `at`; this side moves its mirror now, so every take scheduled from
     /// here on is planned on the grid the engine will have by then. Both use the very same number,
     /// so they agree even when the command arrives late and acts after `at`.
+    /// Whether a free-looping count-in is still counting.
+    fn counting_in(&self) -> bool {
+        self.count_in.is_some_and(|end| self.estimated_pos() < end)
+    }
+
     fn start_transport_at(&mut self, at: u64) -> Result<(), String> {
         self.cmd.send(Command::TransportStart { at })?;
         self.scheduler.timeline = self.scheduler.timeline.with_zero(at);
@@ -2682,6 +2695,7 @@ impl Session {
             self.recorder.end(self.estimated_pos());
             self.cmd.send(Command::TransportStop)?;
             self.transport = false;
+            self.count_in = None;
             self.scheduler.disarm_all();
             self.message = Some(
                 "Transport stopped. The loops are kept; Start plays them from bar 1.".to_string(),
@@ -2698,6 +2712,18 @@ impl Session {
             return Ok(());
         }
         let at = self.scheduler.soon(self.estimated_pos());
+        let bars = self.config.count_in_bars.min(MAX_COUNT_IN_BARS);
+        if bars > 0 {
+            // The count-in: from `at` the click counts `bars` bars while every loop waits, then a
+            // second start makes `end` bar 1 - the grid every take, every loop and the recording
+            // to disk are counted from. Nothing of the count-in lands in a file.
+            let end = self.scheduler.timeline.with_zero(at).bar_start(bars as u64);
+            self.cmd.send(Command::CountIn { at, end })?;
+            self.start_transport_at(end)?;
+            self.count_in = Some(end);
+            self.begin_recording(RecordMode::Free, "Free play", end, 0, 0);
+            return Ok(());
+        }
         self.start_transport_at(at)?;
         self.begin_recording(RecordMode::Free, "Free play", at, 0, 0);
         Ok(())
@@ -2882,6 +2908,12 @@ impl Session {
                     None => FeedMsg::PanicAll,
                 };
                 self.feeds.send(msg)
+            }
+            Action::Record { .. } | Action::Overdub { .. } if self.counting_in() => {
+                // R or O again during the count-in: changed one's mind - nothing is recorded.
+                self.set_transport(Some(false))?;
+                self.message = Some("Count-in cancelled - nothing recorded.".to_string());
+                Ok(())
             }
             Action::Record { track } => {
                 let name = self.tracks[track].name.clone();
@@ -3193,6 +3225,16 @@ impl Session {
             }
             Action::SetQuantize { quantize } => {
                 self.message = Some(self.scheduler.set_quantize(quantize));
+                Ok(())
+            }
+            Action::SetCountIn { bars } => {
+                let bars = bars.min(MAX_COUNT_IN_BARS);
+                self.config.count_in_bars = bars;
+                self.message = Some(match bars {
+                    0 => "Count-in off: R on a standing clock records from bar 1 at once.".to_string(),
+                    1 => "Count-in: 1 bar of click before the first take.".to_string(),
+                    n => format!("Count-in: {n} bars of click before the first take."),
+                });
                 Ok(())
             }
             Action::SetOverdubMode { mode } => {

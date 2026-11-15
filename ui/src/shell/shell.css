@@ -455,3 +455,10 @@ table.tt .tn2 input.name-in { height: 24px; }
   .clockbar .cb-bpm { min-width: 92px; }
   .clockbar .cb-bpm b { font-size: 21px; }
 }
+
+/* Count-in switch in the LOOP panel's header: big enough to hit on stage. */
+.release .rh .grow { flex: 1; }
+.release .rh .cin-btn { height: 40px; padding: 0 14px; border-radius: 9px; display: inline-flex; align-items: center; gap: 8px;
+  background: #15181d; border: 1px solid var(--line-3); color: var(--tx-2); font-size: 15px; font-weight: var(--fw-semibold); white-space: nowrap; }
+.release .rh .cin-btn.on { color: var(--st-armed); border-color: var(--st-armed); }
+.release .rh .cin-btn .ic { --ic: 18px; }

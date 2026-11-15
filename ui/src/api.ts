@@ -166,6 +166,8 @@ export const api = {
     call<void>("set_tempo", { bpm, beats_per_bar: beatsPerBar, beat_unit: beatUnit, bars: bars ?? null }),
   /** One beat of tap tempo; from the third tap on the tempo follows the median gap. */
   tapTempo: () => call<void>("tap_tempo"),
+  /** Bars of count-in before a take that starts the standing clock of free looping (0 = off). */
+  setCountIn: (bars: number) => call<void>("set_count_in", { bars }),
   /** Grid a recording and an overdub snap to. Armed takes keep the position they already have. */
   setQuantize: (quantize: Quantize) => call<void>("set_quantize", { quantize }),
   /** What `O` does in free looping: stay on until pressed again, or one pass. */

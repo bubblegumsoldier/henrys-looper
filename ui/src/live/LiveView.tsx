@@ -86,6 +86,8 @@ function pickClock(s: LooperStatus): Clock & { latency: number } {
     loopSeconds: s.loop_seconds,
     quantize: s.quantize,
     transport: s.transport,
+    countInBars: s.count_in_bars,
+    countingIn: s.counting_in,
     latency: s.latency_frames,
   };
 }
@@ -102,6 +104,8 @@ function sameClock(a: ReturnType<typeof pickClock>, b: ReturnType<typeof pickClo
     a.loopSeconds === b.loopSeconds &&
     a.quantize === b.quantize &&
     a.transport === b.transport &&
+    a.countInBars === b.countInBars &&
+    a.countingIn === b.countingIn &&
     a.latency === b.latency
   );
 }

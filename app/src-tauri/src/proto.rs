@@ -423,6 +423,10 @@ pub struct StartConfig {
     /// `once` (one pass). A score is not affected - its sections say what to overdub.
     #[serde(default)]
     pub overdub_mode: OverdubMode,
+    /// Bars of click before the first take of free looping, when R or O starts a standing clock:
+    /// 0 (off), 1 (the default) or 2. Starting the clock with Space never counts in.
+    #[serde(default = "default_free_count_in")]
+    pub count_in_bars: u32,
     /// Roundtrip latency removed while recording, in **frames** - the default for every track that
     /// brings no value of its own. Measure it with `calibrate` after every change of device,
     /// sample rate or buffer size.
@@ -531,6 +535,10 @@ fn default_beats_per_bar() -> u32 {
 fn default_beat_unit() -> u32 {
     4
 }
+fn default_free_count_in() -> u32 {
+    1
+}
+
 fn default_bars() -> u32 {
     8
 }
@@ -791,6 +799,10 @@ pub struct StatusEvent {
     pub quantize: QuantizeName,
     /// What `O` does in free looping. Changeable while the engine runs.
     pub overdub_mode: OverdubMode,
+    /// Bars of count-in before a take that starts a standing clock (free looping), 0 = off.
+    pub count_in_bars: u32,
+    /// A free-looping count-in is running: the click counts, the take begins on bar 1 after it.
+    pub counting_in: bool,
     pub sample_rate: u32,
     /// The engine's **default** compensation in frames. A track that brings its own reports it in
     /// its own entry; this is what the others follow.
@@ -875,6 +887,8 @@ impl StatusEvent {
             loop_seconds: 0.0,
             quantize: QuantizeName::default(),
             overdub_mode: OverdubMode::default(),
+            count_in_bars: default_free_count_in(),
+            counting_in: false,
             sample_rate: 0,
             latency_frames: 0,
             click: false,
@@ -1968,6 +1982,8 @@ mod tests {
                 "buses_collapsed",
                 "click",
                 "click_gain",
+                "count_in_bars",
+                "counting_in",
                 "fifo_overruns",
                 "fifo_underruns",
                 "ignored_commands",

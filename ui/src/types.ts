@@ -295,6 +295,10 @@ export interface LooperStatus {
   quantize: Quantize;
   /** What `O` does in free looping. */
   overdub_mode: OverdubMode;
+  /** Bars of count-in before a take that starts the standing clock of free looping; 0 = off. */
+  count_in_bars: number;
+  /** A free-looping count-in is running; the take begins on bar 1 after it. */
+  counting_in: boolean;
   sample_rate: number;
   /** The engine's **default** compensation in frames; a track with its own reports it itself. */
   latency_frames: number;
@@ -361,6 +365,8 @@ export const IDLE_STATUS: LooperStatus = {
   loop_seconds: 0,
   quantize: "loop",
   overdub_mode: "latch",
+  count_in_bars: 1,
+  counting_in: false,
   sample_rate: 0,
   latency_frames: 0,
   click: false,
@@ -501,6 +507,8 @@ export interface StartConfig {
   quantize: Quantize;
   /** What `O` does in free looping. Missing in an older stored setup: `latch`. */
   overdub_mode?: OverdubMode;
+  /** Bars of count-in before the first take of free looping (0, 1, 2). Missing: 1. */
+  count_in_bars?: number;
   /** Default compensation in frames, for every track that brings none of its own. */
   latency_frames: number;
   monitor_gain: number;

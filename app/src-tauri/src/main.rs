@@ -516,6 +516,12 @@ async fn set_quantize(
     .await
 }
 
+/// Bars of count-in before a take that starts the standing clock of free looping (0 = off).
+#[tauri::command(rename_all = "snake_case")]
+async fn set_count_in(bars: u32, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::SetCountIn { bars }).await
+}
+
 /// What `O` does in free looping: `"latch"` (stays on until pressed again, every pass a layer) or
 /// `"once"` (one pass).
 #[tauri::command(rename_all = "snake_case")]
@@ -1031,6 +1037,7 @@ fn main() {
             set_quantize,
             set_overdub_mode,
             tap_tempo,
+            set_count_in,
             fx_bypass,
             fx_enable,
             fx_preset,
