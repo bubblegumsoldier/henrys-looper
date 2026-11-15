@@ -119,6 +119,56 @@ const MIX_SAVE_DELAY: Duration = Duration::from_secs(1);
 const NO_ENGINE: &str = "The engine is not running. Start it first.";
 
 // ---------------------------------------------------------------------------------------------
+// Tap tempo
+// ---------------------------------------------------------------------------------------------
+
+/// Taps further apart than this start a new series instead of counting as a very slow beat.
+const TAP_RESET: Duration = Duration::from_millis(2_500);
+/// The last this many gaps count, so the estimate follows a player who speeds up.
+const TAP_WINDOW: usize = 8;
+
+/// Turns taps into a tempo: the median gap of the last few, so one stumble does not move it.
+/// The same rule the setup page's tap button uses (`ui/src/live/TapTempo.tsx`).
+#[derive(Default, Debug)]
+struct TapTempo {
+    taps: VecDeque<Instant>,
+}
+
+impl TapTempo {
+    /// One tap. Returns a tempo from the third tap on (two gaps), rounded to 0.1 BPM.
+    fn tap(&mut self, now: Instant) -> Option<f64> {
+        if self.taps.back().is_some_and(|last| now.duration_since(*last) > TAP_RESET) {
+            self.taps.clear();
+        }
+        self.taps.push_back(now);
+        while self.taps.len() > TAP_WINDOW + 1 {
+            self.taps.pop_front();
+        }
+        if self.taps.len() < 3 {
+            return None;
+        }
+        let mut gaps: Vec<f64> = self
+            .taps
+            .iter()
+            .zip(self.taps.iter().skip(1))
+            .map(|(a, b)| b.duration_since(*a).as_secs_f64())
+            .collect();
+        gaps.sort_by(f64::total_cmp);
+        let mid = gaps.len() / 2;
+        let median = if gaps.len() % 2 == 1 {
+            gaps[mid]
+        } else {
+            (gaps[mid - 1] + gaps[mid]) / 2.0
+        };
+        if median <= 0.0 {
+            return None;
+        }
+        let bpm = (600.0 / median).round() / 10.0;
+        (20.0..=300.0).contains(&bpm).then_some(bpm)
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // What the frontend can ask for
 // ---------------------------------------------------------------------------------------------
 
@@ -176,7 +226,16 @@ pub enum Action {
     SetClickGain { gain: f32 },
     /// Volume of every monitored live input, linear. Output side only.
     SetMonitorGain { gain: f32 },
-    SetTempo { bpm: f64, beats_per_bar: u32, beat_unit: u32 },
+    /// Tempo, time signature and - when given - the loop length in bars. Free looping only, and
+    /// only while every track is empty.
+    SetTempo {
+        bpm: f64,
+        beats_per_bar: u32,
+        beat_unit: u32,
+        bars: Option<u32>,
+    },
+    /// One beat of tap tempo (key T, the Live page's Tap button, a MIDI pad or foot switch).
+    TapTempo,
     /// Switch the grid a take snaps to while the engine runs. Takes that are already armed keep
     /// the position they were given - the engine has those commands already.
     SetQuantize { quantize: Quantize },
@@ -243,6 +302,7 @@ impl Action {
                 | Action::ClearAll
                 | Action::Transport { .. }
                 | Action::SetTempo { .. }
+                | Action::TapTempo
                 | Action::SetQuantize { .. }
         )
     }
@@ -282,6 +342,7 @@ impl Action {
             | Action::SetBusGain { .. }
             | Action::SetBusOutput { .. }
             | Action::SetTempo { .. }
+            | Action::TapTempo
             | Action::SetQuantize { .. }
             | Action::SetOverdubMode { .. } => None,
         }
@@ -743,7 +804,9 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
             bpm,
             beats_per_bar: signature.beats_per_bar,
             beat_unit: signature.beat_unit,
+            bars: None,
         }),
+        MidiAction::TapTempo => MidiIntent::Session(Action::TapTempo),
         MidiAction::SetQuantize(quantize) => {
             MidiIntent::Session(Action::SetQuantize { quantize })
         }
@@ -1617,6 +1680,8 @@ struct Session {
     section_watch: SectionWatch,
     /// The text of the loaded score, for the copy in a recording's folder.
     score_yaml: Option<String>,
+    /// Tap tempo, whichever way the taps come in.
+    taps: TapTempo,
     /// The engine's end of the MIDI routing queue (`looper_engine::engine::source`).
     feeds: FeedSender,
     /// Per track, in engine order: what plays it, if it is an instrument track.
@@ -1974,6 +2039,7 @@ impl Session {
             recorder: crate::recording::Recorder::new(capture_port, scratch_frames),
             section_watch: SectionWatch::default(),
             score_yaml: None,
+            taps: TapTempo::default(),
             feeds,
             routes: vec![TrackRoute::NONE; instrument_inputs.len()],
             instrument_inputs,
@@ -2885,6 +2951,14 @@ impl Session {
                 self.send_all(plan)
             }
             Action::ClearAll => {
+                // Free looping: "clear all" is a fresh start, so the clock goes back to bar 1 and
+                // stands. Stopped first, because a transport stop drops every timed command sent
+                // before it - the clear has to come after.
+                let restart = self.runner.is_none() && self.transport;
+                if restart {
+                    self.set_transport(Some(false))?;
+                }
+                let est = self.estimated_pos();
                 let plan = self.scheduler.clear_all(est);
                 for ui in self.tracks.iter_mut() {
                     ui.gains.clear();
@@ -2895,7 +2969,14 @@ impl Session {
                 {
                     self.reapply_at = Some(*at);
                 }
-                self.send_all(plan)
+                self.send_all(plan)?;
+                if restart {
+                    self.message = Some(
+                        "All cleared - the clock stands at bar 1; tempo and loop length can be changed."
+                            .to_string(),
+                    );
+                }
+                Ok(())
             }
             Action::SetMonitor { track, on } => {
                 self.cmd.send(Command::SetMonitor { track, on })?;
@@ -3082,6 +3163,7 @@ impl Session {
                 bpm,
                 beats_per_bar,
                 beat_unit,
+                bars,
             } => {
                 // The runner schedules on the timeline it was loaded with; moving the engine's grid
                 // under a loaded score would put every later section on the wrong samples.
@@ -3092,7 +3174,22 @@ impl Session {
                             .to_string(),
                     );
                 }
-                self.set_tempo(bpm, beats_per_bar, beat_unit)
+                self.set_tempo(bpm, beats_per_bar, beat_unit, bars)
+            }
+            Action::TapTempo => {
+                if self.runner.is_some() {
+                    return Err("A score is loaded, and its tempo comes from the score.".to_string());
+                }
+                match self.taps.tap(Instant::now()) {
+                    Some(bpm) => {
+                        let sig = self.scheduler.timeline.signature();
+                        self.set_tempo(bpm, sig.beats_per_bar, sig.beat_unit, None)
+                    }
+                    None => {
+                        self.message = Some("Tap tempo: keep tapping…".to_string());
+                        Ok(())
+                    }
+                }
             }
             Action::SetQuantize { quantize } => {
                 self.message = Some(self.scheduler.set_quantize(quantize));
@@ -3306,9 +3403,50 @@ impl Session {
 
     /// A new tempo redefines what every sample position means, so it is only accepted while every
     /// track is empty. The sentence for the refusal is the engine's own.
-    fn set_tempo(&mut self, bpm: f64, beats_per_bar: u32, beat_unit: u32) -> Result<(), String> {
-        self.reconfigure(bpm, beats_per_bar, beat_unit, self.scheduler.bars)?;
-        self.message = Some(format!("Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}."));
+    fn set_tempo(
+        &mut self,
+        bpm: f64,
+        beats_per_bar: u32,
+        beat_unit: u32,
+        bars: Option<u32>,
+    ) -> Result<(), String> {
+        let before = self.scheduler.timeline;
+        let bars = bars.unwrap_or(self.scheduler.bars);
+        self.reconfigure(bpm, beats_per_bar, beat_unit, bars)?;
+        if self.transport && self.runner.is_none() {
+            self.keep_phase(before)?;
+        }
+        self.message = Some(format!(
+            "Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}, loop {bars} bars."
+        ));
+        Ok(())
+    }
+
+    /// A tempo change while the clock runs: the engine keeps bar 1 where it was, so at the new
+    /// tempo "now" would suddenly sit on some other beat and the click would jump. Moving bar 1 so
+    /// that the beat count up to now stays what it was lets the click simply go on faster or slower
+    /// - which is also what makes a tempo knob or tap tempo usable while the click runs. Only ever
+    /// done while every track is empty (that is when a tempo change is accepted at all), so no loop
+    /// is moved by it.
+    fn keep_phase(&mut self, before: Timeline) -> Result<(), String> {
+        let now = self.estimated_pos();
+        let after = self.scheduler.timeline;
+        let old_spb = before.samples_per_beat();
+        let new_spb = after.samples_per_beat();
+        if old_spb <= 0.0 || new_spb <= 0.0 {
+            return Ok(());
+        }
+        let beats = now.saturating_sub(before.zero()) as f64 / old_spb;
+        let per_loop = (after.signature().beats_per_bar.max(1) * self.scheduler.bars.max(1)) as f64;
+        // The place inside the loop is kept; whole loops before it do not matter.
+        let mut kept = beats % per_loop;
+        if kept * new_spb > now as f64 {
+            kept = beats.fract();
+        }
+        let zero = now.saturating_sub((kept * new_spb).round() as u64);
+        // Stamped in the past on purpose: the engine applies it at once and takes `at` as bar 1.
+        self.cmd.send(Command::TransportStart { at: zero })?;
+        self.scheduler.timeline = after.with_zero(zero);
         Ok(())
     }
 
@@ -3392,6 +3530,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tap_tempo_takes_the_median_gap_and_starts_over_after_a_pause() {
+        let t0 = Instant::now();
+        let mut taps = TapTempo::default();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        assert_eq!(taps.tap(at(0)), None);
+        assert_eq!(taps.tap(at(500)), None, "zwei Taps sind noch kein Tempo");
+        assert_eq!(taps.tap(at(1_000)), Some(120.0));
+        // One stumble does not move the median.
+        assert_eq!(taps.tap(at(1_700)), Some(120.0));
+        assert_eq!(taps.tap(at(2_200)), Some(120.0));
+        // A pause starts a new series.
+        assert_eq!(taps.tap(at(10_000)), None);
+        assert_eq!(taps.tap(at(10_600)), None);
+        assert_eq!(taps.tap(at(11_200)), Some(100.0));
+    }
+
+    #[test]
     fn every_action_knows_whether_it_addresses_a_track() {
         assert_eq!(Action::Record { track: 2 }.track(), Some(2));
         assert_eq!(
@@ -3436,7 +3591,8 @@ mod tests {
             Action::SetTempo {
                 bpm: 120.0,
                 beats_per_bar: 4,
-                beat_unit: 4
+                beat_unit: 4,
+                bars: None,
             }
             .track(),
             None
@@ -3481,6 +3637,7 @@ mod tests {
                 bpm: 120.0,
                 beats_per_bar: 4,
                 beat_unit: 4,
+                bars: None,
             },
             Action::SetQuantize {
                 quantize: Quantize::Bar,
@@ -3546,12 +3703,14 @@ mod tests {
             (Target::ClearTrack(track()), Action::ClearTrack { track: 0 }),
             (Target::ClearAll, Action::ClearAll),
             (Target::Transport, Action::Transport { run: None }),
+            (Target::TapTempo, Action::TapTempo),
             (
                 Target::Tempo,
                 Action::SetTempo {
                     bpm: 120.0,
                     beats_per_bar: 4,
                     beat_unit: 4,
+                    bars: None,
                 },
             ),
             (

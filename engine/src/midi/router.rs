@@ -62,6 +62,8 @@ pub enum MidiAction {
     Click(bool),
     ClearAll,
     Tempo(f64),
+    /// One beat of tap tempo.
+    TapTempo,
     SetQuantize(Quantize),
     /// "All notes off": on one track's instrument, or on all of them.
     Panic { track: Option<usize> },
@@ -139,6 +141,7 @@ impl MidiAction {
                 | MidiAction::ClearAll
                 | MidiAction::Transport
                 | MidiAction::Tempo(_)
+                | MidiAction::TapTempo
                 | MidiAction::SetQuantize(_)
         )
     }
@@ -465,6 +468,7 @@ impl Router {
             Target::ScoreGoto(section) => MidiAction::ScoreGoto(*section),
             Target::ClearAll => MidiAction::ClearAll,
             Target::Transport => MidiAction::Transport,
+            Target::TapTempo => MidiAction::TapTempo,
             Target::Panic => MidiAction::Panic { track: None },
             Target::InstrumentPanic(_) => MidiAction::Panic { track: Some(track) },
             Target::Quantize(quantize) => MidiAction::SetQuantize(*quantize),

@@ -463,6 +463,9 @@ pub enum Target {
     Click,
     ClearAll,
     Tempo,
+    /// Tap tempo: every press is one beat; the host turns the gaps into a BPM. A button, so a foot
+    /// switch can set the tempo of free looping.
+    TapTempo,
     Quantize(Quantize),
     /// Volume of one output bus. The obvious thing to put on a fader: turning the headphones down
     /// mid-song without touching the room is half the reason there are two buses.
@@ -529,6 +532,7 @@ impl Target {
             | Target::ScoreGoto(_)
             | Target::ClearAll
             | Target::Transport
+            | Target::TapTempo
             | Target::Quantize(_)
             | Target::Record(_)
             | Target::Overdub(_)
@@ -612,6 +616,7 @@ impl Target {
             | Target::ClearAll
             | Target::Transport
             | Target::Tempo
+            | Target::TapTempo
             | Target::BusGain(_)
             | Target::ClickGain
             | Target::MonitorGain
@@ -692,6 +697,7 @@ impl Target {
                 | Target::ClearAll
                 | Target::Transport
                 | Target::Tempo
+                | Target::TapTempo
                 | Target::Quantize(_)
         )
     }
@@ -712,6 +718,7 @@ impl Target {
             Target::Click => "Click".to_string(),
             Target::ClearAll => "Clear all".to_string(),
             Target::Tempo => "Tempo".to_string(),
+            Target::TapTempo => "Tap tempo".to_string(),
             Target::Quantize(q) => format!("Quantize: {}", quantize_word(*q)),
             Target::Record(t) => format!("{}: Record", track(t)),
             Target::Overdub(t) => format!("{}: Overdub", track(t)),
@@ -785,6 +792,7 @@ impl Target {
             ["global", "click"] => Ok(Target::Click),
             ["global", "clear_all"] => Ok(Target::ClearAll),
             ["global", "tempo"] => Ok(Target::Tempo),
+            ["global", "tap_tempo"] => Ok(Target::TapTempo),
             ["global", "click_gain"] => Ok(Target::ClickGain),
             ["global", "monitor_gain"] => Ok(Target::MonitorGain),
             ["global", "panic"] => Ok(Target::Panic),
@@ -983,6 +991,7 @@ impl fmt::Display for Target {
             Target::Click => f.write_str("global.click"),
             Target::ClearAll => f.write_str("global.clear_all"),
             Target::Tempo => f.write_str("global.tempo"),
+            Target::TapTempo => f.write_str("global.tap_tempo"),
             Target::Quantize(Quantize::Bar) => f.write_str("global.quantize.bar"),
             Target::Quantize(Quantize::Loop) => f.write_str("global.quantize.loop"),
             Target::BusGain(bus) => write!(f, "global.bus.{}.gain", bus.name()),
@@ -1088,6 +1097,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
         Target::Click,
         Target::ClearAll,
         Target::Tempo,
+        Target::TapTempo,
         Target::Quantize(Quantize::Bar),
         Target::Quantize(Quantize::Loop),
     ]);

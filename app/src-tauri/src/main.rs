@@ -364,6 +364,7 @@ async fn set_tempo(
     bpm: f64,
     beats_per_bar: u32,
     beat_unit: u32,
+    bars: Option<u32>,
     engine: State<'_, EngineHandle>,
 ) -> Result<(), String> {
     act(
@@ -372,9 +373,16 @@ async fn set_tempo(
             bpm,
             beats_per_bar,
             beat_unit,
+            bars,
         },
     )
     .await
+}
+
+/// One beat of tap tempo. From the third tap on the tempo follows the median gap.
+#[tauri::command(rename_all = "snake_case")]
+async fn tap_tempo(engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::TapTempo).await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1022,6 +1030,7 @@ fn main() {
             monitor_gain,
             set_quantize,
             set_overdub_mode,
+            tap_tempo,
             fx_bypass,
             fx_enable,
             fx_preset,
