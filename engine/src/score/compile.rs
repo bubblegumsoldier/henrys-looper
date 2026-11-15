@@ -126,6 +126,7 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
         tracks,
         midi,
         sections,
+        mixer: source.mixer.clone(),
     }
 }
 

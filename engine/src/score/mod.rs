@@ -38,6 +38,7 @@ pub mod compile;
 pub mod doc;
 pub mod error;
 pub mod map;
+pub mod mixer;
 pub mod model;
 pub mod read;
 pub mod yaml;

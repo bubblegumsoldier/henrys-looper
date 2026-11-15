@@ -24,6 +24,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::map::OrderedMap;
+use super::mixer::MixerSource;
 use crate::engine::bus::BusSend;
 use crate::engine::frame::TrackInput;
 use crate::engine::schedule::Quantize;
@@ -273,6 +274,9 @@ pub struct ScoreSource {
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub midi: OrderedMap<MidiBindingSource>,
     pub sections: Vec<SectionSource>,
+    /// The `mixer:` section, as written; `None` when the score has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mixer: Option<MixerSource>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -401,6 +405,10 @@ pub struct CompiledScore {
     #[serde(default)]
     pub midi: OrderedMap<CompiledMidiBinding>,
     pub sections: Vec<CompiledSection>,
+    /// The `mixer:` section, passed through as written - it is resolved against the engine when
+    /// the score is loaded (`score::mixer`). `None` when the score has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mixer: Option<MixerSource>,
 }
 
 impl CompiledScore {

@@ -27,6 +27,9 @@ use serde::{Deserialize, Serialize};
 use super::compile_score;
 use super::error::{ScoreError, ScoreIssue};
 use super::map::OrderedMap;
+use super::mixer::{
+    BandLine, BusLevels, CompLine, DelayLine, HighPassLine, ReverbLine, SwitchLine, TrackMixSource,
+};
 use super::model::{CompiledScore, TrackState};
 use super::read::read_score;
 use super::yaml::{Node, NodeKind, Pos, parse_document};
@@ -192,6 +195,47 @@ impl DocSection {
     }
 }
 
+/// One entry of `mixer.tracks`: the track it is about and its mix as written (see
+/// `score/mixer.rs` for what every field means). Written as one `{...}` line while it says nothing
+/// about single effects, as a block of one line per field otherwise.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DocMixerTrack {
+    pub track: String,
+    #[serde(flatten)]
+    pub mix: TrackMixSource,
+    #[serde(default, skip_serializing_if = "Comments::is_empty")]
+    pub comments: Comments,
+    /// Comments of the field lines of a block entry, keyed by field name (`gain`, `comp`, ...).
+    #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
+    pub field_comments: OrderedMap<Comments>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+}
+
+impl DocMixerTrack {
+    pub fn new(track: impl Into<String>, mix: TrackMixSource) -> Self {
+        Self {
+            track: track.into(),
+            mix,
+            comments: Comments::default(),
+            field_comments: OrderedMap::new(),
+            line: None,
+        }
+    }
+}
+
+/// The `mixer:` section. Comments of the `mixer:` key itself are in the root's `field_comments`,
+/// those of its `buses:` and `tracks:` lines here.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DocMixer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buses: Option<BusLevels>,
+    #[serde(default)]
+    pub tracks: Vec<DocMixerTrack>,
+    #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
+    pub field_comments: OrderedMap<Comments>,
+}
+
 /// Where a section's value comes from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -247,6 +291,9 @@ pub struct ScoreDoc {
     pub midi: Vec<DocMidiBinding>,
     #[serde(default)]
     pub sections: Vec<DocSection>,
+    /// The `mixer:` section; `None` when the score has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mixer: Option<DocMixer>,
     /// Comment lines at the top of the file, before the first key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub header: Vec<String>,
@@ -254,7 +301,7 @@ pub struct ScoreDoc {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footer: Vec<String>,
     /// Comments of the top-level keys (`title`, `bpm`, `time_signature`, `beats_per_bar`,
-    /// `tracks`, `midi`, `sections`).
+    /// `tracks`, `midi`, `sections`, `mixer`).
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub field_comments: OrderedMap<Comments>,
 }
@@ -295,6 +342,18 @@ pub enum ScoreRef {
         section_id: String,
         index: usize,
         track: String,
+    },
+    /// The `mixer:` section; `field` is `buses` or `tracks`.
+    Mixer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
+    },
+    /// One entry of `mixer.tracks`; `index` is its position in `DocMixer::tracks`.
+    MixerTrack {
+        index: usize,
+        track: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
     },
 }
 
@@ -389,6 +448,9 @@ enum Anchor {
     Section(usize),
     SectionField(usize, String),
     SectionTrack(usize, usize),
+    MixerField(String),
+    MixerTrack(usize),
+    MixerTrackField(usize, String),
 }
 
 fn number(node: &Node<'_>) -> Option<f64> {
@@ -428,6 +490,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
         tracks: Vec::new(),
         midi: Vec::new(),
         sections: Vec::new(),
+        mixer: None,
         header: Vec::new(),
         footer: Vec::new(),
         field_comments: OrderedMap::new(),
@@ -572,10 +635,129 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                     }
                 }
             }
+            "mixer" => doc.mixer = Some(build_mixer(value, anchors)),
             _ => {}
         }
     }
     doc
+}
+
+fn build_mixer(node: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> DocMixer {
+    let mut mixer = DocMixer::default();
+    let NodeKind::Map(fields) = &node.kind else {
+        return mixer;
+    };
+    for field in fields {
+        let Some(key) = field.key.as_str() else { continue };
+        anchors.push((field.key.pos.line, Anchor::MixerField(key.to_string())));
+        match (key, &field.value.kind) {
+            ("buses", NodeKind::Map(levels)) => {
+                let mut buses = BusLevels::default();
+                for level in levels {
+                    let value = number(&level.value);
+                    match level.key.as_str().unwrap_or("") {
+                        "main" => buses.main = value,
+                        "monitor" => buses.monitor = value,
+                        "click" => buses.click = value,
+                        "inputs" => buses.inputs = value,
+                        _ => {}
+                    }
+                }
+                mixer.buses = Some(buses);
+            }
+            ("tracks", NodeKind::Map(entries)) => {
+                for entry in entries {
+                    let Some(name) = entry.key.as_str() else { continue };
+                    let index = mixer.tracks.len();
+                    anchors.push((entry.key.pos.line, Anchor::MixerTrack(index)));
+                    let mut t = DocMixerTrack::new(name, TrackMixSource::default());
+                    t.line = Some(entry.key.pos.line);
+                    if let NodeKind::Map(items) = &entry.value.kind {
+                        for item in items {
+                            let Some(field) = item.key.as_str() else { continue };
+                            anchors.push((
+                                item.key.pos.line,
+                                Anchor::MixerTrackField(index, field.to_string()),
+                            ));
+                            read_mix_field(&mut t.mix, field, &item.value);
+                        }
+                    }
+                    mixer.tracks.push(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    mixer
+}
+
+/// One field of a mixer entry, from a tree the reader has already accepted.
+fn read_mix_field(mix: &mut TrackMixSource, field: &str, value: &Node<'_>) {
+    let pairs: Vec<(&str, &Node<'_>)> = match &value.kind {
+        NodeKind::Map(entries) => entries
+            .iter()
+            .filter_map(|e| e.key.as_str().map(|k| (k, &e.value)))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let get = |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let num = |name: &str| get(name).and_then(number);
+    let on = || get("on").and_then(boolean);
+    let word = |name: &str| get(name).and_then(text_of);
+    match field {
+        "gain" => mix.gain = number(value),
+        "mute" => mix.mute = boolean(value),
+        "preset" => mix.preset = text_of(value),
+        "bypass" => mix.bypass = boolean(value),
+        "high_pass" => {
+            mix.high_pass = Some(HighPassLine {
+                on: on(),
+                hz: num("hz"),
+            })
+        }
+        "eq" => mix.eq = Some(SwitchLine { on: on() }),
+        "band1" | "band2" | "band3" => {
+            let line = Some(BandLine {
+                kind: word("kind"),
+                hz: num("hz"),
+                q: num("q"),
+                gain: num("gain"),
+            });
+            match field {
+                "band1" => mix.band1 = line,
+                "band2" => mix.band2 = line,
+                _ => mix.band3 = line,
+            }
+        }
+        "comp" => {
+            mix.comp = Some(CompLine {
+                on: on(),
+                threshold: num("threshold"),
+                ratio: num("ratio"),
+                attack: num("attack"),
+                release: num("release"),
+                knee: num("knee"),
+                makeup: num("makeup"),
+            })
+        }
+        "delay" => {
+            mix.delay = Some(DelayLine {
+                on: on(),
+                note: word("note"),
+                feedback: num("feedback"),
+                mix: num("mix"),
+            })
+        }
+        "reverb" => {
+            mix.reverb = Some(ReverbLine {
+                on: on(),
+                size: num("size"),
+                damping: num("damping"),
+                mix: num("mix"),
+            })
+        }
+        _ => {}
+    }
 }
 
 /// One comment found in the text.
@@ -668,6 +850,20 @@ fn comments_of<'a>(doc: &'a mut ScoreDoc, anchor: &Anchor) -> Option<&'a mut Com
             .get_mut(*i)
             .and_then(|s| s.tracks.get_mut(*j))
             .map(|t| &mut t.comments),
+        Anchor::MixerField(name) => doc
+            .mixer
+            .as_mut()
+            .map(|m| field(&mut m.field_comments, name)),
+        Anchor::MixerTrack(i) => doc
+            .mixer
+            .as_mut()
+            .and_then(|m| m.tracks.get_mut(*i))
+            .map(|t| &mut t.comments),
+        Anchor::MixerTrackField(i, name) => doc
+            .mixer
+            .as_mut()
+            .and_then(|m| m.tracks.get_mut(*i))
+            .map(|t| field(&mut t.field_comments, name)),
     }
 }
 
@@ -827,6 +1023,39 @@ pub fn locate(tree: &Node<'_>) -> Vec<Location> {
                                     },
                                     state.key.pos,
                                 ));
+                            }
+                        }
+                    }
+                }
+            }
+            ("mixer", NodeKind::Map(fields)) => {
+                for field in fields {
+                    let name = field.key.as_str().map(str::to_string);
+                    out.push(at(ScoreRef::Mixer { field: name.clone() }, field.key.pos));
+                    if name.as_deref() == Some("tracks")
+                        && let NodeKind::Map(entries) = &field.value.kind
+                    {
+                        for (index, entry) in entries.iter().enumerate() {
+                            let track = entry.key.as_str().unwrap_or("").to_string();
+                            out.push(at(
+                                ScoreRef::MixerTrack {
+                                    index,
+                                    track: track.clone(),
+                                    field: None,
+                                },
+                                entry.key.pos,
+                            ));
+                            if let NodeKind::Map(items) = &entry.value.kind {
+                                for item in items {
+                                    out.push(at(
+                                        ScoreRef::MixerTrack {
+                                            index,
+                                            track: track.clone(),
+                                            field: item.key.as_str().map(str::to_string),
+                                        },
+                                        item.key.pos,
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1091,6 +1320,11 @@ pub fn render_doc(doc: &ScoreDoc) -> String {
         }
     }
 
+    if let Some(mixer) = &doc.mixer {
+        w.blank();
+        render_mixer(&mut w, mixer, &root("mixer"));
+    }
+
     if !doc.footer.is_empty() {
         w.blank();
         for line in &doc.footer {
@@ -1180,6 +1414,130 @@ impl Writer<'_> {
         }
         self.out.push('\n');
     }
+}
+
+fn render_mixer(w: &mut Writer<'_>, mixer: &DocMixer, comments: &Comments) {
+    let field = |name: &str| mixer.field_comments.get(name).cloned().unwrap_or_default();
+    let has_tracks = !mixer.tracks.is_empty() || !field("tracks").is_empty();
+    if mixer.buses.is_none() && !has_tracks {
+        w.line(0, "mixer: {}", comments);
+        return;
+    }
+    w.line(0, "mixer:", comments);
+    if let Some(buses) = &mixer.buses {
+        let mut parts = Vec::new();
+        for (name, value) in [
+            ("main", buses.main),
+            ("monitor", buses.monitor),
+            ("click", buses.click),
+            ("inputs", buses.inputs),
+        ] {
+            if let Some(v) = value {
+                parts.push(format!("{name}: {}", num(v)));
+            }
+        }
+        w.line(1, &format!("buses: {{{}}}", parts.join(", ")), &field("buses"));
+    }
+    if mixer.tracks.is_empty() {
+        if has_tracks {
+            w.line(1, "tracks: {}", &field("tracks"));
+        }
+        return;
+    }
+    w.line(1, "tracks:", &field("tracks"));
+    for entry in &mixer.tracks {
+        let key = scalar(&entry.track);
+        let lines = mix_lines(&entry.mix);
+        let simple = !entry.mix.has_effect_lines() && entry.field_comments.is_empty();
+        if simple {
+            let parts: Vec<String> = lines.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+            w.line(2, &format!("{key}: {{{}}}", parts.join(", ")), &entry.comments);
+        } else {
+            w.line(2, &format!("{key}:"), &entry.comments);
+            for (name, value) in &lines {
+                let comments = entry.field_comments.get(name).cloned().unwrap_or_default();
+                w.line(3, &format!("{name}: {value}"), &comments);
+            }
+        }
+    }
+}
+
+/// The fields of one mixer entry in their fixed order, each as `(key, value text)`.
+fn mix_lines(mix: &TrackMixSource) -> Vec<(&'static str, String)> {
+    fn flow(parts: Vec<(&str, Option<String>)>) -> String {
+        let written: Vec<String> = parts
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| format!("{k}: {v}")))
+            .collect();
+        format!("{{{}}}", written.join(", "))
+    }
+    let n = |v: Option<f64>| v.map(num);
+    let b = |v: Option<bool>| v.map(|v| v.to_string());
+    let t = |v: &Option<String>| v.as_deref().map(flow_scalar);
+    let mut out = Vec::new();
+    if let Some(gain) = mix.gain {
+        out.push(("gain", num(gain)));
+    }
+    if let Some(mute) = mix.mute {
+        out.push(("mute", mute.to_string()));
+    }
+    if let Some(preset) = &mix.preset {
+        out.push(("preset", flow_scalar(preset)));
+    }
+    if let Some(bypass) = mix.bypass {
+        out.push(("bypass", bypass.to_string()));
+    }
+    if let Some(l) = &mix.high_pass {
+        out.push(("high_pass", flow(vec![("on", b(l.on)), ("hz", n(l.hz))])));
+    }
+    if let Some(l) = &mix.eq {
+        out.push(("eq", flow(vec![("on", b(l.on))])));
+    }
+    for (name, band) in [("band1", &mix.band1), ("band2", &mix.band2), ("band3", &mix.band3)] {
+        if let Some(l) = band {
+            out.push((
+                name,
+                flow(vec![("kind", t(&l.kind)), ("hz", n(l.hz)), ("q", n(l.q)), ("gain", n(l.gain))]),
+            ));
+        }
+    }
+    if let Some(l) = &mix.comp {
+        out.push((
+            "comp",
+            flow(vec![
+                ("on", b(l.on)),
+                ("threshold", n(l.threshold)),
+                ("ratio", n(l.ratio)),
+                ("attack", n(l.attack)),
+                ("release", n(l.release)),
+                ("knee", n(l.knee)),
+                ("makeup", n(l.makeup)),
+            ]),
+        ));
+    }
+    if let Some(l) = &mix.delay {
+        out.push((
+            "delay",
+            flow(vec![
+                ("on", b(l.on)),
+                ("note", t(&l.note)),
+                ("feedback", n(l.feedback)),
+                ("mix", n(l.mix)),
+            ]),
+        ));
+    }
+    if let Some(l) = &mix.reverb {
+        out.push((
+            "reverb",
+            flow(vec![
+                ("on", b(l.on)),
+                ("size", n(l.size)),
+                ("damping", n(l.damping)),
+                ("mix", n(l.mix)),
+            ]),
+        ));
+    }
+    out
 }
 
 fn track_flow(track: &DocTrack) -> String {
@@ -1369,6 +1727,7 @@ pub fn template(tracks: &[(String, u32, Option<u32>)]) -> String {
         tracks,
         midi: Vec::new(),
         sections: vec![intro, layer, outro],
+        mixer: None,
         header: vec![
             "Henrys Looper score. Each section states what every track does;".to_string(),
             "a track a section does not name is stopped.".to_string(),

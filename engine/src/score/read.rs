@@ -22,7 +22,9 @@ use crate::engine::command::MAX_TRACKS;
 use crate::engine::schedule::Quantize;
 use crate::midi::{Binding, ButtonMode, Control, Takeover, Target, TrackRef};
 
-const ROOT_FIELDS: [&str; 7] = [
+mod mixer;
+
+const ROOT_FIELDS: [&str; 8] = [
     "title",
     "bpm",
     "time_signature",
@@ -30,6 +32,7 @@ const ROOT_FIELDS: [&str; 7] = [
     "tracks",
     "midi",
     "sections",
+    "mixer",
 ];
 const TRACK_FIELDS: [&str; 7] = [
     "input",
@@ -358,6 +361,10 @@ impl Reader {
             .get("midi")
             .and_then(|node| self.read_midi(node, &track_names, sections.len()))
             .unwrap_or_default();
+        // Optional, and absent from every score written before it existed.
+        let mixer = fields
+            .get("mixer")
+            .and_then(|node| self.read_mixer(node, &track_names));
 
         Some(ScoreSource {
             title,
@@ -367,6 +374,7 @@ impl Reader {
             tracks,
             midi,
             sections,
+            mixer,
         })
     }
 

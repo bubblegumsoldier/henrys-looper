@@ -45,6 +45,19 @@ sections:
   - id: c
     repeat: b
     bars: 2
+
+# Mischpult
+mixer:
+  buses: {main: -1.5, click: -12}   # leiser Klick
+  tracks:
+    stimme: {gain: -3, preset: voice}   # Gesang
+    # Klavier mit eigenem Kompressor
+    klavier:
+      gain: 1.5
+      mute: true
+      preset: voice
+      comp: {threshold: -10, ratio: 4}   # haerter
+      band1: {kind: low_shelf, hz: 120}
 # Ende der Datei
 ";
 
@@ -350,4 +363,89 @@ fn a_hash_inside_quotes_is_not_a_comment() {
     assert_eq!(comment_start("title: 'it''s # x'"), None);
     assert_eq!(comment_start("bus: a#b"), None);
     assert_eq!(comment_start("# ganz"), Some(0));
+}
+
+#[test]
+fn the_mixer_section_reads_into_the_document_with_its_comments() {
+    let doc = parse_doc(RICH).expect("liest sich");
+    let mixer = doc.mixer.as_ref().expect("mixer");
+    assert_eq!(
+        doc.field_comments.get("mixer").map(|c| c.before.clone()),
+        Some(vec!["Mischpult".to_string()])
+    );
+    assert_eq!(mixer.buses.as_ref().and_then(|b| b.main), Some(-1.5));
+    assert_eq!(mixer.buses.as_ref().and_then(|b| b.monitor), None);
+    assert_eq!(
+        mixer.field_comments.get("buses").and_then(|c| c.after.clone()).as_deref(),
+        Some("leiser Klick")
+    );
+    assert_eq!(mixer.tracks.len(), 2);
+    assert_eq!(mixer.tracks[0].track, "stimme");
+    assert_eq!(mixer.tracks[0].mix.gain, Some(-3.0));
+    assert_eq!(mixer.tracks[0].comments.after.as_deref(), Some("Gesang"));
+    let klavier = &mixer.tracks[1];
+    assert_eq!(klavier.comments.before, vec!["Klavier mit eigenem Kompressor"]);
+    assert_eq!(klavier.mix.mute, Some(true));
+    assert_eq!(klavier.mix.comp.as_ref().and_then(|c| c.ratio), Some(4.0));
+    assert_eq!(
+        klavier.field_comments.get("comp").and_then(|c| c.after.clone()).as_deref(),
+        Some("haerter")
+    );
+    assert_eq!(doc.footer, vec!["Ende der Datei"]);
+}
+
+#[test]
+fn a_score_without_a_mixer_section_stays_without_one() {
+    let doc = parse_doc(HENRY).expect("liest sich");
+    assert!(doc.mixer.is_none());
+    assert!(!round_trip(HENRY).contains("mixer"));
+    assert!(compile_score(HENRY).expect("kompiliert").mixer.is_none());
+}
+
+#[test]
+fn a_mixer_entry_written_by_the_app_is_rendered_canonically_and_compiles() {
+    use crate::engine::fx::FxPreset;
+    use crate::score::mixer::TrackMixSource;
+    let mut doc = parse_doc(HENRY).expect("liest sich");
+    let mut tweaked = FxPreset::Voice.settings();
+    tweaked.reverb_mix = 0.3;
+    let first = doc.tracks[0].name.clone();
+    doc.mixer = Some(DocMixer {
+        buses: None,
+        tracks: vec![DocMixerTrack::new(
+            first.clone(),
+            TrackMixSource::from_state(0.5, false, false, FxPreset::Custom, &tweaked),
+        )],
+        field_comments: OrderedMap::new(),
+    });
+    let outcome = render_doc_outcome(&doc);
+    assert!(outcome.ok, "{:?}\n{}", outcome.errors, outcome.yaml);
+    assert!(
+        outcome.yaml.ends_with(&format!(
+            "mixer:\n  tracks:\n    {first}:\n      gain: -6\n      preset: voice\n      reverb: {{mix: 0.3}}\n"
+        )),
+        "{}",
+        outcome.yaml
+    );
+    let mixer = outcome.score.expect("kompiliert").mixer.expect("mixer");
+    let back = mixer.tracks.get(&first).expect("eintrag").resolve();
+    assert_eq!(back.settings, tweaked);
+}
+
+#[test]
+fn a_mixer_entry_for_an_unknown_track_names_its_element() {
+    let o = edited(|d| d.mixer.as_mut().unwrap().tracks[1].track = "klavir".into());
+    let issue = only_issue(&o);
+    assert_eq!(issue.suggestion.as_deref(), Some("did you mean 'klavier'?"));
+    assert_eq!(
+        issue.at,
+        Some(ScoreRef::MixerTrack { index: 1, track: "klavir".into(), field: None })
+    );
+    let o = edited(|d| d.mixer.as_mut().unwrap().tracks[0].mix.gain = Some(20.0));
+    let issue = only_issue(&o);
+    assert!(issue.message.contains("dB"), "{}", issue.message);
+    assert_eq!(
+        issue.at,
+        Some(ScoreRef::MixerTrack { index: 0, track: "stimme".into(), field: Some("gain".into()) })
+    );
 }
