@@ -61,6 +61,12 @@ pub struct Timeline {
     bpm: f64,
     signature: TimeSignature,
     samples_per_beat: f64,
+    /// Sample position of the downbeat of bar 1 - where the transport was last started. 0 for
+    /// everything that never stops its clock (CLI, score subcommand, tests); the app's free mode
+    /// moves it each time the musician presses Start, so "bar 1" is where he pressed it. Every
+    /// grid boundary is `zero + round(i * samples_per_beat)`, so the rounding argument of the
+    /// module comment is untouched: the offset is an integer and is added once, not accumulated.
+    zero: u64,
 }
 
 impl Timeline {
@@ -73,7 +79,20 @@ impl Timeline {
             bpm,
             signature,
             samples_per_beat,
+            zero: 0,
         }
+    }
+
+    /// The same grid, with bar 1 starting at `zero` instead of at the start of the session.
+    #[must_use]
+    pub fn with_zero(mut self, zero: u64) -> Self {
+        self.zero = zero;
+        self
+    }
+
+    /// Where bar 1 begins on the sample axis. See the field.
+    pub fn zero(&self) -> u64 {
+        self.zero
     }
 
     pub fn validate(sample_rate: u32, bpm: f64, signature: TimeSignature) -> Result<(), String> {
@@ -122,7 +141,7 @@ impl Timeline {
     /// Absolute, never incremental - see the module comment.
     #[inline]
     pub fn beat_start(&self, beat_index: u64) -> u64 {
-        (beat_index as f64 * self.samples_per_beat).round() as u64
+        self.zero + (beat_index as f64 * self.samples_per_beat).round() as u64
     }
 
     /// First sample of bar number `bar_index`.
@@ -141,8 +160,10 @@ impl Timeline {
     /// The division gives the answer up to one beat; the two corrections below fix the boundary
     /// cases introduced by rounding, so this is the exact inverse of `beat_start`.
     #[inline]
+    ///
+    /// A position before `zero` (before the transport was started) counts as beat 0.
     pub fn beat_index_at(&self, pos: u64) -> u64 {
-        let mut i = (pos as f64 / self.samples_per_beat) as u64;
+        let mut i = (pos.saturating_sub(self.zero) as f64 / self.samples_per_beat) as u64;
         while self.beat_start(i + 1) <= pos {
             i += 1;
         }
@@ -162,7 +183,7 @@ impl Timeline {
         MusicalPos {
             bar: beat_index / self.beats_per_bar(),
             beat: (beat_index % self.beats_per_bar()) as u32,
-            offset: pos - self.beat_start(beat_index),
+            offset: pos.saturating_sub(self.beat_start(beat_index)),
         }
     }
 
@@ -397,5 +418,26 @@ mod tests {
     fn a_loop_of_zero_bars_falls_back_to_the_bar_grid() {
         let t = tl(120.0, 4, 4);
         assert_eq!(t.loop_start_at_or_after(100_000, 0), t.bar_start_at_or_after(100_000));
+    }
+
+    /// A transport started at `zero` moves the whole grid by exactly that many samples and
+    /// changes nothing else: same beat lengths, same rounding, bar 1 where the start was.
+    #[test]
+    fn a_moved_zero_shifts_the_grid_and_nothing_else() {
+        let plain = tl(137.0, 7, 8);
+        let zero = 123_457u64;
+        let moved = plain.with_zero(zero);
+        assert_eq!(moved.zero(), zero);
+        for beat in 0..5_000u64 {
+            assert_eq!(moved.beat_start(beat), plain.beat_start(beat) + zero);
+            let pos = moved.beat_start(beat) + 3;
+            assert_eq!(moved.beat_index_at(pos), beat);
+            assert_eq!(moved.locate(pos), plain.locate(pos - zero));
+        }
+        assert_eq!(moved.span_bars(3, 8), plain.span_bars(3, 8));
+        // Before the start everything counts as the very first beat, with no offset.
+        assert_eq!(moved.locate(10), MusicalPos::default());
+        assert_eq!(moved.bar_start_at_or_after(10), zero);
+        assert_eq!(moved.loop_start_at_or_after(zero + 1, 4), moved.bar_start(4));
     }
 }

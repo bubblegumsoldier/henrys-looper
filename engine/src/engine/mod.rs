@@ -61,3 +61,5 @@ mod tests;
 mod insert_tests;
 #[cfg(test)]
 mod fader_tests;
+#[cfg(test)]
+mod transport_tests;

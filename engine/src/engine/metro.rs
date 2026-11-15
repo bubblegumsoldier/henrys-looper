@@ -53,7 +53,10 @@ impl Metronome {
     #[inline]
     pub fn sample_at(&self, timeline: &Timeline, pos: u64) -> f32 {
         let beat = timeline.beat_index_at(pos);
-        let n = pos - timeline.beat_start(beat);
+        // Before the transport's bar 1 (`Timeline::zero`) there is no beat to click on.
+        let Some(n) = pos.checked_sub(timeline.beat_start(beat)) else {
+            return 0.0;
+        };
         if n >= self.env_len {
             return 0.0;
         }

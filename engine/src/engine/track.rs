@@ -311,6 +311,8 @@ pub struct Track {
     take: Option<Take>,
     pending: Option<PendingTake>,
     playing: bool,
+    /// True while the transport stands: the loop is not heard, whatever `playing` says.
+    held: bool,
     monitor: bool,
     /// Monitoring state a fresh start would have, restored by "alles loeschen".
     monitor_default: bool,
@@ -385,6 +387,7 @@ impl Track {
             take: None,
             pending: None,
             playing: false,
+            held: false,
             monitor,
             monitor_default: monitor,
             input_peak: [0.0; 2],
@@ -669,7 +672,7 @@ impl Track {
         monitor: Frame,
         collapsed: bool,
     ) -> ([Frame; BUS_COUNT], Spread) {
-        let dry = if self.playing {
+        let dry = if self.playing && !self.held {
             self.read(pos + self.playback_advance)
         } else {
             Frame::SILENT
@@ -776,6 +779,27 @@ impl Track {
     #[inline]
     pub fn set_playing(&mut self, on: bool) {
         self.playing = on;
+    }
+
+    /// Whether the transport stands. A held track keeps its layers and its play state but is not
+    /// heard - its monitored input still is.
+    #[inline]
+    pub fn set_held(&mut self, held: bool) {
+        self.held = held;
+    }
+
+    #[inline]
+    pub fn held(&self) -> bool {
+        self.held
+    }
+
+    /// Re-anchor the loop so its top sits at `origin`. Used when the transport starts again: the
+    /// loop then plays from its beginning on the new bar 1. Only meaningful without a running take,
+    /// which the caller makes sure of.
+    pub fn rebase(&mut self, origin: u64) {
+        if !self.layers.is_empty() {
+            self.origin = origin;
+        }
     }
 
     #[inline]

@@ -151,6 +151,17 @@ pub enum Command {
     SetFxParam { track: usize, param: FxParam },
     /// Load a ready-made chain. The one command the musician uses on stage.
     LoadFxPreset { track: usize, preset: FxPreset },
+    /// Start the transport: from `at` on the clock runs, the click sounds and every track that is
+    /// on play is heard again. `at` becomes bar 1 (`Timeline::zero`), and every loop is re-anchored
+    /// there, so each one plays from its top again. A take queued for the same `at` behind it
+    /// starts on that very downbeat - the order of arrival decides among equal timestamps.
+    TransportStart { at: u64 },
+    /// Stop the transport: the clock stands at bar 1, the click and the loops are silent, the
+    /// monitored inputs stay audible. Layers and play states are kept. A take that has not reached
+    /// its end is dealt with so nothing half-made is left behind - see
+    /// `EngineCore::stop_transport`. Untimed: a stop button has to act now. Like `ClearAll`, it
+    /// drops every timed command that was sent before it and is still waiting.
+    TransportStop,
     /// Stop everything (playback and recording) and mark the engine as finished.
     Stop,
 }
@@ -165,7 +176,8 @@ impl Command {
             | Command::StartPlay { at, .. }
             | Command::StopPlay { at, .. }
             | Command::ClearTrack { at, .. }
-            | Command::ClearAll { at } => Some(*at),
+            | Command::ClearAll { at }
+            | Command::TransportStart { at } => Some(*at),
             Command::SetMonitor { .. }
             | Command::SetPan { .. }
             | Command::SetTrackGain { .. }
@@ -186,6 +198,7 @@ impl Command {
             | Command::SetFxEnabled { .. }
             | Command::SetFxParam { .. }
             | Command::LoadFxPreset { .. }
+            | Command::TransportStop
             | Command::Stop => None,
         }
     }
@@ -220,6 +233,8 @@ impl Command {
             | Command::SetBusGain { .. }
             | Command::SetBusOutput { .. }
             | Command::SetTempo { .. }
+            | Command::TransportStart { .. }
+            | Command::TransportStop
             | Command::Stop => None,
         }
     }
@@ -420,6 +435,10 @@ pub struct Status {
     pub buffers_taken: [u64; BUFFER_KINDS],
     /// Set once a `Stop` command has been executed.
     pub stopped: bool,
+    /// Whether the transport runs. While it stands, `bar`, `beat` and `beat_offset` are all zero
+    /// and nothing but the monitored inputs is heard; `pos` keeps counting, because it is the
+    /// sample axis every command is stamped on, not the musical clock.
+    pub transport: bool,
 }
 
 impl Status {

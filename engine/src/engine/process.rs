@@ -228,6 +228,10 @@ pub struct EngineCore {
     /// True while at least one track is soloed; every other track is then held at silence.
     /// Recomputed on a solo command, never per sample.
     any_solo: bool,
+    /// Whether the transport runs: the clock counts, the click sounds, the loops are heard. True
+    /// from the start for everything except the app, which opens with it standing - see
+    /// [`EngineCore::hold_transport`].
+    transport: bool,
 }
 
 impl EngineCore {
@@ -275,7 +279,23 @@ impl EngineCore {
             stopped: false,
             inserts: None,
             any_solo: false,
+            transport: true,
         }
+    }
+
+    /// Open with the transport standing: bar 1, no click, no loop heard until a
+    /// [`Command::TransportStart`] arrives. Called on the control thread before the engine moves
+    /// into the callback. The CLI and the score subcommand never call it and run as they always did.
+    pub fn hold_transport(&mut self) {
+        self.transport = false;
+        for track in self.tracks.iter_mut() {
+            track.set_held(true);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn transport(&self) -> bool {
+        self.transport
     }
 
     /// Give the engine its plugin slots. Called on the control thread before the engine moves into
@@ -479,13 +499,14 @@ impl EngineCore {
                 Some((index, _)) => {
                     // `remove` on a `Vec` of `Copy` commands is a memmove of a few dozen bytes.
                     let cmd = self.scheduled.remove(index);
-                    if matches!(cmd, Command::ClearAll { .. }) {
+                    if matches!(cmd, Command::ClearAll { .. } | Command::TransportStop) {
                         // "Like freshly started" includes the waiting room: everything still in it
                         // that was sent *before* the clear (the lower slots - arrival order is kept)
                         // belongs to the state being thrown away. Without this a take's `StartPlay`
                         // scheduled bars ahead would wake a track up after it was cleared. What was
                         // sent after the clear stays. `drain` on a `Vec` of `Copy` values moves
-                        // memory and allocates nothing.
+                        // memory and allocates nothing. A transport stop drops them for the same
+                        // reason: a play or a take end armed for bar 9 has no bar 9 to happen in.
                         self.scheduled.drain(..index);
                     }
                     self.apply(cmd);
@@ -552,7 +573,8 @@ impl EngineCore {
     ) {
         let channels = self.input_channels;
         let monitor_gain = self.monitor_gain;
-        let click = self.click;
+        // A standing transport has no beat to click on.
+        let click = self.click && self.transport;
         let click_gain = self.click_gain;
         let bus_gain = self.bus_gain;
         // One way out is one mix. See `Track::render` and `super::bus::BusRouting::collapsed`.
@@ -684,7 +706,7 @@ impl EngineCore {
         }
         let click_bus = if collapsed { Bus::Main } else { Bus::Monitor }.index();
         for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
-            let click = if self.click {
+            let click = if self.click && self.transport {
                 self.metro.sample_at(&self.timeline, start + i as u64) * self.click_gain
             } else {
                 0.0
@@ -978,7 +1000,10 @@ impl EngineCore {
                 }) {
                     self.refuse(Refusal::Tempo);
                 } else {
-                    self.timeline = Timeline::new(self.timeline.sample_rate(), bpm, signature);
+                    // Bar 1 stays where the transport put it; the control thread's mirror keeps
+                    // the same `zero`, so both sides go on agreeing about where every bar is.
+                    self.timeline = Timeline::new(self.timeline.sample_rate(), bpm, signature)
+                        .with_zero(self.timeline.zero());
                     // Only a *changed* length invalidates the stocks, and the two sides of the
                     // buffer accounting have to agree on when that happened - `LayerPool::
                     // set_layer_frames` makes exactly the same comparison. A tempo change that
@@ -1019,6 +1044,8 @@ impl EngineCore {
             Command::SetMonitorGain { gain } => {
                 self.monitor_gain = gain.clamp(0.0, super::command::MAX_LEVEL_GAIN);
             }
+            Command::TransportStart { at } => self.start_transport(at),
+            Command::TransportStop => self.stop_transport(),
             Command::Stop => {
                 for track in 0..self.tracks.len() {
                     self.cancel_takes(track);
@@ -1026,6 +1053,79 @@ impl EngineCore {
                 }
                 self.stopped = true;
             }
+        }
+    }
+
+    /// The transport starts at `at`, which becomes bar 1.
+    ///
+    /// Every loop is re-anchored there, so it plays from its top - the musician pressed Start and
+    /// expects the song to begin, not to resume at whatever phase the sample counter has reached.
+    /// A take that is still open can only be one whose end has passed and which is waiting for its
+    /// last `R` frames (the stop keeps exactly those, see [`Self::stop_transport`]); it is closed
+    /// first, because moving the origin under a take that is still writing would tear it apart.
+    /// Bounded work: a handful of stores per track, nothing allocated.
+    fn start_transport(&mut self, at: u64) {
+        for t in 0..self.tracks.len() {
+            if let Some(take) = self.tracks[t].take() {
+                let end = take.end.unwrap_or(at);
+                self.finish_take(t, end);
+                // `finish_take` may promote a queued take; the stop dropped all of those, so this
+                // only guards against a start that was not preceded by a stop.
+                self.cancel_takes(t);
+            }
+            self.tracks[t].rebase(at);
+            self.tracks[t].set_held(false);
+        }
+        self.timeline = self.timeline.with_zero(at);
+        self.transport = true;
+    }
+
+    /// The transport stops now. Layers and play states stay; the loops fall silent.
+    ///
+    /// What happens to a take, chosen so that no half-made layer survives and nothing finished is
+    /// lost:
+    ///
+    /// * **armed** (not begun yet): dropped, with its buffer.
+    /// * **first take of a loop**, end not reached: discarded, and the track is empty again. A loop
+    ///   cut off wherever the button happened to be pressed would have a length that fits no bar.
+    /// * **first take whose end has passed** and which only waits for its last `R` frames: kept -
+    ///   it finishes on its own while the transport stands, because input keeps arriving.
+    /// * **overdub**: ended right here and kept. A layer is addressed modulo the loop, so a partial
+    ///   pass is simply a layer that is silent for the rest of the loop - what was played stays.
+    fn stop_transport(&mut self) {
+        let now = self.out_pos;
+        for t in 0..self.tracks.len() {
+            if let Some(buffer) = self.tracks[t].take_pending_buffer() {
+                self.buffers.retire(buffer);
+            }
+            if let Some(take) = self.tracks[t].take() {
+                let begun = take.start < now && self.musical_input_pos(t) > take.start;
+                if !begun {
+                    self.discard_take(t, take.defines_loop);
+                } else if take.defines_loop {
+                    if !take.end.is_some_and(|end| end <= now) {
+                        self.clear_track(t);
+                    }
+                } else {
+                    let end = take.end.map_or(now, |end| end.min(now));
+                    self.tracks[t].set_take_end(end);
+                }
+            }
+            self.tracks[t].set_held(true);
+        }
+        self.transport = false;
+    }
+
+    /// Throw away the running take of one track together with the layer it was writing.
+    fn discard_take(&mut self, track: usize, defines_loop: bool) {
+        if defines_loop {
+            // The take's layer is the only one: `StartRecord` cleared the track before it began.
+            self.clear_track(track);
+            return;
+        }
+        self.tracks[track].cancel_take();
+        if let Some(buffer) = self.tracks[track].pop_layer() {
+            self.buffers.retire(buffer);
         }
     }
 
@@ -1110,7 +1210,12 @@ impl EngineCore {
     }
 
     fn publish_status(&mut self) {
-        let here = self.timeline.locate(self.out_pos);
+        // A standing transport stands at bar 1, beat 1 - nothing on screen may count.
+        let here = if self.transport {
+            self.timeline.locate(self.out_pos)
+        } else {
+            super::timeline::MusicalPos::default()
+        };
         let in_index = self.in_index;
         let mut tracks = [TrackStatus::default(); MAX_TRACKS];
         for (i, slot) in tracks.iter_mut().enumerate().take(self.tracks.len()) {
@@ -1165,6 +1270,7 @@ impl EngineCore {
             spares: [self.spares[0].len() as u32, self.spares[1].len() as u32],
             buffers_taken: self.buffers_taken,
             stopped: self.stopped,
+            transport: self.transport,
         };
         self.bus_peak = [[0.0; BUS_CHANNELS]; BUS_COUNT];
         self.status.push(status);
