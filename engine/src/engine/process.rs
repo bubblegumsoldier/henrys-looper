@@ -416,8 +416,19 @@ impl EngineCore {
         let in_frames = input.len() / self.input_channels;
         let out_frames = output.len() / BUS_SAMPLES;
 
+        let tap = self
+            .capture
+            .as_deref_mut()
+            .and_then(CaptureSlot::session)
+            .is_some();
+        if let Some(rack) = self.sources.as_deref_mut() {
+            rack.set_tap(tap);
+        }
         self.render_sources(out_frames);
         self.render_with_commands(input, in_frames, output, out_frames);
+        if tap {
+            self.capture_midi();
+        }
         self.clamp_and_meter(output);
         self.record_input(input, in_frames);
         self.record_sources(out_frames);
@@ -568,6 +579,22 @@ impl EngineCore {
             }
         }
         self.record_midi();
+    }
+
+    /// Hand the recorder what every instrument was sent in this process call, for the MIDI files of
+    /// a recording (`crate::capture::smf`).
+    fn capture_midi(&mut self) {
+        let (Some(rack), Some(capture)) = (
+            self.sources.as_deref(),
+            self.capture.as_deref_mut().and_then(CaptureSlot::session),
+        ) else {
+            return;
+        };
+        for t in 0..self.tracks.len().min(MAX_TRACKS) {
+            for &(offset, msg) in &rack.sent[t] {
+                capture.midi_event(t, self.out_pos + u64::from(offset), msg);
+            }
+        }
     }
 
     /// Render the instruments for frames `from..to` of this process call - the piece the commands

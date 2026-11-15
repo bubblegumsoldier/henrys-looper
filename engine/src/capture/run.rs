@@ -352,6 +352,37 @@ fn finalize(
         },
         None => None,
     };
+    // One MIDI file per track that sent its instrument anything.
+    let mut midi_names: Vec<Option<String>> = vec![None; info.tracks.len()];
+    for (t, track) in info.tracks.iter().enumerate() {
+        let events: Vec<(u64, [u8; 3])> = written
+            .midi
+            .iter()
+            .filter(|m| m.track as usize == t)
+            .map(|m| (m.frame, m.msg))
+            .collect();
+        if events.is_empty() {
+            continue;
+        }
+        let name = session::midi_file(t, &track.name);
+        let data = super::smf::write(
+            &events,
+            info.sample_rate,
+            info.bpm,
+            info.beats_per_bar,
+            info.beat_unit,
+            &track.name,
+        );
+        match std::fs::write(folder.join(&name), &data) {
+            Ok(()) => {
+                bytes += data.len() as u64;
+                midi_names[t] = Some(name);
+            }
+            Err(e) => {
+                error.get_or_insert_with(|| format!("{name}: {e}"));
+            }
+        }
+    }
     let file = SessionFile {
         format: session::FORMAT,
         version: session::VERSION,
@@ -380,7 +411,7 @@ fn finalize(
                 input_channels: track.channels.count(),
                 stem: session::stem_file(t, &track.name),
                 dry: info.dry.then(|| session::dry_file(t, &track.name)),
-                midi: None,
+                midi: midi_names[t].clone(),
                 latency_frames: track.latency_frames,
             })
             .collect(),

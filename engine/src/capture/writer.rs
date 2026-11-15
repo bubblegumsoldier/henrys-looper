@@ -39,6 +39,8 @@ pub struct Written {
     pub files: Vec<(String, u64)>,
     /// First disk error, if any. The files are as complete as the disk allowed.
     pub error: Option<String>,
+    /// What every instrument track sent its instrument, in arrival order (`super::smf`).
+    pub midi: Vec<super::MidiCapture>,
 }
 
 /// Write everything `reader` delivers into the files of `specs` inside `dir`, until the capture is
@@ -59,7 +61,9 @@ pub fn write_all(mut reader: CaptureReader, dir: &Path, specs: &[FileSpec]) -> W
     let width = reader.width();
     let mut buf: Vec<f32> = Vec::with_capacity(CHUNK * width);
     let mut last_header = Instant::now();
+    let mut midi = Vec::new();
     loop {
+        reader.take_midi(|m| midi.push(m));
         buf.clear();
         match reader.read(&mut buf, CHUNK) {
             Read::Frames(_) => {
@@ -95,8 +99,10 @@ pub fn write_all(mut reader: CaptureReader, dir: &Path, specs: &[FileSpec]) -> W
             }
         }
     }
+    reader.take_midi(|m| midi.push(m));
     let mut written = Written {
         frames: reader.delivered(),
+        midi,
         ..Written::default()
     };
     for (spec, file) in specs.iter().zip(files) {

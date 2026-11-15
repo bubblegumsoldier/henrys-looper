@@ -637,3 +637,68 @@ fn a_transport_stop_in_an_overdub_ends_its_open_notes_in_the_layer() {
     assert_eq!(r[1].frame, L as i64 - 1);
     assert_eq!(sounding(&rig), vec![(0, 67)], "die gehaltene Live-Taste klingt weiter");
 }
+
+/// A recording of a MIDI loop: the stem as audio, and next to it `01 keys.mid` with everything the
+/// track sent its instrument - the live notes of the take and the loop's playback after it.
+#[test]
+fn a_recording_writes_the_tracks_midi_file() {
+    use crate::capture::capture_channel;
+    use crate::capture::run::{Mode, Recording, RunInfo, RunTrack};
+    use crate::engine::frame::Channels;
+    let dir = std::env::temp_dir().join(format!("henrys-looper-midi-capture-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut rig = rig();
+    let (mut port, endpoint) = capture_channel();
+    rig.sim.core.attach_capture(endpoint);
+    let mut rec = Recording::start(
+        RunInfo {
+            title: "MIDI".into(),
+            mode: Mode::Free,
+            folder: dir.join("run"),
+            started_at: "2026-11-15 20:00:00".into(),
+            sample_rate: 48_000,
+            bpm: 100.0,
+            beats_per_bar: 4,
+            beat_unit: 4,
+            count_in_bars: 0,
+            start: 0,
+            start_bar: 0,
+            tracks: vec![RunTrack {
+                name: "keys".into(),
+                channels: Channels::Stereo,
+                latency_frames: 0,
+            }],
+            dry: false,
+            max_block: BLOCK,
+            score_yaml: None,
+            score_path: None,
+            min_seconds: 1.0,
+            queue_seconds: 60.0,
+        },
+        &mut port,
+    )
+    .expect("Aufnahme startet");
+    rec.note_take();
+    record_first_pass(&mut rig);
+    play(&mut rig, 10_000, [0x90, 60, 100]);
+    play(&mut rig, 20_000, [0x80, 60, 0]);
+    rig.sim.run_to(2 * L + 30_000);
+    rec.stop(2 * L + 30_000);
+    let end = rig.sim.pos() + 10 * 48_000;
+    while rig.sim.pos() < end && rec.poll().is_none() {
+        rig.sim.step();
+    }
+    let outcome = rec.wait().cloned().expect("fertig");
+    assert!(outcome.kept, "{outcome:?}");
+    let data = std::fs::read(outcome.folder.join("01 keys.mid")).expect("MIDI-Datei");
+    assert_eq!(&data[..4], b"MThd");
+    // Live once, then the loop in pass 2 and at the start of pass 3: three note ons.
+    let ons = data.windows(3).filter(|w| w == &[0x90, 60, 100]).count();
+    assert_eq!(ons, 3);
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(outcome.folder.join("session.json")).unwrap())
+            .unwrap();
+    assert_eq!(json["tracks"][0]["midi"], "01 keys.mid");
+    let _ = std::fs::remove_dir_all(&dir);
+}

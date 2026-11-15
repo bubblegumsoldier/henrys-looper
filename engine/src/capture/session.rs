@@ -11,9 +11,9 @@
 //!  └── session.json
 //! ```
 //!
-//! Every per-track entry in `session.json` carries a `midi` field that is `null` today. Instrument
-//! tracks and MIDI loops will put `01 keys.mid` there - same number, same name, one more file -
-//! without a new format version.
+//! Every per-track entry in `session.json` carries a `midi` field. A track that sent its instrument
+//! anything during the run - live keys and MIDI-loop playback alike - names its Standard MIDI File
+//! there (`01 keys.mid`: same number, same name, one more file); every other track has `null`.
 
 use serde::Serialize;
 
@@ -53,6 +53,10 @@ pub fn track_stem(index: usize, name: &str) -> String {
 
 pub fn stem_file(index: usize, name: &str) -> String {
     format!("{}.wav", track_stem(index, name))
+}
+
+pub fn midi_file(index: usize, name: &str) -> String {
+    format!("{}.mid", track_stem(index, name))
 }
 
 pub fn dry_file(index: usize, name: &str) -> String {

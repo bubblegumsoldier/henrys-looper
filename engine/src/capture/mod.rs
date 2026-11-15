@@ -60,6 +60,7 @@
 
 pub mod run;
 pub mod session;
+pub mod smf;
 pub mod wav;
 pub mod writer;
 
@@ -212,6 +213,19 @@ pub struct CaptureSpec {
     pub queue_seconds: f64,
 }
 
+/// One MIDI message an instrument track sent to its instrument, at a file frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MidiCapture {
+    pub track: u8,
+    /// Frame of the recording (0 is its first frame), on the output axis like the stems.
+    pub frame: u64,
+    pub msg: [u8; 3],
+}
+
+/// MIDI messages the queue to the writer holds. A pianist with the pedal sends a few dozen a
+/// second; the writer takes them every few milliseconds.
+const MIDI_QUEUE: usize = 32_768;
+
 /// Which stem slots one track writes to, precomputed so the audio thread does no arithmetic on the
 /// layout.
 #[derive(Clone, Copy, Debug)]
@@ -247,6 +261,7 @@ pub struct CaptureSession {
     tail_silence: u64,
     max_tail: u64,
     shared: Arc<Shared>,
+    midi: rtrb::Producer<MidiCapture>,
 }
 
 /// The writer's half of one capture.
@@ -263,6 +278,7 @@ pub struct CaptureReader {
     shared: Arc<Shared>,
     start: u64,
     sample_rate: u32,
+    midi: rtrb::Consumer<MidiCapture>,
 }
 
 /// Build both halves of a capture. Control thread only - this is where its memory is allocated.
@@ -276,6 +292,7 @@ pub fn capture_pair(spec: &CaptureSpec) -> (Box<CaptureSession>, CaptureReader) 
         ((spec.sample_rate as f64 * spec.queue_seconds) as usize).max(4 * max_block as usize);
     let (data_tx, data_rx) = rtrb::RingBuffer::<f32>::new(queue * width);
     let (gap_tx, gap_rx) = rtrb::RingBuffer::<Gap>::new(256);
+    let (midi_tx, midi_rx) = rtrb::RingBuffer::<MidiCapture>::new(MIDI_QUEUE);
     let shared = Arc::new(Shared::new());
     let slots = (0..spec.layout.tracks.len())
         .map(|t| Slots {
@@ -303,6 +320,7 @@ pub fn capture_pair(spec: &CaptureSpec) -> (Box<CaptureSession>, CaptureReader) 
         tail_silence: (rate * TAIL_SILENCE_SECS) as u64,
         max_tail: (rate * MAX_TAIL_SECS) as u64,
         shared: Arc::clone(&shared),
+        midi: midi_tx,
     });
     let reader = CaptureReader {
         data: data_rx,
@@ -315,6 +333,7 @@ pub fn capture_pair(spec: &CaptureSpec) -> (Box<CaptureSession>, CaptureReader) 
         shared,
         start: spec.start,
         sample_rate: spec.sample_rate,
+        midi: midi_rx,
     };
     (session, reader)
 }
@@ -484,6 +503,25 @@ impl CaptureSession {
         finished
     }
 
+    /// A message track `t` sent its instrument at output position `pos` - live or from a MIDI loop.
+    /// Before the recording's first frame or after its end it is not part of it; a full queue drops
+    /// it (and counts nothing: the audio files are what the run is judged by).
+    #[inline]
+    pub fn midi_event(&mut self, t: usize, pos: u64, msg: [u8; 3]) {
+        if pos < self.start || self.shared.done.load(Ordering::Relaxed) {
+            return;
+        }
+        let stop = self.shared.stop_at.load(Ordering::Relaxed);
+        if pos >= stop.saturating_add(self.max_tail) {
+            return;
+        }
+        let _ = self.midi.push(MidiCapture {
+            track: t.min(255) as u8,
+            frame: pos - self.start,
+            msg,
+        });
+    }
+
     /// End the capture right where it is - a new one replaces it, or the engine is told to stop.
     pub fn finish_now(&mut self) {
         self.shared.done.store(true, Ordering::Release);
@@ -566,6 +604,13 @@ impl CaptureReader {
 
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Every MIDI message that arrived since the last call.
+    pub fn take_midi(&mut self, mut f: impl FnMut(MidiCapture)) {
+        while let Ok(m) = self.midi.pop() {
+            f(m);
+        }
     }
 
     /// Frames delivered so far, silence for gaps included.
