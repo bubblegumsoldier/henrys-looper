@@ -24,6 +24,11 @@ export const docStore = new DocStore(
 // The file layer is the authority for which text is open. A text that arrives there from anywhere
 // but this store (open, new, the live view) replaces the document and its history.
 let started = false;
+/** Follow the score file. Called by the first `useDoc`, and by the mixer, which needs the open song
+ *  also while only the Live view is on screen. */
+export function startDoc(): void {
+  start();
+}
 function start() {
   if (started) return;
   started = true;

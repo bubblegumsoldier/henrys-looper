@@ -315,6 +315,11 @@ export interface LooperStatus {
   spares: number;
   /** Newest German sentence about what happened - a confirmation or a refusal. */
   message: string | null;
+  /**
+   * Goes up whenever a human changes a fader, mute, effect or bus level (mouse, key or MIDI);
+   * `mixerApi.take` then says what changed. See `mixer/scoreMix.ts`.
+   */
+  mixer_rev: number;
 }
 
 export const IDLE_STATUS: LooperStatus = {
@@ -355,6 +360,7 @@ export const IDLE_STATUS: LooperStatus = {
   spares: 0,
   message: null,
   score: null,
+  mixer_rev: 0,
 };
 
 // --- device survey ---------------------------------------------------------
@@ -579,6 +585,8 @@ export interface CompiledScore {
   tracks: CompiledTrack[];
   midi: Record<string, { id: string }>;
   sections: CompiledSection[];
+  /** The `mixer:` section as written; absent when the score has none. */
+  mixer?: MixerSource;
 }
 
 /**
@@ -714,6 +722,66 @@ export interface DocSection {
   resolved?: ResolvedSection;
 }
 
+// --- the `mixer:` section. Mirrors `looper_engine::score::mixer`. Levels in dB (-100 and below is
+// silence), every field optional: inside an entry an omitted field is the default (0 dB, not muted,
+// dry); an effect line overrides only the fields it names, on top of `preset`.
+
+export interface MixerBusLevels {
+  main?: number;
+  monitor?: number;
+  click?: number;
+  /** The monitored live inputs (`monitor_gain`). */
+  inputs?: number;
+}
+
+export interface TrackMix {
+  /** Channel fader, dB. */
+  gain?: number;
+  mute?: boolean;
+  /** `dry` | `voice` | `piezo_guitar`; absent = dry. */
+  preset?: string;
+  /** Whole chain out; absent = out exactly when no effect is on. */
+  bypass?: boolean;
+  high_pass?: { on?: boolean; hz?: number };
+  eq?: { on?: boolean };
+  band1?: MixBand;
+  band2?: MixBand;
+  band3?: MixBand;
+  comp?: { on?: boolean; threshold?: number; ratio?: number; attack?: number; release?: number; knee?: number; makeup?: number };
+  delay?: { on?: boolean; note?: string; feedback?: number; mix?: number };
+  reverb?: { on?: boolean; size?: number; damping?: number; mix?: number };
+}
+
+export interface MixBand {
+  kind?: string;
+  hz?: number;
+  q?: number;
+  gain?: number;
+}
+
+/** The section without comments - what `mixer_state` / `mixer_take` answer and `mixer_apply` takes. */
+export interface MixerSource {
+  buses?: MixerBusLevels;
+  /** By track name, in order. */
+  tracks?: Record<string, TrackMix>;
+}
+
+/** One entry of `mixer.tracks` in the document: the mix fields flat, plus comments. */
+export interface DocMixerTrack extends TrackMix {
+  track: string;
+  comments?: DocComments;
+  /** Comments of the field lines of a block entry. */
+  field_comments?: Record<string, DocComments>;
+  line?: number;
+}
+
+export interface DocMixer {
+  buses?: MixerBusLevels;
+  tracks: DocMixerTrack[];
+  /** Comments of the `buses:` and `tracks:` lines. */
+  field_comments?: Record<string, DocComments>;
+}
+
 export interface ScoreDoc {
   title?: string;
   bpm: number;
@@ -724,6 +792,8 @@ export interface ScoreDoc {
   tracks: DocTrack[];
   midi: DocMidiBinding[];
   sections: DocSection[];
+  /** Fader, mute, effects and bus levels kept with the song; absent when the score has none. */
+  mixer?: DocMixer;
   /** Comment lines above the first key / after the last element. */
   header?: string[];
   footer?: string[];
@@ -738,7 +808,11 @@ export type ScoreRef =
   | { kind: "midi"; index: number; key: string; field?: string }
   | { kind: "section"; index: number; id: string; field?: string }
   /** `index` is the position in `DocSection.tracks`. */
-  | { kind: "section_track"; section: number; section_id: string; index: number; track: string };
+  | { kind: "section_track"; section: number; section_id: string; index: number; track: string }
+  /** The `mixer:` section; `field` is `buses` or `tracks`. */
+  | { kind: "mixer"; field?: string }
+  /** `index` is the position in `DocMixer.tracks`. */
+  | { kind: "mixer_track"; index: number; track: string; field?: string };
 
 /** Where an element's key stands in the text. */
 export interface ScoreLocation {

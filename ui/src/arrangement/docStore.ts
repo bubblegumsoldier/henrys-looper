@@ -48,6 +48,12 @@ export interface DocState extends Snapshot {
   failure: string | null;
   /** Increases on every change of `text` that did not come from the text editor itself. */
   textRev: number;
+  /**
+   * Which document this is: increases with every `replace` (open, new, a file changed elsewhere),
+   * never with an edit or an undo. The mixer uses it to tell "this song, changed" from "another
+   * song" (`mixer/scoreMix.ts`).
+   */
+  docId: number;
 }
 
 export interface StoreOptions {
@@ -78,7 +84,7 @@ export class DocStore {
   constructor(backend: Backend, options: StoreOptions = {}) {
     this.backend = backend;
     this.opts = { onText: () => undefined, parseDelayMs: 350, limit: 200, ...options };
-    this.state = { ...EMPTY, canUndo: false, canRedo: false, busy: false, failure: null, textRev: 0 };
+    this.state = { ...EMPTY, canUndo: false, canRedo: false, busy: false, failure: null, textRev: 0, docId: 0 };
   }
 
   get(): DocState {
@@ -127,7 +133,7 @@ export class DocStore {
     const ticket = ++this.ticket;
     this.history = [{ ...EMPTY, text }];
     this.index = 0;
-    this.set({ text, textRev: this.state.textRev + 1 });
+    this.set({ text, textRev: this.state.textRev + 1, docId: this.state.docId + 1 });
     const snap = await this.parsed(text, null);
     if (ticket !== this.ticket || snap === null) return;
     this.history = [snap];

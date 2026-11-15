@@ -33,6 +33,7 @@ import { useScoreKeys } from "./shell/scoreTransport";
 import { useScoreModelSync } from "./shell/scoreModel";
 import { useWindowTitle } from "./shell/windowTitle";
 import { IS_MAC } from "./platform";
+import { startScoreMix } from "./mixer/scoreMix";
 
 const MODE_KEY = "looper.mode";
 
@@ -56,6 +57,8 @@ export default function App() {
 
   useScoreModelSync();
   useWindowTitle();
+  // Fader moves go into the open song's `mixer:` section, undo moves the faders back.
+  useEffect(() => startScoreMix(), []);
   // Space / N start or release, Shift+S stops - in every mode: the arrangement has no transport of
   // its own any more, the title bar is the transport.
   useScoreKeys(true);

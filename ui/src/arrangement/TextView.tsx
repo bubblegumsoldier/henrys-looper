@@ -337,6 +337,13 @@ function Notes({ doc }: { doc: ScoreDoc }) {
   doc.tracks.forEach((t) => {
     if (t.input_right) notes.push({ line: t.line, text: `${t.name} is stereo (inputs ${t.input} and ${t.input_right}).` });
   });
+  if (doc.mixer) {
+    const n = doc.mixer.tracks.length;
+    notes.push({
+      line: doc.mixer.tracks[0]?.line,
+      text: `mixer: faders, mutes and effects of ${plural(n, "track")}${doc.mixer.buses ? " and the bus levels" : ""} are kept with the song. While this score is loaded the section follows the mixer, and the mixer follows the section.`,
+    });
+  }
   return (
     <>
       {notes.map((n, i) => (

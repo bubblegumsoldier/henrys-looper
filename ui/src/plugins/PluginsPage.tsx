@@ -15,7 +15,8 @@ const STATUS_LABEL: Record<ScannedPlugin["status"], string> = {
 };
 
 export function PluginsPage() {
-  const { catalog, scanning, notice } = usePlugins();
+  const { catalog, scanning, notice, rack } = usePlugins();
+  const parked = rack.parked ?? [];
   const plugins = catalog?.plugins ?? [];
   const ready = plugins.filter((p) => p.status === "ok").length;
 
@@ -81,6 +82,27 @@ export function PluginsPage() {
         )}
         {catalog && <div className="hint">Scan results: {catalog.cache_path}</div>}
       </section>
+      {parked.length > 0 && (
+        <section className="card">
+          <div className="caps" style={{ marginBottom: 8 }}>
+            Kept for tracks not in this session
+          </div>
+          <div className="plg-params">
+            {parked.map((p) => (
+              <div key={`${p.track}:${p.slot}`} className="plg-param" title={p.plugin_id}>
+                <span className="plg-pname">{p.name}</span>
+                <span className="plg-pname">
+                  {p.track} · slot {p.slot + 1}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="hint">
+            Plugins belong to a track by its name. These come back as soon as a track of that name is in the engine
+            again - from the setup or from a score.
+          </div>
+        </section>
+      )}
       <section className="card">
         <PluginSlots target="bus.main" title="Main bus" />
       </section>

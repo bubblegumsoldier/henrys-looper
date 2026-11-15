@@ -335,7 +335,7 @@ export function patchTrack(doc: ScoreDoc, index: number, patch: TrackPatch): Sco
   return done(d);
 }
 
-/** Rename a track, its states in every section and the bindings that name it. */
+/** Rename a track, its states in every section, its mixer entry and the bindings that name it. */
 export function renameTrack(doc: ScoreDoc, index: number, name: string): ScoreDoc {
   const d = draft(doc);
   const t = d.tracks[index];
@@ -348,6 +348,7 @@ export function renameTrack(doc: ScoreDoc, index: number, name: string): ScoreDo
   d.midi = remapMidi(d.midi, {
     track: (ref) => ("name" in ref ? (ref.name === old ? name : ref.name) : String(ref.index + 1)),
   });
+  if (d.mixer) d.mixer.tracks = d.mixer.tracks.map((m) => (m.track === old ? { ...m, track: name } : m));
   return done(d);
 }
 
@@ -362,13 +363,14 @@ export function moveTrack(doc: ScoreDoc, from: number, to: number): ScoreDoc {
   return done(d);
 }
 
-/** Delete a track, its states and every binding that names it. */
+/** Delete a track, its states, its mixer entry and every binding that names it. */
 export function deleteTrack(doc: ScoreDoc, index: number): ScoreDoc {
   const d = draft(doc);
   const t = d.tracks[index];
   if (!t) return doc;
   d.tracks.splice(index, 1);
   for (const s of d.sections) s.tracks = s.tracks.filter((st) => st.track !== t.name);
+  if (d.mixer) d.mixer.tracks = d.mixer.tracks.filter((m) => m.track !== t.name);
   d.midi = remapMidi(d.midi, {
     track: (ref) =>
       "name" in ref

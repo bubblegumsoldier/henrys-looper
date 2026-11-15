@@ -20,6 +20,7 @@ import { setLoadedScore } from "../shell/scoreModel";
 import { currentStatus, useStatusSlice } from "../status";
 import type { RecentFile } from "../types";
 import { docStore } from "./useDoc";
+import { markLoaded, withoutMixer } from "../mixer/scoreMix";
 
 export interface ScoreActions {
   recent: RecentFile[];
@@ -174,6 +175,8 @@ export function useScoreActions(): ScoreActions {
       const text = scoreFile().text;
       const loaded = await scoreApi.load(text, shownCountIn);
       loadedText = text;
+      // The host has applied the score's `mixer:`; from now on fader and section move together.
+      markLoaded();
       setLoadedRev((n) => n + 1);
       setLoadedScore(loaded.score);
       note(loaded.message);
@@ -184,6 +187,7 @@ export function useScoreActions(): ScoreActions {
     }
   }, [shownCountIn]);
 
-  const stale = inRunner && loadedText !== null && loadedText !== scoreFile().text;
+  // The mix is kept in step with the engine both ways, so it does not make the loaded score stale.
+  const stale = inRunner && loadedText !== null && withoutMixer(loadedText) !== withoutMixer(scoreFile().text);
   return { recent, newScore, openFile, openRecent, save, saveAs, load, loading, countIn: shownCountIn, setCountIn, stale };
 }

@@ -42,6 +42,18 @@ describe("DocStore", () => {
     expect(store.get().doc!.sections[2].id).toBe("layer_2");
   });
 
+  it("a mixer write is one undo step and the document stays the same document", async () => {
+    const id = store.get().docId;
+    store.edit((d) => ({ ...d, mixer: { tracks: [{ track: d.tracks[0].name, gain: -3 }] } }));
+    await store.settled();
+    expect(store.get().doc!.mixer?.tracks[0].gain).toBe(-3);
+    store.undo();
+    expect(store.get().doc!.mixer).toBeUndefined();
+    expect(store.get().docId).toBe(id);
+    await store.replace(text());
+    expect(store.get().docId).toBe(id + 1);
+  });
+
   it("edits made in a row are rendered in order and each is one undo step", async () => {
     store.edit((d) => ops.addSection(d));
     store.edit((d) => ops.addSection(d));

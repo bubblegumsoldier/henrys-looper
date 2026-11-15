@@ -19,6 +19,7 @@ import type {
   FxPresetName,
   FilesInfo,
   FxSlotName,
+  MixerSource,
   OpenedFile,
   RecentFile,
   SavedFile,
@@ -276,6 +277,19 @@ export const scoreApi = {
   rewind: () => call<string>("score_rewind"),
   /** Count-in bars for the next start (1..8; 0 becomes 1). Only before the start. Answers a sentence. */
   countIn: (bars: number) => call<string>("score_count_in", { bars }),
+};
+
+/**
+ * The mix as a score's `mixer:` section holds it (levels in dB, chains as preset plus what differs).
+ * The open score keeps it in sync - see `mixer/scoreMix.ts`.
+ */
+export const mixerApi = {
+  /** Every track of the engine and the buses. */
+  state: () => call<MixerSource>("mixer_state"),
+  /** Only what a human changed since the last call; `LooperStatus.mixer_rev` says when to ask. */
+  take: () => call<MixerSource>("mixer_take"),
+  /** Put the engine into this mix, tracks by name (undo/redo in the arrangement). */
+  apply: (mixer: MixerSource) => call<void>("mixer_apply", { mixer }),
 };
 
 // ---------------------------------------------------------------------------------------------

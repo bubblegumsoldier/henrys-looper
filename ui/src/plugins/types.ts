@@ -60,8 +60,20 @@ export interface SlotView {
   cpu_us: number;
   /** Why the plugin did not start, if it did not. */
   error: string | null;
-  /** MIDI address of the slot's bypass, e.g. `track.1.insert.2.bypass`. */
+  /** MIDI address of the slot's bypass, e.g. `track.voice.insert.2.bypass` - by track name, so a
+   *  learned control follows the plugin when a score orders the tracks differently. */
   bypass_address: string;
+  /** Name of the track the slot belongs to; null on a bus. Slots belong to names, not positions. */
+  track: string | null;
+}
+
+/** A slot whose track is not in the running engine: kept, and back as soon as the track is. */
+export interface ParkedSlot {
+  /** Track name (or `track 3` for a slot from an old rack file that has not met an engine yet). */
+  track: string;
+  slot: number;
+  plugin_id: string;
+  name: string;
 }
 
 export interface RackView {
@@ -71,6 +83,7 @@ export interface RackView {
   /** Slots per track and per bus (8). */
   max_slots: number;
   slots: SlotView[];
+  parked: ParkedSlot[];
 }
 
 export interface ParamView {
@@ -85,7 +98,7 @@ export interface ParamView {
   automatable: boolean;
   read_only: boolean;
   is_bypass: boolean;
-  /** MIDI address, e.g. `track.1.insert.1.param.42`. */
+  /** MIDI address, e.g. `track.voice.insert.1.param.42`. */
   address: string;
 }
 
@@ -109,4 +122,5 @@ export const EMPTY_RACK: RackView = {
   sample_rate: null,
   max_slots: 8,
   slots: [],
+  parked: [],
 };
