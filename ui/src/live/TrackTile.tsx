@@ -213,14 +213,14 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
           className={`tb dub${track.state === "overdub" && (!latchMode || track.latched) ? " on" : ""}${pending === "dub" || overdubNext ? " pend" : ""}`}
           aria-pressed={latchMode ? track.latched : undefined}
           data-midi={trackAddress(i, "overdub")}
-          disabled={empty}
+          disabled={empty && !writing && !latchMode}
           onClick={(e) => {
             e.stopPropagation();
             onSelect(i);
             actions.overdub(i);
           }}
           title={
-            empty
+            empty && !writing && !latchMode
               ? "Record a loop first, then overdub"
               : latchMode
                 ? `${T.overdub} · key O · stays on until pressed again`
