@@ -318,3 +318,47 @@ fn a_replaced_instrument_goes_back_to_its_sender() {
     rig.sim.run_blocks(1);
     assert_eq!(rig.instruments.drain_retired(), 1);
 }
+
+/// An engine built from a score's tracks (as the app's rebuild and the CLI build it) plays the
+/// score's instrument track - heard, whatever the score's setup and sections switch - unless the
+/// score says monitor: false.
+#[test]
+fn an_engine_built_from_a_score_plays_its_instrument_track() {
+    for (monitor, heard) in [("", true), (", monitor: false", false)] {
+        let text = format!(
+            "bpm: 120\ntracks:\n  keys: {{input: instrument{monitor}}}\n  voice: {{input: 1}}\n\
+             sections:\n  - id: a\n    bars: 1\n    tracks:\n      voice: hear_through\n"
+        );
+        let score = crate::score::compile_score(&text).unwrap();
+        let specs: Vec<TrackSpec> = super::score_cli::track_defs(&score)
+            .into_iter()
+            .zip(&score.tracks)
+            .map(|(def, track)| TrackSpec {
+                input: def.input,
+                // What the app starts an instrument track with: the score's monitor.
+                monitor: track.is_instrument() && track.monitor,
+                pan: def.pan,
+                latency: def.latency,
+                loop_send: def.loop_send,
+                monitor_send: def.monitor_send,
+            })
+            .collect();
+        assert_eq!(specs[0].input, super::frame::TrackInput::Instrument);
+        let mut rig = rig(specs, false);
+        install(&mut rig, 0, Box::new(Impulse::new(0)), 0);
+        for command in super::runner::setup_commands(&score) {
+            rig.sim.send(command);
+        }
+        // What a section's monitoring would send; an instrument track ignores it.
+        rig.sim.send(Command::SetMonitor { track: 0, on: false });
+        rig.sim.run_blocks(2);
+        rig.keys
+            .push(LiveEvent {
+                host_ns: 0,
+                msg: [0x90, 60, 127],
+            })
+            .unwrap();
+        rig.sim.run_blocks(1);
+        assert_eq!(!nonzero(&rig.sim.out_l).is_empty(), heard, "monitor{monitor}");
+    }
+}
