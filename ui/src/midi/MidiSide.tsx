@@ -522,7 +522,7 @@ function NewPort({
 // Waiting for the controller
 // =============================================================================================
 
-function WaitCard({ view }: { view: MidiView }) {
+export function WaitCard({ view }: { view: MidiView }) {
   const [busy, run] = useRun();
   const address = view.learning!;
   const bound = view.bindings.filter((b) => !b.from_score && (b.resolved_address ?? b.address) === address);
@@ -793,10 +793,12 @@ function BindingDetail({
               <option value="pickup">pickup</option>
               <option value="jump">jump</option>
             </select>
-            <label>Range</label>
-            <NumberField value={b.min} placeholder={b.range_min} disabled={busy} onCommit={(min) => edit({ min })} />
-            <span className="dim">–</span>
-            <NumberField value={b.max} placeholder={b.range_max} disabled={busy} onCommit={(max) => edit({ max })} />
+            <span className="bdet-range">
+              <label>Range</label>
+              <NumberField value={b.min} placeholder={b.range_min} disabled={busy} onCommit={(min) => edit({ min })} />
+              <span className="dim">–</span>
+              <NumberField value={b.max} placeholder={b.range_max} disabled={busy} onCommit={(max) => edit({ max })} />
+            </span>
           </div>
         ) : (
           <div className="bdet-opts">

@@ -105,6 +105,13 @@ async function runStep(step: Step): Promise<void> {
     case "midiProfile":
       setMidiView(await midiApi.profile(step.action as MidiProfileAction));
       return;
+    case "clickSel":
+      // A click on the first element matching a CSS selector (a row, a button).
+      document.querySelector<HTMLElement>(String(step.sel))?.click();
+      return;
+    case "midiOpen":
+      setMidiView(await midiApi.open(String(step.device)));
+      return;
     case "midiFocus":
       setMidiFocus((step.address as string | undefined) ?? null);
       return;

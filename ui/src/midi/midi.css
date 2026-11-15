@@ -68,7 +68,8 @@ input.field.midi-rename { height: 22px; width: 100%; font-weight: var(--fw-semib
 .bdet-opts label { color: var(--tx-3); }
 .bdet-opts select.field { height: var(--ctl-h-s); font-size: var(--fs-11); }
 .bdet-opts label + select { margin-right: 6px; }
-input.field.bdet-num { width: 58px; height: var(--ctl-h-s); font-size: var(--fs-11); }
+.bdet-range { display: inline-flex; align-items: center; gap: 6px; }
+input.field.bdet-num { width: 52px; min-width: 0; flex: none; height: var(--ctl-h-s); font-size: var(--fs-11); padding: 0 6px; }
 
 /* --- monitor ----------------------------------------------------------------------------------- */
 .mon-h { margin-bottom: 4px; display: flex; justify-content: space-between; }
@@ -94,6 +95,9 @@ input.field.bdet-num { width: 58px; height: var(--ctl-h-s); font-size: var(--fs-
 .learn-on [data-midi].midi-learnable:disabled { opacity: 1; }
 /* The control of the row under the pointer, or of the row just clicked. */
 [data-midi].midi-focus { outline: 2px solid var(--learn) !important; outline-offset: 3px; }
+/* While learning, the MIDI sidebar takes the inspector's place (design: `.main.learn`). */
+.content.with-midi .main { grid-template-columns: minmax(0, 1fr); }
+.content.with-midi .main > .insp { display: none; }
 /* What cannot be mapped steps back (the design: lanes and ruler of the arrangement, the text). */
 .learn-on .content .editor-host, .learn-on .content .cm-editor { opacity: .42; filter: saturate(.6); }
 
@@ -107,3 +111,5 @@ input.field.bdet-num { width: 58px; height: var(--ctl-h-s); font-size: var(--fs-
 .midi-setup .card-h .dim { font-size: var(--fs-11); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .midi-setup .midi-cols { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; align-items: start; }
 .midi-setup .midi-notes { margin: 0; padding: 0 16px 10px 32px; font-size: var(--fs-11); color: var(--tx-3); }
+
+.midi-setup .waitcard { margin: 0; max-width: 620px; }

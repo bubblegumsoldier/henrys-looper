@@ -7,7 +7,7 @@ import { IS_MAC } from "../platform";
 import { Icon } from "../shell/Icon";
 import { T } from "../shell/terms";
 import { M, plural } from "./labels";
-import { BindingList, DeviceStatus, InputMonitor, MidiMessage, useGrouping } from "./MidiSide";
+import { BindingList, DeviceStatus, InputMonitor, MidiMessage, useGrouping, WaitCard } from "./MidiSide";
 import { clearMidiEvents, loadMidiView, sayMidi, setMidiView, useMidiEvents, useMidiView } from "./store";
 import { bindingWorks } from "./types";
 import "./midi.css";
@@ -37,7 +37,7 @@ export function MidiSetup() {
         </p>
       </div>
 
-      <MidiMessage view={view} sticky />
+      {view.learning ? <WaitCard view={view} /> : <MidiMessage view={view} sticky />}
 
       <div className="midi-cols">
         <div style={{ display: "flex", flexDirection: "column", gap: 18, minWidth: 0 }}>
