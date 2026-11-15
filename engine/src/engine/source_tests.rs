@@ -39,9 +39,9 @@ fn rig(tracks: Vec<TrackSpec>, clock: bool) -> Rig {
     if clock {
         sim.with_clock(OUT);
     }
-    let (keys, handle) = port_feed(0);
+    let (keys, handle) = port_feed();
     feeds
-        .send(FeedMsg::Attach(handle.take_feed().unwrap()))
+        .send(FeedMsg::Attach(handle.take_feed(0).unwrap()))
         .unwrap();
     feeds
         .send(FeedMsg::Route {

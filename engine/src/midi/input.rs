@@ -18,6 +18,15 @@
 //! three bytes and pushes into a lock-free ring buffer ([`rtrb`], the same one the audio thread
 //! uses), and the control thread does everything else.
 //!
+//! # Two queues: one for the looper, one for the instrument
+//!
+//! Every port has a second, fast queue that leads straight into the audio thread
+//! ([`crate::engine::source`]). Which messages take it is decided here, in the callback, by the
+//! port's [`PortRoute`] - a handful of atomics the host thread sets from the instrument tracks'
+//! routing: the keys and pedals an instrument plays go fast and never reach a binding, everything
+//! else goes the usual way. Notes cannot wait for the control thread's 4 ms tick; looper commands
+//! can.
+//!
 //! A full queue drops the event and counts it. 1024 events is about eight seconds of a knob being
 //! swept continuously; a control thread that has not drained it in eight seconds has a problem the
 //! MIDI input cannot fix.
@@ -29,6 +38,7 @@ use midir::{Ignore, MidiInput, MidiInputConnection, MidiInputPort};
 use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::event::{MidiDecoder, MidiEvent};
+use crate::engine::source::{FeedHandle, LiveEvent, PortRoute, port_feed};
 
 /// Events buffered between the driver callback and the control thread.
 const QUEUE: usize = 1024;
@@ -137,6 +147,9 @@ struct Sink {
     decoder: MidiDecoder,
     tx: Producer<TimedEvent>,
     dropped: Arc<AtomicU64>,
+    /// Which messages belong to an instrument, and where they go.
+    route: Arc<PortRoute>,
+    fast: Producer<LiveEvent>,
 }
 
 /// An open MIDI input. Closes when dropped.
@@ -146,6 +159,8 @@ pub struct MidiIn {
     rx: Consumer<TimedEvent>,
     dropped: Arc<AtomicU64>,
     name: String,
+    route: Arc<PortRoute>,
+    feed: FeedHandle,
 }
 
 impl MidiIn {
@@ -163,6 +178,16 @@ impl MidiIn {
     /// something is wrong.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// The mask that decides which messages go to an instrument.
+    pub fn route(&self) -> &Arc<PortRoute> {
+        &self.route
+    }
+
+    /// The audio-thread end of the fast queue, for whichever engine runs.
+    pub fn feed(&self) -> &FeedHandle {
+        &self.feed
     }
 }
 
@@ -221,10 +246,14 @@ fn connect(input: MidiInput, port: &MidiInputPort, name: String) -> Result<MidiI
 
     let (tx, rx) = RingBuffer::<TimedEvent>::new(QUEUE);
     let dropped = Arc::new(AtomicU64::new(0));
+    let route = PortRoute::new();
+    let (fast, feed) = port_feed();
     let sink = Sink {
         decoder: MidiDecoder::new(),
         tx,
         dropped: Arc::clone(&dropped),
+        route: Arc::clone(&route),
+        fast,
     };
 
     let connection = input
@@ -234,9 +263,29 @@ fn connect(input: MidiInput, port: &MidiInputPort, name: String) -> Result<MidiI
             |micros, bytes, sink: &mut Sink| {
                 // Split so the decoder and the queue are borrowed separately - the decoder needs
                 // `&mut self` while the closure it is given writes into the queue.
-                let Sink { decoder, tx, dropped } = sink;
-                decoder.push(bytes, |event| {
-                    if tx.push(TimedEvent { micros, event }).is_err() {
+                let Sink {
+                    decoder,
+                    tx,
+                    dropped,
+                    route,
+                    fast,
+                } = sink;
+                decoder.push_raw(bytes, |msg| {
+                    // Keys and pedals of an instrument: straight to the audio thread, stamped with
+                    // the driver's host time (microseconds of the same clock cpal uses).
+                    if route.takes(msg) {
+                        let event = LiveEvent {
+                            host_ns: micros.saturating_mul(1000),
+                            msg,
+                        };
+                        if fast.push(event).is_err() {
+                            dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return;
+                    }
+                    if let Some(event) = MidiEvent::from_raw(msg)
+                        && tx.push(TimedEvent { micros, event }).is_err()
+                    {
                         dropped.fetch_add(1, Ordering::Relaxed);
                     }
                 });
@@ -250,6 +299,8 @@ fn connect(input: MidiInput, port: &MidiInputPort, name: String) -> Result<MidiI
         rx,
         dropped,
         name,
+        route,
+        feed,
     })
 }
 

@@ -56,6 +56,12 @@ pub enum MidiEvent {
 }
 
 impl MidiEvent {
+    /// The event a raw channel message makes, if it is one this module decodes - the same rules
+    /// as [`MidiDecoder::push`].
+    pub fn from_raw(msg: [u8; 3]) -> Option<Self> {
+        build(msg[0], msg[1], msg[2])
+    }
+
     pub fn channel(&self) -> u8 {
         match *self {
             MidiEvent::NoteOn { channel, .. }
@@ -263,6 +269,17 @@ impl MidiDecoder {
     /// Split messages are fine: state survives between calls, which is what makes this usable from
     /// a callback that gets whatever the driver felt like handing over.
     pub fn push(&mut self, bytes: &[u8], mut emit: impl FnMut(MidiEvent)) {
+        self.push_raw(bytes, |[status, d0, d1]| {
+            if let Some(event) = build(status, d0, d1) {
+                emit(event);
+            }
+        });
+    }
+
+    /// The same, but every complete **channel** message is handed over raw - status byte and data
+    /// bytes, running status resolved, a one-byte message with a zero third byte - including the
+    /// kinds [`Self::push`] drops (aftertouch, program change). What an instrument wants.
+    pub fn push_raw(&mut self, bytes: &[u8], mut emit: impl FnMut([u8; 3])) {
         for &byte in bytes {
             // System real-time bytes may appear *inside* another message and change nothing about
             // it - not even the running status. Clock and active sensing arrive constantly, so
@@ -303,9 +320,8 @@ impl MidiDecoder {
                 continue;
             }
             self.have = 0;
-            if let Some(event) = build(self.status, self.data[0], self.data[1]) {
-                emit(event);
-            }
+            let second = if needed(self.status) == 2 { self.data[1] } else { 0 };
+            emit([self.status, self.data[0], second]);
         }
     }
 

@@ -392,29 +392,28 @@ impl Drop for PortFeed {
 /// The control side of one port's feed: hands the queue end to an engine.
 #[derive(Clone, Debug)]
 pub struct FeedHandle {
-    pub port: usize,
     home: Arc<FeedHome>,
 }
 
 impl FeedHandle {
-    /// The queue end, packed for the engine - `None` while an engine holds it.
-    pub fn take_feed(&self) -> Option<PortFeed> {
+    /// The queue end, packed for the engine as port slot `port` - `None` while an engine holds it.
+    pub fn take_feed(&self, port: usize) -> Option<PortFeed> {
         let rx = self.home.rx.lock().ok()?.take()?;
         Some(PortFeed {
-            port: self.port,
+            port,
             rx: Some(rx),
             home: Arc::clone(&self.home),
         })
     }
 }
 
-/// A fresh fast queue for port slot `port`: the producer goes into the driver callback.
-pub fn port_feed(port: usize) -> (Producer<LiveEvent>, FeedHandle) {
+/// A fresh fast queue: the producer goes into the driver callback.
+pub fn port_feed() -> (Producer<LiveEvent>, FeedHandle) {
     let (tx, rx) = RingBuffer::new(FEED_QUEUE);
     let home = Arc::new(FeedHome {
         rx: Mutex::new(Some(rx)),
     });
-    (tx, FeedHandle { port, home })
+    (tx, FeedHandle { home })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1275,11 +1274,12 @@ mod tests {
 
     #[test]
     fn a_feed_goes_home_when_its_engine_lets_go() {
-        let (mut tx, handle) = port_feed(3);
-        let feed = handle.take_feed().expect("frei");
-        assert!(handle.take_feed().is_none(), "ein Feed gehoert genau einer Engine");
+        let (mut tx, handle) = port_feed();
+        let feed = handle.take_feed(3).expect("frei");
+        assert_eq!(feed.port, 3);
+        assert!(handle.take_feed(3).is_none(), "ein Feed gehoert genau einer Engine");
         drop(feed);
-        let mut again = handle.take_feed().expect("zurueck daheim");
+        let mut again = handle.take_feed(3).expect("zurueck daheim");
         tx.push(LiveEvent {
             host_ns: 1,
             msg: [0x90, 1, 1],
