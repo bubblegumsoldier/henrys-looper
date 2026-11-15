@@ -23,6 +23,7 @@ mod layout;
 mod midi;
 mod mixstore;
 mod instruments;
+mod pluginmix;
 mod plugins;
 mod proto;
 mod recording;
@@ -658,26 +659,59 @@ async fn score_file_forget(
     offload(move || Ok(files::forget(&config_dir(&app), &path))).await
 }
 
-/// One track for the "New" template: name and 1-based input(s).
+/// One track for the "New" template: name and 1-based input(s), or what plays it when it is an
+/// instrument track (as the setup has it).
 #[derive(serde::Deserialize)]
 struct TemplateTrack {
     name: String,
     input: u32,
     #[serde(default)]
     input_right: Option<u32>,
+    #[serde(default)]
+    instrument: Option<proto::InstrumentInput>,
 }
 
 /// The text behind "New": the given tracks (normally the running engine's, so the new score loads
 /// straight away) or a voice and a guitar, and three sections - record, layer, play out.
 #[tauri::command(rename_all = "snake_case")]
 async fn score_template(tracks: Option<Vec<TemplateTrack>>) -> Result<String, String> {
+    use looper_engine::score::doc::DocTrack;
+    use looper_engine::score::model::InstrumentSource;
     offload(move || {
-        let tracks: Vec<(String, u32, Option<u32>)> = tracks
+        let tracks: Vec<DocTrack> = tracks
             .unwrap_or_default()
             .into_iter()
-            .map(|t| (t.name, t.input, t.input_right))
+            .map(|t| match t.instrument {
+                Some(i) => {
+                    let mut track = DocTrack::instrument(
+                        t.name,
+                        Some(InstrumentSource {
+                            device: i.device,
+                            channel: i.channel,
+                            note_low: i.note_low.filter(|_| i.note_high.is_some()),
+                            note_high: i.note_high.filter(|_| i.note_low.is_some()),
+                        }),
+                    );
+                    if !i.monitor {
+                        track.monitor = Some(false);
+                    }
+                    track
+                }
+                None => {
+                    let mut track = DocTrack::new(t.name, t.input);
+                    track.input_right = t.input_right;
+                    track
+                }
+            })
             .collect();
-        Ok(looper_engine::score::doc::template(&tracks))
+        // The instrument each instrument track plays now goes into `mixer:` - by id only.
+        let names: Vec<String> = tracks
+            .iter()
+            .filter(|t| t.instrument)
+            .map(|t| t.name.clone())
+            .collect();
+        let instruments = pluginmix::instruments_of(&names);
+        Ok(looper_engine::score::doc::template_with(tracks, instruments))
     })
     .await
 }
@@ -701,16 +735,21 @@ async fn mixer_state(engine: State<'_, EngineHandle>) -> Result<MixerSource, Str
 
 /// The mixer entries a human changed since the last call - see `StatusEvent::mixer_rev`.
 #[tauri::command]
-async fn mixer_take(engine: State<'_, EngineHandle>) -> Result<MixerSource, String> {
+async fn mixer_take(engine: State<'_, EngineHandle>) -> Result<host::MixerTake, String> {
     let handle = engine.inner().clone();
     offload(move || handle.mixer_take()).await
 }
 
-/// Put the engine into a mix, tracks by name (an undo in the arrangement).
+/// Put the engine into a mix, tracks by name (an undo in the arrangement), plus the pans the
+/// score's `tracks:` give.
 #[tauri::command(rename_all = "snake_case")]
-async fn mixer_apply(mixer: MixerSource, engine: State<'_, EngineHandle>) -> Result<(), String> {
+async fn mixer_apply(
+    mixer: MixerSource,
+    pan: Option<looper_engine::score::OrderedMap<f64>>,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
     let handle = engine.inner().clone();
-    offload(move || handle.mixer_apply(mixer)).await
+    offload(move || handle.mixer_apply(mixer, pan.unwrap_or_default())).await
 }
 
 #[tauri::command(rename_all = "snake_case")]

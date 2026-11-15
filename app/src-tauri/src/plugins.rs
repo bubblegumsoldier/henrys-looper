@@ -70,6 +70,7 @@ use looper_engine::engine::insert::{
     MAX_INSERTS, insert_channel,
 };
 use looper_engine::midi::MidiAction;
+use looper_engine::score::mixer::InsertLine;
 use looper_engine::plugin::scan::{self, Scanned};
 use looper_engine::plugin::{self, PluginInstance};
 
@@ -174,8 +175,10 @@ pub fn apply_midi(action: &MidiAction) -> Result<(), String> {
                 entry.bypass = on;
             }
             schedule(move |m| {
-                if let Ok(owner) = m.owner(target) {
-                    let _ = m.bypass(&owner, slot, on);
+                if let Ok(owner) = m.owner(target)
+                    && m.bypass(&owner, slot, on).is_ok()
+                {
+                    m.touched(&owner);
                 }
             });
             Ok(())
@@ -775,6 +778,28 @@ impl Manager {
     }
 
     fn refresh_snapshot(&self) {
+        // Which plugins sit on which track, for the score's `mixer:` (`crate::pluginmix`).
+        let mut by_track: HashMap<String, Vec<(usize, InsertLine)>> = HashMap::new();
+        for s in &self.slots {
+            if let Owner::Track(name) = &s.owner {
+                by_track.entry(name.clone()).or_default().push((
+                    s.index,
+                    InsertLine {
+                        plugin: s.info.info.id.clone(),
+                        bypass: s.shared.bypass().then_some(true),
+                    },
+                ));
+            }
+        }
+        crate::pluginmix::publish_inserts(
+            by_track
+                .into_iter()
+                .map(|(track, mut lines)| {
+                    lines.sort_by_key(|(i, _)| *i);
+                    (track, lines.into_iter().map(|(_, l)| l).collect())
+                })
+                .collect(),
+        );
         let mut snap = snapshot().lock().unwrap();
         snap.clear();
         for s in &self.slots {
@@ -1053,6 +1078,92 @@ impl Manager {
         self.slot(owner, index)?.shared.set_bypass(on);
         self.changed();
         Ok(self.view())
+    }
+
+    /// A human changed the slots of `owner`: the open score writes it into its `mixer:`.
+    fn touched(&self, owner: &Owner) {
+        if let Owner::Track(name) = owner {
+            crate::pluginmix::touch_inserts(name);
+        }
+    }
+
+    /// What a loaded score (or an undo in its `mixer:`) says sits in `track`'s insert slots, in
+    /// slot order. The same plugins in the same order stay as they are - only their bypass
+    /// follows - so their sound is kept. Anything else is rebuilt from the front: a plugin that
+    /// was already on this track comes back with the state it had, a new one with its default,
+    /// one that is not installed here is left out with a notice, and the score keeps its entry.
+    fn apply_score(&mut self, track: &str, wanted: &[InsertLine]) {
+        let owner = Owner::Track(track.to_string());
+        let mut have: Vec<usize> = (0..self.slots.len())
+            .filter(|p| self.slots[*p].owner == owner)
+            .collect();
+        have.sort_by_key(|p| self.slots[*p].index);
+        let same = have.len() == wanted.len()
+            && have
+                .iter()
+                .zip(wanted)
+                .all(|(p, w)| self.slots[*p].info.info.id == w.plugin);
+        if same {
+            let mut changed = false;
+            for (p, w) in have.iter().zip(wanted) {
+                let on = w.bypass.unwrap_or(false);
+                if self.slots[*p].shared.bypass() != on {
+                    self.slots[*p].shared.set_bypass(on);
+                    changed = true;
+                }
+            }
+            if changed {
+                self.changed();
+            }
+            crate::pluginmix::found(track, false);
+            return;
+        }
+        // The states of what is there now, by plugin id, in slot order.
+        let mut states: Vec<(String, Option<Vec<u8>>)> = have
+            .iter()
+            .map(|p| {
+                let s = &self.slots[*p];
+                (s.info.info.id.clone(), s.plugin.save_state().ok())
+            })
+            .collect();
+        let indices: Vec<usize> = have.iter().map(|p| self.slots[*p].index).collect();
+        for index in indices {
+            if let Err(e) = self.remove_slot(&owner, index) {
+                log!("Plugin slot {} of track \"{track}\" not emptied: {e}", index + 1);
+            }
+        }
+        let mut missing = Vec::new();
+        let mut index = 0;
+        for w in wanted {
+            match self.load(&owner, Some(index), &w.plugin) {
+                Ok(_) => {
+                    if let Some(p) = self.position(&owner, index) {
+                        if let Some(at) = states.iter().position(|(id, _)| *id == w.plugin)
+                            && let (_, Some(state)) = states.remove(at)
+                            && let Err(e) = self.slots[p].plugin.load_state(&state)
+                        {
+                            log!("State of {} not loaded: {e}", w.plugin);
+                        }
+                        self.slots[p].shared.set_bypass(w.bypass.unwrap_or(false));
+                    }
+                    index += 1;
+                }
+                Err(e) => missing.push(format!("\"{}\" ({e})", w.plugin)),
+            }
+        }
+        self.changed();
+        if missing.is_empty() {
+            crate::pluginmix::found(track, false);
+        } else {
+            crate::pluginmix::inserts_missing(track, wanted.to_vec());
+            let message = format!(
+                "Track \"{track}\": the score's plugin(s) {} are not available here. The track \
+                 plays without them; the score keeps the entry.",
+                missing.join(", ")
+            );
+            log!("{message}");
+            emit(PluginEvent::Notice { message });
+        }
     }
 
     fn params(&self, owner: &Owner, index: usize) -> Result<Vec<ParamView>, String> {
@@ -1470,7 +1581,21 @@ pub async fn plugin_load(
     plugin_id: String,
 ) -> Result<RackView, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.load(&m.owner(target)?, slot, &plugin_id))).await
+    blocking(move || {
+        on_main(move |m| {
+            let owner = m.owner(target)?;
+            let view = m.load(&owner, slot, &plugin_id)?;
+            m.touched(&owner);
+            Ok(view)
+        })
+    })
+    .await
+}
+
+/// A loaded score (or an undo in its `mixer:`) says which plugins sit on `track`. Handed to the
+/// main thread without waiting.
+pub fn apply_score(track: String, inserts: Vec<InsertLine>) {
+    schedule(move |m| m.apply_score(&track, &inserts));
 }
 
 /// Empty a slot.
@@ -1479,7 +1604,9 @@ pub async fn plugin_remove(target: String, slot: usize) -> Result<RackView, Stri
     let target = parse_target(&target)?;
     blocking(move || {
         on_main(move |m| {
-            m.remove_slot(&m.owner(target)?, slot)?;
+            let owner = m.owner(target)?;
+            m.remove_slot(&owner, slot)?;
+            m.touched(&owner);
             Ok(m.view())
         })
     })
@@ -1490,14 +1617,30 @@ pub async fn plugin_remove(target: String, slot: usize) -> Result<RackView, Stri
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_move(target: String, from: usize, to: usize) -> Result<RackView, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.move_slot(&m.owner(target)?, from, to))).await
+    blocking(move || {
+        on_main(move |m| {
+            let owner = m.owner(target)?;
+            let view = m.move_slot(&owner, from, to)?;
+            m.touched(&owner);
+            Ok(view)
+        })
+    })
+    .await
 }
 
 /// The host's bypass of a slot: the plugin is not called, the signal passes unchanged.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_bypass(target: String, slot: usize, on: bool) -> Result<RackView, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.bypass(&m.owner(target)?, slot, on))).await
+    blocking(move || {
+        on_main(move |m| {
+            let owner = m.owner(target)?;
+            let view = m.bypass(&owner, slot, on)?;
+            m.touched(&owner);
+            Ok(view)
+        })
+    })
+    .await
 }
 
 /// Every parameter of the plugin in a slot, with value and display text.

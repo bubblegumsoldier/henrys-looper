@@ -67,7 +67,17 @@ use looper_engine::midi::{
     TrackRef,
 };
 use looper_engine::score::mixer::{BusLevels, MixerSource, TrackMixSource, mixer_commands};
-use looper_engine::score::{CompiledScore, OrderedMap, ScoreError, compile_score};
+
+/// What [`Session::mixer_take`] answers: the changed `mixer:` entries, and the changed pans
+/// (which the score keeps under `tracks:`, not in `mixer:`).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct MixerTake {
+    #[serde(flatten)]
+    pub mixer: MixerSource,
+    #[serde(skip_serializing_if = "OrderedMap::is_empty")]
+    pub pan: OrderedMap<f64>,
+}
+use looper_engine::score::{CompiledScore, CompiledTrack, OrderedMap, ScoreError, compile_score};
 
 use crate::logfile::{self, log};
 use crate::layout::{self, LayoutTrack};
@@ -368,9 +378,10 @@ enum Request {
     /// The mix as the score's `mixer:` section would write it: every track and the buses.
     MixerState(Sender<Result<MixerSource, String>>),
     /// The entries changed by a fader, a knob or a pad since the last call, and only those.
-    MixerTake(Sender<Result<MixerSource, String>>),
-    /// Put the engine into a mix (an undo in the arrangement). Tracks by name.
-    MixerApply(Box<MixerSource>, Sender<Result<(), String>>),
+    MixerTake(Sender<Result<MixerTake, String>>),
+    /// Put the engine into a mix (an undo in the arrangement), and the pans it names. Tracks by
+    /// name.
+    MixerApply(Box<MixerSource>, OrderedMap<f64>, Sender<Result<(), String>>),
 
     // --- MIDI. Handled on this thread because that is where the session is, and because a MIDI
     // connection belongs to the thread that opened it.
@@ -457,12 +468,12 @@ impl EngineHandle {
         self.call(Request::MixerState)
     }
 
-    pub fn mixer_take(&self) -> Result<MixerSource, String> {
+    pub fn mixer_take(&self) -> Result<MixerTake, String> {
         self.call(Request::MixerTake)
     }
 
-    pub fn mixer_apply(&self, mixer: MixerSource) -> Result<(), String> {
-        self.call(|reply| Request::MixerApply(Box::new(mixer), reply))
+    pub fn mixer_apply(&self, mixer: MixerSource, pan: OrderedMap<f64>) -> Result<(), String> {
+        self.call(|reply| Request::MixerApply(Box::new(mixer), pan, reply))
     }
 
     // ---- MIDI ------------------------------------------------------------------------------
@@ -701,10 +712,11 @@ fn handle(
                 None => Err(NO_ENGINE.to_string()),
             });
         }
-        Request::MixerApply(mixer, reply) => {
+        Request::MixerApply(mixer, pan, reply) => {
             let _ = reply.send(match session.as_mut() {
                 Some(active) => {
                     active.queue_mix(&mixer);
+                    active.apply_pans(&pan);
                     Ok(())
                 }
                 None => Err(NO_ENGINE.to_string()),
@@ -1208,7 +1220,13 @@ fn load_score_onto(
         return Err(NO_ENGINE.to_string());
     };
     let score = compile_score(yaml).map_err(|error| render_issues(&error))?;
-    let Err(mismatch) = check_tracks(&score, &active.defs) else {
+    let fits = check_tracks(&score, &active.defs).and_then(|()| {
+        match instrument_mismatch(&score, &active.instrument_inputs) {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    });
+    let Err(mismatch) = fits else {
         return active.load_score(yaml, count_in).map(|loaded| ScoreLoaded {
             engine: None,
             ..loaded
@@ -1300,8 +1318,7 @@ fn rebuilt_config(
             latency_trim: t.latency_trim,
             bus: Some(t.bus.clone()),
             monitor_bus: Some(t.monitor_bus.clone()),
-            // Scores do not name instruments yet.
-            instrument: None,
+            instrument: instrument_input(t),
         })
         .collect();
     config.bpm = score.bpm;
@@ -1327,6 +1344,37 @@ fn rebuilt_config(
         }
     }
     config
+}
+
+/// What plays an instrument track of a score, in the form the setup has it. The score's `monitor`
+/// is the instrument's "heard" switch: an instrument track is heard whenever it is played, unless
+/// the score says `monitor: false`.
+fn instrument_input(track: &CompiledTrack) -> Option<InstrumentInput> {
+    let midi = track.instrument.as_ref()?;
+    Some(InstrumentInput {
+        device: midi.device.clone(),
+        channel: midi.channel,
+        note_low: midi.note_low,
+        note_high: midi.note_high,
+        monitor: track.monitor,
+    })
+}
+
+/// Why the running engine cannot take a score's instrument tracks as they are, beyond what
+/// [`check_tracks`] compares: whether an instrument is heard is fixed when the engine starts.
+fn instrument_mismatch(score: &CompiledScore, running: &[Option<InstrumentInput>]) -> Option<String> {
+    score.tracks.iter().zip(running).find_map(|(t, have)| {
+        let want = instrument_input(t)?;
+        let have = have.as_ref()?;
+        (want.monitor != have.monitor).then(|| {
+            format!(
+                "Instrument track \"{}\" is {} in the score but {} in the running engine.",
+                t.name,
+                if want.monitor { "heard" } else { "silent (monitor: false)" },
+                if have.monitor { "heard" } else { "silent" },
+            )
+        })
+    })
 }
 
 /// A click or monitor volume, refused in a sentence when it is out of range rather than clamped
@@ -1671,6 +1719,8 @@ struct Session {
     /// ([`Session::mixer_take`]). Restores do not count - they are not news to anybody.
     mix_changed: Vec<String>,
     mix_buses_changed: bool,
+    /// Tracks whose pan a human changed since the arrangement last asked.
+    pan_changed: Vec<String>,
     /// Goes up with every human change of the mix; the status event carries it, so the arrangement
     /// knows when to ask.
     mix_rev: u64,
@@ -2038,6 +2088,7 @@ impl Session {
             mix_backlog: VecDeque::new(),
             mix_changed: Vec::new(),
             mix_buses_changed: false,
+            pan_changed: Vec::new(),
             mix_rev: 0,
             free_mix_dirty: Vec::new(),
             free_mix_since: None,
@@ -2390,7 +2441,8 @@ impl Session {
             ignored_commands: status.ignored_commands,
             spares: status.spares_total(),
             message: self.message.clone(),
-            mixer_rev: self.mix_rev,
+            // A human plugin change counts like a fader move (`crate::pluginmix`).
+            mixer_rev: self.mix_rev + crate::pluginmix::rev(),
         }
     }
 
@@ -2479,6 +2531,22 @@ impl Session {
         // picture starts at "everything off"; a track started with monitoring on would otherwise
         // stay on for the whole score, because the runner would never see a difference to send.
         self.apply_score_setup(&score)?;
+        // What plays each instrument track - device, channel, keys - is the score's now;
+        // `sync_instruments` routes the ports anew on its next turn. Whether it is heard was
+        // compared before (`instrument_mismatch`): that one needs a rebuild.
+        for (i, spec) in score.tracks.iter().enumerate() {
+            if let Some(input) = instrument_input(spec) {
+                if let Some(slot) = self.instrument_inputs.get_mut(i) {
+                    *slot = Some(input.clone());
+                }
+                if let Some(info) = self.info.tracks.get_mut(i) {
+                    info.instrument = Some(input.clone());
+                }
+                if let Some(config) = self.config.tracks.get_mut(i) {
+                    config.instrument = Some(input);
+                }
+            }
+        }
         // The score's mix, for the tracks it names. What it leaves out keeps what it has.
         if let Some(mixer) = &score.mixer {
             self.queue_mix(mixer);
@@ -2505,12 +2573,16 @@ impl Session {
         }
         self.runner = Some(runner);
 
-        let message = format!(
+        let mut message = format!(
             "Score \"{title}\" loaded: {sections} sections, {:.1} BPM, {}, longest section \
              {bars} bars, {count_in}-bar count-in.",
             score.bpm,
             score.time_signature,
         );
+        // What the score says correctly and the engine cannot do yet (`loop: midi`, `grid:`).
+        for note in looper_engine::score::score_notes(yaml) {
+            message.push_str(&format!(" Note: {}", note.message));
+        }
         self.message = Some(message.clone());
         Ok(ScoreLoaded {
             score,
@@ -2886,6 +2958,16 @@ impl Session {
             Action::SetBusGain { .. } | Action::SetClickGain { .. } | Action::SetMonitorGain { .. } => {
                 Some(None)
             }
+            // Pan is not a mixer field but the track's own (`tracks:`), and the score keeps it
+            // the same way.
+            Action::SetPan { track, .. } => {
+                if let Some(name) = self.tracks.get(track).map(|ui| ui.name.clone())
+                    && !self.pan_changed.contains(&name)
+                {
+                    self.pan_changed.push(name);
+                }
+                Some(Some(track))
+            }
             _ => None,
         };
         let result = self.apply_action(action);
@@ -3019,6 +3101,17 @@ impl Session {
                 Ok(())
             }
             Action::SetMonitor { track, on } => {
+                // An instrument track is heard whenever it is played; switching that per take
+                // would silence the piano between two of them. Only its setup (or the score's
+                // `monitor: false`) can.
+                if self.defs.get(track).is_some_and(|d| d.input.is_instrument()) {
+                    return Err(format!(
+                        "\"{}\" is an instrument track: it is always heard while it is played. \
+                         To silence it, mute it - or set 'monitor: false' for it in the score or \
+                         the setup.",
+                        self.tracks[track].name
+                    ));
+                }
                 self.cmd.send(Command::SetMonitor { track, on })?;
                 self.message = Some(format!(
                     "\"{}\": Monitor {}.",
@@ -3344,7 +3437,11 @@ impl Session {
                 continue;
             }
             if let Some(ts) = status.tracks().get(i) {
-                tracks.insert(ui.name.clone(), TrackMixSource::from_status(ts));
+                let mut entry = TrackMixSource::from_status(ts);
+                // The plugins are not in the engine's snapshot; the managers publish them.
+                let instrument_track = self.defs.get(i).is_some_and(|d| d.input.is_instrument());
+                (entry.instrument, entry.inserts) = crate::pluginmix::entry(&ui.name, instrument_track);
+                tracks.insert(ui.name.clone(), entry);
             }
         }
         let buses = (only.is_none() || self.mix_buses_changed).then(|| BusLevels::from_status(&status));
@@ -3355,17 +3452,34 @@ impl Session {
     ///
     /// Answered from the newest snapshot, which the arrangement asks for a moment after the
     /// revision moved - by then the engine has reported the change.
-    fn mixer_take(&mut self) -> MixerSource {
-        let names = std::mem::take(&mut self.mix_changed);
-        let mut out = self.mixer_state(Some(&names));
+    fn mixer_take(&mut self) -> MixerTake {
+        let mut names = std::mem::take(&mut self.mix_changed);
+        // Instruments and inserts a human changed (`crate::pluginmix`).
+        for name in crate::pluginmix::take() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        let mut mixer = self.mixer_state(Some(&names));
         if !self.mix_buses_changed {
-            out.buses = None;
+            mixer.buses = None;
         }
         self.mix_buses_changed = false;
-        out
+        let mut pan = OrderedMap::new();
+        if let Some((status, _)) = self.last {
+            for name in std::mem::take(&mut self.pan_changed) {
+                if let Some(i) = self.tracks.iter().position(|ui| ui.name == name)
+                    && let Some(ts) = status.tracks().get(i)
+                {
+                    pan.insert(name, looper_engine::score::mixer::clean(ts.pan));
+                }
+            }
+        }
+        MixerTake { mixer, pan }
     }
 
-    /// Queue the commands that put the engine into `mixer`, tracks matched by name.
+    /// Queue the commands that put the engine into `mixer`, tracks matched by name - and hand the
+    /// plugins it names to their managers.
     fn queue_mix(&mut self, mixer: &MixerSource) {
         let names: Vec<String> = self.tracks.iter().map(|ui| ui.name.clone()).collect();
         let current: Vec<TrackStatus> = self
@@ -3375,6 +3489,30 @@ impl Session {
         self.mix_backlog
             .extend(mixer_commands(mixer, &names, &current));
         self.drain_mix();
+        if mixer.tracks.iter().any(|(_, e)| e.has_plugins()) {
+            let instruments: Vec<String> = self
+                .defs
+                .iter()
+                .filter(|d| d.input.is_instrument())
+                .map(|d| d.name.clone())
+                .collect();
+            crate::pluginmix::apply(mixer, &names, &instruments);
+        }
+    }
+
+    /// Pans by track name, from the score (an undo, typing in `tracks:`). Not a human change.
+    fn apply_pans(&mut self, pans: &OrderedMap<f64>) {
+        for (name, pan) in pans.iter() {
+            if let Some(track) = self.tracks.iter().position(|ui| ui.name == name) {
+                let pan = (*pan as f32).clamp(-1.0, 1.0);
+                if let Err(e) = self.cmd.send(Command::SetPan { track, pan }) {
+                    log!("Pan of \"{name}\" not set: {e}");
+                }
+                if let Some(info) = self.info.tracks.get_mut(track) {
+                    info.pan = pan;
+                }
+            }
+        }
     }
 
     fn drain_mix(&mut self) {
@@ -3406,7 +3544,8 @@ impl Session {
         let entries: Vec<(String, TrackMixSource)> = state
             .tracks
             .iter()
-            .map(|(name, entry)| (name.to_string(), entry.clone()))
+            // The plugins have their own files in the free mode.
+            .map(|(name, entry)| (name.to_string(), entry.clone().without_plugins()))
             .collect();
         if let Err(e) = mixstore::merge_and_save(entries) {
             log!("Mix not saved to {}: {e}", mixstore::path().display());
@@ -4104,6 +4243,47 @@ mod tests {
             check_tracks(&score, &resolve_tracks(&previous.tracks, 8).unwrap()).is_err(),
             "vorher passte die Engine nicht"
         );
+    }
+
+    /// A score's instrument track becomes an instrument track of the rebuilt engine, with the
+    /// score's routing; whether it is heard is the score's `monitor`, and a difference there alone
+    /// is a reason to rebuild (the engine fixes it at start).
+    #[test]
+    fn a_rebuild_builds_instrument_tracks_from_the_score() {
+        let score = compile_score(
+            "bpm: 100\ntracks:\n  keys: {input: instrument, midi: {device: Testkeys, channel: 2, \
+             notes: 36-51}}\n  pads: {input: instrument, monitor: false}\n  stimme: {input: 1}\n\
+             sections:\n  - id: a\n    bars: 2\n",
+        )
+        .expect("Partitur");
+        let previous = start_config(r#"[{"name": "gitarre", "input_channel": 2}]"#);
+        let config = rebuilt_config(&previous, &score, None, Quantize::Bar);
+        let keys = config.tracks[0].instrument.as_ref().expect("Instrument-Spur");
+        assert_eq!(keys.device.as_deref(), Some("Testkeys"));
+        assert_eq!((keys.channel, keys.note_low, keys.note_high), (Some(2), Some(36), Some(51)));
+        assert!(keys.monitor, "heard unless the score says otherwise");
+        assert!(!config.tracks[1].instrument.as_ref().unwrap().monitor);
+        assert!(config.tracks[2].instrument.is_none());
+        assert_eq!(config.tracks[0].channels(), 2);
+        // An instrument is heard in the room as well by default.
+        assert_eq!(config.tracks[0].monitor_send("keys").unwrap(), BusSend::BOTH);
+
+        let defs = resolve_tracks(&config.tracks, 2).expect("no input channel needed");
+        assert!(defs[0].input.is_instrument() && defs[1].input.is_instrument());
+        assert_eq!(check_tracks(&score, &defs), Ok(()));
+        let running: Vec<Option<InstrumentInput>> =
+            config.tracks.iter().map(|t| t.instrument.clone()).collect();
+        assert_eq!(instrument_mismatch(&score, &running), None);
+
+        // The same layout, but the setup has the pads heard: the score wins by a rebuild.
+        let mut heard = running.clone();
+        heard[1].as_mut().unwrap().monitor = true;
+        let why = instrument_mismatch(&score, &heard).expect("mismatch");
+        assert!(why.contains("\"pads\" is silent (monitor: false) in the score"), "{why}");
+        // A different keyboard alone is no reason: the routing follows without a rebuild.
+        let mut other = running;
+        other[0].as_mut().unwrap().device = Some("KeyLab".into());
+        assert_eq!(instrument_mismatch(&score, &other), None);
     }
 
     /// What was changed at runtime survives a rebuild: bus volumes and outputs, and the click.

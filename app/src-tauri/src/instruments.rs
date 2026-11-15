@@ -225,6 +225,9 @@ struct Slot {
 #[derive(Default)]
 struct Manager {
     slots: Vec<Slot>,
+    /// States of instruments that were taken off a track, by (track, plugin id): a score that puts
+    /// the same instrument back gets its sound back, not the plugin's default.
+    shelf: Vec<SavedInstrument>,
     layout: Vec<TrackSlot>,
     dirty: bool,
     last_change: Option<Instant>,
@@ -238,9 +241,14 @@ struct Manager {
 #[derive(Serialize, Deserialize, Default)]
 struct SavedInstruments {
     tracks: Vec<SavedInstrument>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shelf: Vec<SavedInstrument>,
 }
 
-#[derive(Serialize, Deserialize)]
+/// How many taken-off instruments keep their state.
+const SHELF: usize = 32;
+
+#[derive(Serialize, Deserialize, Clone)]
 struct SavedInstrument {
     track: String,
     plugin_id: String,
@@ -280,6 +288,81 @@ impl Manager {
             }
         }
         self.layout = tracks;
+        self.publish();
+    }
+
+    /// Tell the score side (`crate::pluginmix`) which instrument sits on which track.
+    fn publish(&self) {
+        crate::pluginmix::publish_instruments(
+            self.slots
+                .iter()
+                .map(|s| (s.track.clone(), s.info.info.id.clone()))
+                .collect(),
+        );
+    }
+
+    /// Keep the state of an instrument that is taken off its track.
+    fn shelve(&mut self, p: usize) {
+        let slot = &self.slots[p];
+        let Some(state) = slot.plugin.save_state().ok().map(|b| crate::plugins::encode_state(&b))
+        else {
+            return;
+        };
+        let (track, id) = (slot.track.clone(), slot.info.info.id.clone());
+        self.shelf.retain(|e| !(e.track == track && e.plugin_id == id));
+        self.shelf.push(SavedInstrument {
+            track,
+            plugin_id: id,
+            name: slot.info.info.name.clone(),
+            state: Some(state),
+        });
+        if self.shelf.len() > SHELF {
+            self.shelf.remove(0);
+        }
+    }
+
+    /// What a loaded score says plays `track`. The same plugin already there is kept as it is,
+    /// with its sound; another one is loaded (with the state it last had on this track, if it
+    /// had one here); one that is not installed leaves the track silent and says so.
+    fn apply_score(&mut self, track: &str, plugin_id: &str) {
+        if self
+            .position(track)
+            .is_some_and(|p| self.slots[p].info.info.id == plugin_id)
+        {
+            crate::pluginmix::found(track, true);
+            return;
+        }
+        // Still waiting to be restored from the last session: the same one stays queued (with its
+        // sound); another one's sound goes on the shelf before the score's replaces it.
+        if let Some(pending) = self.restoring.iter().find(|e| e.track == track).cloned() {
+            if pending.plugin_id == plugin_id {
+                crate::pluginmix::found(track, true);
+                return;
+            }
+            if pending.state.is_some() {
+                self.shelf
+                    .retain(|e| !(e.track == track && e.plugin_id == pending.plugin_id));
+                self.shelf.push(pending);
+            }
+        }
+        match self.set(track, Some(plugin_id)) {
+            Ok(_) => {
+                crate::pluginmix::found(track, true);
+                log!("Instrument {plugin_id} on track \"{track}\" from the score.");
+            }
+            Err(e) => {
+                // The score is the arrangement: an instrument it does not ask for does not play
+                // in its place. Its state is shelved, the score keeps its entry.
+                let _ = self.remove(track);
+                crate::pluginmix::instrument_missing(track, plugin_id);
+                let message = format!(
+                    "Track \"{track}\": the score's instrument \"{plugin_id}\" is not available \
+                     here ({e}). The track stays silent; the score keeps the entry."
+                );
+                log!("{message}");
+                emit(InstrumentEvent::Notice { message });
+            }
+        }
     }
 
     fn view(&self) -> InstrumentRack {
@@ -321,6 +404,7 @@ impl Manager {
     fn changed(&mut self) {
         self.dirty = true;
         self.last_change = Some(Instant::now());
+        self.publish();
         emit(InstrumentEvent::Rack { rack: self.view() });
     }
 
@@ -459,6 +543,7 @@ impl Manager {
         let Some(p) = self.position(track) else {
             return Ok(());
         };
+        self.shelve(p);
         if !self.retire(p) {
             let slot = self.slots.remove(p);
             log!(
@@ -502,6 +587,18 @@ impl Manager {
     ) -> Result<InstrumentRack, String> {
         let entry = Self::catalog_entry(plugin_id)?;
         self.remove(track)?;
+        // Without a state of its own: the sound this instrument last had on this track, if it was
+        // taken off here before (a score that puts it back gets it back).
+        let shelved = match state {
+            Some(_) => None,
+            None => self
+                .shelf
+                .iter()
+                .position(|e| e.track == track && e.plugin_id == plugin_id)
+                .and_then(|at| self.shelf.remove(at).state)
+                .and_then(|text| crate::plugins::decode_state(&text)),
+        };
+        let state = state.or(shelved.as_deref());
         self.loading = Some(track.to_string());
         emit(InstrumentEvent::Rack { rack: self.view() });
         let started = Instant::now();
@@ -635,6 +732,7 @@ impl Manager {
                     state: s.plugin.save_state().ok().map(|b| crate::plugins::encode_state(&b)),
                 })
                 .collect(),
+            shelf: self.shelf.clone(),
         };
         let path = store_path();
         if let Some(dir) = path.parent() {
@@ -669,6 +767,7 @@ impl Manager {
         let Ok(saved) = serde_json::from_str::<SavedInstruments>(&text) else {
             return;
         };
+        self.shelf = saved.shelf;
         if saved.tracks.is_empty() {
             return;
         }
@@ -700,6 +799,7 @@ impl Manager {
         } else {
             schedule(|m| m.restore_next());
         }
+        self.publish();
         emit(InstrumentEvent::Rack { rack: self.view() });
     }
 }
@@ -762,7 +862,21 @@ pub async fn instrument_rack() -> Result<InstrumentRack, String> {
 /// Put an instrument on a track (by name), or take it off with `plugin_id: null`.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn instrument_set(track: String, plugin_id: Option<String>) -> Result<InstrumentRack, String> {
-    blocking(move || on_main(move |m| m.set(&track, plugin_id.as_deref()))).await
+    blocking(move || {
+        on_main(move |m| {
+            let view = m.set(&track, plugin_id.as_deref())?;
+            // A human choice: the open score writes it into its `mixer:` section.
+            crate::pluginmix::touch_instrument(&track);
+            Ok(view)
+        })
+    })
+    .await
+}
+
+/// A loaded score (or an undo in its `mixer:` section) says which instrument plays `track`.
+/// Handed to the main thread without waiting.
+pub fn apply_score(track: String, plugin_id: String) {
+    schedule(move |m| m.apply_score(&track, &plugin_id));
 }
 
 /// Open or close the instrument's own window.
