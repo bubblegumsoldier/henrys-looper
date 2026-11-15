@@ -23,6 +23,9 @@ export const T = {
   stop: "Stop",
   monitor: "Monitor",
   clear: "Clear",
+  clearTrack: "Clear track",
+  tap: "Tap",
+  tempoLocked: "Clear all loops to change tempo, time signature or loop length.",
   mute: "Mute",
   muted: "Muted",
   /** Overdub mode, setup and tile. */

@@ -84,6 +84,8 @@ export const GLOBAL = {
   click: "global.click",
   clearAll: "global.clear_all",
   tempo: "global.tempo",
+  /** Tap tempo - a button, so a foot switch can set the tempo. */
+  tapTempo: "global.tap_tempo",
   /** Click volume - on the Monitor bus strip of the mixer. */
   clickGain: "global.click_gain",
   /** Volume of every monitored live input. */

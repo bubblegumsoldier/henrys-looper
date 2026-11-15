@@ -7,6 +7,7 @@
 //! everything the engine can change on the fly stays live here: bus outputs and volumes, each
 //! track's monitoring, sends and latency trim, tempo, grid and click.
 
+import { applyClock } from "../live/ClockBar";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api } from "../api";
 import { MidiSetup } from "../midi/MidiSetup";
@@ -1152,7 +1153,7 @@ function TempoPage({ config, running, patch }: { config: StartConfig; running: b
         <h1>Tempo &amp; Loop</h1>
         <p className="lead">
           {running
-            ? "The running engine's clock. Tempo, grid and click change at once; loop length and time signature on the next start (or from the score)."
+            ? "The running engine's clock - the same values the Live page shows. Tempo, time signature and loop length change at once while every track is empty (and no score is loaded), and are kept for the next start."
             : "What the engine starts with. A loaded score sets tempo, time signature and loop length itself."}
         </p>
       </div>
@@ -1173,7 +1174,7 @@ function TempoPage({ config, running, patch }: { config: StartConfig; running: b
                     min={20}
                     max={300}
                     step={0.5}
-                    onChange={(v) => v !== null && run(() => api.setTempo(v, Number(bpb), Number(unit)))}
+                    onChange={(v) => v !== null && applyClock(v, Number(bpb), Number(unit), Number(bars))}
                   />
                 </span>
               ) : (
@@ -1181,6 +1182,11 @@ function TempoPage({ config, running, patch }: { config: StartConfig; running: b
               )}
               <span className="dim">BPM</span>
               {!running && <TapTempo onTempo={(v) => patch({ bpm: v })} />}
+              {running && (
+                <button className="btn" data-midi={GLOBAL.tapTempo} onClick={() => run(() => api.tapTempo())} title="Tap tempo · key T on the Live page">
+                  Tap tempo
+                </button>
+              )}
             </div>
           </div>
           <div className="srow">
@@ -1188,20 +1194,30 @@ function TempoPage({ config, running, patch }: { config: StartConfig; running: b
             <div>
               <NumberInput
                 width={60}
-                disabled={running}
+                commitOnBlur={running}
                 value={running ? Number(bpb) : config.beats_per_bar}
                 min={1}
                 max={16}
-                onChange={(v) => v !== null && patch({ beats_per_bar: Math.max(1, Math.round(v)) })}
+                onChange={(v) =>
+                  v !== null &&
+                  (running
+                    ? applyClock(Number(bpm), Math.max(1, Math.round(v)), Number(unit), Number(bars))
+                    : patch({ beats_per_bar: Math.max(1, Math.round(v)) }))
+                }
               />
               <span className="dim">/</span>
               <NumberInput
                 width={60}
-                disabled={running}
+                commitOnBlur={running}
                 value={running ? Number(unit) : config.beat_unit}
                 min={1}
                 max={16}
-                onChange={(v) => v !== null && patch({ beat_unit: Math.max(1, Math.round(v)) })}
+                onChange={(v) =>
+                  v !== null &&
+                  (running
+                    ? applyClock(Number(bpm), Number(bpb), Math.max(1, Math.round(v)), Number(bars))
+                    : patch({ beat_unit: Math.max(1, Math.round(v)) }))
+                }
               />
             </div>
           </div>
@@ -1210,11 +1226,16 @@ function TempoPage({ config, running, patch }: { config: StartConfig; running: b
             <div>
               <NumberInput
                 width={60}
-                disabled={running}
+                commitOnBlur={running}
                 value={running ? Number(bars) : config.bars}
                 min={1}
                 max={64}
-                onChange={(v) => v !== null && patch({ bars: Math.max(1, Math.round(v)) })}
+                onChange={(v) =>
+                  v !== null &&
+                  (running
+                    ? applyClock(Number(bpm), Number(bpb), Number(unit), Math.max(1, Math.round(v)))
+                    : patch({ bars: Math.max(1, Math.round(v)) }))
+                }
               />
               <span className="dim">
                 {T.bars} · {seconds.toFixed(2)} s
@@ -1323,6 +1344,8 @@ function GeneralPage({ info }: { info: AppInfo | null }) {
     ["Q", "mute / unmute the selected track (at once, the loop keeps its place)"],
     ["I", "track details (pan, sends, latency, effects, layers)"],
     ["K", "click on/off"],
+    ["T", "tap tempo (free looping, while every track is empty)"],
+    ["Shift+Backspace", "clear all (asks first)"],
     ["F", "effect chain in/out"],
     ["X n · V n · D n", "toggle effect n · load preset n · delay note n"],
     ["Space / N", "start the score · Release"],

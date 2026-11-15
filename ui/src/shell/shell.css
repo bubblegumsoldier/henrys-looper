@@ -430,3 +430,28 @@ table.tt .tn2 input.name-in { height: 24px; }
 .tbtns .tb.stop, .tbtns .tb.hear { grid-column: span 2; }
 .tb.hear.mute.on { background: rgba(245,185,66,.16); color: #ffe2a6; border-color: var(--warn); }
 .tb.hear.mute.on .ic { color: var(--warn); }
+
+/* ---- Tempo, metre and loop length on the Live page (ClockBar) ------------------------------- */
+.clockbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 12px; border-radius: var(--r-4, 10px);
+  background: linear-gradient(to bottom, #1d2027, #171a1f); border: 1px solid var(--line-3); }
+.clockbar .cb-group { display: flex; align-items: center; gap: 6px; }
+.clockbar .cb-btn { height: 44px; min-width: 44px; padding: 0 12px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: linear-gradient(to bottom, #262a32, #1e2128); border: 1px solid var(--line-3); color: var(--tx-1); font-size: 15px; font-weight: var(--fw-semibold); }
+.clockbar .cb-btn.s { height: 32px; min-width: 32px; padding: 0 6px; }
+.clockbar .cb-btn.tap { min-width: 64px; letter-spacing: .06em; text-transform: uppercase; }
+.clockbar .cb-btn.tap:active { background: var(--st-armed); color: #000; }
+.clockbar .cb-btn.danger { color: #ffb4a8; border-color: rgba(255,120,100,.4); margin-left: auto; }
+.clockbar .cb-btn:disabled, .clockbar .cb-bpm:disabled, .clockbar .cb-sel:disabled { opacity: .45; cursor: not-allowed; }
+.clockbar .cb-bpm { height: 44px; min-width: 112px; padding: 0 10px; border-radius: 8px; background: #111317; border: 1px solid var(--line-3); color: var(--tx-2); font-size: 15px; }
+.clockbar .cb-bpm b { font: var(--fw-bold) 26px/1 var(--font-mono); color: #fff; margin-right: 4px; }
+.clockbar .cb-bpm-in { height: 44px; width: 112px; font: var(--fw-bold) 24px/1 var(--font-mono); text-align: center; border-radius: 8px; background: #000; color: #fff; border: 1px solid var(--st-armed); }
+.clockbar .cb-sel { height: 44px; padding: 0 10px; border-radius: 8px; background: #111317; color: #fff; border: 1px solid var(--line-3); font-size: 17px; font-weight: var(--fw-semibold); }
+.clockbar .cb-free { display: inline-flex; align-items: center; gap: 6px; color: var(--tx-2); font-size: 15px; }
+.clockbar .cb-num { width: 58px; height: 44px; font-size: 17px; text-align: center; border-radius: 8px; background: #111317; color: #fff; border: 1px solid var(--line-3); }
+.clockbar .cb-note { flex-basis: 100%; font-size: 13px; color: var(--warn); }
+@container (max-width: 1200px) {
+  .clockbar { padding: 8px; gap: 6px 8px; }
+  .clockbar .cb-btn, .clockbar .cb-bpm, .clockbar .cb-sel, .clockbar .cb-num, .clockbar .cb-bpm-in { height: 38px; }
+  .clockbar .cb-bpm { min-width: 92px; }
+  .clockbar .cb-bpm b { font-size: 21px; }
+}

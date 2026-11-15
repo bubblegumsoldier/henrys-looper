@@ -6,6 +6,7 @@
 //! and the buttons become Start/Stop of the clock (`transport.toggle`, Space), the grid and the
 //! click.
 
+import { ClockBar } from "./ClockBar";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { FREE_TRANSPORT, GLOBAL, TRANSPORT, quantizeAddress } from "../midi/addresses";
@@ -290,6 +291,7 @@ function FreePanel({ clock, tracks }: { clock: Clock; tracks: LooperTrackStatus[
           </>
         )}
       </section>
+      <ClockBar clock={clock} free />
       <div className="lv-row three">
         <button
           className={`bigbtn transport${clock.transport ? " running" : ""}`}

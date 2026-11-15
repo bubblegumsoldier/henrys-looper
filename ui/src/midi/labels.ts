@@ -113,6 +113,7 @@ const GLOBAL_PART: Record<string, string> = {
   "global.click": "Click on/off",
   "global.clear_all": T.clearAll,
   "global.tempo": T.tempo,
+  "global.tap_tempo": "Tap tempo",
   "global.quantize.bar": T.quantizeBar,
   "global.quantize.loop": T.quantizeLoop,
   "global.bus.main.gain": "Main volume",

@@ -42,6 +42,7 @@ import { PositionPanel, type Clock } from "./PositionPanel";
 import { ReleasePanel } from "./ReleasePanel";
 import { ArrangementStrip } from "./ArrangementStrip";
 import { TrackTile, trackColor } from "./TrackTile";
+import { clearAllAsked } from "./ClockBar";
 import { TrackDetail, type TrackActions } from "./TrackDetail";
 import { DELAY_NOTES, FX_NAME, FX_PRESETS, FX_SLOT_ORDER } from "../mixer/fxModel";
 import { channelActions } from "../mixer/actions";
@@ -270,14 +271,20 @@ function Stage({ onOpenArrangement }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
-      // Shift belongs to the score transport (Shift+S stops the whole run).
-      if (e.shiftKey) return;
       const target = e.target as HTMLElement | null;
       if (target && target.tagName) {
         const tag = target.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable) return;
         if (target.closest(".cm-editor")) return;
       }
+      // Shift+Backspace: clear all, asked first.
+      if (e.shiftKey && e.key === "Backspace") {
+        e.preventDefault();
+        clearAllAsked();
+        return;
+      }
+      // Other Shift keys belong to the score transport (Shift+S stops the whole run).
+      if (e.shiftKey) return;
       const { tracks: list, selected: current, click } = state.current;
 
       if (e.key === "Escape" && chord.current) {
@@ -308,6 +315,11 @@ function Stage({ onOpenArrangement }: Props) {
       if (key === "k") {
         e.preventDefault();
         run(() => api.setClick(!click));
+        return;
+      }
+      if (key === "t") {
+        e.preventDefault();
+        run(() => api.tapTempo());
         return;
       }
       const track = list[current];

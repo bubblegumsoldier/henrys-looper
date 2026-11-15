@@ -158,9 +158,14 @@ export const api = {
   clickGain: (gain: number) => call<void>("click_gain", { gain }),
   /** Volume of every monitored live input, linear 0..4. Output side only. */
   monitorGain: (gain: number) => call<void>("monitor_gain", { gain }),
-  /** Tempo and time signature. Refused unless every track is empty (and no score plays). */
-  setTempo: (bpm: number, beatsPerBar: number, beatUnit: number) =>
-    call<void>("set_tempo", { bpm, beats_per_bar: beatsPerBar, beat_unit: beatUnit }),
+  /**
+   * Tempo, time signature and (optionally) loop length in bars. Refused unless every track is
+   * empty (and no score is loaded). With the clock running the beat keeps its place.
+   */
+  setTempo: (bpm: number, beatsPerBar: number, beatUnit: number, bars?: number) =>
+    call<void>("set_tempo", { bpm, beats_per_bar: beatsPerBar, beat_unit: beatUnit, bars: bars ?? null }),
+  /** One beat of tap tempo; from the third tap on the tempo follows the median gap. */
+  tapTempo: () => call<void>("tap_tempo"),
   /** Grid a recording and an overdub snap to. Armed takes keep the position they already have. */
   setQuantize: (quantize: Quantize) => call<void>("set_quantize", { quantize }),
   /** What `O` does in free looping: stay on until pressed again, or one pass. */
