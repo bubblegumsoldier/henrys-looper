@@ -191,14 +191,22 @@ fn every_apple_effect_survives_the_probe() {
     assert!(ok >= 10, "nur {ok} Apple-Effekte bestehen die Probe");
 }
 
-/// A real VST3, if this machine has one: loaded, started, audio through it, state saved and put
-/// back. Takes the first effect found in the standard folders or `HENRYS_LOOPER_PLUGIN_PATH`.
+/// A real VST3: loaded, started, audio through it, state saved and put back. The test plugin of
+/// this repository; the installed ones only when `HENRYS_LOOPER_TEST_INSTALLED_VST3` is set.
+///
+/// Not the installed ones by default: enumerating a bundle loads it into the test process, and a
+/// big commercial one (Kontakt 8) tears down its own Qt application in `exit()` and crashes there -
+/// after every test has passed, with a macOS crash dialog for each run.
 #[cfg(target_os = "macos")]
 #[test]
 fn audio_goes_through_a_real_vst3() {
     let mut found = None;
-    // Whatever is installed first; the test plugin of this repository when nothing is.
-    for bundle in scan::vst3_bundles().into_iter().chain(fixture_bundle()) {
+    let installed = if std::env::var_os("HENRYS_LOOPER_TEST_INSTALLED_VST3").is_some() {
+        scan::vst3_bundles()
+    } else {
+        Vec::new()
+    };
+    for bundle in fixture_bundle().into_iter().chain(installed) {
         if let Ok(infos) = super::vst3::enumerate(&bundle)
             && let Some(info) = infos.into_iter().find(|i| i.kind == Kind::Effect)
         {
