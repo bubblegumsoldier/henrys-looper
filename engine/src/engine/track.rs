@@ -1122,7 +1122,12 @@ impl Track {
     }
 
     #[inline]
-    pub fn pending_defines_loop(&self) -> bool {
+    pub fn has_pending(&self) -> bool {
+        self.grid.pending.is_some()
+    }
+
+    #[inline]
+        pub fn pending_defines_loop(&self) -> bool {
         self.grid.pending.map(|p| p.defines_loop).unwrap_or(false)
     }
 

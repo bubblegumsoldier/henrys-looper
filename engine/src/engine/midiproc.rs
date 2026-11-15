@@ -35,7 +35,6 @@
 //! muting, undoing or clearing a layer ends exactly those notes and leaves the live keys alone.
 
 use super::super::command::MAX_TRACKS;
-use super::super::frame::Frame;
 use super::super::midiloop::{
     CLIP_STOCK, ClipEndpoint, ClipNews, MidiClip, OpenNotes, RawEvent, pass_end,
 };
@@ -301,6 +300,14 @@ impl EngineCore {
         }
     }
 
+    /// Forget the tail of `t` without writing its note-offs: the pass it belongs to was dropped,
+    /// and its notes are handed to the next pass, which will see their note-offs itself.
+    pub(super) fn midi_drop_tail(&mut self, t: usize) {
+        if let Some(midi) = self.midi.as_deref_mut() {
+            midi.tails[t].reset();
+        }
+    }
+
     /// End every note of the tail of `t` one frame before the end of its pass.
     fn close_tail(&mut self, t: usize) {
         let len = self.tracks[t].loop_len();
@@ -334,7 +341,8 @@ impl EngineCore {
     }
 
     /// A MIDI take began on `t`. `from_idle`: nothing was running before it on this track, so it
-    /// may take its pre-roll.
+    /// may take its pre-roll. Also true when the pass before it was judged empty apart from notes
+    /// in its last pre-roll window (`super::latch::Verdict::EarlyOnly`): those are taken over here.
     pub(super) fn midi_take_begun(&mut self, t: usize, from_idle: bool) {
         if !self.tracks[t].midi_loop() {
             return;
@@ -357,7 +365,7 @@ impl EngineCore {
         } else {
             take.start - (take.start - origin) % len
         };
-        let preroll = (self.timeline.samples_per_quarter() / 8.0).round() as u64;
+        let preroll = self.midi_preroll();
         let sustain = self.sources.as_deref().map_or(0, |r| r.live_sustain(t));
         let Some(midi) = self.midi.as_deref_mut() else {
             return;
@@ -511,7 +519,7 @@ impl EngineCore {
         let clip = notes.clip;
         if is_on(msg) {
             // Something was played: a latched pass with this in it is kept.
-            self.latch.note(t, Frame::mono(1.0));
+            self.latch.note_midi(t, pos);
         }
         self.store_event(t, clip, frame, msg);
     }

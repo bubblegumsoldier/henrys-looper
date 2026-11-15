@@ -3121,7 +3121,7 @@ impl Session {
         match ts.state {
             TrackState::Recording | TrackState::Armed => {
                 let on = !ts.latched;
-                self.cmd.send(Command::LatchOverdub { track, on })?;
+                self.cmd.send(Command::LatchOverdub { track, on, at: 0 })?;
                 self.message = Some(if on {
                     format!("\"{name}\": overdub next - the take runs straight on into overdub.")
                 } else {
@@ -3130,7 +3130,7 @@ impl Session {
                 Ok(())
             }
             TrackState::Overdub if ts.latched => {
-                self.cmd.send(Command::LatchOverdub { track, on: false })?;
+                self.cmd.send(Command::LatchOverdub { track, on: false, at: 0 })?;
                 let beat = self.scheduler.timeline.samples_per_beat().round() as u64;
                 let into = match ts.loop_len {
                     0 => u64::MAX,
@@ -3149,13 +3149,13 @@ impl Session {
                 Ok(())
             }
             TrackState::Overdub => {
-                self.cmd.send(Command::LatchOverdub { track, on: true })?;
+                self.cmd.send(Command::LatchOverdub { track, on: true, at: 0 })?;
                 self.message = Some(format!("\"{name}\": overdub stays on."));
                 Ok(())
             }
             TrackState::Empty | TrackState::Ready | TrackState::Playing => {
                 let plan = self.overdub_plan(track, est)?;
-                self.cmd.send(Command::LatchOverdub { track, on: true })?;
+                self.cmd.send(Command::LatchOverdub { track, on: true, at: 0 })?;
                 self.send_all(Scheduled {
                     message: format!(
                         "{} Stays on until O is pressed again.",
@@ -3274,7 +3274,7 @@ impl Session {
                 let name = self.tracks[track].name.clone();
                 // A new loop is "another action of the track": a continuous overdub ends with it.
                 if self.status_of(track).latched {
-                    self.cmd.send(Command::LatchOverdub { track, on: false })?;
+                    self.cmd.send(Command::LatchOverdub { track, on: false, at: 0 })?;
                 }
                 // With the clock standing, `soon(est)` is the new bar 1 and therefore the first
                 // point of every grid - `record` lands exactly on it.
@@ -3295,7 +3295,7 @@ impl Session {
             Action::StopTrack { track } => {
                 let ts = self.status_of(track);
                 if ts.latched {
-                    self.cmd.send(Command::LatchOverdub { track, on: false })?;
+                    self.cmd.send(Command::LatchOverdub { track, on: false, at: 0 })?;
                 }
                 let name = self.tracks[track].name.clone();
                 let plan = self.scheduler.stop(track, &name, est, ts.state);
@@ -3305,7 +3305,7 @@ impl Session {
                 let name = self.tracks[track].name.clone();
                 let ts = self.status_of(track);
                 if ts.latched {
-                    self.cmd.send(Command::LatchOverdub { track, on: false })?;
+                    self.cmd.send(Command::LatchOverdub { track, on: false, at: 0 })?;
                 }
                 // Play during a continuous overdub means "enough layers, just play": the take ends
                 // on the next bar line, exactly like Stop ends it.

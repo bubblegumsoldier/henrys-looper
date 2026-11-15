@@ -80,12 +80,12 @@ fn three_latched_passes_after_the_recording_are_three_seamless_layers() {
     record_loop(&mut sim);
     // Pressed halfway through the first take.
     sim.run_to(pass(0) + L / 2);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     assert!(latched(&mut sim), "die Anzeige sieht \"Overdub next\"");
 
     // Three overdub passes, then switched off during the third: it still finishes.
     sim.run_to(pass(3) + L / 3);
-    sim.send(Command::LatchOverdub { track: 0, on: false });
+    sim.send(Command::LatchOverdub { track: 0, on: false, at: 0 });
     run_past_pass(&mut sim, 3);
     sim.run_to(input_of(pass(5)) + 4 * BLOCK as u64);
 
@@ -114,9 +114,9 @@ fn an_impulse_on_the_boundary_lands_in_exactly_one_layer_at_index_zero() {
     let played: Played = mono(move |k| if k == input_of(boundary) { 1.0 } else { 0.1 });
     let mut sim = Sim::new(spec(), played);
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(input_of(pass(2)) + 2 * BLOCK as u64);
-    sim.send(Command::LatchOverdub { track: 0, on: false });
+    sim.send(Command::LatchOverdub { track: 0, on: false, at: 0 });
     run_past_pass(&mut sim, 2);
 
     assert_eq!(sim.core.track(0).layer_count(), 3);
@@ -146,9 +146,9 @@ fn an_empty_pass_is_dropped_and_the_next_one_takes_its_place() {
     });
     let mut sim = Sim::new(spec(), played);
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(input_of(pass(3)) + 2 * BLOCK as u64);
-    sim.send(Command::LatchOverdub { track: 0, on: false });
+    sim.send(Command::LatchOverdub { track: 0, on: false, at: 0 });
     run_past_pass(&mut sim, 3);
 
     let t = sim.core.track(0);
@@ -164,9 +164,9 @@ fn the_pass_left_running_too_long_is_dropped_too() {
     let played: Played = mono(move |k| if k < input_of(pass(2)) { fingerprint(k) } else { 0.0 });
     let mut sim = Sim::new(spec(), played);
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(pass(2) + L / 2);
-    sim.send(Command::LatchOverdub { track: 0, on: false });
+    sim.send(Command::LatchOverdub { track: 0, on: false, at: 0 });
     run_past_pass(&mut sim, 2);
     assert_eq!(sim.core.track(0).layer_count(), 2);
 }
@@ -186,9 +186,9 @@ fn a_single_accent_keeps_the_pass() {
     });
     let mut sim = Sim::new(spec(), played);
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(pass(1) + L / 2);
-    sim.send(Command::LatchOverdub { track: 0, on: false });
+    sim.send(Command::LatchOverdub { track: 0, on: false, at: 0 });
     run_past_pass(&mut sim, 1);
     assert_eq!(sim.core.track(0).layer_count(), 2);
     assert_eq!(content(&sim, 1)[1_234], 0.05);
@@ -199,7 +199,7 @@ fn a_single_accent_keeps_the_pass() {
 fn the_layer_ceiling_ends_the_overdub_with_a_reason() {
     let mut sim = Sim::new(spec(), mono(fingerprint));
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     run_past_pass(&mut sim, MAX_LAYERS as u64 + 2);
 
     let status = sim.latest_status().expect("Status");
@@ -220,10 +220,10 @@ fn the_layer_ceiling_ends_the_overdub_with_a_reason() {
 fn a_stop_inside_a_latched_pass_ends_it_there() {
     let mut sim = Sim::new(spec(), mono(fingerprint));
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(input_of(pass(2)) + 2 * BLOCK as u64);
     let cut = pass(2) + 2_000;
-    sim.send(Command::LatchOverdub { track: 0, on: false });
+    sim.send(Command::LatchOverdub { track: 0, on: false, at: 0 });
     sim.send(Command::StopRecord { track: 0, at: cut });
     sim.send(Command::StartPlay { track: 0, at: cut });
     sim.run_to(input_of(pass(4)));
@@ -241,14 +241,14 @@ fn a_stop_inside_a_latched_pass_ends_it_there() {
 fn clear_and_transport_stop_switch_the_latch_off() {
     let mut sim = Sim::new(spec(), mono(fingerprint));
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(pass(1) + 100);
     sim.send(Command::TransportStop);
     assert!(!latched(&mut sim));
     sim.run_to(input_of(pass(3)));
     assert!(sim.core.track(0).take().is_none());
 
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     assert!(latched(&mut sim));
     let at = sim.pos() + 1_000;
     sim.send(Command::ClearTrack { track: 0, at });
@@ -282,7 +282,7 @@ fn the_one_pass_overdub_is_unchanged() {
 #[test]
 fn a_latched_overdub_on_an_empty_track_records_first_and_then_layers() {
     let mut sim = Sim::new(spec(), mono(fingerprint));
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.send(Command::StartOverdub {
         track: 0,
         at: START,
@@ -292,7 +292,7 @@ fn a_latched_overdub_on_an_empty_track_records_first_and_then_layers() {
         at: START + L,
     });
     sim.run_to(input_of(pass(2)) + 2 * BLOCK as u64);
-    sim.send(Command::LatchOverdub { track: 0, on: false });
+    sim.send(Command::LatchOverdub { track: 0, on: false, at: 0 });
     run_past_pass(&mut sim, 2);
     let t = sim.core.track(0);
     assert_eq!(t.loop_len(), L);
@@ -307,9 +307,9 @@ fn a_latched_overdub_on_an_empty_track_records_first_and_then_layers() {
 fn undo_removes_exactly_the_newest_layer() {
     let mut sim = Sim::new(spec(), mono(fingerprint));
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(pass(2) + L / 2);
-    sim.send(Command::LatchOverdub { track: 0, on: false });
+    sim.send(Command::LatchOverdub { track: 0, on: false, at: 0 });
     run_past_pass(&mut sim, 2);
     assert_eq!(sim.core.track(0).layer_count(), 3);
     let before: Vec<Vec<f32>> = (0..2).map(|l| content(&sim, l)).collect();
@@ -338,7 +338,7 @@ fn undo_removes_exactly_the_newest_layer() {
 fn undo_during_a_latched_overdub_drops_the_running_pass_and_ends_it() {
     let mut sim = Sim::new(spec(), mono(fingerprint));
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(input_of(pass(2)) + L / 2);
     assert_eq!(sim.core.track(0).layer_count(), 3, "Durchlauf 2 laeuft");
     sim.send(Command::UndoLayer { track: 0 });
@@ -355,7 +355,7 @@ fn undo_during_a_latched_overdub_drops_the_running_pass_and_ends_it() {
 fn undo_during_the_first_recording_leaves_the_track_empty() {
     let mut sim = Sim::new(spec(), mono(fingerprint));
     record_loop(&mut sim);
-    sim.send(Command::LatchOverdub { track: 0, on: true });
+    sim.send(Command::LatchOverdub { track: 0, on: true, at: 0 });
     sim.run_to(input_of(pass(0)) + L / 2);
     sim.send(Command::UndoLayer { track: 0 });
     sim.run_to(input_of(pass(3)));

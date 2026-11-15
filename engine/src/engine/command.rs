@@ -68,8 +68,12 @@ pub enum Command {
     /// Keep overdubbing: while on, every take of this track that ends at its loop boundary is
     /// followed seamlessly by a further overdub pass, each one its own layer, and a pass that
     /// stayed practically silent is dropped instead of kept. Off lets the running pass finish and
-    /// starts no further one. Untimed - see `super::latch` for the whole behaviour.
-    LatchOverdub { track: usize, on: bool },
+    /// starts no further one. See `super::latch` for the whole behaviour.
+    ///
+    /// Timed like a take: `at: 0` (long past) acts in the next block, which is what a button press
+    /// wants; the score runner stamps it, so the latch goes on with the first pass of a `stack`
+    /// section and off inside its last one, both scheduled bars ahead.
+    LatchOverdub { track: usize, on: bool, at: u64 },
     StartPlay { track: usize, at: u64 },
     StopPlay { track: usize, at: u64 },
     /// Throw this track's layers away; the buffers go back to the control thread.
@@ -214,11 +218,11 @@ impl Command {
             | Command::StopPlay { at, .. }
             | Command::ClearTrack { at, .. }
             | Command::ClearAll { at }
+            | Command::LatchOverdub { at, .. }
             | Command::TransportStart { at }
             | Command::CountIn { at, .. }
             | Command::ClickGate { at, .. } => Some(*at),
-            Command::LatchOverdub { .. }
-            | Command::SetMonitor { .. }
+            Command::SetMonitor { .. }
             | Command::SetPan { .. }
             | Command::SetTrackGain { .. }
             | Command::SetTrackMute { .. }

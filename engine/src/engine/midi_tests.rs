@@ -221,6 +221,7 @@ fn three_latched_passes_are_three_midi_layers() {
     rig.sim.send(Command::LatchOverdub {
         track: 0,
         on: true,
+        at: 0,
     });
     for (pass, note) in [(1u64, 50u8), (2, 52), (3, 55)] {
         play(&mut rig, pass * L + 10_000, [0x90, note, 90]);
@@ -230,6 +231,7 @@ fn three_latched_passes_are_three_midi_layers() {
     rig.sim.send(Command::LatchOverdub {
         track: 0,
         on: false,
+        at: 0,
     });
     rig.sim.run_to(6 * L);
     let track = rig.sim.core.track(0);
@@ -826,4 +828,117 @@ fn transpose_shifts_live_notes_after_the_key_range() {
         .map(|e| e.ev.d1)
         .collect();
     assert_eq!(notes, vec![48, 52]);
+}
+
+// ---------------------------------------------------------------------------------------------
+// `stack` on an empty MIDI track: the latch is on before the loop-defining take begins
+// ---------------------------------------------------------------------------------------------
+
+/// What the score runner sends for `stack` on an empty track: the latch first, then the first pass
+/// like `record` over `0..L`, then the latch off in the middle of pass `last`.
+fn stack_from_empty(rig: &mut Rig, last: u64) {
+    rig.sim.send(Command::LatchOverdub {
+        track: 0,
+        on: true,
+        at: 0,
+    });
+    record_first_pass(rig);
+    rig.sim.send(Command::LatchOverdub {
+        track: 0,
+        on: false,
+        at: last * L + L / 2,
+    });
+}
+
+/// The owner's case: the first pass is left empty (he has to get from the guitar to the pads),
+/// then three passes are played. The empty pass leaves no layer but keeps the grid - origin and
+/// length are those of the first pass - and the first pass actually played is layer 1.
+#[test]
+fn a_stack_with_an_empty_first_pass_keeps_the_grid_and_starts_with_the_first_played_pass() {
+    let mut rig = rig();
+    stack_from_empty(&mut rig, 3);
+    for (pass, note) in [(1u64, 50u8), (2, 52), (3, 55)] {
+        play(&mut rig, pass * L + 10_000, [0x99, note, 90]);
+        play(&mut rig, pass * L + 12_000, [0x89, note, 0]);
+    }
+    rig.sim.run_to(6 * L);
+    let track = rig.sim.core.track(0);
+    assert_eq!(track.layer_count(), 3, "der leere erste Durchlauf hinterlaesst keine Ebene");
+    assert_eq!(track.origin(), 0, "das Raster ist das des ersten Durchlaufs");
+    assert_eq!(track.loop_len(), L);
+    assert_eq!(track.muted_mask(), 0, "keine stummgeschaltete Platzhalter-Ebene bleibt");
+    assert!(track.take().is_none());
+    for (layer, note) in [(0usize, 50u8), (1, 52), (2, 55)] {
+        let r = raw(&rig, layer);
+        assert_eq!(r.len(), 2, "Ebene {layer}: {r:?}");
+        assert_eq!(r[0].ev.d1, note);
+        assert_eq!(r[0].frame.rem_euclid(L as i64), 10_000, "taktgenau");
+    }
+    let ons: Vec<u8> = sent(&rig, 5 * L, 6 * L)
+        .iter()
+        .filter(|(_, m)| m[0] == 0x99)
+        .map(|(_, m)| m[1])
+        .collect();
+    assert_eq!(ons, vec![50, 52, 55]);
+    assert_eq!(rig.sim.latest_status().unwrap().refusal, super::command::Refusal::None);
+    assert!(sounding(&rig).is_empty());
+}
+
+/// A hit a hair before the one of the first played pass - in the pre-roll window, while the empty
+/// first pass is still running - belongs to the pass it was meant for, not to the empty one.
+#[test]
+fn an_early_hit_after_an_empty_first_pass_lands_in_the_pass_it_was_meant_for() {
+    let mut rig = rig();
+    stack_from_empty(&mut rig, 2);
+    play(&mut rig, L - 500, [0x99, 36, 120]);
+    play(&mut rig, L - 200, [0x89, 36, 0]);
+    play(&mut rig, L + 30_000, [0x99, 38, 100]);
+    play(&mut rig, L + 31_000, [0x89, 38, 0]);
+    // Pass 2: something played, plus an early hit at its end. A pass with something in it keeps
+    // such a hit where it was played, as before - and the latch ends here, so nothing follows.
+    play(&mut rig, 2 * L + 20_000, [0x99, 42, 100]);
+    play(&mut rig, 2 * L + 21_000, [0x89, 42, 0]);
+    play(&mut rig, 3 * L - 500, [0x99, 40, 120]);
+    play(&mut rig, 3 * L - 200, [0x89, 40, 0]);
+    rig.sim.run_to(5 * L);
+    let track = rig.sim.core.track(0);
+    assert_eq!(track.layer_count(), 2, "Durchlauf 1 und 2");
+    let second: Vec<(u8, i64)> = raw(&rig, 1)
+        .iter()
+        .filter(|e| e.ev.kind == NoteKind::On)
+        .map(|e| (e.ev.d1, e.frame.rem_euclid(L as i64)))
+        .collect();
+    assert_eq!(second, vec![(42, 20_000), (40, (L - 500) as i64)]);
+    assert_eq!(track.origin(), 0);
+    let first = raw(&rig, 0);
+    let notes: Vec<(u8, i64)> = first
+        .iter()
+        .filter(|e| e.ev.kind == NoteKind::On)
+        .map(|e| (e.ev.d1, e.frame))
+        .collect();
+    assert_eq!(notes, vec![(36, -500), (38, 30_000)], "{first:?}");
+    // The early hit plays where it was played: 500 frames before the one, every pass.
+    let got = sent(&rig, 4 * L - 1_000, 4 * L);
+    assert!(got.contains(&(4 * L - 500, [0x99, 36, 120])), "{got:?}");
+    assert!(sounding(&rig).is_empty());
+}
+
+/// Nothing played at all until the latch ends: the track is empty again - no silent layer, no
+/// refusal - and playing it afterwards is simply silence.
+#[test]
+fn a_stack_in_which_nothing_was_played_leaves_the_track_empty() {
+    let mut rig = rig();
+    stack_from_empty(&mut rig, 2);
+    rig.sim.run_to(3 * L + 2_000);
+    let status = rig.sim.latest_status().unwrap();
+    assert_eq!(status.tracks()[0].layers, 0);
+    assert_eq!(status.tracks()[0].state, TrackState::Empty);
+    // What the runner sends for a later `play` / `stop`: harmless on an empty track.
+    rig.sim.send(Command::StartPlay { track: 0, at: 4 * L });
+    rig.sim.send(Command::StopPlay { track: 0, at: 5 * L });
+    rig.sim.run_to(6 * L);
+    let status = rig.sim.latest_status().unwrap();
+    assert_eq!(status.refusal, super::command::Refusal::None);
+    assert_eq!(status.ignored_commands, 0);
+    assert!(sent(&rig, L, 6 * L).iter().all(|(_, m)| m[0] & 0xF0 != 0x90));
 }

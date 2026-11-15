@@ -138,7 +138,7 @@ use super::command::{
 };
 use super::frame::{Channels, Frame};
 use super::insert::{InsertEndpoint, InsertRack, MAX_BLOCK, PluginTransport, Spread};
-use super::latch::Latches;
+use super::latch::{Latches, Verdict};
 use super::metro::Metronome;
 use super::source::{HostClock, SourceEndpoint, SourceRack, heard_at, place_event};
 use super::timeline::Timeline;
@@ -1215,7 +1215,7 @@ impl EngineCore {
                     self.midi_take_begun(track, true);
                 }
             }
-            Command::LatchOverdub { track, on } => self.latch.set(track, on),
+            Command::LatchOverdub { track, on, .. } => self.latch.set(track, on),
             Command::StopRecord { track, at } => {
                 // The loop length is known now, even though the last R samples of the take are
                 // still travelling in from the interface. Publishing it here is what makes the
@@ -1315,7 +1315,11 @@ impl EngineCore {
                     return;
                 }
                 match self.tracks[track].remove_layer(layer) {
-                    Some(buffer) => self.retire_store(track, buffer),
+                    Some(buffer) => {
+                        // Whatever was removed, layer 0 is no longer known to be the stand-in.
+                        self.latch.set_placeholder(track, false);
+                        self.retire_store(track, buffer);
+                    }
                     None => self.refuse(Refusal::NoSuchTarget),
                 }
             }
@@ -1484,6 +1488,7 @@ impl EngineCore {
     /// buffers handed back.
     fn undo_layer(&mut self, track: usize) {
         self.latch.set(track, false);
+        self.latch.set_placeholder(track, false);
         // A take queued behind one that is finishing is the newest thing; only it goes.
         if let Some(buffer) = self.tracks[track].take_pending_buffer() {
             self.retire_store(track, buffer);
@@ -1523,14 +1528,54 @@ impl EngineCore {
             self.midi_take_closed(track, end);
         }
         // A latched pass in which nothing was played goes again before anything else can push a
-        // layer - it is the last one, since every take writes into the layer it pushed.
-        if closed.is_some_and(|take| !take.defines_loop) && self.latch.closed_silent(track) {
-            if let Some(buffer) = self.tracks[track].pop_layer() {
-                self.retire_store(track, buffer);
+        // layer - it is the last one, since every take writes into the layer it pushed. A
+        // loop-defining one stays as the placeholder that holds the grid (see `super::latch`).
+        let preroll = self.midi_preroll();
+        let verdict = match closed {
+            Some(_) => self.latch.closed(track, end, preroll),
+            None => Verdict::Kept,
+        };
+        // Early notes can only be handed on when a pass follows; the last one keeps them at its
+        // end, which is where a hit before the loop's one has always been stored.
+        let follows = self.latch.on(track) || self.tracks[track].has_pending();
+        let verdict = if verdict == Verdict::EarlyOnly && !follows {
+            Verdict::Kept
+        } else {
+            verdict
+        };
+        // Notes from the last pre-roll window of an empty pass go to the pass beginning here.
+        let replay = verdict == Verdict::EarlyOnly;
+        match (closed, verdict) {
+            (Some(take), Verdict::Silent | Verdict::EarlyOnly) => {
+                if replay {
+                    self.midi_drop_tail(track);
+                }
+                if take.defines_loop {
+                    if self.tracks[track].set_layer_muted(0, true) {
+                        self.release_layers(track, Some(0));
+                    }
+                    self.latch.set_placeholder(track, true);
+                } else if let Some(buffer) = self.tracks[track].pop_layer() {
+                    self.retire_store(track, buffer);
+                }
             }
+            (Some(take), Verdict::Kept)
+                if !take.defines_loop
+                    && self.latch.placeholder(track)
+                    && self.tracks[track].layer_count() > 1 =>
+            {
+                // The first pass that was really played takes the placeholder's place. Nothing is
+                // running at this instant, so no take's layer index moves under it.
+                self.latch.set_placeholder(track, false);
+                if let Some(buffer) = self.tracks[track].remove_layer(0) {
+                    self.retire_store(track, buffer);
+                }
+            }
+            _ => {}
         }
         if self.tracks[track].pending_defines_loop() {
             // What was queued is a completely new loop, so the old layers go back first.
+            self.latch.set_placeholder(track, false);
             self.tracks[track].set_playing(false);
             while let Some(buffer) = self.tracks[track].pop_layer() {
                 self.retire_store(track, buffer);
@@ -1541,10 +1586,10 @@ impl EngineCore {
             self.refuse(Refusal::LayerLimit);
         }
         match self.tracks[track].take() {
-            Some(take) => {
-                self.latch.begun(track, !take.defines_loop);
+            Some(_) => {
+                self.latch.begun(track);
                 self.midi_length_known(track);
-                self.midi_take_begun(track, false);
+                self.midi_take_begun(track, replay);
             }
             // Nothing queued behind it: a latched track carries straight on with the next pass,
             // starting on the very sample the closed take ended on.
@@ -1558,12 +1603,27 @@ impl EngineCore {
                         // `begin_take` has said why (no buffer); do not try again every frame.
                         self.latch.set(track, false);
                     } else {
-                        self.midi_take_begun(track, false);
+                        self.midi_take_begun(track, replay);
                     }
                 }
             }
             None => {}
         }
+        // The latch has ended and nothing was ever played: the placeholder is all there is, and a
+        // track holding only silence is an empty track.
+        if self.tracks[track].take().is_none()
+            && self.latch.placeholder(track)
+            && self.tracks[track].layer_count() <= 1
+        {
+            self.clear_track(track);
+        }
+    }
+
+    /// The MIDI pre-roll window in frames: a thirty-second note. Notes up to this much before a
+    /// take's start belong to it (see `midiproc`).
+    #[inline]
+    pub(super) fn midi_preroll(&self) -> u64 {
+        (self.timeline.samples_per_quarter() / 8.0).round() as u64
     }
 
     /// Queue a take behind the one that is currently finishing.
@@ -1592,11 +1652,12 @@ impl EngineCore {
         } else {
             self.tracks[track].begin_overdub_take(start, buffer);
         }
-        self.latch.begun(track, !defines_loop);
+        self.latch.begun(track);
     }
 
     /// Cancel whatever this track is doing and give every one of its buffers back.
     fn clear_track(&mut self, track: usize) {
+        self.latch.set_placeholder(track, false);
         self.cancel_takes(track);
         self.tracks[track].set_playing(false);
         while let Some(buffer) = self.tracks[track].pop_layer() {
