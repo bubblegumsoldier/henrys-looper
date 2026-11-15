@@ -36,63 +36,7 @@ struct Rig {
 /// One MIDI-loop instrument track (plus `extra` audio tracks), a recorder for an instrument that
 /// reports `latency` frames, a clock, and the clip stage.
 fn rig_with(latency: u32, extra: usize) -> Rig {
-    let mut tracks = vec![TrackSpec::instrument()];
-    for i in 0..extra {
-        tracks.push(TrackSpec::on(i));
-    }
-    let spec = SimSpec {
-        tracks,
-        loopback_channel: None,
-        block: BLOCK,
-        bars: 4,
-        input_channels: extra.max(1),
-        ..SimSpec::default()
-    };
-    let mut sim = Sim::new(spec, silence());
-    let (mut instruments, mut feeds, endpoint) = source_channel(16);
-    sim.core.attach_sources(endpoint, BLOCK * 4);
-    sim.with_clock(OUT);
-    sim.with_clips();
-    let (keys, handle) = port_feed();
-    feeds
-        .send(FeedMsg::Attach(handle.take_feed(0).unwrap()))
-        .unwrap();
-    feeds
-        .send(FeedMsg::Route {
-            track: 0,
-            route: TrackRoute {
-                ports: 1,
-                channels: TrackRoute::ALL_CHANNELS,
-                low: 0,
-                high: 127,
-            },
-        })
-        .unwrap();
-    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
-    instruments
-        .send(InstrumentMsg::Install {
-            track: 0,
-            instrument: Instrument::new(
-                Box::new(Recorder {
-                    seen: Arc::clone(&seen),
-                    blocks: 0,
-                    frames: 0,
-                }),
-                SourceShared::new(latency),
-            ),
-        })
-        .unwrap();
-    sim.send(Command::SetLoopKind {
-        track: 0,
-        midi: true,
-    });
-    Rig {
-        sim,
-        _instruments: instruments,
-        feeds,
-        keys,
-        seen,
-    }
+    rig_at(100.0, latency, extra)
 }
 
 fn rig() -> Rig {
@@ -1286,4 +1230,398 @@ fn latched_passes_with_early_hits_sound_once_each() {
         }
     }
     assert!(sounding(&rig).is_empty());
+}
+
+// ---------------------------------------------------------------------------------------------
+// The owner's drum take, played back exactly: every hit once per pass, nothing missing
+// ---------------------------------------------------------------------------------------------
+
+/// The owner's take (see the data file): frame from the one of the recording pass, message.
+const OWNER_TAKE: &[(i64, [u8; 3])] = &include!("../../tests/data/owner-drums-124.rs");
+
+/// The rig of [`rig_with`] at `bpm`.
+fn rig_at(bpm: f64, latency: u32, extra: usize) -> Rig {
+    let mut tracks = vec![TrackSpec::instrument()];
+    for i in 0..extra {
+        tracks.push(TrackSpec::on(i));
+    }
+    let spec = SimSpec {
+        tracks,
+        loopback_channel: None,
+        block: BLOCK,
+        bars: 4,
+        bpm,
+        input_channels: extra.max(1),
+        ..SimSpec::default()
+    };
+    let mut sim = Sim::new(spec, silence());
+    let (mut instruments, mut feeds, endpoint) = source_channel(16);
+    sim.core.attach_sources(endpoint, BLOCK * 4);
+    sim.with_clock(OUT);
+    sim.with_clips();
+    let (keys, handle) = port_feed();
+    feeds
+        .send(FeedMsg::Attach(handle.take_feed(0).unwrap()))
+        .unwrap();
+    feeds
+        .send(FeedMsg::Route {
+            track: 0,
+            route: TrackRoute {
+                ports: 1,
+                channels: TrackRoute::ALL_CHANNELS,
+                low: 0,
+                high: 127,
+            },
+        })
+        .unwrap();
+    let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+    instruments
+        .send(InstrumentMsg::Install {
+            track: 0,
+            instrument: Instrument::new(
+                Box::new(Recorder {
+                    seen: Arc::clone(&seen),
+                    blocks: 0,
+                    frames: 0,
+                }),
+                SourceShared::new(latency),
+            ),
+        })
+        .unwrap();
+    sim.send(Command::SetLoopKind {
+        track: 0,
+        midi: true,
+    });
+    Rig {
+        sim,
+        _instruments: instruments,
+        feeds,
+        keys,
+        seen,
+    }
+}
+
+
+/// Twelve short takes on a 1/16 grid, each cleared again: every clip in circulation has had a
+/// play list from the control thread swapped in - what the owner's app had after his earlier runs
+/// on a grid.
+fn use_every_clip_on_a_grid(rig: &mut Rig) {
+    rig.sim.clips.as_mut().unwrap().set_grid(0, NoteGrid::Sixteenth);
+    for _ in 0..12 {
+        let p = rig.sim.pos() + 2_000;
+        rig.sim.send(Command::StartRecord { track: 0, at: p });
+        rig.sim.send(Command::StopRecord {
+            track: 0,
+            at: p + 24_000,
+        });
+        play(rig, p + 1_000, [0x99, 36, 100]);
+        play(rig, p + 1_400, [0x89, 36, 0]);
+        rig.sim.run_to(p + 24_000 + 4 * C);
+        let at = rig.sim.pos() + BLOCK as u64;
+        rig.sim.send(Command::ClearTrack { track: 0, at });
+        rig.sim.run_to(at + 4 * C);
+    }
+    assert_eq!(rig.sim.core.track(0).layer_count(), 0);
+}
+
+/// The owner's score at 124 BPM: three guitar loops (the bass one loops until Release, given in
+/// its second pass), then the drums in the states `drums` - one section of four bars each, the
+/// last one looping - with his take played from the one of drum pass `played_in` (0: the first).
+/// `used`: the clips have been used on a grid before. Returns the rig, that one and the loop
+/// length.
+fn owners_take(
+    grid: NoteGrid,
+    drums: &[&str],
+    latency: u32,
+    played_in: u64,
+    used: bool,
+) -> (Rig, u64, u64) {
+    use crate::engine::runner::Runner;
+    use crate::engine::timeline::{TimeSignature, Timeline};
+    let grid_yaml = match grid {
+        NoteGrid::None => String::new(),
+        g => format!(", grid: {}", g.as_str()),
+    };
+    let mut yaml = format!(
+        "bpm: 124\ntime_signature: 4/4\ntracks:\n  Drums: {{input: instrument, midi: {{device: \"MPD218 Port A\", channel: 10}}, loop: midi{grid_yaml}}}\n  melodic_1: {{input: 1}}\n  melodic_2: {{input: 2}}\n  bass: {{input: 3}}\nsections:\n"
+    );
+    let section = |id: &str, release: bool, tracks: &[(&str, &str)]| {
+        let mut s = format!("  - id: {id}\n    bars: 4\n");
+        if release {
+            s.push_str("    autorelease: true\n");
+        } else {
+            s.push_str("    autorelease: false\n    quantize: loop\n");
+        }
+        s.push_str("    tracks:\n");
+        for (t, state) in tracks {
+            s.push_str(&format!("      {t}: {state}\n"));
+        }
+        s
+    };
+    yaml.push_str(&section("melodic_1", true, &[("melodic_1", "record")]));
+    yaml.push_str(&section("melodic_2", true, &[("melodic_1", "play"), ("melodic_2", "record")]));
+    yaml.push_str(&section("bass", false, &[
+        ("melodic_1", "play"),
+        ("melodic_2", "play"),
+        ("bass", "record"),
+    ]));
+    for (i, state) in drums.iter().enumerate() {
+        let last = i + 1 == drums.len();
+        yaml.push_str(&section(&format!("drums_{}", i + 1), !last, &[
+            ("melodic_1", "play"),
+            ("melodic_2", "play"),
+            ("bass", "play"),
+            ("Drums", state),
+        ]));
+    }
+    let score = crate::score::compile_score(&yaml).expect("Partitur");
+    let mut rig = rig_at(124.0, latency, 3);
+    if used {
+        use_every_clip_on_a_grid(&mut rig);
+    }
+    // What the host does with the score's grid.
+    rig.sim.clips.as_mut().unwrap().set_grid(0, grid);
+    let timeline = Timeline::new(48_000, 124.0, TimeSignature::new(4, 4));
+    let mut runner = Runner::new(score, timeline, BLOCK as u32).expect("Runner");
+    for cmd in super::runner::setup_commands(runner.score()) {
+        rig.sim.send(cmd);
+    }
+    runner.start(rig.sim.pos());
+    for cmd in runner.take_commands() {
+        rig.sim.send(cmd);
+    }
+    let first = runner.armed_at().expect("armiert").1;
+    let bar = |n: u64| timeline.bar_start(first + n);
+    let step = |rig: &mut Rig, runner: &mut Runner, to: u64| {
+        while rig.sim.pos() < to {
+            rig.sim.step();
+            runner.tick(rig.sim.pos());
+            for cmd in runner.take_commands() {
+                rig.sim.send(cmd);
+            }
+        }
+    };
+    // Release in the second pass of the bass section: the drums begin on bar 16 (the 17th).
+    step(&mut rig, &mut runner, bar(13) + 10_000);
+    runner.next(rig.sim.pos());
+    for cmd in runner.take_commands() {
+        rig.sim.send(cmd);
+    }
+    let len = bar(20) - bar(16);
+    let one = bar(16) + played_in * len;
+    for &(f, msg) in OWNER_TAKE {
+        let at = (one as i64 + f) as u64;
+        step(&mut rig, &mut runner, at + OUT);
+        play(&mut rig, at, msg);
+    }
+    step(&mut rig, &mut runner, one + 4 * len);
+    stop_drums(&mut rig);
+    let status = rig.sim.latest_status().unwrap();
+    assert_eq!(status.ignored_commands, 0, "{:?}", status.refusal);
+    (rig, one, len)
+}
+
+/// Stop the drums, so that what is left sounding afterwards is what hangs.
+fn stop_drums(rig: &mut Rig) {
+    let at = rig.sim.pos() + BLOCK as u64;
+    rig.sim.send(Command::StopPlay { track: 0, at });
+    rig.sim.run_to(at + 4 * C);
+}
+
+/// Note ons the instrument got in pass `n` after the one at `one` (0: the pass played in), as
+/// (offset from that pass's one, message), sorted. A pass is counted from 5000 frames before its
+/// one, so the pre-roll hits belong to the pass they lead into.
+fn ons_in_pass(rig: &Rig, one: u64, len: u64, n: u64) -> Vec<(i64, [u8; 3])> {
+    let a = one + n * len - 5_000;
+    let mut got: Vec<(i64, [u8; 3])> = sent(rig, a, a + len)
+        .into_iter()
+        .filter(|(_, m)| m[0] & 0xF0 == 0x90 && m[2] > 0)
+        .map(|(at, m)| (at as i64 - (one + n * len) as i64, m))
+        .collect();
+    got.sort();
+    got
+}
+
+/// What the owner played, as note ons at the offset from the one the loop plays them at - on the
+/// nearest line of `grid` - sorted.
+fn owners_ons(grid: NoteGrid) -> Vec<(i64, [u8; 3])> {
+    // Frames per tick at 124 BPM.
+    let fpt = 48_000.0 * 60.0 / 124.0 / f64::from(super::source::PPQ);
+    let mut ons: Vec<(i64, [u8; 3])> = OWNER_TAKE
+        .iter()
+        .filter(|(_, m)| m[0] == 0x99)
+        .map(|&(f, m)| match grid.step() {
+            None => (f, m),
+            Some(step) => {
+                let tick = (f as f64 / fpt).round() as i64;
+                let line = (tick as f64 / step as f64).round() as i64 * step;
+                ((line as f64 * fpt).round() as i64, m)
+            }
+        })
+        .collect();
+    ons.sort();
+    ons
+}
+
+/// The pass the take was played in has every hit once, live; every later pass up to `last` has
+/// every hit once, where the loop plays it (a frame of rounding allowed on a grid); nothing is
+/// left sounding. Without a grid, the pre-roll hits of the first pass after the take lie before
+/// its one, at the end of the take's own pass: they sound there only if the loop already plays
+/// in that pass (`preroll_first`), as in a stack; otherwise from the second pass on.
+fn check_owners_passes(
+    rig: &Rig,
+    one: u64,
+    len: u64,
+    grid: NoteGrid,
+    last: u64,
+    preroll_first: bool,
+    latency: i64,
+) {
+    // Sent as early as the instrument's latency, so that it is heard on time.
+    let want: Vec<(i64, [u8; 3])> =
+        owners_ons(grid).into_iter().map(|(f, m)| (f - latency, m)).collect();
+    assert_eq!(want.len(), 53);
+    let mut live: Vec<[u8; 3]> = ons_in_pass(rig, one, len, 0).iter().map(|(_, m)| *m).collect();
+    let mut wanted: Vec<[u8; 3]> = want.iter().map(|(_, m)| *m).collect();
+    live.sort();
+    wanted.sort();
+    assert_eq!(live, wanted, "{grid:?}: Aufnahme-Durchlauf - jeder Schlag einmal, live");
+    for n in 1..=last {
+        let got = ons_in_pass(rig, one, len, n);
+        let want: Vec<(i64, [u8; 3])> =
+            want.iter().filter(|(f, _)| n > 1 || preroll_first || *f + latency >= 0).copied().collect();
+        let mut left = got.clone();
+        let mut missing = Vec::new();
+        for w in &want {
+            match left.iter().position(|g| g.1 == w.1 && (g.0 - w.0).abs() <= 1) {
+                Some(i) => {
+                    left.remove(i);
+                }
+                None => missing.push(*w),
+            }
+        }
+        assert!(
+            missing.is_empty() && left.is_empty(),
+            "{grid:?}, Durchlauf {n} nach der Aufnahme: {} von {} - fehlend {missing:?}, zu viel {left:?}",
+            got.len() - left.len(),
+            want.len()
+        );
+    }
+    assert!(sounding(rig).is_empty(), "{grid:?}: {:?}", sounding(rig));
+}
+
+/// The owner's report, with his take: record, overdub, overdub without a grid - in an app whose
+/// clips had been used on a grid before. Only the first few hits came back; now all of them, in
+/// every pass after the recording.
+#[test]
+fn owners_take_without_grid_plays_every_hit_in_every_later_pass() {
+    for used in [false, true] {
+        let drums = ["record", "overdub", "overdub"];
+        let (rig, one, len) = owners_take(NoteGrid::None, &drums, 0, 0, used);
+        check_owners_passes(&rig, one, len, NoteGrid::None, 3, false, 0);
+    }
+}
+
+/// The same take on the grids he uses, and with an instrument that reports latency.
+#[test]
+fn owners_take_on_a_grid_plays_every_hit_once_on_its_line() {
+    let drums = ["record", "overdub", "overdub"];
+    for grid in [NoteGrid::Sixteenth, NoteGrid::EighthTriplet] {
+        let (rig, one, len) = owners_take(grid, &drums, 0, 0, true);
+        check_owners_passes(&rig, one, len, grid, 3, false, 0);
+    }
+    let (rig, one, len) = owners_take(NoteGrid::None, &drums, 64, 0, true);
+    check_owners_passes(&rig, one, len, NoteGrid::None, 3, false, 64);
+}
+
+/// `stack` in one section: the first pass is left empty, the take is played in the second, and the
+/// stacking runs on over the passes after it.
+#[test]
+fn owners_take_in_a_stack_after_an_empty_pass_plays_every_hit_once() {
+    for grid in [NoteGrid::None, NoteGrid::Sixteenth, NoteGrid::EighthTriplet] {
+        let (rig, one, len) = owners_take(grid, &["stack"], 0, 1, true);
+        check_owners_passes(&rig, one, len, grid, 2, true, 0);
+        // The take is one layer with every hit; the passes after it added nothing.
+        let ons_per_layer: Vec<usize> = (0..rig.sim.core.track(0).layer_count())
+            .map(|l| raw(&rig, l).iter().filter(|e| e.ev.kind == NoteKind::On).count())
+            .collect();
+        assert_eq!(ons_per_layer.iter().sum::<usize>(), 53, "{grid:?}: {ons_per_layer:?}");
+        assert_eq!(ons_per_layer[0], 53, "{grid:?}: {ons_per_layer:?}");
+    }
+}
+
+/// Free mode: the take recorded, then overdub latched on for good - the passes after it are
+/// overdubs in which nothing is played.
+#[test]
+fn owners_take_with_a_latched_overdub_plays_every_hit_once() {
+    use crate::engine::timeline::{TimeSignature, Timeline};
+    let timeline = Timeline::new(48_000, 124.0, TimeSignature::new(4, 4));
+    for grid in [NoteGrid::None, NoteGrid::Sixteenth, NoteGrid::EighthTriplet] {
+        let mut rig = rig_at(124.0, 0, 0);
+        use_every_clip_on_a_grid(&mut rig);
+        rig.sim.clips.as_mut().unwrap().set_grid(0, grid);
+        let len = timeline.bar_start(4) - timeline.bar_start(0);
+        let one = (rig.sim.pos() / len + 2) * len;
+        rig.sim.send(Command::StartRecord { track: 0, at: one });
+        rig.sim.send(Command::StopRecord {
+            track: 0,
+            at: one + len,
+        });
+        rig.sim.send(Command::StartPlay {
+            track: 0,
+            at: one + len,
+        });
+        rig.sim.send(Command::LatchOverdub {
+            track: 0,
+            on: true,
+            at: one + len,
+        });
+        for &(f, msg) in OWNER_TAKE {
+            play(&mut rig, (one as i64 + f) as u64, msg);
+        }
+        rig.sim.run_to(one + 4 * len);
+        stop_drums(&mut rig);
+        check_owners_passes(&rig, one, len, grid, 3, false, 0);
+    }
+}
+
+/// Fast hits on one pad: each note on comes before the off of the hit before it. Every hit is
+/// played back once per pass, and nothing is left sounding.
+#[test]
+fn fast_hits_on_one_pad_before_the_previous_off_all_come_back() {
+    for grid in [NoteGrid::None, NoteGrid::Sixteenth] {
+        let mut rig = rig();
+        use_every_clip_on_a_grid(&mut rig);
+        rig.sim.clips.as_mut().unwrap().set_grid(0, grid);
+        let start = (rig.sim.pos() / L + 1) * L;
+        rig.sim.send(Command::StartRecord { track: 0, at: start });
+        rig.sim.send(Command::StopRecord {
+            track: 0,
+            at: start + L,
+        });
+        rig.sim.send(Command::StartPlay {
+            track: 0,
+            at: start + L,
+        });
+        // 32 hits a 1/16 apart (7200 frames at 100 BPM), a little late, each held 9000 frames.
+        let hits: Vec<u64> = (0..32).map(|i| 7_200 * i + 1_000).collect();
+        let mut events: Vec<(u64, [u8; 3])> = Vec::new();
+        for &h in &hits {
+            events.push((start + h, [0x99, 42, 100]));
+            events.push((start + h + 9_000, [0x89, 42, 0]));
+        }
+        events.sort_by_key(|e| e.0);
+        for (at, msg) in events {
+            play(&mut rig, at, msg);
+        }
+        rig.sim.run_to(start + 4 * L);
+        for pass in 1..4u64 {
+            let got = ons(&rig, start + pass * L - 1_000, start + (pass + 1) * L - 1_000, 42);
+            assert_eq!(got.len(), hits.len(), "{grid:?}, Durchlauf {pass}: {got:?}");
+        }
+        let at = rig.sim.pos() + BLOCK as u64;
+        rig.sim.send(Command::StopPlay { track: 0, at });
+        rig.sim.run_to(at + 4 * C);
+        assert!(sounding(&rig).is_empty(), "{grid:?}: {:?}", sounding(&rig));
+    }
 }

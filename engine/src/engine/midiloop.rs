@@ -204,13 +204,19 @@ impl MidiClip {
         })
     }
 
-    /// Control thread: empty it for reuse under a new id. Keeps the allocations.
+    /// Control thread: empty it for reuse under a new id. Keeps the allocations - except a play
+    /// list the control thread swapped in: that one is exactly as long as the raw data it was built
+    /// from, and the engine, filling the list itself on a track without a grid, would lose every
+    /// event past that length. The clip gets its full room back here, where allocating is allowed.
     pub fn recycle(&mut self, id: u32) {
         self.id = id;
         self.max_frames = 0;
         self.base = 0;
         self.raw.clear();
         self.play.clear();
+        if self.play.capacity() < self.raw.capacity() {
+            self.play = Vec::with_capacity(self.raw.capacity());
+        }
         self.external = false;
         self.tracker = NoteTracker::default();
         self.notes = 0;
@@ -892,6 +898,27 @@ mod tests {
         assert!(om(&list).contains(&(6_450, [0xE0, 0, 70])), "Bend bleibt");
         let triplet = build_play_list(&raw, 96_000, NoteGrid::EighthTriplet, fpt);
         assert!(om(&triplet).contains(&(8_000, [0x90, 60, 100])));
+    }
+
+    /// The owner's drums played back only their first few hits: the clip had been used before on a
+    /// grid, the control thread's play list - exactly as long as the raw data then - had been
+    /// swapped in, and recycling kept that small list. On a track without a grid the engine fills
+    /// the list itself, and everything past its old length was lost.
+    #[test]
+    fn a_recycled_clip_has_its_full_room_again_after_a_list_from_the_control_thread() {
+        let fpt = 24_000.0 / f64::from(PPQ);
+        let len = 96_000u64;
+        let mut clip = MidiClip::new(1, 64);
+        let raw = vec![ev(0, [0x99, 36, 100], fpt), ev(400, [0x89, 36, 0], fpt)];
+        let mut list = build_play_list(&raw, len, NoteGrid::Sixteenth, fpt);
+        clip.install_list(&mut list, len);
+        clip.recycle(2);
+        assert!(!clip.external());
+        for i in 0..40 {
+            assert!(clip.record(ev(i * 1_000, [0x99, 42, 100], fpt), len));
+        }
+        assert_eq!(clip.lost(), 0);
+        assert_eq!(clip.play().len(), 40);
     }
 
     #[test]
