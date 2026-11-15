@@ -243,6 +243,27 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
     );
     println!("Tracks:");
     for (track, def) in score.tracks.iter().zip(defs) {
+        if let Some(midi) = &track.instrument {
+            // No cable to measure: the app works the compensation out from the output latency,
+            // one block and the instrument's own.
+            println!(
+                "  {} {:<10} instrument, MIDI {} / {} / keys {}, pan {}, heard {}, latency automatic{}, Loop -> {}, Monitor bus {}",
+                track.index + 1,
+                track.name,
+                midi.device.as_deref().unwrap_or("every device"),
+                midi.channel.map_or("every channel".to_string(), |c| format!("channel {c}")),
+                match (midi.note_low, midi.note_high) {
+                    (Some(low), Some(high)) => format!("{low}-{high}"),
+                    _ => "all".to_string(),
+                },
+                pan_label(def.pan),
+                if track.monitor { "always" } else { "never" },
+                if def.latency.trim != 0 { format!(" {:+} frames trim", def.latency.trim) } else { String::new() },
+                def.loop_send.label(),
+                def.monitor_send.label(),
+            );
+            continue;
+        }
         let effective = def.latency.resolve(default_latency);
         println!(
             "  {} {:<10} input {} ({}), pan {}, Monitor {}, latency {} frames ({:.2} ms, {}), Loop -> {}, Monitor bus {}",

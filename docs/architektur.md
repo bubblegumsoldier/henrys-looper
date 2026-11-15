@@ -1329,6 +1329,12 @@ mixer:
   beim nächsten Laden alle anderen Spuren stumm — auf der Bühne. **Mute schon**: eine
   stummgeschaltete Spur ist eine Entscheidung über das Arrangement und am Kanalzug sichtbar.
 * Pan, Busrouting und Mithören sind keine Mixer-Felder, sondern stehen schon unter `tracks:`.
+  **Pan läuft trotzdem denselben Rückweg** (seit 2026-11): eine Pan-Änderung am Kanalzug zählt
+  `mixer_rev` hoch, `mixer_take` liefert sie unter `pan` (Spurname → Wert) mit, und das
+  Arrangement schreibt sie unter `tracks.<name>.pan` (Mitte = Feld weg); Undo/Tippen schickt die
+  Pans mit `mixer_apply(mixer, pan)` zurück. Der `mixer:`-Eintrag der Spur wird dabei nicht
+  angefasst, eine Partitur ohne `mixer:` bekommt durch eine Pan-Bewegung keinen.
+* **Plugins: nur Ids** (seit 2026-11, siehe unten): `instrument` und `inserts` je Spur.
 
 *Laden.* Der Host wendet den Abschnitt nach Namen an (`load_score`, auch nach dem Neuaufbau),
 über gewöhnliche Kommandos, höchstens 48 je Runde (`MIX_BATCH`), damit die Kommando-Queue nie
@@ -1360,13 +1366,74 @@ sie dort ein, die Engine startet damit, und der Neuaufbau übernimmt sie aus dem
 Der Konfigurationsordner (`~/Library/Application Support/henrys-looper/`) lässt sich mit
 `HENRYS_LOOPER_CONFIG_DIR` umlenken; die Tests benutzen eigene temporäre Verzeichnisse.
 
-**Empfehlung, nicht gebaut: Plugins in der Partitur.** Technisch ginge es (`mixer.tracks.<name>.
-inserts: [{plugin: vst3:…, bypass, state: <base64>}]`), aber der Zustand eines Plugins ist ein
-binärer, oft mehrere Kilobyte großer Blob, der die Partitur unlesbar und schlecht diffbar macht,
-und die Partitur würde an installierte Plugins gebunden (ein anderer Rechner lädt sie nicht
-sauber). Vorschlag für später: in der Partitur nur, **welches** Plugin auf welcher Spur sitzt
-(Id, Slot, Bypass, ggf. ein benannter Preset des Plugins), den Zustand weiter in
-`plugin-rack.json` bzw. einer Datei neben der Partitur (`song.yaml` + `song.plugins.json`).
+**Plugins in der Partitur: welches, nicht wie** (gebaut 2026-11). Der Zustand eines Plugins ist
+ein binärer, oft mehrere Kilobyte großer Blob — er bliebe unlesbar und schlecht diffbar in der
+Partitur. Darum steht dort nur, **welches** Plugin auf welcher Spur sitzt:
+
+```yaml
+tracks:
+  keys:  {input: instrument, midi: {device: "KeyLab 49", channel: 1}}
+  drums: {input: instrument, midi: {device: MPD218, channel: 10, notes: 36-51}}
+mixer:
+  tracks:
+    keys:
+      gain: -3
+      instrument: "au:aumu:dls :appl"                          # Plugin-Id
+      inserts: [{plugin: "au:aufx:dely:appl", bypass: false}]  # Slot-Reihenfolge
+```
+
+* `input: instrument` macht die Spur zur Instrument-Spur (immer stereo, `monitor_bus` ohne
+  Angabe `main+monitor`, kein gemessenes `latency` — die Kompensation ist automatisch, nur
+  `latency_trim` gilt). `midi:` sagt, was sie spielt: `device` (Name oder eindeutiger Teil, fehlt
+  = alle Geräte), `channel: 1..16|all`, `notes: a-b` (fehlt = alle Tasten; die übrigen bleiben bei
+  den MIDI-Bindungen). `midi:` an einer Audiospur, `instrument:` im `mixer:` einer Audiospur und
+  `latency:` an einer Instrument-Spur sind Fehler mit Zeilenangabe.
+* `instrument` und `inserts` sind die einzigen Mixer-Felder, bei denen **fehlend „behalten“**
+  heißt (nicht Standardwert): eine Partitur von vor dieser Änderung nimmt niemandem das Klavier
+  oder den Hall weg. `inserts: []` leert die Slots ausdrücklich; der Rückweg schreibt `[]`, wenn
+  ein Mensch den letzten Effekt einer Spur entfernt hat.
+* Die Zustände bleiben lokal nach Spurname: `instruments.json` (jetzt mit einem „Regal“ der
+  zuletzt von einer Spur genommenen Instrumente samt Zustand, höchstens 32) und
+  `plugin-rack.json`.
+
+*Laden* (`Session::queue_mix` → `app/src-tauri/src/pluginmix.rs` → Hauptthread): Sitzt das
+genannte Plugin schon auf der Spur, bleibt es mit seinem Klang (bei Inserts: gleiche Ids in
+gleicher Reihenfolge, nur Bypass folgt). Sonst wird geladen — ein Plugin, das auf dieser Spur
+schon einmal lief (Regal bzw. bisheriger Slot), bekommt seinen Zustand zurück, ein neues seinen
+Standardzustand. **Fehlt es auf dem Rechner**, läuft die Spur stumm (Instrument) bzw. ohne diesen
+Effekt weiter, eine englische Notice sagt es, und `pluginmix` meldet für die Spur weiter, was die
+Partitur verlangt hat — so schreibt der nächste Fader-Zug den Eintrag nicht weg. Erst wenn ein
+Mensch auf dieser Spur ein Plugin wählt, gilt seine Wahl. Instrument-Routing (Gerät, Kanal,
+Tasten) folgt beim Laden ohne Neuaufbau; ein anderes `monitor` einer Instrument-Spur erzwingt den
+Neuaufbau (das Hören ist beim Engine-Start festgelegt), den das Laden auf leere Spuren ohnehin
+darf.
+
+*Rückweg* wie bei den Fadern: Plugin wählen, laden, verschieben, entfernen, Bypass (Maus oder
+MIDI) zählt `mixer_rev` hoch (`pluginmix::touch_*`), `mixer_take` nennt die Spur, ihr Eintrag
+wird mit `instrument`/`inserts` neu geschrieben, ein Undo setzt die Plugins über denselben Weg
+zurück. Das Wiederherstellen beim Start und das Anwenden einer Partitur sind keine Änderung. Im
+freien Modus landen die Plugin-Felder nicht in `mixer.json` (die Plugins haben ihre eigenen
+Dateien).
+
+*Monitor bei Instrument-Spuren — Entscheidung.* Eine Instrument-Spur ist **immer hörbar, wenn
+sie gespielt wird**, außer mit `monitor: false`. Das Mithören der Sektionen (`hear_through`, die
+Takes) gilt für Mikrofone: der Runner schaltet es für Instrument-Spuren nie (`setup_commands`
+schickt kein `SetMonitor`), die Engine ignoriert es ohnehin, und der Monitor-Schalter (Live,
+MIDI) antwortet mit einer Erklärung statt still nichts zu tun. `monitor: false` der Partitur geht
+beim Neuaufbau als `InstrumentInput::monitor` in die Startkonfiguration. Ein `hear_through`-Clip
+einer Instrument-Spur ist erlaubt und ändert nichts; der Inspektor sagt das.
+
+*Reserviert: `loop` und `grid`.* Damit das Format nicht zweimal bricht, liest, prüft und
+rendert der Compiler schon jetzt `loop: audio|midi` je Spur (`midi` nur an einer Instrument-Spur)
+und `grid: none|1/4|1/8|1/16|1/8t|1/16t` je Spur und je Clip (`keys: {state: play, grid: 1/16}`)
+— das Notenraster für eine spätere Quantisierung von MIDI-Loops, begrifflich getrennt vom
+Sektionsfeld `quantize: bar|loop` (wann eine Sektion wechselt). Gesetzt wird daraus nur ein
+**Hinweis** („not supported yet“, `score_notes`, im Text-Editor als Warnung, beim Laden in der
+Meldung), nie ein Fehler; die Bedienelemente dafür gibt es noch nicht.
+
+*Kommandozeile.* `looper-engine score` lehnt eine Partitur mit Instrument-Spuren mit einer klaren
+Meldung ab (sie hostet keine Instrumente und hört auf kein Keyboard); `--check` zeigt sie samt
+MIDI-Routing.
 
 ## 16. Mitschnitt der Performance als Stems
 

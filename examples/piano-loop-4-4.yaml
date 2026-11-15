@@ -1,0 +1,63 @@
+# Ein Klavier aus dem Rechner und eine Stimme vom Mikrofon, 4/4.
+#
+# Das Klavier ist eine Instrument-Spur: ein Plugin (hier Apples DLSMusicDevice, auf jedem Mac
+# dabei), gespielt von einem MIDI-Keyboard. Geloopt wird sein Klang, wie bei einem Mikrofon.
+# Eine Instrument-Spur ist immer zu hoeren, wenn sie gespielt wird - in jeder Sektion, egal was
+# der Clip sagt ('monitor: false' schaltet sie ganz stumm).
+#
+# In der Partitur steht nur, WELCHES Plugin auf der Spur sitzt (seine Id unter 'mixer:'), nicht
+# sein Klang: der bleibt auf dem Rechner (instruments.json, nach Spurname). Fehlt das Plugin auf
+# einem anderen Rechner, laeuft die Spur stumm weiter und die Partitur behaelt den Eintrag.
+#
+# Verkabelung:
+#   MIDI      ein Keyboard, Kanal 1 (ohne 'device' hoert die Spur auf alle Geraete)
+#   Eingang 1 Mikrofon (voice)
+title: Piano loop 4/4
+bpm: 92
+time_signature: 4/4
+
+tracks:
+  piano: {input: instrument, midi: {channel: 1}, pan: -0.15}
+  voice: {input: 1, pan: 0.15}
+
+sections:
+  # Vier Takte Klavier. Die Stimme ist zu hoeren, wird aber nicht aufgenommen.
+  - id: piano
+    bars: 4
+    autorelease: true
+    tracks:
+      piano: record
+      voice: hear_through
+
+  # Weitere Klavier-Ebenen, je eine pro Durchlauf, bis Release.
+  - id: layers
+    bars: 4
+    autorelease: false
+    tracks:
+      piano: overdub
+      voice: hear_through
+
+  # Die Stimme bekommt ihren eigenen Loop ueber acht Takte.
+  - id: voice
+    bars: 8
+    autorelease: true
+    tracks:
+      piano: play
+      voice: record
+
+  # Alles spielt, bis Release das Ende einleitet.
+  - id: all
+    bars: 8
+    autorelease: false
+    tracks:
+      piano: play
+      voice: play
+
+mixer:
+  tracks:
+    # Apples General-MIDI-Klangerzeuger; ein Delay dahinter.
+    piano:
+      gain: -4
+      instrument: "au:aumu:dls :appl"
+      inserts: [{plugin: "au:aufx:dely:appl", bypass: true}]
+    voice: {gain: 0, preset: voice}

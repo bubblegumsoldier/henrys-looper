@@ -196,8 +196,34 @@ Effekte, Bus-/Klick-/Mithörpegel — per Maus, Taste oder MIDI) nach einem Mome
 eine Fader-Fahrt samt Klang zurück. Beim Laden wird der Abschnitt angewendet, auch nach dem
 Neuaufbau der Engine. Solo wird absichtlich nicht gespeichert. Ohne Partitur merkt sich die App
 den Mix je Spurname in `mixer.json` (Konfigurationsordner) und die Buspegel im Setup. Plugins
-gehören ebenfalls dem Spurnamen (`plugin-rack.json`), nicht der Spurnummer. Details:
-`docs/architektur.md`, Abschnitt 15.
+gehören ebenfalls dem Spurnamen (`plugin-rack.json`), nicht der Spurnummer. Pan landet unter
+`tracks:`, Instrument und Effekt-Plugins einer Spur unter `mixer:` — nur ihre Ids, der Klang
+bleibt auf dem Rechner. Details: `docs/architektur.md`, Abschnitt 15.
+
+**Instrument-Spuren.** Eine Spur kann statt eines Eingangs ein Instrument-Plugin haben, das ein
+MIDI-Keyboard spielt; geloopt wird sein Klang. In der Partitur (Beispiel
+`examples/piano-loop-4-4.yaml`):
+
+```yaml
+tracks:
+  keys:  {input: instrument, midi: {device: "KeyLab 49", channel: 1}}
+  drums: {input: instrument, midi: {device: MPD218, channel: 10, notes: 36-51}}
+mixer:
+  tracks:
+    keys:
+      instrument: "au:aumu:dls :appl"                          # Plugin-Id, kein Zustand
+      inserts: [{plugin: "au:aufx:dely:appl", bypass: false}]  # Effekte in Slot-Reihenfolge
+```
+
+`device` fehlt = alle Geräte, `channel: 1..16|all`, `notes` fehlt = alle Tasten. Im Arrangement
+wählt der Inspektor der Spur *Source: Instrument*, das Plugin, Gerät, Kanal und Tasten. Eine
+Instrument-Spur ist immer zu hören, wenn sie gespielt wird (`monitor: false` macht sie stumm);
+der Monitor-Schalter wirkt auf sie nicht. Fehlt ein genanntes Plugin auf dem Rechner, läuft die
+Spur stumm bzw. ohne diesen Effekt weiter, eine Meldung sagt es, und der Eintrag bleibt in der
+Datei. `loop: audio|midi` und `grid: none|1/4|1/8|1/16|1/8t|1/16t` (je Spur, je Clip als
+`keys: {state: play, grid: 1/16}`) sind für MIDI-Loops und ihre Quantisierung reserviert: sie
+werden geprüft und gespeichert, tun aber noch nichts („not supported yet"). Die
+Kommandozeile spielt keine Partitur mit Instrument-Spuren (`--check` zeigt sie).
 
 Die Logik dahinter (Bearbeitungsoperationen, Verweise, Undo) testet `npm test` in `ui/` (vitest).
 

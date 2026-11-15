@@ -326,3 +326,18 @@ fn the_command_line_refuses_an_instrument_score_in_words() {
     let audio = compile_score(include_str!("../../../examples/solo-loop-4-4.yaml")).unwrap();
     assert!(crate::engine::score_cli::refuse_instruments(&audio).is_ok());
 }
+
+/// The shipped example with an instrument track reads, round-trips and names the DLS piano.
+#[test]
+fn the_piano_example_round_trips() {
+    let text = include_str!("../../../examples/piano-loop-4-4.yaml");
+    let score = compile_score(text).unwrap();
+    assert!(score.track("piano").unwrap().is_instrument());
+    assert!(!score.track("voice").unwrap().is_instrument());
+    let piano = score.mixer.as_ref().unwrap().tracks.get("piano").unwrap();
+    assert_eq!(piano.instrument.as_deref(), Some("au:aumu:dls :appl"));
+    let again = render_doc(&parse_doc(text).unwrap());
+    assert_eq!(compiled(&again), compiled(text));
+    assert_eq!(render_doc(&parse_doc(&again).unwrap()), again);
+    assert!(score_notes(text).is_empty());
+}
