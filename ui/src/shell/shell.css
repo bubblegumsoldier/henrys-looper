@@ -411,29 +411,3 @@ table.tt .tn2 input.name-in { height: 24px; }
 .tap { display: inline-flex; align-items: center; gap: 8px; }
 .tap .tap-btn .tap-value { color: var(--tx-1); font-variant-numeric: var(--num); margin-left: 4px; }
 .tap .tap-hint { margin-left: 4px; }
-
-/* =============================================================================================
-   ARRANGEMENT (placeholder shell)
-   ============================================================================================= */
-.arr-shell { grid-template-rows: var(--toolbar-h) minmax(0, 1fr); height: 100%; }
-.arr-shell .toolbar .seg > button { height: 20px; }
-.legacy-score { min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.legacy.legacy-score .score-transport { display: none; }
-
-/* =============================================================================================
-   LEGACY parts, aligned to the tokens (the score view, the effect chain)
-   ============================================================================================= */
-.legacy.legacy .btn {
-  height: auto; min-height: var(--ctl-h); padding: 4px 10px; font-size: var(--fs-12); font-weight: var(--fw-medium);
-  border-radius: var(--r-2); background: linear-gradient(to bottom, #20252c, #1a1e24); border: 1px solid var(--line-3);
-  box-shadow: var(--sh-ctl); color: var(--tx-2);
-}
-.legacy.legacy .btn:hover:not(:disabled) { background: linear-gradient(to bottom, #262c35, #20242b); color: var(--tx-1); }
-.legacy.legacy .btn-on { color: var(--tx-1); background: linear-gradient(to bottom, #2b313b, #252a33); border-color: var(--line-4); }
-.legacy.legacy .btn-primary { color: #0b0d14; background: var(--accent); border-color: transparent; font-weight: var(--fw-semibold); }
-.legacy.legacy .btn-primary:hover:not(:disabled) { background: var(--accent); filter: brightness(1.08); color: #0b0d14; }
-.legacy.legacy select, .legacy.legacy input:not([type="range"]):not([type="checkbox"]) {
-  background: var(--bg-inset); border: 0; border-radius: var(--r-2); box-shadow: var(--sh-inset); color: var(--tx-1); font-size: var(--fs-12);
-}
-.legacy.legacy .panel-title { font-size: var(--fs-11); font-weight: var(--fw-semibold); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--tx-3); }
-
