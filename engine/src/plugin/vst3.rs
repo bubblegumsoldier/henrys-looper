@@ -829,6 +829,10 @@ pub struct Vst3Plugin {
     view: Option<ComPtr<IPlugView>>,
     window: Rc<RefCell<Option<EditorWindow>>>,
     _frame: Option<ComWrapper<Frame>>,
+    /// Unit text by parameter id, filled by `params()`: `param_text` needs the unit, and asking
+    /// the controller for every parameter on every call made the list of a plugin with 4145
+    /// parameters (Kontakt) take five seconds on the main thread.
+    units: RefCell<HashMap<u32, String>>,
 }
 
 pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
@@ -981,6 +985,7 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
         view: None,
         window: Rc::new(RefCell::new(None)),
         _frame: None,
+        units: RefCell::new(HashMap::new()),
     }))
 }
 
@@ -1172,8 +1177,9 @@ impl PluginInstance for Vst3Plugin {
 
     fn params(&self) -> Vec<ParamInfo> {
         use ParameterInfo_::ParameterFlags_ as F;
-        self.params_raw()
-            .into_iter()
+        let raw = self.params_raw();
+        *self.units.borrow_mut() = raw.iter().map(|p| (p.id, w_text(&p.units))).collect();
+        raw.into_iter()
             .filter(|p| p.flags & F::kIsHidden as int32 == 0)
             .map(|p| ParamInfo {
                 id: p.id,
@@ -1205,12 +1211,10 @@ impl PluginInstance for Vst3Plugin {
         let mut text: String128 = [0; 128];
         if unsafe { c.getParamStringByValue(id, value, &mut text) } == kResultOk {
             let t = w_text(&text);
-            let unit = self
-                .params_raw()
-                .into_iter()
-                .find(|p| p.id == id)
-                .map(|p| w_text(&p.units))
-                .unwrap_or_default();
+            if self.units.borrow().is_empty() {
+                let _ = self.params();
+            }
+            let unit = self.units.borrow().get(&id).cloned().unwrap_or_default();
             if unit.is_empty() || t.ends_with(&unit) {
                 t
             } else {

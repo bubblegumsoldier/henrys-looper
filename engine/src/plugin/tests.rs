@@ -953,6 +953,19 @@ fn kontakt_round_trip(info: PluginInfo) {
     );
     let state = plugin.save_state().expect("Zustand");
     eprintln!("Zustand: {} Bytes", state.len());
+    // What `plugin_params` does for the UI: every parameter with value and text.
+    let listed = std::time::Instant::now();
+    let params = plugin.params();
+    let bytes: usize = params
+        .iter()
+        .map(|p| p.name.len() + plugin.param_text(p.id, plugin.param(p.id)).len() + 60)
+        .sum();
+    eprintln!(
+        "Parameterliste: {} Eintraege in {:?}, etwa {} kB als JSON",
+        params.len(),
+        listed.elapsed(),
+        bytes / 1024
+    );
     let mut synth = plugin.activate_instrument(48_000.0, 512).expect("startet");
     let mut l = vec![0.0f32; 512];
     let mut r = vec![0.0f32; 512];

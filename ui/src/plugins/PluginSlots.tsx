@@ -202,6 +202,10 @@ function SlotRow({ slot: s, first, last, prevSlot, nextSlot, paramsOpen, toggleP
   );
 }
 
+/** Sliders drawn at once. Kontakt brings 2049 (AU) or 4145 (VST3) parameters; the filter finds
+ *  the rest, so the list stays a list and not a frozen page. */
+const PARAMS_SHOWN = 200;
+
 /** A dragged slider would otherwise send a command per pixel. */
 const PARAM_THROTTLE_MS = 40;
 
@@ -273,7 +277,12 @@ export function ParamList({
           onChange={(e) => setFilter(e.target.value)}
         />
       )}
-      {shown.slice(0, 200).map((p) => (
+      {shown.length > PARAMS_SHOWN && (
+        <div className="hint">
+          {PARAMS_SHOWN} of {shown.length} parameters shown - type to find the others.
+        </div>
+      )}
+      {shown.slice(0, PARAMS_SHOWN).map((p) => (
         <label key={p.id} className="plg-param" data-midi={p.address} title={p.address}>
           <span className="plg-pname">{p.name}</span>
           <input
