@@ -139,7 +139,7 @@ export function structureSignature(status: LooperStatus): string {
  *
  * The one field of a chain that does move by itself - `comp_reduction_db`, the gain-reduction meter
  * - is deliberately missing. It differs in every single event, and a card that re-renders twenty
- * times a second is exactly what this module exists to prevent. `FxEditor` draws that meter straight
+ * times a second is exactly what this module exists to prevent. `CompReduction` (devices/editors) draws that meter straight
  * into the DOM through `useStatusEffect`, the same way the level meters do.
  */
 function fxSignature(fx: FxStatus | undefined): string {

@@ -47,7 +47,7 @@
 .dvc.off .dev-n, .dvc.off .dev-s { color: var(--tx-4); }
 .dvc.off .dev-n { font-weight: var(--fw-medium); }
 .dev-chev { --ic: 11px; color: var(--tx-4); flex: none; }
-.dev-grip { display: grid; place-items: center; width: 22px; height: 100%; color: var(--tx-4); cursor: grab; flex: none; }
+.dev-grip { display: grid; place-items: center; width: 22px; height: 100%; color: var(--tx-3); cursor: grab; flex: none; }
 .dev-grip .ic { --ic: 12px; }
 .dvc[draggable="true"]:active { cursor: grabbing; }
 
