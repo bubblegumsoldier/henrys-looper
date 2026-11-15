@@ -27,7 +27,7 @@ use tauri::{Emitter, Manager, State};
 
 use host::{Action, EngineHandle, READY_EVENT, ScoreAction};
 use logfile::log;
-use midi::{BindingOptions, MidiPortView, MidiSaved, MidiView};
+use midi::{BindingOptions, MidiPortView, MidiSaved, MidiView, ProfileAction};
 use looper_engine::engine::bus::{Bus, TrackSource};
 use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
 use looper_engine::engine::track::TrackLatency as EngineTrackLatency;
@@ -789,6 +789,17 @@ async fn midi_save(engine: State<'_, EngineHandle>) -> Result<MidiSaved, String>
     offload(move || handle.midi_save()).await
 }
 
+/// Move every binding of one device to another, rename a device, or delete its profile:
+/// `{action: "move", device, to}`, `{action: "rename", device, name}`, `{action: "delete", device}`.
+#[tauri::command]
+async fn midi_profile(
+    action: ProfileAction,
+    engine: State<'_, EngineHandle>,
+) -> Result<MidiView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.midi_profile(action)).await
+}
+
 /// The connection, the mapping and the learn mode, for a frontend that has just started and missed
 /// the events so far.
 #[tauri::command]
@@ -889,6 +900,7 @@ fn main() {
             midi_edit,
             midi_save,
             midi_state,
+            midi_profile,
             dev_snapshot
         ])
         .run(tauri::generate_context!())

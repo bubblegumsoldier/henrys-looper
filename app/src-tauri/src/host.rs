@@ -64,7 +64,7 @@ use looper_engine::midi::{
 use looper_engine::score::{CompiledScore, ScoreError, compile_score};
 
 use crate::logfile::{self, log};
-use crate::midi::{BindingOptions, MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView};
+use crate::midi::{BindingOptions, MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView, ProfileAction};
 use crate::proto::{
     AppInfo, BusOutConfig, CalibrateConfig, NoticeEvent, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
     DeviceReport, EngineInfo, HostInfo, QuantizeName, ScoreLoaded, StartConfig, StatusEvent,
@@ -274,6 +274,8 @@ enum Request {
     MidiEdit(String, Option<String>, BindingOptions, Sender<Result<MidiView, String>>),
     MidiSave(Sender<Result<MidiSaved, String>>),
     MidiState(Sender<Result<MidiView, String>>),
+    /// Move, rename or delete a device's profile.
+    MidiProfile(ProfileAction, Sender<Result<MidiView, String>>),
 }
 
 /// Cloneable, `Send + Sync` handle held in Tauri's managed state. Nothing audio-related crosses
@@ -369,6 +371,10 @@ impl EngineHandle {
 
     pub fn midi_state(&self) -> Result<MidiView, String> {
         self.call(Request::MidiState)
+    }
+
+    pub fn midi_profile(&self, action: ProfileAction) -> Result<MidiView, String> {
+        self.call(|reply| Request::MidiProfile(action, reply))
     }
 }
 
@@ -583,6 +589,13 @@ fn handle(
         }
         Request::MidiState(reply) => {
             let _ = reply.send(Ok(midi.view()));
+        }
+        Request::MidiProfile(action, reply) => {
+            let result = midi.manage(&action);
+            if let Some(text) = result.as_ref().ok().and_then(|v| v.message.clone()) {
+                log!("MIDI: {text}");
+            }
+            let _ = reply.send(result);
         }
     }
 }

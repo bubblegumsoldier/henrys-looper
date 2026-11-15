@@ -465,3 +465,135 @@ fn coremidi_virtual_controller_is_found_connected_heard_and_lost() {
     assert_eq!(device(&bridge.view(), &name).state, DeviceState::Missing);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The foot pedal is gone, a different one is on the desk: its bindings move over in one step. A
+/// control the new device already uses for something else stays where it was, and says so.
+#[test]
+fn the_bindings_of_a_missing_device_move_to_another_one() {
+    let (mut bridge, midi, dir) = bridge("move");
+    std::fs::write(
+        dir.join("old.yaml"),
+        "device: Old Pedal\nbindings:\n  ch1.note60: {target: transport.next}\n  \
+         ch1.note61: {target: global.click}\n  ch1.note62: {target: track.1.record}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("new.yaml"),
+        "# meine Notizen\ndevice: New Pedal\nbindings:\n  ch1.note62: {target: track.2.play}\n",
+    )
+    .unwrap();
+    midi.plug("New Pedal");
+    bridge.scan();
+    assert_eq!(device(&bridge.view(), "Old Pedal").state, DeviceState::Missing);
+
+    let action = ProfileAction::Move {
+        device: "Old Pedal".into(),
+        to: "New Pedal".into(),
+    };
+    let view = bridge.manage(&action).expect("moved");
+    let message = view.message.clone().unwrap();
+    assert!(message.contains("Moved 2 bindings"), "{message}");
+    assert!(message.contains("Pad 62"), "the conflict is named: {message}");
+    assert_eq!(device(&view, "New Pedal").bindings, 3);
+    assert_eq!(device(&view, "Old Pedal").bindings, 1, "the conflicting one stays");
+
+    let new = std::fs::read_to_string(dir.join("new.yaml")).unwrap();
+    assert!(new.starts_with("# meine Notizen"), "{new}");
+    assert!(new.contains("ch1.note60: {target: transport.next}"), "{new}");
+    assert!(new.contains("ch1.note62: {target: track.2.play}"), "unchanged: {new}");
+    let old = std::fs::read_to_string(dir.join("old.yaml")).unwrap();
+    assert!(!old.contains("note60") && old.contains("note62"), "{old}");
+
+    // The moved control works through the new device right away.
+    midi.send("New Pedal", press(61));
+    let results = pump_resolve(&mut bridge, &["a", "b"]);
+    assert!(
+        !matches!(results[0].1, Resolution::Unbound),
+        "global.click answers on the new pedal: {results:?}"
+    );
+
+    // Nothing left that could move -> refused with a sentence.
+    let err = bridge.manage(&action).expect_err("only the conflict is left");
+    assert!(err.contains("Nothing moved"), "{err}");
+    let same = ProfileAction::Move {
+        device: "New Pedal".into(),
+        to: "New Pedal".into(),
+    };
+    assert!(bridge.manage(&same).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A name of its own in the app and "last seen" both survive a restart; the profile file is not
+/// touched by either.
+#[test]
+fn name_and_last_seen_are_remembered_across_a_restart() {
+    let (mut bridge, midi, dir) = bridge("meta");
+    let text = "device: FS-4\nbindings:\n  ch1.note60: {target: transport.next}\n";
+    std::fs::write(dir.join("fs-4.yaml"), text).unwrap();
+    midi.plug("FS-4");
+    bridge.scan();
+    let view = bridge
+        .manage(&ProfileAction::Rename {
+            device: "FS-4".into(),
+            name: "  Foot switch  ".into(),
+        })
+        .expect("renamed");
+    assert_eq!(device(&view, "FS-4").name, "Foot switch");
+    midi.unplug("FS-4");
+    bridge.scan();
+    let seen = device(&bridge.view(), "FS-4").last_seen.expect("seen");
+    assert_eq!(std::fs::read_to_string(dir.join("fs-4.yaml")).unwrap(), text);
+
+    // The app starts again, the pedal is still not there.
+    let mut again = MidiBridge::with(Box::new(midi.clone()), &dir);
+    again.scan();
+    let view = again.view();
+    let fs4 = device(&view, "FS-4");
+    assert_eq!(fs4.state, DeviceState::Missing);
+    assert_eq!(fs4.last_seen, Some(seen), "last seen comes from devices.json");
+    assert_eq!(fs4.name, "Foot switch");
+
+    // An empty name gives the device its own name back.
+    let view = again
+        .manage(&ProfileAction::Rename {
+            device: "FS-4".into(),
+            name: String::new(),
+        })
+        .expect("reset");
+    assert_eq!(device(&view, "FS-4").name, "FS-4");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Deleting a profile disconnects the device, keeps the file aside and does not connect it again.
+#[test]
+fn a_deleted_profile_is_kept_aside_and_its_device_is_no_longer_taken() {
+    let (mut bridge, midi, dir) = bridge("delete");
+    std::fs::write(
+        dir.join("pads.yaml"),
+        "device: Pads\nbindings:\n  ch1.note36: {target: track.1.record}\n",
+    )
+    .unwrap();
+    midi.plug("Pads");
+    bridge.scan();
+    assert!(bridge.is_open());
+    let view = bridge
+        .manage(&ProfileAction::Delete {
+            device: "Pads".into(),
+        })
+        .expect("deleted");
+    assert!(view.devices.is_empty());
+    assert!(view.bindings.is_empty());
+    assert!(!bridge.is_open());
+    assert!(!dir.join("pads.yaml").exists());
+    assert!(dir.join("pads.yaml.deleted").exists(), "nothing is destroyed");
+    assert!(view.ports.iter().any(|p| p.name == "Pads" && p.profile.is_none()));
+    bridge.scan();
+    assert!(!bridge.is_open(), "an unknown device is not taken by itself");
+    let err = bridge
+        .manage(&ProfileAction::Delete {
+            device: "Pads".into(),
+        })
+        .expect_err("gone");
+    assert!(err.contains("no MIDI profile"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -46,6 +46,7 @@
 //! knob sweep is coalesced and emitted at most every [`EMIT_INTERVAL`]; anything discrete goes out
 //! at once.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -69,6 +70,12 @@ const PENDING_MAX: usize = 64;
 pub const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the session's shape (tracks, sections) is sampled for the status of the bindings.
 const SHAPE_INTERVAL: Duration = Duration::from_millis(250);
+/// How often "last seen" of a connected device is written to disk. An unplug, a connect and a
+/// manual disconnect are written at once; this only bounds what a crash can lose.
+const SEEN_PERSIST_INTERVAL: Duration = Duration::from_secs(60);
+/// The file next to the profiles that remembers what is not part of a profile: the name a device
+/// was given in the app and when it was last seen. Not `.yaml`, so the store never reads it as one.
+pub const DEVICES_FILE: &str = "devices.json";
 
 // ---------------------------------------------------------------------------------------------
 // The MIDI system, behind a seam so the bridge can be tested without CoreMIDI or winmm
@@ -190,6 +197,8 @@ pub enum DeviceState {
 pub struct MidiDeviceView {
     /// `device:` of the profile - also the key the other views refer to.
     pub device: String,
+    /// What the app calls it: the name given with "Rename", else `device`.
+    pub name: String,
     pub path: String,
     pub state: DeviceState,
     pub connected: bool,
@@ -203,8 +212,9 @@ pub struct MidiDeviceView {
     pub error: Option<String>,
     /// True while a change could not be written (see `save_error`).
     pub unsaved: bool,
-    /// When the device was last connected, in milliseconds since 1970 - "last seen 20:41". Only
-    /// known since the app started; null before that.
+    /// When the device was last connected, in milliseconds since 1970 - "last seen 20:41".
+    /// Remembered across restarts (`devices.json` next to the profiles); null for a device that has
+    /// never been connected.
     pub last_seen: Option<u64>,
     /// One English line, ready to show: "connected - 12 of 12 bindings active".
     pub summary: String,
@@ -321,6 +331,31 @@ pub struct BindingOptions {
     pub max: Option<f32>,
 }
 
+/// Managing the profiles themselves from the device list.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum ProfileAction {
+    /// Move every binding of `device` into the profile of `to` - a replacement controller, or the
+    /// same pedal showing up under another name. A control `to` already uses for something else
+    /// stays where it was, and the message says which.
+    Move { device: String, to: String },
+    /// Give the device a name of its own in the app. Empty = back to its port name. The profile
+    /// file is not touched: `device:` is what the port is recognised by.
+    Rename { device: String, name: String },
+    /// Forget a device: its profile file is renamed to `<file>.yaml.deleted` (nothing is
+    /// destroyed), and it is no longer connected by itself.
+    Delete { device: String },
+}
+
+/// What `devices.json` keeps per profile file.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+struct DeviceMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_seen: Option<u64>,
+}
+
 // ---------------------------------------------------------------------------------------------
 // The bridge
 // ---------------------------------------------------------------------------------------------
@@ -359,8 +394,10 @@ pub struct MidiBridge {
     last_emit: Instant,
     last_scan: Option<Instant>,
     last_shape: Option<Instant>,
-    /// Profile file -> when its device was last seen connected.
-    seen: Vec<(PathBuf, u64)>,
+    /// Profile file name -> its app-side name and when its device was last seen connected.
+    /// Mirrors `devices.json`.
+    meta: BTreeMap<String, DeviceMeta>,
+    last_persist: Option<Instant>,
 }
 
 impl Default for MidiBridge {
@@ -377,6 +414,8 @@ impl MidiBridge {
 
     /// The bridge on any MIDI system and any folder - what the tests use.
     pub fn with(system: Box<dyn MidiSystem>, dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        let meta = load_meta(&dir);
         Self {
             system,
             store: ProfileStore::new(dir),
@@ -395,7 +434,8 @@ impl MidiBridge {
             last_emit: Instant::now(),
             last_scan: None,
             last_shape: None,
-            seen: Vec::new(),
+            meta,
+            last_persist: None,
         }
     }
 
@@ -449,12 +489,16 @@ impl MidiBridge {
         self.available = ports;
 
         // Still here: remember when, for "last seen" once it is gone.
-        let now = now_ms();
-        for link in &self.links {
-            match self.seen.iter_mut().find(|(p, _)| *p == link.profile) {
-                Some(slot) => slot.1 = now,
-                None => self.seen.push((link.profile.clone(), now)),
-            }
+        let here: Vec<PathBuf> = self.links.iter().map(|l| l.profile.clone()).collect();
+        for path in &here {
+            self.touch_seen(path);
+        }
+        if !here.is_empty()
+            && self
+                .last_persist
+                .is_none_or(|at| at.elapsed() >= SEEN_PERSIST_INTERVAL)
+        {
+            self.persist_meta();
         }
 
         // Gone: drop the link, say how many bindings went with it.
@@ -477,6 +521,7 @@ impl MidiBridge {
             log.push(line.clone());
             self.message = Some(line);
             self.view_changed = true;
+            self.persist_meta();
         }
         if self.links.is_empty() && self.learn.is_armed() {
             // Nothing could answer the learn mode any more.
@@ -531,8 +576,8 @@ impl MidiBridge {
             router: Router::new(MidiMap::new()),
             notes: Vec::new(),
         });
-        self.seen.retain(|(p, _)| p != path);
-        self.seen.push((path.to_path_buf(), now_ms()));
+        self.touch_seen(path);
+        self.persist_meta();
         self.rebuild(path);
         self.view_changed = true;
         let entry = self.store.get(path);
@@ -631,6 +676,9 @@ impl MidiBridge {
         }
         if self.links.is_empty() {
             self.learn.cancel();
+        }
+        if !closed.is_empty() {
+            self.persist_meta();
         }
         self.message = Some(if closed.is_empty() {
             "No such MIDI device is connected.".to_string()
@@ -811,11 +859,11 @@ impl MidiBridge {
             [one] => Ok(one.path.clone()),
             [] => Err(if self.score.get(id).is_some() {
                 format!(
-                    "{id} kommt aus der Partitur, nicht aus dem Profil. Diese Bindung steht im \
-                     'midi:'-Block der Partitur und geht mit ihr wieder weg."
+                    "{id} comes from the score, not from a profile. It is written in the score's \
+                     'midi:' block and goes when the score goes."
                 )
             } else {
-                format!("{id} ist gar nicht belegt.")
+                format!("{id} is not bound at all.")
             }),
             many => Err(format!(
                 "{id} is bound on several devices ({}) - say which one.",
@@ -836,8 +884,8 @@ impl MidiBridge {
             .get_mut(&path)
             .and_then(|e| e.profile.as_mut())
             .and_then(|p| p.map.remove(key))
-            .ok_or_else(|| format!("{id} ist gar nicht belegt."))?;
-        let mut message = format!("{id} ist wieder frei (war \"{}\").", removed.target.label());
+            .ok_or_else(|| format!("{id} is not bound at all."))?;
+        let mut message = format!("{id} is free again (was \"{}\").", removed.target.label());
         if let Err(error) = self.persist(&path) {
             message.push_str(&format!(" NOT SAVED: {error}"));
         }
@@ -923,6 +971,184 @@ impl MidiBridge {
             message,
             view: self.view(),
         })
+    }
+
+    // ---- the profiles themselves --------------------------------------------------------------
+
+    /// Move, rename or delete a profile (see [`ProfileAction`]).
+    pub fn manage(&mut self, action: &ProfileAction) -> Result<MidiView, String> {
+        let message = match action {
+            ProfileAction::Move { device, to } => self.move_bindings(device, to)?,
+            ProfileAction::Rename { device, name } => self.rename(device, name)?,
+            ProfileAction::Delete { device } => self.delete(device)?,
+        };
+        self.message = Some(message);
+        self.view_changed = true;
+        Ok(self.view())
+    }
+
+    /// The profile file of a device, by its `device:`.
+    fn profile_of(&self, device: &str) -> Result<PathBuf, String> {
+        self.store
+            .entries()
+            .iter()
+            .find(|e| e.device == device)
+            .map(|e| e.path.clone())
+            .ok_or_else(|| format!("There is no MIDI profile for \"{device}\"."))
+    }
+
+    /// What the app calls a device.
+    fn display_name(&self, path: &Path) -> String {
+        self.meta
+            .get(&meta_key(path))
+            .and_then(|m| m.name.clone())
+            .or_else(|| self.store.get(path).map(|e| e.device.clone()))
+            .unwrap_or_default()
+    }
+
+    fn readable_map(&self, path: &Path) -> Result<MidiMap, String> {
+        self.store
+            .get(path)
+            .and_then(|e| e.profile.as_ref())
+            .map(|p| p.map.clone())
+            .ok_or_else(|| {
+                format!(
+                    "The profile {} has errors - fix the file first, it is left untouched.",
+                    path.display()
+                )
+            })
+    }
+
+    fn move_bindings(&mut self, device: &str, to: &str) -> Result<String, String> {
+        let from_path = self.profile_of(device)?;
+        let to_path = self.profile_of(to)?;
+        if from_path == to_path {
+            return Err("Source and destination are the same device.".to_string());
+        }
+        let source = self.readable_map(&from_path)?;
+        let mut destination = self.readable_map(&to_path)?;
+        let (from_name, to_name) = (self.display_name(&from_path), self.display_name(&to_path));
+        if source.is_empty() {
+            return Err(format!("\"{from_name}\" has no bindings to move."));
+        }
+
+        let mut moved: Vec<MidiId> = Vec::new();
+        let mut kept: Vec<String> = Vec::new();
+        for (id, binding) in source.sorted() {
+            match destination.get(id) {
+                Some(there) if there.target != binding.target => kept.push(format!(
+                    "{} (\"{to_name}\" uses it for \"{}\")",
+                    id.short(),
+                    there.target.label()
+                )),
+                // The same job on both: nothing to add, the source just lets go of it.
+                Some(_) => moved.push(id),
+                None => {
+                    destination.insert(id, binding.clone());
+                    moved.push(id);
+                }
+            }
+        }
+        if moved.is_empty() {
+            return Err(format!(
+                "Nothing moved: \"{to_name}\" already uses every one of these controls - {}.",
+                kept.join(", ")
+            ));
+        }
+        let mut remaining = source.clone();
+        for id in &moved {
+            remaining.remove(*id);
+        }
+
+        // Destination first: if writing it fails, the source still has everything.
+        if let Some(profile) = self.store.get_mut(&to_path).and_then(|e| e.profile.as_mut()) {
+            profile.map = destination;
+        }
+        let mut problems = Vec::new();
+        if let Err(error) = self.persist(&to_path) {
+            problems.push(error);
+        }
+        if let Some(profile) = self.store.get_mut(&from_path).and_then(|e| e.profile.as_mut()) {
+            profile.map = remaining;
+        }
+        if let Err(error) = self.persist(&from_path) {
+            problems.push(error);
+        }
+        self.rebuild(&to_path);
+        self.rebuild(&from_path);
+        for link in self.links.iter_mut().filter(|l| l.profile == to_path) {
+            // Moved knobs must not jump to where the new device's knobs happen to sit.
+            link.router.rearm();
+        }
+
+        let mut message = format!(
+            "Moved {} {} from \"{from_name}\" to \"{to_name}\".",
+            moved.len(),
+            plural(moved.len(), "binding", "bindings")
+        );
+        if !kept.is_empty() {
+            message.push_str(&format!(" Kept on \"{from_name}\": {}.", kept.join(", ")));
+        }
+        if !problems.is_empty() {
+            message.push_str(&format!(" NOT SAVED: {}", problems.join("; ")));
+        }
+        Ok(message)
+    }
+
+    fn rename(&mut self, device: &str, name: &str) -> Result<String, String> {
+        let path = self.profile_of(device)?;
+        let name = name.trim();
+        let slot = self.meta.entry(meta_key(&path)).or_default();
+        slot.name = (!name.is_empty() && name != device).then(|| name.to_string());
+        let message = match &slot.name {
+            Some(name) => format!("\"{device}\" is now called \"{name}\"."),
+            None => format!("\"{device}\" goes by its own name again."),
+        };
+        self.persist_meta();
+        Ok(message)
+    }
+
+    fn delete(&mut self, device: &str) -> Result<String, String> {
+        let path = self.profile_of(device)?;
+        let name = self.display_name(&path);
+        let count = self.store.get(&path).map_or(0, |e| e.len());
+        let kept = path.with_extension("yaml.deleted");
+        std::fs::rename(&path, &kept)
+            .map_err(|e| format!("The profile {} could not be removed: {e}", path.display()))?;
+        self.links.retain(|link| link.profile != path);
+        if self.links.is_empty() {
+            self.learn.cancel();
+        }
+        self.store.scan();
+        self.meta.remove(&meta_key(&path));
+        self.persist_meta();
+        Ok(format!(
+            "Deleted \"{name}\" with {count} {}. The file is kept as {}; the device is no \
+             longer connected by itself.",
+            plural(count, "binding", "bindings"),
+            kept.display()
+        ))
+    }
+
+    /// A device is connected right now.
+    fn touch_seen(&mut self, path: &Path) {
+        self.meta.entry(meta_key(path)).or_default().last_seen = Some(now_ms());
+    }
+
+    /// Write `devices.json`. Failing to is not worth an error on screen: it only holds names and
+    /// times, and the next write tries again.
+    fn persist_meta(&mut self) {
+        self.last_persist = Some(Instant::now());
+        let path = self.store.dir().join(DEVICES_FILE);
+        let Ok(text) = serde_json::to_string_pretty(&self.meta) else {
+            return;
+        };
+        if std::fs::read_to_string(&path).is_ok_and(|old| old == text) {
+            return;
+        }
+        let _ = std::fs::create_dir_all(self.store.dir());
+        let temp = path.with_extension("json.tmp");
+        let _ = std::fs::write(&temp, text).and_then(|()| std::fs::rename(&temp, &path));
     }
 
     // ---- the stream ------------------------------------------------------------------------
@@ -1162,11 +1388,15 @@ impl MidiBridge {
                 inactive,
                 error: entry.error.clone().or(failure),
                 unsaved: entry.unsaved,
+                name: self
+                    .meta
+                    .get(&meta_key(&entry.path))
+                    .and_then(|m| m.name.clone())
+                    .unwrap_or_else(|| entry.device.clone()),
                 last_seen: self
-                    .seen
-                    .iter()
-                    .find(|(p, _)| *p == entry.path)
-                    .map(|(_, at)| *at),
+                    .meta
+                    .get(&meta_key(&entry.path))
+                    .and_then(|m| m.last_seen),
                 summary,
             });
         }
@@ -1248,6 +1478,20 @@ fn pick(selector: &str, names: &[String]) -> Result<String, String> {
             names.join(", ")
         )),
     }
+}
+
+/// The key of a profile in `devices.json`: its file name, so the folder can move.
+fn meta_key(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn load_meta(dir: &Path) -> BTreeMap<String, DeviceMeta> {
+    std::fs::read_to_string(dir.join(DEVICES_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
 }
 
 fn now_ms() -> u64 {
