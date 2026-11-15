@@ -32,17 +32,23 @@ async function attempt(work: () => Promise<unknown>): Promise<void> {
   }
 }
 
+/** How long the note light stays on after a note. */
+const NOTE_LED_MS = 150;
+
 /** The light: on while keys are held, and for a moment after every note that arrives. */
 export function NoteLed({ index }: { index: number }) {
   const el = useRef<HTMLSpanElement | null>(null);
   const last = useRef<number | null>(null);
+  const litUntil = useRef(0);
   useStatusEffect((status: LooperStatus) => {
     const t = status.tracks[index];
     if (!t || !el.current) return;
     const notes = t.notes ?? 0;
-    const moved = last.current !== null && notes !== last.current;
+    const now = performance.now();
+    // A note keeps the light on for a moment, so fast notes read as "lit", not as flicker.
+    if (last.current !== null && notes !== last.current) litUntil.current = now + NOTE_LED_MS;
     last.current = notes;
-    el.current.classList.toggle("lit", moved || (t.held_notes ?? 0) > 0);
+    el.current.classList.toggle("lit", now < litUntil.current || (t.held_notes ?? 0) > 0);
   });
   return <span ref={el} className="nled" title="Lights while notes reach this track" aria-hidden="true" />;
 }
