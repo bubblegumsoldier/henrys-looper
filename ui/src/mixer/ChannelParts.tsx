@@ -22,6 +22,7 @@ function LayerRow({
   number,
   muted,
   gain,
+  notes,
   recording,
   actions,
 }: {
@@ -30,12 +31,19 @@ function LayerRow({
   number: number;
   muted: boolean;
   gain: number;
+  /** A MIDI layer's note count; absent on an audio layer. */
+  notes?: number;
   recording: boolean;
   actions: ChannelActions;
 }) {
   return (
     <div className={`layer${recording ? " rec" : ""}${muted ? " muted" : ""}`}>
       <span className="no">{number}</span>
+      {notes !== undefined && (
+        <span className="num dim2" title={`MIDI layer: ${notes} ${notes === 1 ? T.note1 : T.notes} - its volume scales the velocity`}>
+          <Icon name="midi" size={11} /> {notes}
+        </span>
+      )}
       <HBar
         className="grow"
         value={gain}
@@ -95,6 +103,7 @@ export function LayerList({ track, actions }: { track: LooperTrackStatus; action
             number={l.number}
             muted={l.muted}
             gain={l.gain}
+            notes={l.notes}
             recording={l.index === recordingLayer}
             actions={actions}
           />

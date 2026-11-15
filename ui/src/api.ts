@@ -95,6 +95,10 @@ export const api = {
   trackMonitor: (track: number, on: boolean) => call<void>("track_monitor", { track, on }),
   /** Where the track sits between the speakers: -1 hard left, 0 centre, +1 hard right. */
   trackPan: (track: number, pan: number) => call<void>("track_pan", { track, pan }),
+  /** What a take of an instrument track stores: its sound or its notes. Only while it is empty. */
+  trackLoopKind: (track: number, kind: "audio" | "midi") => call<void>("track_loop_kind", { track, kind }),
+  /** Note grid of a MIDI loop; acts on what is recorded already, never changes the recording. */
+  trackGrid: (track: number, grid: string) => call<void>("track_grid", { track, grid }),
   /**
    * Which output buses one source of a track is heard on.
    *

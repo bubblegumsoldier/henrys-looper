@@ -3,6 +3,22 @@ import { henry } from "./fixtures";
 import * as ops from "./ops";
 import { deriveLayers, inheritedState, resolveSection, sectionSpans, totalBars } from "./resolve";
 
+describe("clip grid", () => {
+  it("sets and drops a clip's own note grid without changing its state", () => {
+    const doc = henry();
+    const cell = { section: 5, track: 0 };
+    const name = doc.tracks[0].name;
+    const before = inheritedState(doc, 5, name).state;
+    const set = ops.setCellGrid(doc, cell, "1/16");
+    expect(set.sections[5].tracks.find((t) => t.track === name)).toMatchObject({ track: name, state: before, grid: "1/16" });
+    // Picking the shown state again keeps the entry, because it carries the grid.
+    const same = ops.setCellState(set, [cell], before);
+    expect(same.sections[5].tracks.find((t) => t.track === name)?.grid).toBe("1/16");
+    const dropped = ops.setCellGrid(same, cell, undefined);
+    expect(dropped.sections[5].tracks.find((t) => t.track === name)?.grid).toBeUndefined();
+  });
+});
+
 const keys = (doc: ReturnType<typeof henry>) => doc.midi.map((m) => m.key);
 const ids = (doc: ReturnType<typeof henry>) => doc.sections.map((s) => s.id);
 

@@ -11,6 +11,7 @@ import { noteName } from "../plugins/instruments";
 import { usePlugins } from "../plugins/store";
 import { T } from "../shell/terms";
 import type { DocTrack, ModelIssue, ScoreDoc, ScoreState, TrackMidi } from "../types";
+import { GRID_CHOICES } from "../live/MidiLoopRows";
 import { inputLabel } from "./Grid";
 import { STATES, STATE_LOOK, busHas, busWord, duration, plural } from "./labels";
 import * as ops from "./ops";
@@ -525,6 +526,7 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
   }
   const needsMonitor = !t.instrument && (st.state === "record" || st.state === "overdub" || st.state === "hear_through");
   const own = st.from.kind === "own";
+  const ownGrid = s.tracks.find((x) => x.track === t.name)?.grid;
   return (
     <div className="insp-s">
       <span className="caps">
@@ -541,6 +543,27 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
         {what}
         {needsMonitor && t.monitor === false && <span className="warnline"> Monitoring is off for {t.name}, so you will not hear the input.</span>}
       </div>
+      {t.loop === "midi" && (
+        <div className="frow">
+          <label>{T.noteGrid}</label>
+          <div>
+            <select
+              className="field sel"
+              value={ownGrid ?? ""}
+              disabled={!editable}
+              title="This clip's note grid: while the section runs, the track's MIDI layers play on it"
+              onChange={(e) => edit((d) => ops.setCellGrid(d, { section: index, track }, e.target.value === "" ? undefined : e.target.value))}
+            >
+              <option value="">Track ({GRID_CHOICES.find((g) => g.value === (t.grid ?? "none"))?.label})</option>
+              {GRID_CHOICES.map((g) => (
+                <option key={g.value} value={g.value}>
+                  {g.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
       {own && (
         <button className="btn s" disabled={!editable} onClick={() => edit((d) => ops.resetCells(d, [{ section: index, track }]))}>
           {s.repeat ? `Reset to template (${s.repeat})` : "Clear (back to Stop)"}
@@ -617,7 +640,44 @@ function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, index
           </div>
         </div>
         {t.instrument ? (
-          <InstrumentRows doc={doc} track={t} editable={editable} edit={edit} patch={patch} />
+          <>
+            <InstrumentRows doc={doc} track={t} editable={editable} edit={edit} patch={patch} />
+            <div className="frow">
+              <label>{T.loopKind}</label>
+              <div>
+                <select
+                  className="field sel"
+                  value={t.loop === "midi" ? "midi" : "audio"}
+                  disabled={!editable}
+                  title="What a take stores: the instrument's sound (Audio) or the notes, played back through the instrument (MIDI)"
+                  onChange={(e) => patch({ loop: e.target.value === "midi" ? "midi" : undefined, ...(e.target.value === "midi" ? {} : { grid: undefined }) })}
+                >
+                  <option value="audio">{T.loopAudio}</option>
+                  <option value="midi">{T.loopMidi}</option>
+                </select>
+              </div>
+            </div>
+            {t.loop === "midi" && (
+              <div className="frow">
+                <label>{T.noteGrid}</label>
+                <div>
+                  <select
+                    className="field sel"
+                    value={t.grid ?? "none"}
+                    disabled={!editable}
+                    title="Notes play on this grid - the recorded ones too. The recording itself never changes."
+                    onChange={(e) => patch({ grid: e.target.value === "none" ? undefined : e.target.value })}
+                  >
+                    {GRID_CHOICES.map((g) => (
+                      <option key={g.value} value={g.value}>
+                        {g.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
+          </>
         ) : (
           <>
             <div className="frow">

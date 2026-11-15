@@ -39,8 +39,10 @@ export interface LayerStatus {
   /** One-based, for display. */
   number: number;
   muted: boolean;
-  /** 0.0 to 4.0. */
+  /** 0.0 to 4.0. On a MIDI layer it scales the velocity. */
   gain: number;
+  /** On a MIDI loop: how many notes the layer holds. Absent on an audio layer. */
+  notes?: number;
 }
 
 // --- effects ---------------------------------------------------------------
@@ -267,6 +269,10 @@ export interface LooperTrackStatus {
   notes?: number;
   /** Keys held down right now. */
   held_notes?: number;
+  /** The takes store notes (a MIDI loop), played back through the instrument. */
+  midi_loop?: boolean;
+  /** Note grid of the MIDI layers: "none", "1/4", "1/8", "1/16", "1/8t", "1/16t". */
+  grid?: string;
 }
 
 /** Event `looper://status`, pushed about twenty times a second while the engine runs. */
@@ -478,6 +484,10 @@ export interface StartInstrument {
   note_high?: number | null;
   /** Heard whenever it is played (default true). */
   monitor: boolean;
+  /** What a take stores: the sound ("audio", default) or the notes ("midi"). */
+  loop?: "audio" | "midi" | null;
+  /** Note grid of a MIDI loop (default "none"). */
+  grid?: string | null;
 }
 
 /** Where one bus leaves the machine, as the setup writes it. */
@@ -711,9 +721,9 @@ export interface DocTrack {
   bus?: string;
   /** Same words; absent = `monitor` (`main+monitor` on an instrument track). */
   monitor_bus?: string;
-  /** Reserved: `audio` | `midi` (what a take stores). Not offered in the UI yet. */
+  /** `audio` | `midi`: what a take stores; absent = `audio`. `midi` needs an instrument track. */
   loop?: string;
-  /** Reserved: note grid for a later quantisation (`none`, `1/4`, ...). Not offered yet. */
+  /** Note grid of the track's MIDI layers (`none`, `1/4`, `1/8`, `1/16`, `1/8t`, `1/16t`). */
   grid?: string;
   comments?: DocComments;
   line?: number;
@@ -750,7 +760,7 @@ export interface DocMidiBinding {
 export interface DocSectionTrack {
   track: string;
   state: ScoreState;
-  /** Reserved: the clip's own note grid. */
+  /** The clip's own note grid, overriding the track's while the section runs. */
   grid?: string;
   comments?: DocComments;
   line?: number;

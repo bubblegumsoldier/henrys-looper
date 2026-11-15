@@ -128,7 +128,11 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         </span>
         <b>{track.name}</b>
         <span>
-          {track.instrument ? T.midiIn : `${T.input} ${track.input_channels.join("–")}`}
+          {track.midi_loop
+            ? `${T.midiLoop} · ${track.layers.reduce((n, l) => n + (l.notes ?? 0), 0)} ${T.notes}`
+            : track.instrument
+              ? T.midiIn
+              : `${T.input} ${track.input_channels.join("–")}`}
         </span>
         <FxLetters track={track} />
         <span className="lay" title={`${track.layers.length} ${track.layers.length === 1 ? "layer" : "layers"}`}>

@@ -25,6 +25,7 @@ import { fail, run } from "../shell/notes";
 import { startEngine, stopEngine, useEngine } from "../shell/engine";
 import { T, gainDb, num } from "../shell/terms";
 import { HMeter } from "../live/HMeter";
+import { GRID_CHOICES } from "../live/MidiLoopRows";
 import { TapTempo } from "../live/TapTempo";
 import {
   BUS_CHOICES,
@@ -1022,6 +1023,25 @@ function InstrumentInputFields({
         title="Which MIDI channel plays this track. Notes on other channels stay with the MIDI bindings."
         onChange={(v) => onChange({ ...value, channel: v === 0 ? null : v })}
       />
+      <Select
+        width={90}
+        value={value.loop === "midi" ? "midi" : "audio"}
+        options={[
+          { value: "audio", label: `${T.loopKind}: ${T.loopAudio}` },
+          { value: "midi", label: `${T.loopKind}: ${T.loopMidi}` },
+        ]}
+        title="What a take stores: the instrument's sound (Audio) or the notes, played back through the instrument (MIDI)"
+        onChange={(v) => onChange({ ...value, loop: v === "midi" ? "midi" : null })}
+      />
+      {value.loop === "midi" && (
+        <Select
+          width={90}
+          value={value.grid ?? "none"}
+          options={GRID_CHOICES.map((g) => ({ value: g.value, label: g.value === "none" ? `${T.noteGrid}: ${T.gridNone}` : g.label }))}
+          title="Note grid of the MIDI loop. Acts on what is recorded too and never changes the recording."
+          onChange={(v) => onChange({ ...value, grid: v === "none" ? null : v })}
+        />
+      )}
     </>
   );
 }

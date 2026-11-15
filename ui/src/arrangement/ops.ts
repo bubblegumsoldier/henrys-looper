@@ -163,7 +163,7 @@ export function setCellState(doc: ScoreDoc, cells: Cell[], state: ScoreState): S
     if (track === undefined || !section) continue;
     const inherited = inheritedState(d, cell.section, track);
     const at = section.tracks.findIndex((t) => t.track === track);
-    if (inherited.state === state) {
+    if (inherited.state === state && !(at >= 0 && section.tracks[at].grid)) {
       if (at >= 0) section.tracks.splice(at, 1);
     } else if (at >= 0) {
       section.tracks[at] = { ...section.tracks[at], state };
@@ -173,6 +173,29 @@ export function setCellState(doc: ScoreDoc, cells: Cell[], state: ScoreState): S
   }
   // Keep the written order the score's track order, so the text reads like the grid.
   for (const cell of cells) sortStates(d, cell.section);
+  return done(d);
+}
+
+/**
+ * The note grid of one clip (`keys: {state: play, grid: 1/16}`): while the section runs, the
+ * track's MIDI layers play on it instead of the track's own grid. `undefined` follows the track.
+ * A clip without a state of its own gets the state it shows now, so nothing else changes.
+ */
+export function setCellGrid(doc: ScoreDoc, cell: Cell, grid: string | undefined): ScoreDoc {
+  const d = draft(doc);
+  const track = d.tracks[cell.track]?.name;
+  const section = d.sections[cell.section];
+  if (track === undefined || !section) return doc;
+  const at = section.tracks.findIndex((t) => t.track === track);
+  if (at >= 0) {
+    const entry = { ...section.tracks[at] };
+    if (grid === undefined) delete entry.grid;
+    else entry.grid = grid;
+    section.tracks[at] = entry;
+  } else if (grid !== undefined) {
+    section.tracks.push({ track, state: inheritedState(d, cell.section, track).state, grid });
+    sortStates(d, cell.section);
+  }
   return done(d);
 }
 

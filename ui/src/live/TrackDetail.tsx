@@ -18,6 +18,7 @@ import { Knob, linear } from "../mixer/controls";
 import { DeviceChain } from "../devices/DeviceChain";
 import { trackOwner } from "../devices/model";
 import { LatencyRows, LayerList } from "../mixer/ChannelParts";
+import { MidiLoopRows } from "./MidiLoopRows";
 import { FADER_CURVE } from "../mixer/Strip";
 import { MAX_TRACK_GAIN, faderText, panText } from "../mixer/scale";
 import "../mixer/mixer.css";
@@ -195,6 +196,7 @@ export function TrackDetail({ track, color, actions, defaultLatency, onClose }: 
           <div className="caps">Channel</div>
           <ChannelRow track={track} actions={actions} />
           <SendRow track={i} status={track} actions={actions} />
+          {track.instrument && <MidiLoopRows track={track} />}
         </section>
 
         <section className="insp-s drawer-fx">
