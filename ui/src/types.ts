@@ -206,6 +206,10 @@ export interface LooperTrackStatus {
   loop_seconds: number;
   /** Frames already written during a running loop-defining take. */
   filled_samples: number;
+  /** 1-based bar inside this track's own loop (or its first take), 0 when there is none. */
+  take_bar: number;
+  /** Loop length in whole bars, 0 while nothing is recorded. */
+  loop_bars: number;
   /** Loudest recorded input channel. */
   input_peak: number;
   input_dbfs: number | null;

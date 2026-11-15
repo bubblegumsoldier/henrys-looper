@@ -377,8 +377,8 @@ function Stage({ onOpenArrangement }: Props) {
                 onDetail={(i) => setDetail((d) => (d === i ? null : i))}
                 actions={actions}
                 next={nextStates[t.index] ?? null}
-                barInLoop={writing ? barInLoop : 0}
-                loopBars={clock.bars}
+                barInLoop={writing ? t.take_bar || barInLoop : 0}
+                loopBars={t.loop_bars || clock.bars}
               />
             );
           })}

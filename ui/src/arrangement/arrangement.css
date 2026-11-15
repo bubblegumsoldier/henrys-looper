@@ -79,6 +79,12 @@
 .hl-arr .sec.lifted { opacity: .45; }
 .hl-arr .sec.loopsec { overflow: visible; }
 .hl-arr .sec.loopsec .t { overflow: hidden; }
+/* A section a bar or two wide: the number gives way to the name, and the last one - nothing to its
+   right but empty ruler - lets the name run out over the free space instead of cutting it to "…". */
+.hl-arr .sec.narrow { padding: 4px 2px 0 4px; }
+.hl-arr .sec.narrow .t .no { display: none; }
+.hl-arr .sec.narrow.last, .hl-arr .sec.narrow.last .t, .hl-arr .sec.narrow.last .t .id { overflow: visible; }
+.hl-arr .sec.narrow.last .t .id { text-overflow: clip; }
 .hl-arr .sec .edge { position: absolute; top: 0; bottom: -21px; right: -4px; width: 8px; cursor: ew-resize; z-index: 2; }
 .hl-arr .sec .edge:hover, .hl-arr .arr.dragging .sec .edge:active { background: linear-gradient(to right, transparent 3px, var(--accent) 3px 5px, transparent 5px); }
 .hl-arr .sec.armed { border: 1px dashed var(--st-armed-line); border-bottom: 0; background: var(--hatch-armed), #1d1b12; }

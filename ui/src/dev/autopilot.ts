@@ -19,7 +19,7 @@
 //! UI-only steps (`mode`, `ui`) are passed to the frame as a `looper-autopilot` window event.
 
 import { invoke } from "@tauri-apps/api/core";
-import { api, midiApi, scoreApi } from "../api";
+import { api, filesApi, midiApi, scoreApi } from "../api";
 import { fail, note } from "../shell/notes";
 import { startEngine, stopEngine } from "../shell/engine";
 import { currentConfig, setConfig } from "../setup/config";
@@ -55,6 +55,16 @@ async function runStep(step: Step): Promise<void> {
       note(loaded.message);
       return;
     }
+    case "fileOpen": {
+      // What File > Open does once the picker has answered (scoreActions.openPath).
+      const opened = await filesApi.open(String(step.path));
+      updateScoreFile({ text: opened.yaml, path: opened.path, name: opened.name, savedText: opened.yaml });
+      note(`Opened ${opened.name}.`);
+      return;
+    }
+    case "reload":
+      window.location.reload();
+      return;
     case "scoreStart":
       note(await scoreApi.start());
       return;

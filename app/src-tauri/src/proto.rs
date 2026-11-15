@@ -636,6 +636,12 @@ pub struct TrackStatusEvent {
     pub loop_seconds: f64,
     /// Frames already written during a running loop-defining take.
     pub filled_samples: u64,
+    /// 1-based bar inside this track's own loop (or inside the first take while it is being
+    /// written), counted from the track's origin - 0 when there is neither. The global bar counter
+    /// runs from engine start and has nothing to do with where a loop begins.
+    pub take_bar: u32,
+    /// Loop length in whole bars, 0 while nothing is recorded.
+    pub loop_bars: u32,
     /// Loudest recorded input channel.
     pub input_peak: f32,
     pub input_dbfs: Option<f64>,
@@ -903,6 +909,8 @@ pub fn track_event(
         loop_samples: ts.loop_len,
         loop_seconds: ts.loop_len as f64 / rate,
         filled_samples: ts.filled,
+        take_bar: 0,
+        loop_bars: 0,
         input_peak,
         input_dbfs: dbfs(input_peak),
         input_peaks: ts.input_peak[..(ts.channels as usize).clamp(1, 2)].to_vec(),
@@ -1932,6 +1940,7 @@ mod tests {
                 "latency_ms",
                 "latency_trim",
                 "layers",
+                "loop_bars",
                 "loop_samples",
                 "loop_seconds",
                 "monitor",
@@ -1953,6 +1962,7 @@ mod tests {
                 "state_label",
                 "strip_peak",
                 "strip_peaks",
+                "take_bar",
             ]
         );
         assert_eq!(

@@ -244,6 +244,8 @@ export function Grid({ doc, errors, editable, run, sel, setSel, zoom, edit, onGo
           const narrow = span.bars * zoom < 70;
           const cls = [
             "sec",
+            narrow && "narrow",
+            narrow && i === doc.sections.length - 1 && "last",
             picked.has(i) && "sel",
             !auto && "loopsec",
             sounding && run.section === i && "cur",

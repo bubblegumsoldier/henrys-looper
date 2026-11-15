@@ -116,7 +116,7 @@ export function TitleBar({ mode, setupOpen, onMode, onSetup, enginePanelOpen, on
   const locked = mode === "live" && !setupOpen && scoreRuns(score);
 
   return (
-    <header className={`titlebar${IS_MAC ? " mac" : ""}`} data-tauri-drag-region>
+    <header className={`titlebar${IS_MAC ? " mac" : ""}${showTransport ? " with-transport" : ""}`} data-tauri-drag-region>
       <Doc score={score} />
       {showTransport && (
         <>

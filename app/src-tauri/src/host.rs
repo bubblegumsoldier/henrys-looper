@@ -1869,7 +1869,22 @@ impl Session {
                     // The count-in is measured against the position of this very snapshot, so the
                     // number on screen and the beat that is sounding belong together.
                     let lead = self.scheduler.lead(i, status.pos);
-                    track_event(i, &ui.name, &ts, &ui.gains, rate, lead)
+                    let mut event = track_event(i, &ui.name, &ts, &ui.gains, rate, lead);
+                    let timeline = &self.scheduler.timeline;
+                    let bar = timeline.samples_per_beat() * timeline.beats_per_bar() as f64;
+                    if bar > 0.0 {
+                        let into = if ts.loop_len > 0 {
+                            Some(status.pos.saturating_sub(ts.origin) % ts.loop_len)
+                        } else if ts.filled > 0 {
+                            Some(ts.filled)
+                        } else {
+                            None
+                        };
+                        // A hair of slack: the loop grid and the bar grid differ by a sample or two.
+                        event.take_bar = into.map_or(0, |f| ((f as f64 + 2.0) / bar) as u32 + 1);
+                        event.loop_bars = (ts.loop_len as f64 / bar).round() as u32;
+                    }
+                    event
                 })
                 .collect(),
             xruns: stats.xruns.load(Ordering::Relaxed),
