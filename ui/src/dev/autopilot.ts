@@ -26,7 +26,8 @@ import { currentConfig, setConfig } from "../setup/config";
 import { setLoadedScore } from "../shell/scoreModel";
 import { setLearnMode, setMidiFocus, setMidiView } from "../midi/store";
 import type { MidiProfileAction } from "../midi/types";
-import { updateScoreFile } from "../scoreFile";
+import { scoreFile, updateScoreFile } from "../scoreFile";
+import { docStore } from "../arrangement/useDoc";
 import { setMixer, type MixerState } from "../mixer/store";
 import { currentStatus } from "../status";
 
@@ -66,6 +67,18 @@ async function runStep(step: Step): Promise<void> {
     case "reload":
       window.location.reload();
       return;
+    case "windowEvent":
+      // What the window gets when the musician comes back to it: {"do": "windowEvent", "name": "focus"}
+      window.dispatchEvent(new Event(String(step.name ?? "focus")));
+      return;
+    case "typeText": {
+      // What typing in the text view hands the store: replace `find` by `with` in the open text,
+      // {"do": "typeText", "find": "gain: -6", "with": "gain: -2"}.
+      const text = scoreFile().text;
+      if (!text.includes(String(step.find))) throw new Error(`text has no "${String(step.find)}"`);
+      docStore.setText(text.replace(String(step.find), String(step.with)));
+      return;
+    }
     case "scoreStart":
       note(await scoreApi.start());
       return;
