@@ -6,5 +6,16 @@
        stays silent even after the microphone permission was granted. -->
   <key>com.apple.security.device.audio-input</key>
   <true/>
+  <!-- A plugin host loads code signed by other vendors. Under the hardened runtime, library
+       validation refuses every plugin whose Team ID differs from the app's (an ad-hoc signed app
+       has none), so Kontakt and every other third-party VST3/AU fails to load - only Apple's own
+       units pass. Every DAW ships with this entitlement. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+  <!-- Many plugins (script engines, JIT-compiled DSP) need executable memory. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
 </dict>
 </plist>
