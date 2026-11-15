@@ -36,6 +36,8 @@ use cpal::{InputCallbackInfo, OutputCallbackInfo, SupportedBufferSize};
 use tauri::{AppHandle, Emitter};
 
 use looper_engine::audio::{self, DeviceOpts};
+use looper_engine::capture::capture_channel;
+use looper_engine::capture::run::{Mode as RecordMode, SectionWatch};
 use looper_engine::engine::bus::{
     Bus, BusOutput, BusSend, MAX_BUS_GAIN, TrackSource, place_buses, routing_note,
 };
@@ -286,6 +288,8 @@ enum Request {
     ScoreLoad(String, Option<u32>, Sender<Result<ScoreLoaded, String>>),
     ScoreAct(ScoreAction, Sender<Result<String, String>>),
     Calibrate(Box<CalibrateConfig>, Sender<Result<CalibrateOutcome, String>>),
+    /// End the recording to disk that is running now.
+    RecordingStop(Sender<Result<(), String>>),
 
     /// The mix as the score's `mixer:` section would write it: every track and the buses.
     MixerState(Sender<Result<MixerSource, String>>),
@@ -365,6 +369,10 @@ impl EngineHandle {
 
     pub fn score_act(&self, action: ScoreAction) -> Result<String, String> {
         self.call(|reply| Request::ScoreAct(action, reply))
+    }
+
+    pub fn recording_stop(&self) -> Result<(), String> {
+        self.call(Request::RecordingStop)
     }
 
     pub fn calibrate(&self, config: CalibrateConfig) -> Result<CalibrateOutcome, String> {
@@ -463,6 +471,8 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
         }
 
         pump_midi(&mut midi, &mut session, &app);
+        // Recordings whose writer has finished - also those of a session that is gone.
+        crate::recording::poll(&app);
     }
 
     // The handle was dropped, so the app is going down. Give the device back properly anyway.
@@ -592,6 +602,13 @@ fn handle(
             if let Ok(message) = &result {
                 log!("Score: {message}");
             }
+            let _ = reply.send(result);
+        }
+        Request::RecordingStop(reply) => {
+            let result = match session.as_mut() {
+                Some(active) => active.stop_recording(),
+                None => Err(NO_ENGINE.to_string()),
+            };
             let _ = reply.send(result);
         }
         Request::Calibrate(config, reply) => {
@@ -1548,6 +1565,12 @@ struct Session {
     /// Tracks of the free mode whose mix changed and is not on disk yet, and since when.
     free_mix_dirty: Vec<String>,
     free_mix_since: Option<Instant>,
+    /// Recording every run to disk (`crate::recording`).
+    recorder: crate::recording::Recorder,
+    /// Notices when the runner's armed change takes effect - the recording's section markers.
+    section_watch: SectionWatch,
+    /// The text of the loaded score, for the copy in a recording's folder.
+    score_yaml: Option<String>,
 }
 
 impl Session {
@@ -1641,6 +1664,9 @@ impl Session {
         // to the plugin manager once the streams run (`crate::plugins`).
         let (inserts, insert_endpoint) = crate::plugins::engine_channel();
         core.attach_inserts(insert_endpoint);
+        // The recorder's slot: recordings are handed in per run (`crate::recording`).
+        let (capture_port, capture_endpoint) = capture_channel();
+        core.attach_capture(capture_endpoint);
         // The app opens with the clock standing: nothing blinks or clicks until the musician
         // presses Start, records something, or loads a score.
         core.hold_transport();
@@ -1845,6 +1871,9 @@ impl Session {
             mix_rev: 0,
             free_mix_dirty: Vec::new(),
             free_mix_since: None,
+            recorder: crate::recording::Recorder::new(capture_port, scratch_frames),
+            section_watch: SectionWatch::default(),
+            score_yaml: None,
         };
         // The free mode's faders and chains, by track name - before anything is played, so the
         // first note already sounds the way the last session ended.
@@ -1865,6 +1894,8 @@ impl Session {
     /// on this thread, which is allowed to free memory. `pool.drain()` then empties the return
     /// queue and the reserve, so nothing survives into the next session.
     fn shutdown(mut self) {
+        // A recording ends with the engine; its writer finishes with what reached it.
+        self.recorder.abandon();
         drop(self.input);
         drop(self.output);
         // Every installed plugin processor went down with the engine core just now.
@@ -1914,13 +1945,19 @@ impl Session {
         if let Some((status, _)) = self.last
             && self.runner.is_some()
         {
+            let mut section = None;
             let notices = match self.runner.as_mut() {
                 Some(runner) => {
+                    self.section_watch.before(runner);
                     runner.tick(status.pos);
+                    section = self.section_watch.after(runner, status.pos);
                     runner.take_notices()
                 }
                 None => Vec::new(),
             };
+            if let Some(event) = section {
+                self.recorder.section(&event);
+            }
             self.pump_runner();
             // What the runner said on its own - a section began, the score ended. No reply carries
             // it, so it goes out as the status message and as an event of its own (the status
@@ -1955,6 +1992,14 @@ impl Session {
 
         // The only place layer buffers are allocated, zeroed and dropped.
         self.pool.service(self.last.as_ref().map(|(s, _)| s));
+
+        let takes = self.last.is_some_and(|(s, _)| {
+            s.tracks()
+                .iter()
+                .any(|t| matches!(t.state, TrackState::Recording | TrackState::Overdub))
+        });
+        let dropouts = self.dropouts();
+        self.recorder.service(takes, dropouts, app);
 
         if self.last_emit.elapsed() >= EMIT_INTERVAL
             && let Some((status, _)) = self.last
@@ -2095,6 +2140,7 @@ impl Session {
     /// the `score` subcommand does by building the engine out of the score - here the device stays
     /// open and only the grid moves, which the engine allows precisely because nothing is recorded.
     fn load_score(&mut self, yaml: &str, count_in: Option<u32>) -> Result<ScoreLoaded, String> {
+        self.score_yaml = Some(yaml.to_string());
         if self.score_is_playing() {
             return Err(
                 "A score is already running. Press \"Stop all\" first - switching in the middle of a \
@@ -2158,6 +2204,10 @@ impl Session {
             .with_count_in(count_in.unwrap_or(DEFAULT_COUNT_IN_BARS));
         // What the runner really uses: a requested 0 is one bar, and the sentence says so.
         let count_in = runner.count_in_bars();
+        // A free-play recording ends here: from now on the score's runs are recorded.
+        if self.recorder.mode() == Some(RecordMode::Free) {
+            self.recorder.end(self.estimated_pos());
+        }
         self.runner = Some(runner);
 
         let message = format!(
@@ -2184,10 +2234,24 @@ impl Session {
             );
         };
         let message = match action {
-            ScoreAction::Start => runner.start(est),
+            ScoreAction::Start => {
+                let message = runner.start(est);
+                if runner.phase() == Phase::CountIn
+                    && let Some((at, at_bar)) = runner.armed_at()
+                {
+                    let title = runner.score().title.clone();
+                    let count_in = runner.count_in_bars();
+                    self.begin_recording(RecordMode::Score, &title, at, at_bar, count_in);
+                }
+                message
+            }
             ScoreAction::Next => runner.next(est),
             ScoreAction::Goto(index) => runner.goto(index, est),
-            ScoreAction::StopAll => runner.stop_all(est),
+            ScoreAction::StopAll => {
+                let message = runner.stop_all(est);
+                self.recorder.end(est);
+                message
+            }
             ScoreAction::CountIn(bars) => runner.set_count_in(bars),
             ScoreAction::Rewind => {
                 let (message, commands) = runner.rewind(est)?;
@@ -2333,8 +2397,10 @@ impl Session {
         if run {
             let at = self.scheduler.soon(self.estimated_pos());
             self.start_transport_at(at)?;
+            self.begin_recording(RecordMode::Free, "Free play", at, 0, 0);
             self.message = Some("Transport started at bar 1.".to_string());
         } else {
+            self.recorder.end(self.estimated_pos());
             self.cmd.send(Command::TransportStop)?;
             self.transport = false;
             self.scheduler.disarm_all();
@@ -2353,7 +2419,56 @@ impl Session {
             return Ok(());
         }
         let at = self.scheduler.soon(self.estimated_pos());
-        self.start_transport_at(at)
+        self.start_transport_at(at)?;
+        self.begin_recording(RecordMode::Free, "Free play", at, 0, 0);
+        Ok(())
+    }
+
+    /// Hand the recorder a new run with frame 0 at `at` (bar index `at_bar` on the current grid).
+    /// A recording that cannot start is said in the status line; the music goes on regardless.
+    fn begin_recording(&mut self, mode: RecordMode, title: &str, at: u64, at_bar: u64, count_in: u32) {
+        let default = self.info.latency_frames;
+        let tracks = crate::recording::run_tracks(
+            self.tracks
+                .iter()
+                .map(|ui| (ui.name.clone(), ui.channels, ui.latency.resolve(default))),
+        );
+        let ctx = crate::recording::Context {
+            timeline: &self.scheduler.timeline,
+            tracks,
+            now: self.estimated_pos(),
+            sample_rate: self.info.sample_rate,
+        };
+        let yaml = match mode {
+            RecordMode::Score => self.score_yaml.clone(),
+            RecordMode::Free => None,
+        };
+        let dropouts = self.dropouts();
+        if let Some(text) = self
+            .recorder
+            .begin(ctx, mode, title, at, at_bar, count_in, yaml, dropouts)
+        {
+            self.message = Some(text);
+        }
+    }
+
+    /// End the recording now, whatever started it - the recorder's own stop button.
+    fn stop_recording(&mut self) -> Result<(), String> {
+        if !self.recorder.active() {
+            return Err("Nothing is being recorded to disk.".to_string());
+        }
+        self.recorder.end(self.estimated_pos());
+        self.message = Some("Recording to disk stopped.".to_string());
+        Ok(())
+    }
+
+    /// Everything the audio callbacks counted as lost or late, added up.
+    fn dropouts(&self) -> u64 {
+        let s = &self.stats;
+        s.xruns.load(Ordering::Relaxed)
+            + s.other_errors.load(Ordering::Relaxed)
+            + s.underruns.load(Ordering::Relaxed)
+            + s.overruns.load(Ordering::Relaxed)
     }
 
     fn send_all(&mut self, plan: Scheduled) -> Result<(), String> {

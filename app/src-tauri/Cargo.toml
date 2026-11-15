@@ -26,6 +26,9 @@ serde_json = "1"
 cpal = "0.18"
 rtrb = "0.4.0"
 tauri-plugin-dialog = "2"
+# Local time for the recording folder names and the free space on the recording disk
+# (`recording.rs`). Already in the dependency tree through cpal and Tauri.
+libc = "0.2"
 
 [dev-dependencies]
 # Only for the CoreMIDI test in `midi/tests.rs`, which plays a controller through a virtual port.

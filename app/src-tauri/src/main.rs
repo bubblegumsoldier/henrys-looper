@@ -24,6 +24,7 @@ mod midi;
 mod mixstore;
 mod plugins;
 mod proto;
+mod recording;
 mod schedule;
 
 use tauri::{Emitter, Manager, State};
@@ -894,6 +895,50 @@ async fn dev_dump(path: String, text: String) -> Result<(), String> {
     std::fs::write(p, text).map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------------------------
+// Recording every run to disk (`recording.rs`)
+// ---------------------------------------------------------------------------------------------
+
+/// The recording settings, the folder in use and the free space there.
+#[tauri::command]
+async fn recording_settings() -> Result<recording::SettingsView, String> {
+    offload(|| Ok(recording::view())).await
+}
+
+#[tauri::command(rename_all = "snake_case")]
+async fn recording_set(
+    enabled: bool,
+    dry: bool,
+    folder: Option<String>,
+) -> Result<recording::SettingsView, String> {
+    offload(move || recording::set(recording::Settings { enabled, dry, folder })).await
+}
+
+/// The newest recordings, newest first.
+#[tauri::command]
+async fn recording_list() -> Result<Vec<recording::RecordingEntry>, String> {
+    offload(|| Ok(recording::list())).await
+}
+
+/// Show one recording - or, without a path, the recordings folder - in the Finder.
+#[tauri::command]
+async fn recording_reveal(path: Option<String>) -> Result<(), String> {
+    offload(move || recording::reveal(path.as_deref())).await
+}
+
+/// Delete one recording folder. The web view asks first.
+#[tauri::command]
+async fn recording_delete(path: String) -> Result<Vec<recording::RecordingEntry>, String> {
+    offload(move || recording::delete(&path)).await
+}
+
+/// End the recording that is running now.
+#[tauri::command]
+async fn recording_stop(engine: State<'_, EngineHandle>) -> Result<(), String> {
+    let engine = engine.inner().clone();
+    offload(move || engine.recording_stop()).await
+}
+
 fn main() {
     // The plugin scan starts this executable as a child to load one plugin at a time, so a plugin
     // that crashes takes the child down and not the program (`looper_engine::plugin::scan`).
@@ -919,6 +964,8 @@ fn main() {
             app.manage(EngineHandle::spawn(app.handle().clone()));
             // Plugin slots live on this (the main) thread; see `plugins.rs`.
             plugins::init(app.handle());
+            // Recording to disk: settings from the config folder, recordings under Documents.
+            recording::init(config_dir(app.handle()), app.path().document_dir().ok());
 
             let info = host::app_info();
             log!(
@@ -1008,6 +1055,12 @@ fn main() {
             plugins::plugin_editor,
             plugins::plugin_state_get,
             plugins::plugin_state_set,
+            recording_settings,
+            recording_set,
+            recording_list,
+            recording_reveal,
+            recording_delete,
+            recording_stop,
             dev_snapshot,
             dev_dump
         ])
