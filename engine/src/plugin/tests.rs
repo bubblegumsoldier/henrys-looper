@@ -314,6 +314,11 @@ fn the_test_vst3_behaves_exactly_as_built() {
     plugin.set_param(0, 0.25);
     drop(processor);
     plugin.deactivate();
+
+    // Changed while nothing runs: the saved state must still carry the new value.
+    plugin.set_param(0, 0.75);
+    let idle = plugin.save_state().expect("Zustand ohne Engine");
+    assert_eq!(&idle[8..16], &0.75f64.to_le_bytes(), "Parameter ohne laufende Engine im Zustand");
     plugin.load_state(&saved).expect("Zustand zurueck");
     assert_eq!(plugin.param(0), 0.5, "der Controller kennt den geladenen Zustand");
 

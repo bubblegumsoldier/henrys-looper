@@ -1217,6 +1217,53 @@ neuen Adressen verschiebt den Transport, alle bleiben also bedienbar, während e
 | `ui/src/live/BusStrip.tsx` | die Bus-Leiste |
 | `ui/src/live/TrackCard.tsx` | `BusRow`, die vier Schalter je Track |
 
+## 14. Plugin-Hosting (VST3, Audio Units)
+
+**Gebaut, macOS.** Code in `engine/src/engine/insert.rs` (Slots im Audio-Thread),
+`engine/src/plugin/` (VST3, AU, Scan, Editor-Fenster, CLI `looper-engine plugins scan|probe|edit`),
+`app/src-tauri/src/plugins.rs` (Manager, Tauri-Kommandos), `ui/src/plugins/`.
+
+**Formate.** VST3 über die Crate `vst3` 0.3 (aus den Steinberg-Headern generiert, MIT/Apache; das
+SDK selbst ist seit 3.8 MIT). Audio Units über die AudioToolbox-C-API — fast geschenkt neben VST3,
+und Apples mitgelieferte Effekte sind auf jedem Mac echte Testobjekte. CLAP (`clack-host` 0.2) ist
+möglich, aber nicht gebaut: hier ist kein CLAP-Plugin installiert, und die großen Bibliotheken
+liefern es nicht (Abschnitt 8).
+
+**Lage im Signalweg.** Acht Insert-Slots je Track **nach der eingebauten Kette und vor Fader und
+Panorama**, acht je Bus über der Summe der Tracks, **vor** dem Klick (der bleibt außerhalb jedes
+Plugins). Aufgenommen wird weiter trocken. Eine Instanz je Slot; hören Main und Monitor
+verschiedene Quellen (4+ Ausgänge, Loop und Mithören getrennt), rechnen die Inserts auf Main —
+Monitor bekommt dann die eingebaute Kette ohne Plugins. Bekannte Grenze.
+
+**Echtzeit.** Der Audio-Thread lädt, erzeugt und verwirft nie ein Plugin. Ein `Insert` (Prozessor +
+geteilte Atomics) wandert über eine eigene rtrb-Queue hinein und über eine Retire-Queue zurück;
+Bypass ist ein Atomic. Solange kein Slot belegt ist, rendert die Engine bitgleich wie vorher
+(Rahmenpfad); sonst blockweise, höchstens 1024 Frames je Plugin-Aufruf. NaN/Inf aus einem Plugin
+wird an der Eintrittsstelle zu Stille. Parameter: VST3 über eine lock-freie Queue als
+`IParameterChanges` im nächsten Block, AU über `AudioUnitSetParameter` (threadsicher). **Was ein
+fremdes Plugin in seinem `process` tut, kann die Engine nicht garantieren.**
+
+**Latenz.** Die gemeldete Latenz der aktiven Inserts eines Tracks wird auf der **Loop-Wiedergabe**
+ausgeglichen (der Loop wird um genau so viele Frames vorgelesen). Das Mithörsignal ist um sie
+später, Bus-Inserts verschieben den ganzen Bus gegen den Klick — beides wird nur ausgewiesen.
+
+**Threads.** Jedes geladene Plugin lebt auf dem Hauptthread (VST3-Editor, AppKit, JUCE). Jeder
+Engine-Start veröffentlicht seine Insert-Queue mit neuer Generation; der Manager deaktiviert,
+aktiviert mit der neuen Samplerate und setzt neu ein.
+
+**Abstürze.** Der **Scan** lädt jedes Plugin zuerst in einem Kindprozess (`--plugin-probe`):
+Absturz oder Hänger (45 s) werden vermerkt, das Plugin wird nie geladen. Cache `plugins.json`
+neben den MIDI-Profilen. Im laufenden Betrieb gibt es keine Prozesstrennung: ein Plugin, das in
+`process` abstürzt, reißt die App mit. Die Belegung samt Plugin-Zustand liegt in
+`plugin-rack.json` und kommt beim Start wieder; stürzt das Wiederherstellen ab, wird es beim
+nächsten Start übersprungen.
+
+**MIDI.** `track.<n>.insert.<slot>.bypass` (Schalter), `track.<n>.insert.<slot>.param.<id>`
+(0..1, Pickup), dasselbe unter `global.bus.<main|monitor>.insert.…`. Die Id ist die des Plugins.
+
+**Nicht gebaut.** Instrumente (werden gelistet, nicht geladen), Sidechain, MIDI an Plugins,
+Latenzausgleich über Busse hinweg, Windows-Host (kompiliert, sagt „nur macOS“).
+
 ## 13. Arbeitsweise
 
 - Henry bedient Hardware selbst; Audio-Tests laufen nur mit seiner Zustimmung.

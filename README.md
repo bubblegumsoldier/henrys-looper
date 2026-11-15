@@ -103,6 +103,21 @@ gespeichert, Kommentare in der Datei bleiben erhalten). Ohne Controller testen:
 `cargo run -p looper-engine --example midi-virtual -- "Testpad"` legt einen virtuellen
 CoreMIDI-Eingang an und sendet Befehle von stdin (`note 36`, `cc 3 64`, `quit`).
 
+## Plugins (macOS)
+
+VST3- und Audio-Unit-Effekte in acht Slots je Track (Track-Drawer) und je Bus (Einrichtung >
+Plugins). Gesucht wird in `/Library/Audio/Plug-Ins/VST3`, `~/Library/Audio/Plug-Ins/VST3` und den
+Ordnern in `HENRYS_LOOPER_PLUGIN_PATH`; Audio Units kommen vom System. Jedes Plugin wird beim Scan
+zuerst in einem eigenen Prozess getestet. Ohne App:
+
+```sh
+target/debug/looper-engine plugins scan          # alles finden und testen (Cache plugins.json)
+target/debug/looper-engine plugins probe AUReverb2
+target/debug/looper-engine plugins edit AUDelay --seconds 5
+```
+
+Details: `docs/architektur.md`, Abschnitt 14.
+
 ## Arrangement in der App
 
 Die Partitur lässt sich vollständig grafisch arrangieren (Modus **Arrangement**): ein Raster aus

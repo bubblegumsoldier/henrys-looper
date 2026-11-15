@@ -816,8 +816,8 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
         separate_controller,
         processor,
         queue,
-        pending_consumer: Some(consumer),
-        consumer_home: Arc::new(Mutex::new(None)),
+        pending_consumer: None,
+        consumer_home: Arc::new(Mutex::new(Some(consumer))),
         changed,
         _latency_changed: latency_changed,
         _handler: handler,
@@ -883,6 +883,57 @@ impl Vst3Plugin {
                 (unsafe { ctrl.getParameterInfo(i, &mut info) } == kResultOk).then_some(info)
             })
             .collect()
+    }
+
+    /// Hand parameter changes that are still waiting for a processor to the component, with a
+    /// zero-sample `process` call - the VST3 "parameter flush". Without it, a parameter changed while
+    /// the engine is stopped exists only in the controller, and the state saved from the component
+    /// would silently carry the old value.
+    fn flush_inactive(&self) {
+        if self.active {
+            return;
+        }
+        let mut home = self.consumer_home.lock().unwrap();
+        let Some(consumer) = home.as_mut() else {
+            return;
+        };
+        if consumer.is_empty() {
+            return;
+        }
+        let changes = ComWrapper::new(Changes::new());
+        while let Ok((id, value)) = consumer.pop() {
+            changes.set(id, value);
+        }
+        let ptr = changes
+            .as_com_ref::<IParameterChanges>()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null_mut());
+        let mut setup = ProcessSetup {
+            processMode: ProcessModes_::kRealtime as int32,
+            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as int32,
+            maxSamplesPerBlock: 1024,
+            sampleRate: 48_000.0,
+        };
+        unsafe {
+            self.processor.setupProcessing(&mut setup);
+            self.component.setActive(1);
+            let mut data = ProcessData {
+                processMode: ProcessModes_::kRealtime as int32,
+                symbolicSampleSize: SymbolicSampleSizes_::kSample32 as int32,
+                numSamples: 0,
+                numInputs: 0,
+                numOutputs: 0,
+                inputs: std::ptr::null_mut(),
+                outputs: std::ptr::null_mut(),
+                inputParameterChanges: ptr,
+                outputParameterChanges: std::ptr::null_mut(),
+                inputEvents: std::ptr::null_mut(),
+                outputEvents: std::ptr::null_mut(),
+                processContext: std::ptr::null_mut(),
+            };
+            self.processor.process(&mut data);
+            self.component.setActive(0);
+        }
     }
 
     fn close_view(&mut self) {
@@ -966,6 +1017,7 @@ impl PluginInstance for Vst3Plugin {
     }
 
     fn save_state(&self) -> Result<Vec<u8>, String> {
+        self.flush_inactive();
         let comp = ComWrapper::new(Stream::default());
         let cs = comp.to_com_ptr::<IBStream>().expect("IBStream");
         if unsafe { self.component.getState(cs.as_ptr()) } != kResultOk {

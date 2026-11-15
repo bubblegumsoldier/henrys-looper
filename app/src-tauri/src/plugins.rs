@@ -395,6 +395,8 @@ struct Slot {
     active_gen: Option<u64>,
     error: Option<String>,
     editor_was_open: bool,
+    /// Whether the first audio through this slot has been logged for the current activation.
+    heard: bool,
 }
 
 #[derive(Default)]
@@ -568,6 +570,15 @@ impl Manager {
                             Ok(()) => {
                                 slot.active_gen = Some(generation);
                                 slot.error = None;
+                                slot.heard = false;
+                                log!(
+                                    "Plugin {} in {} Slot {} gestartet: {} Hz, Latenz {} Frames.",
+                                    slot.info.info.name,
+                                    slot.target.address(),
+                                    slot.index + 1,
+                                    sample_rate,
+                                    slot.shared.latency()
+                                );
                             }
                             Err(e) => slot.error = Some(e),
                         }
@@ -652,6 +663,7 @@ impl Manager {
             active_gen: None,
             error: None,
             editor_was_open: false,
+            heard: false,
         });
         let p = self.slots.len() - 1;
         self.install(p);
@@ -865,6 +877,16 @@ impl Manager {
                 });
                 self.dirty = true;
                 self.last_change = Some(Instant::now());
+            }
+            if s.active_gen.is_some() && !s.heard && s.shared.blocks() > 0 {
+                s.heard = true;
+                log!(
+                    "Plugin {} in {} Slot {}: Audio laeuft durch ({} Bloecke).",
+                    s.info.info.name,
+                    s.target.address(),
+                    s.index + 1,
+                    s.shared.blocks()
+                );
             }
             if s.active_gen.is_some() {
                 let latency = s.plugin.latency();

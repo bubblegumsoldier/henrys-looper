@@ -139,6 +139,11 @@ function SlotRow({ slot: s, first, last, prevSlot, nextSlot, paramsOpen, toggleP
           {s.name}
           <span className="plg-fmt">{s.format === "vst3" ? "VST3" : "AU"}</span>
           {s.latency > 0 && <span className="plg-fmt">{s.latency} smp</span>}
+          {s.active && (
+            <span className="plg-fmt" title="Output peak of this slot">
+              {s.peak > 0 ? `${(20 * Math.log10(s.peak)).toFixed(0)} dB` : "−∞ dB"}
+            </span>
+          )}
         </span>
         <button
           className={`btn s${s.bypass ? " on" : ""}`}
