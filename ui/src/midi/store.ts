@@ -10,6 +10,7 @@
 //! would mean either a context around the whole app or the same boolean in three places.
 
 import { useSyncExternalStore } from "react";
+import { midiApi } from "../api";
 import { EMPTY_MIDI_VIEW, type MidiBindingView, type MidiEventReport, type MidiFeed, type MidiView } from "./types";
 
 /** Events kept for the monitor. Enough to see a bank of pads being pressed one after the other. */
@@ -22,6 +23,12 @@ const listeners = new Set<Listener>();
 let view: MidiView = EMPTY_MIDI_VIEW;
 let events: MidiEventReport[] = [];
 let learnMode = false;
+/**
+ * The address the binding list and the controls point at together: hovering or clicking a row
+ * outlines its control, hovering a control in learn mode lights up its row. One value for both
+ * directions, because only one thing can be under the pointer.
+ */
+let focus: string | null = null;
 /**
  * `address -> bindings`, rebuilt whenever the view changes. What the badges are drawn from.
  *
@@ -64,7 +71,12 @@ export function setMidiView(next: MidiView): void {
 export function pushMidiFeed(feed: MidiFeed): void {
   if (feed.events.length > 0) {
     // Newest first: the eye starts at the top, and the monitor is read while pressing a pad.
-    events = [...feed.events].reverse().concat(events).slice(0, MAX_EVENTS);
+    const at = Date.now();
+    events = [...feed.events]
+      .reverse()
+      .map((e): MidiEventReport => ({ ...e, at }))
+      .concat(events)
+      .slice(0, MAX_EVENTS);
   }
   if (feed.view) {
     setMidiView(feed.view);
@@ -75,7 +87,7 @@ export function pushMidiFeed(feed: MidiFeed): void {
 
 /**
  * Say something about the MIDI side without a round trip - a refusal that came back from a command,
- * usually. It lands where the engine's own sentences land, in the panel's message line.
+ * usually. It lands where the engine's own sentences land, in the sidebar's message line.
  */
 export function sayMidi(message: string): void {
   view = { ...view, message };
@@ -87,17 +99,50 @@ export function clearMidiEvents(): void {
   announce();
 }
 
+/** Point at one address from the list or from a control (null = nothing). */
+export function setMidiFocus(address: string | null): void {
+  if (focus === address) return;
+  focus = address;
+  announce();
+}
+
 /**
  * Turn the learn mode on or off.
  *
  * **A switch, not a modifier key.** Ctrl-click works too (see `LearnLayer.tsx`), but the switch is
  * the one that is offered: with Ctrl one clicks *next to* the button often enough, and next to
- * "Aufnahme" is "Aufnahme" - a missed modifier would start a take instead of learning a pad.
+ * "Record" is "Record" - a missed modifier would start a take instead of learning a pad.
  */
 export function setLearnMode(on: boolean): void {
   if (learnMode === on) return;
   learnMode = on;
+  if (!on) focus = null;
   announce();
+}
+
+/**
+ * Leave the learn mode, and take back a pending target with it: the Rust side would otherwise keep
+ * waiting, and the next pad pressed for a completely different reason would be bound to whatever
+ * was clicked last.
+ */
+export function leaveLearnMode(): void {
+  setLearnMode(false);
+  if (view.learning) {
+    midiApi
+      .learn(null)
+      .then(setMidiView)
+      .catch((e) => sayMidi((e as Error).message));
+  }
+}
+
+/** Fetch whatever the Rust side already knows - connections survive a reload of the web view. */
+export function loadMidiView(): void {
+  midiApi
+    .state()
+    .then(setMidiView)
+    .catch(() => {
+      // No engine behind this window (a browser tab on the dev server).
+    });
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -127,6 +172,14 @@ export function useMidiEvents(): MidiEventReport[] {
 
 export function useLearnMode(): boolean {
   return useSyncExternalStore(subscribe, isLearnMode);
+}
+
+export function currentMidiFocus(): string | null {
+  return focus;
+}
+
+export function useMidiFocus(): string | null {
+  return useSyncExternalStore(subscribe, currentMidiFocus);
 }
 
 // A way to drive the MIDI side from the console while `npm run dev` runs, so the learn mode, the

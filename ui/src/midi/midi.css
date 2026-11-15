@@ -1,0 +1,109 @@
+/* The MIDI side (MidiSide.tsx). The design's own classes (.learnbar, .side, .dev, .waitcard,
+   .brow, .mb, .mon in design/app.css) carry the look; this adds what the mockup does not show:
+   the layout next to the view, the folding parts of a row and a device, and interaction states.
+   Magenta (--learn) is MIDI Learn's alone. */
+
+/* --- the frame: view | sidebar ---------------------------------------------------------------- */
+.content.with-midi { grid-template-columns: minmax(0, 1fr) 360px; }
+.learnbar { min-width: 0; }
+.learnbar-hint { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.learnbar-keep { color: #e3b6ef; }
+
+.midi-side { min-width: 0; }
+.midi-side .learn-ic { color: var(--learn); }
+.side-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-bottom: 8px; }
+.side-scroll .blist { overflow: visible; }
+.midi-pad { margin: 10px 14px 0; }
+
+/* --- devices ----------------------------------------------------------------------------------- */
+button.dev { width: calc(100% - 28px); text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.dev[role="button"] { cursor: pointer; }
+.dev > div { min-width: 0; }
+.dev b, .dev > div > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dev.dev-missing:not(.missing) .ic { color: var(--tx-4); }
+.dev.dev-missing:not(.missing) b { color: var(--tx-2); }
+.dev .pill { flex: none; }
+.dev-wrap + .dev-wrap > .dev, .dev-wrap + .dev, .dev + .dev-wrap > .dev { margin-top: 8px; }
+.dev.dev-disconnected .ic, .dev.dev-unavailable .ic { color: var(--tx-3); }
+.dev.dev-new { border-style: dashed; }
+.dev.dev-new .ic { color: var(--tx-3); }
+.dev-acts { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 14px 0; }
+.dev-move { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 8px 14px 0; padding: 8px 10px; border-radius: var(--r-2); background: var(--bg-2); border: 1px solid var(--line-2); }
+.dev-move select.field { height: var(--ctl-h-s); font-size: var(--fs-11); max-width: 170px; }
+.dev-move-note { flex-basis: 100%; }
+input.field.midi-rename { height: 22px; width: 100%; font-weight: var(--fw-semibold); font-size: var(--fs-13); margin-bottom: 2px; }
+
+/* --- messages ---------------------------------------------------------------------------------- */
+.midi-msg { display: flex; align-items: flex-start; gap: 8px; margin: 10px 14px 0; padding: 8px 10px; border-radius: var(--r-2); background: var(--bg-2); border: 1px solid var(--line-2); font-size: var(--fs-11); color: var(--tx-2); line-height: 1.4; }
+.midi-msg .ic { --ic: 13px; color: var(--tx-3); flex: none; margin-top: 1px; }
+.midi-msg.err { border-color: rgba(255,92,108,.45); color: #ffd6da; }
+.midi-msg.err .ic { color: var(--err); }
+.midi-msg span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+
+/* --- waiting ----------------------------------------------------------------------------------- */
+.spinner { animation: midi-spin .9s linear infinite; }
+@keyframes midi-spin { to { transform: rotate(360deg); } }
+.waitcard .tgt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- bindings ---------------------------------------------------------------------------------- */
+.brow { cursor: pointer; }
+.brow:hover, .brow.lit { background: rgba(255,255,255,.035); }
+.brow.lit { box-shadow: inset 2px 0 0 var(--learn-line); }
+.brow.cur { background: var(--learn-soft); box-shadow: inset 2px 0 0 var(--learn); }
+.brow.open { background: var(--bg-2); }
+.brow.off .t small { color: var(--tx-4); }
+.brow .bst { font-style: normal; font-size: var(--fs-10); color: var(--warn); margin-left: 6px; }
+.brow .bst-overridden { color: #ffe3a8; }
+.brow .bx { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--tx-4); cursor: pointer; }
+.brow .bx .ic { --ic: 12px; }
+.brow .bx:hover { color: var(--tx-1); background: var(--bg-3); }
+.mb.score { color: #ffe3a8; border-color: rgba(245,185,66,.6); background: #2a2210; }
+.bdet { margin: 0 14px 6px; padding: 8px 10px; border-radius: 0 0 var(--r-2) var(--r-2); background: var(--bg-2); border: 1px solid var(--line-2); border-top: 0; display: flex; flex-direction: column; gap: 7px; font-size: var(--fs-11); color: var(--tx-2); }
+.bdet code { font-family: var(--font-mono); font-size: 10.5px; color: var(--tx-3); }
+.bdet-reason { display: flex; gap: 6px; align-items: flex-start; line-height: 1.35; }
+.bdet-reason .ic { --ic: 12px; flex: none; margin-top: 1px; color: var(--tx-3); }
+.bdet-reason.bad { color: #ffe3a8; }
+.bdet-reason.bad .ic { color: var(--warn); }
+.bdet-opts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.bdet-opts label { color: var(--tx-3); }
+.bdet-opts select.field { height: var(--ctl-h-s); font-size: var(--fs-11); }
+.bdet-opts label + select { margin-right: 6px; }
+input.field.bdet-num { width: 58px; height: var(--ctl-h-s); font-size: var(--fs-11); }
+
+/* --- monitor ----------------------------------------------------------------------------------- */
+.mon-h { margin-bottom: 4px; display: flex; justify-content: space-between; }
+.mon-h .dim2 { letter-spacing: 0; text-transform: none; font-weight: var(--fw-medium); }
+.mon .ln b { overflow: hidden; text-overflow: ellipsis; }
+.mon .ln .mon-dev { overflow: hidden; text-overflow: ellipsis; }
+.mon .ln .mon-res { font-style: normal; color: var(--tx-3); font-weight: 400; }
+.mon .ln.out-refused .mon-res { color: var(--warn); }
+.mon .ln.new .mon-res { color: #f3b8ff; }
+.mon-empty { font-size: var(--fs-11); color: var(--tx-4); line-height: 1.6; }
+.mon.mon-card { border-top: 0; padding: 10px 16px 12px; }
+.mon.mon-card .ln { grid-template-columns: 64px 140px 1fr; font-size: 11.5px; }
+.midi-setup .midi-msg { margin: 0; }
+
+/* --- the controls in the view ------------------------------------------------------------------ */
+/* The target: the badge reads "waiting …", filled magenta (design: .mb.waitb). */
+[data-midi-state="waiting"]::after {
+  background: var(--learn); color: #1a0420; border-color: transparent; box-shadow: 0 0 12px rgba(232,121,249,.6);
+  text-decoration: none;
+}
+/* While learning, a disabled control is a target like any other ("Play" on an empty track) - and
+   its badge must not fade with it. */
+.learn-on [data-midi].midi-learnable:disabled { opacity: 1; }
+/* The control of the row under the pointer, or of the row just clicked. */
+[data-midi].midi-focus { outline: 2px solid var(--learn) !important; outline-offset: 3px; }
+/* What cannot be mapped steps back (the design: lanes and ruler of the arrangement, the text). */
+.learn-on .content .editor-host, .learn-on .content .cm-editor { opacity: .42; filter: saturate(.6); }
+
+/* --- Setup page -------------------------------------------------------------------------------- */
+.midi-setup .card-b.midi-devs { padding: 4px 0 12px; gap: 0; }
+.midi-setup .card-b.midi-devs .dev, .midi-setup .card-b.midi-devs .dev-acts, .midi-setup .card-b.midi-devs .dev-move { margin-left: 16px; margin-right: 16px; }
+.midi-setup .dev-wrap > .dev { margin-top: 10px; }
+.midi-setup .blist { padding: 4px 0 8px; }
+.midi-setup .brow, .midi-setup .bgrp { padding-left: 16px; padding-right: 16px; }
+.midi-setup .bdet { margin-left: 16px; margin-right: 16px; }
+.midi-setup .card-h .dim { font-size: var(--fs-11); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.midi-setup .midi-cols { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+.midi-setup .midi-notes { margin: 0; padding: 0 16px 10px 32px; font-size: var(--fs-11); color: var(--tx-3); }

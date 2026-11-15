@@ -16,6 +16,8 @@ export type MidiOutcome = "unbound" | "absorbed" | "action" | "refused" | "learn
 export interface MidiEventReport {
   /** Counts up for the life of the app - the key of a list row. */
   seq: number;
+  /** When it arrived here (set by the store, not by the backend). */
+  at?: number;
   /** `ch1.note36` - the key a profile file uses. */
   id: string;
   /** `Pad 36`, `CC 3`, `Bend` - the badge on a bound control. */
@@ -65,6 +67,8 @@ export type MidiDeviceState = "connected" | "missing" | "disconnected" | "unavai
 export interface MidiDeviceView {
   /** `device:` of the profile. Bindings refer to their device by this. */
   device: string;
+  /** What the app calls it: the name given with "Rename", else `device`. */
+  name: string;
   path: string;
   state: MidiDeviceState;
   connected: boolean;
@@ -79,9 +83,15 @@ export interface MidiDeviceView {
   unsaved: boolean;
   /** Ready-made line: "connected - 12 bindings active", "not plugged in - 3 bindings inactive". */
   summary: string;
-  /** Milliseconds since 1970 when the device was last seen connected (since app start). */
+  /** Milliseconds since 1970 when the device was last seen connected. Survives a restart. */
   last_seen: number | null;
 }
+
+/** What `midi_profile` does. `device` is always the profile's `device:`. */
+export type MidiProfileAction =
+  | { action: "move"; device: string; to: string }
+  | { action: "rename"; device: string; name: string }
+  | { action: "delete"; device: string };
 
 /**
  * Whether one binding works right now.

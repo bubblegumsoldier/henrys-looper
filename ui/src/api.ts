@@ -31,7 +31,7 @@ import type {
   StartConfig,
   TrackSourceId,
 } from "./types";
-import type { MidiBindingOptions, MidiPortView, MidiSaved, MidiView } from "./midi/types";
+import type { MidiBindingOptions, MidiPortView, MidiProfileAction, MidiSaved, MidiView } from "./midi/types";
 
 /**
  * `status` is kept for the components written against the old HTTP layer. It is 0 for everything
@@ -207,7 +207,7 @@ export const midiApi = {
   close: (device?: string) => call<MidiView>("midi_close", { device: device ?? null }),
   /**
    * Arm the learn mode for one address - the dotted path of the clicked control. `null` cancels.
-   * The address is parsed on the Rust side, so a wrong one comes back as a German sentence.
+   * The address is parsed on the Rust side, so a wrong one comes back as a sentence.
    */
   learn: (address: string | null) => call<MidiView>("midi_learn", { address }),
   /**
@@ -222,6 +222,11 @@ export const midiApi = {
   save: () => call<MidiSaved>("midi_save"),
   /** For a frontend that just started and missed the events so far. */
   state: () => call<MidiView>("midi_state"),
+  /**
+   * Manage a device's profile: move all its bindings to another device, give it a name of its own
+   * in the app, or delete it (the file is kept as `.yaml.deleted`).
+   */
+  profile: (action: MidiProfileAction) => call<MidiView>("midi_profile", { action }),
 };
 
 export const scoreApi = {

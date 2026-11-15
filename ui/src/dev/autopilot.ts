@@ -19,12 +19,13 @@
 //! UI-only steps (`mode`, `ui`) are passed to the frame as a `looper-autopilot` window event.
 
 import { invoke } from "@tauri-apps/api/core";
-import { api, scoreApi } from "../api";
+import { api, midiApi, scoreApi } from "../api";
 import { fail, note } from "../shell/notes";
 import { startEngine, stopEngine } from "../shell/engine";
 import { currentConfig, setConfig } from "../setup/config";
 import { setLoadedScore } from "../shell/scoreModel";
-import { setLearnMode } from "../midi/store";
+import { setLearnMode, setMidiFocus, setMidiView } from "../midi/store";
+import type { MidiProfileAction } from "../midi/types";
 import { updateScoreFile } from "../scoreFile";
 
 type Step = Record<string, unknown> & { do: string };
@@ -95,6 +96,16 @@ async function runStep(step: Step): Promise<void> {
     }
     case "learn":
       setLearnMode(Boolean(step.on));
+      return;
+    case "midiLearn":
+      // What a click on a control does in learn mode: arm it (null cancels).
+      setMidiView(await midiApi.learn((step.address as string | undefined) ?? null));
+      return;
+    case "midiProfile":
+      setMidiView(await midiApi.profile(step.action as MidiProfileAction));
+      return;
+    case "midiFocus":
+      setMidiFocus((step.address as string | undefined) ?? null);
       return;
     case "mode":
     case "ui":

@@ -2,7 +2,7 @@
 //!
 //! # The whole idea in one sentence
 //!
-//! Turn on „MIDI lernen“, click the button you want on a pad, press the pad. No list of a hundred
+//! Turn on "MIDI Learn", click the button you want on a pad, press the pad. No list of a hundred
 //! addresses to search through, no manual to look the address up in: the thing you point at *is*
 //! the thing you bind.
 //!
@@ -20,7 +20,7 @@
 //! # Why a switch and not only Ctrl
 //!
 //! Both work, and the switch is the one that is offered. With Ctrl held one clicks next to the
-//! button often enough, and next to „Aufnahme“ is „Aufnahme“: a missed modifier would start a take
+//! button often enough, and next to "Record" is "Record": a missed modifier would start a take
 //! instead of binding a pad. That is a bad trade on a stage, so the reliable way is the visible one
 //! and Ctrl is the shortcut for whoever wants it.
 //!
@@ -45,7 +45,7 @@
 //!
 //! # Why the click is swallowed
 //!
-//! In learn mode a click on a learnable control must not *also* do its job - clicking „Aufnahme“ to
+//! In learn mode a click on a learnable control must not *also* do its job - clicking "Record" to
 //! bind it would otherwise arm a take. The interception happens in the capture phase and on
 //! `pointerdown`, because a slider acts while the finger is down and a `click` handler would be too
 //! late. Anything **without** an address is left alone, which is what keeps the panel's own buttons
@@ -54,7 +54,19 @@
 import { useEffect } from "react";
 import { modHeld } from "../platform";
 import { midiApi } from "../api";
-import { bindingsFor, isLearnMode, setLearnMode, setMidiView, sayMidi, useLearnMode, useMidiView } from "./store";
+import {
+  bindingsFor,
+  isLearnMode,
+  loadMidiView,
+  setLearnMode,
+  setMidiFocus,
+  setMidiView,
+  sayMidi,
+  useLearnMode,
+  useMidiFocus,
+  useMidiView,
+} from "./store";
+import { M } from "./labels";
 import { bindingWorks } from "./types";
 
 /** How long a `pointerdown` claims the `click` that follows it, so one gesture arms once. */
@@ -89,7 +101,25 @@ function learnableAt(e: MouseEvent): HTMLElement | null {
 export function LearnLayer(): null {
   const learnMode = useLearnMode();
   const view = useMidiView();
+  const focus = useMidiFocus();
   const learning = view.learning;
+
+  // Whatever the Rust side already knows - connections survive a reload of the web view.
+  useEffect(loadMidiView, []);
+
+  // --- pointing: a control under the pointer lights up its row in the sidebar ------------------
+  useEffect(() => {
+    if (!learnMode) return;
+    const over = (e: PointerEvent) => {
+      const el = (e.target as HTMLElement | null)?.closest?.("[data-midi]") as HTMLElement | null;
+      setMidiFocus(el?.dataset.midi ?? null);
+    };
+    document.addEventListener("pointerover", over);
+    return () => {
+      document.removeEventListener("pointerover", over);
+      setMidiFocus(null);
+    };
+  }, [learnMode]);
 
   // --- the interception ----------------------------------------------------
   // Installed once. Everything it needs to decide is read from the store, not from a closure, so a
@@ -166,7 +196,11 @@ export function LearnLayer(): null {
         const address = element.dataset.midi;
         if (!address) continue;
         const bound = bindingsFor(address);
-        if (bound.length > 0) {
+        if (learning === address) {
+          // The target: its badge says what it is waiting for (design: `.mb.waitb`).
+          element.dataset.midiKey = M.waiting;
+          element.dataset.midiState = "waiting";
+        } else if (bound.length > 0) {
           element.dataset.midiKey = [...new Set(bound.map((b) => b.short))].join(" · ");
           element.dataset.midiState = bound.some((b) => bindingWorks(b.state)) ? "active" : "inactive";
         } else {
@@ -175,6 +209,7 @@ export function LearnLayer(): null {
         }
         element.classList.toggle("midi-learnable", learnMode);
         element.classList.toggle("midi-waiting", learning === address);
+        element.classList.toggle("midi-focus", focus === address && learning !== address);
         element.classList.toggle("midi-from-score", bound.some((b) => b.from_score && bindingWorks(b.state)));
       }
     };
@@ -194,7 +229,7 @@ export function LearnLayer(): null {
       observer.disconnect();
       if (scheduled !== 0) window.cancelAnimationFrame(scheduled);
     };
-  }, [learnMode, learning, view.bindings]);
+  }, [learnMode, learning, view.bindings, focus]);
 
   return null;
 }

@@ -20,7 +20,7 @@
 //! CSS, so nothing has to render when a binding changes either.
 //!
 //! **The addresses are not checked here.** They are parsed by `Target::parse` on the Rust side when
-//! the learn mode is armed, and a typo comes back as the German sentence that names the list. This
+//! the learn mode is armed, and a typo comes back as the sentence that names the list. This
 //! file exists so the strings are built in one place rather than typed out at forty call sites, not
 //! as a second source of truth.
 //!

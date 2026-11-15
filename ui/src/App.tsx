@@ -2,8 +2,8 @@
 //!
 //! ```text
 //!  ┌ TitleBar ───────────────────────────────────────────────────────────────┐
-//!  ├ bars: input-loss alarm · MIDI strip (Arrangement/Setup, and Live while learning) ┤
-//!  │ Arrangement  |  Live  |  Setup (gear)                                    │
+//!  ├ bars: input-loss alarm · MIDI learn band (while learning)               ┤
+//!  │ Arrangement  |  Live  |  Setup (gear)          [MIDI sidebar, learning]  │
 //!  └──────────────────────────────────────────────────── toasts, popovers ───┘
 //! ```
 //!
@@ -21,7 +21,7 @@ import { LiveView } from "./live/LiveView";
 import { ArrangementView } from "./arrangement/ArrangementView";
 import { SetupView, type SetupPage } from "./setup/SetupView";
 import { LearnLayer } from "./midi/LearnLayer";
-import { MidiPanel } from "./midi/MidiPanel";
+import { LearnBar, MidiSide } from "./midi/MidiSide";
 import { useLearnMode } from "./midi/store";
 import { useLooperEvents } from "./useWebSocket";
 import { useStatusSlice } from "./status";
@@ -99,10 +99,9 @@ export default function App() {
     setSetupOpen(true);
   }, []);
 
-  // The old MIDI strip (connection, pending learn target, save) until the next stage brings the
-  // MIDI sidebar of the design: always while learning, otherwise only above the Arrangement. In
-  // Setup it lives on the MIDI page.
-  const showMidiStrip = (learn && !(setupOpen && page === "midi")) || (!setupOpen && mode === "arrangement");
+  // While learning: the band under the title bar and the sidebar next to whatever is open
+  // (design/midi-learn.html). On Setup → MIDI the page itself is the sidebar, so it is not doubled.
+  const showMidiSide = learn && !(setupOpen && page === "midi");
 
   return (
     <div className={`window${learn ? " learn-on" : ""}${IS_MAC ? " mac" : ""}`}>
@@ -117,14 +116,10 @@ export default function App() {
 
       <div className="bars">
         <Alarm />
-        {showMidiStrip && (
-          <div className="legacy legacy-midi">
-            <MidiPanel />
-          </div>
-        )}
+        {learn && <LearnBar mode={setupOpen ? "setup" : mode} />}
       </div>
 
-      <div className="content">
+      <div className={`content${showMidiSide ? " with-midi" : ""}`}>
         {setupOpen ? (
           <SetupView info={info} page={page} onPage={setPage} onStarted={() => chooseMode("live")} />
         ) : mode === "live" ? (
@@ -132,6 +127,7 @@ export default function App() {
         ) : (
           <ArrangementView />
         )}
+        {showMidiSide && <MidiSide />}
       </div>
 
       {enginePanel && <EnginePanel onClose={() => setEnginePanel(false)} onSetup={openSetup} />}

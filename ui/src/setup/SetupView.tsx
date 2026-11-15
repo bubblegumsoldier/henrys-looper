@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api } from "../api";
-import { MidiPanel } from "../midi/MidiPanel";
+import { MidiSetup } from "../midi/MidiSetup";
 import { PluginsPage } from "../plugins/PluginsPage";
 import { busGainAddress, GLOBAL, quantizeAddress, trackAddress } from "../midi/addresses";
 import { useMidiView } from "../midi/store";
@@ -356,22 +356,7 @@ export function SetupView({ info, page, onPage, onStarted }: Props) {
           </>
         )}
         {page === "tempo" && <TempoPage config={config} running={running} patch={patch} />}
-        {page === "midi" && (
-          <>
-            <div>
-              <h1>MIDI</h1>
-              <p className="lead">
-                Controller, learn mode and the profile. Click <b>{T.midiLearn}</b> in the title bar, then click a
-                control and press a pad.
-              </p>
-            </div>
-            <section className="card">
-              <div className="legacy legacy-midi">
-                <MidiPanel />
-              </div>
-            </section>
-          </>
-        )}
+        {page === "midi" && <MidiSetup />}
         {page === "plugins" && <PluginsPage />}
         {page === "general" && <GeneralPage info={info} />}
       </main>
