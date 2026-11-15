@@ -18,6 +18,11 @@
 //! grid 120 8 [note]       n notes on the beat at that tempo (default note 60, 50 ms long) -
 //!                         for timing measurements; prints when each one was sent
 //! cc 3 64                 controller 3 to 64
+//! events FILE [at]        play an event list with its original timing: one event per line,
+//!                         `ms status d1 d2` (decimal, `#` starts a comment), ms relative to an
+//!                         anchor - negative for what comes before it. `at` is the anchor as Unix
+//!                         time in ms (to meet a bar of a running app); without it the first
+//!                         event goes out right away. The channel is the one in the file.
 //! ch 2                    following commands on channel 2
 //! sleep 500               wait (milliseconds)
 //! quit                    close the port and exit (like pulling the cable)
@@ -104,6 +109,57 @@ fn main() {
                     result = result.and(port.send(&[0x80 | channel, note, 0]));
                 }
                 result
+            }
+            Some("events") => {
+                let path = words.get(1).copied().unwrap_or("");
+                let at: Option<u128> = words.get(2).and_then(|w| w.parse().ok());
+                match std::fs::read_to_string(path) {
+                    Ok(text) => {
+                        let mut events: Vec<(i64, Vec<u8>)> = text
+                            .lines()
+                            .map(|l| l.split('#').next().unwrap_or("").trim())
+                            .filter(|l| !l.is_empty())
+                            .filter_map(|l| {
+                                let mut w = l.split_whitespace();
+                                let ms: f64 = w.next()?.parse().ok()?;
+                                let bytes: Vec<u8> = w.filter_map(|b| b.parse().ok()).collect();
+                                (!bytes.is_empty()).then_some(((ms * 1000.0).round() as i64, bytes))
+                            })
+                            .collect();
+                        events.sort_by_key(|e| e.0);
+                        let first = events.first().map_or(0, |e| e.0);
+                        let now_unix = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_micros());
+                        // The anchor in microseconds from now: where ms 0 is.
+                        let anchor: i64 = match at {
+                            Some(ms) => (ms * 1000) as i64 - now_unix as i64,
+                            None => -first,
+                        };
+                        let start = std::time::Instant::now();
+                        let mut result = Ok(());
+                        let mut late = 0usize;
+                        for (us, bytes) in &events {
+                            let due = anchor + us;
+                            if due < 0 {
+                                late += 1;
+                                continue;
+                            }
+                            if let Some(wait) =
+                                Duration::from_micros(due as u64).checked_sub(start.elapsed())
+                            {
+                                std::thread::sleep(wait);
+                            }
+                            result = result.and(port.send(bytes));
+                        }
+                        println!("{} events sent, {late} skipped (too late)", events.len() - late);
+                        result
+                    }
+                    Err(e) => {
+                        eprintln!("{path}: {e}");
+                        Ok(())
+                    }
+                }
             }
             Some("on") => port.send(&[0x90 | channel, num(1, 36), num(2, 100)]),
             Some("off") => port.send(&[0x80 | channel, num(1, 36), 0]),
