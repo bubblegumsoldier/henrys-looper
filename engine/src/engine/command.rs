@@ -411,6 +411,9 @@ pub struct TrackStatus {
     /// Whether the overdub of this track keeps going into the next pass (`Command::LatchOverdub`).
     /// During a first recording it means "overdub next".
     pub latched: bool,
+    /// Layer 0 is the muted stand-in of a `stack` whose first pass stayed empty: it only holds the
+    /// loop's grid, and a display does not count it (see `super::latch`).
+    pub placeholder: bool,
     /// Whether this track's takes store notes - a MIDI loop.
     pub midi_loop: bool,
     /// On a MIDI loop: note ons recorded in each layer.
@@ -450,6 +453,7 @@ impl Default for TrackStatus {
             notes: 0,
             held_notes: 0,
             latched: false,
+            placeholder: false,
             midi_loop: false,
             layer_notes: [0; super::track::MAX_LAYERS],
         }
@@ -944,11 +948,15 @@ mod tests {
     ///
     /// MIDI loops were the next: the note count of every layer (sixteen `u16` per track) is what
     /// lets a MIDI layer show "42 notes" instead of a waveform - 2144 bytes, limit 2176.
+    ///
+    /// Then `stack`: one flag per track saying that layer 0 is only the placeholder of an empty
+    /// first pass, so the display does not count a layer that is not there. It costs a whole
+    /// alignment step per track - 2208 bytes, limit 2208.
     #[test]
     fn the_status_snapshot_stays_small_enough_to_memcpy_in_a_callback() {
         let size = std::mem::size_of::<Status>();
         assert!(
-            size <= 2_176,
+            size <= 2_208,
             "Der Status ist auf {size} Bytes gewachsen - das wandert bei jedem Snapshot durch \
              den Audio-Callback."
         );

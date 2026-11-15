@@ -694,6 +694,10 @@ pub struct LayerStatus {
     /// On a MIDI loop: how many notes the layer holds; absent on an audio layer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<u32>,
+    /// The muted stand-in a `stack` keeps while its first pass stayed empty: it holds the loop's
+    /// grid and nothing else. A display does not count it as a layer. Absent when false.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub placeholder: bool,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1048,6 +1052,7 @@ pub fn track_event(
             muted: ts.muted_mask & (1 << i) != 0,
             gain: gains.get(i).copied().unwrap_or(1.0),
             notes: ts.midi_loop.then(|| u32::from(ts.layer_notes.get(i).copied().unwrap_or(0))),
+            placeholder: i == 0 && ts.placeholder,
         })
         .collect();
     let rate = sample_rate.max(1) as f64;
@@ -2613,13 +2618,14 @@ mod tests {
         }
     }
 
-    /// The five target states of a score, in the spelling the YAML uses and with the word
+    /// The six target states of a score, in the spelling the YAML uses and with the word
     /// the block preview prints.
     #[test]
     fn score_target_states_travel_as_the_yaml_spells_them() {
         for (state, wire, label) in [
             (ScoreState::Record, "record", "Record"),
             (ScoreState::Overdub, "overdub", "Overdub"),
+            (ScoreState::Stack, "stack", "Stack"),
             (ScoreState::Play, "play", "Play"),
             (ScoreState::Stop, "stop", "Stop"),
             (ScoreState::HearThrough, "hear_through", "Monitor"),

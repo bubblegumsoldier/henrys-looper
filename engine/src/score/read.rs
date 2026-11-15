@@ -101,9 +101,9 @@ pub fn read_score(yaml_text: &str) -> Result<ScoreSource, ScoreError> {
     read_score_noted(yaml_text).0
 }
 
-/// [`read_score`] plus the notes: things that are written correctly but do nothing yet (`loop:
-/// midi`, `grid:`). They never make a score fail - the format is fixed before the engine has the
-/// feature, so a file written today keeps working when it arrives.
+/// [`read_score`] plus the notes: things that are written correctly but do something other than
+/// the writer most likely meant (`stack` with `autorelease: true` on an empty track records one
+/// pass). They never make a score fail.
 pub fn read_score_noted(yaml_text: &str) -> (Result<ScoreSource, ScoreError>, Vec<ScoreIssue>) {
     let document = match parse_document(yaml_text) {
         Ok(document) => document,
@@ -111,7 +111,12 @@ pub fn read_score_noted(yaml_text: &str) -> (Result<ScoreSource, ScoreError>, Ve
     };
     let mut reader = Reader::default();
     let score = reader.read_root(&document);
-    let notes = reader.notes;
+    let mut notes = std::mem::take(&mut reader.notes);
+    if reader.issues.is_empty()
+        && let Some(score) = &score
+    {
+        notes.extend(stack_notes(score, &reader.state_pos));
+    }
     if reader.issues.is_empty() {
         // Only a clean read produces a score; anything else would hand the compiler half a file.
         let score = score.ok_or_else(|| {
@@ -134,8 +139,45 @@ pub fn score_notes(yaml_text: &str) -> Vec<ScoreIssue> {
 #[derive(Default)]
 struct Reader {
     issues: Vec<ScoreIssue>,
-    /// Not errors: written correctly, not supported by the engine yet.
+    /// Not errors: written correctly, but worth a word.
     notes: Vec<ScoreIssue>,
+    /// Where each written clip state stands: `(section id, track)` -> position of the value.
+    state_pos: HashMap<(String, String), Pos>,
+}
+
+/// `stack` with `autorelease: true` on a track that nothing has recorded on yet: the section's
+/// `bars` are the loop length, so it ends after exactly one pass - one layer, which is `record`.
+/// Judged on the sections in written order, `repeat:` resolved.
+fn stack_notes(score: &ScoreSource, state_pos: &HashMap<(String, String), Pos>) -> Vec<ScoreIssue> {
+    let compiled = super::compile::compile(score);
+    let mut recorded: Vec<&str> = Vec::new();
+    let mut notes = Vec::new();
+    for section in &compiled.sections {
+        for (track, state) in section.tracks.iter() {
+            if *state == TrackState::Stack && section.autorelease && !recorded.contains(&track) {
+                let pos = state_pos
+                    .get(&(section.id.clone(), track.to_string()))
+                    .copied();
+                let mut note = ScoreIssue::new(
+                    pos,
+                    format!(
+                        "Section '{}': stack with autorelease records a single pass on the empty                          track '{track}' - use record, or switch autorelease off.",
+                        section.id
+                    ),
+                );
+                if pos.is_none() {
+                    note.line = section.source_line;
+                }
+                notes.push(note);
+            }
+        }
+        for (track, state) in section.tracks.iter() {
+            if state.records() && !recorded.contains(&track) {
+                recorded.push(track);
+            }
+        }
+    }
+    notes
 }
 
 impl Reader {
@@ -1366,7 +1408,11 @@ impl Reader {
                 continue;
             };
             match TrackState::parse(text) {
-                Some(state) => states.insert(name, state),
+                Some(state) => {
+                    self.state_pos
+                        .insert((section.to_string(), name.to_string()), state_node.pos);
+                    states.insert(name, state)
+                }
                 None => self.error_with(
                     Some(state_node.pos),
                     format!("Unknown state '{text}' for Track '{name}' in Section '{section}'."),

@@ -486,3 +486,75 @@ fn a_new_score_counts_in_two_bars() {
     assert_eq!(score.count_in, Some(2), "{text}");
     assert!(text.contains("count_in: 2"), "{text}");
 }
+
+/// `stack` - also as a clip with a grid - reads, renders and reads back unchanged, and the
+/// compiled section carries it.
+#[test]
+fn stack_survives_the_round_trip() {
+    let text = "\
+bpm: 100
+tracks:
+  drums: {input: instrument, loop: midi, grid: 1/8t}
+  bass: {input: 1}
+sections:
+  - id: bass
+    bars: 4
+    autorelease: true
+    tracks:
+      bass: record
+  - id: drums
+    bars: 4
+    autorelease: false
+    quantize: loop
+    tracks:
+      drums: {state: stack, grid: 1/16}
+      bass: stack
+";
+    let once = round_trip(text);
+    assert!(once.contains("drums: {state: stack, grid: 1/16}"), "{once}");
+    assert!(once.contains("bass: stack"), "{once}");
+    assert_eq!(once, round_trip(&once));
+    let score = compile_score(&once).expect("kompiliert");
+    assert_eq!(score.sections[1].tracks.get("drums"), Some(&TrackState::Stack));
+    assert_eq!(score.sections[1].tracks.get("bass"), Some(&TrackState::Stack));
+    let doc = parse_doc(text).unwrap();
+    let json = serde_json::to_value(&doc).unwrap();
+    assert!(json.to_string().contains("\"stack\""), "{json}");
+    assert!(crate::score::score_notes(text).is_empty(), "kein Hinweis ohne autorelease");
+}
+
+/// `stack` with `autorelease: true` on an empty track is one pass - the note says so, at the clip,
+/// and does not make the score fail. On a track that already has a loop it is fine.
+#[test]
+fn stack_with_autorelease_on_an_empty_track_gets_a_note() {
+    let text = "\
+bpm: 100
+tracks:
+  a: {input: 1}
+  b: {input: 2}
+sections:
+  - id: one
+    bars: 4
+    autorelease: true
+    tracks:
+      a: stack
+      b: record
+  - id: two
+    bars: 8
+    autorelease: true
+    tracks:
+      b: stack
+";
+    compile_score(text).expect("ein Hinweis ist kein Fehler");
+    let notes = crate::score::score_notes(text);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].message.contains("stack with autorelease records a single pass"), "{notes:?}");
+    assert!(notes[0].message.contains("use record, or switch autorelease off"));
+    assert_eq!(notes[0].line, Some(10));
+    let outcome = parse_doc_outcome(text);
+    assert!(
+        matches!(outcome.notes[0].at, Some(ScoreRef::SectionTrack { .. })),
+        "{:?}",
+        outcome.notes[0].at
+    );
+}

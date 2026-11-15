@@ -44,6 +44,10 @@ pub enum TrackState {
     Record,
     /// One more layer on top of the existing loop.
     Overdub,
+    /// A new layer every pass until the section ends: on an empty track the first pass defines the
+    /// loop (over the section's `bars`, like `record`), every further pass is a layer of its own.
+    /// Passes in which nothing was played are dropped. See `engine::runner`.
+    Stack,
     /// Play what is recorded.
     Play,
     /// Silent.
@@ -53,9 +57,10 @@ pub enum TrackState {
 }
 
 impl TrackState {
-    pub const ALL: [TrackState; 5] = [
+    pub const ALL: [TrackState; 6] = [
         TrackState::Record,
         TrackState::Overdub,
+        TrackState::Stack,
         TrackState::Play,
         TrackState::Stop,
         TrackState::HearThrough,
@@ -66,6 +71,7 @@ impl TrackState {
         match self {
             TrackState::Record => "record",
             TrackState::Overdub => "overdub",
+            TrackState::Stack => "stack",
             TrackState::Play => "play",
             TrackState::Stop => "stop",
             TrackState::HearThrough => "hear_through",
@@ -86,17 +92,27 @@ impl TrackState {
         match self {
             TrackState::Record => "Record",
             TrackState::Overdub => "Overdub",
+            TrackState::Stack => "Stack",
             TrackState::Play => "Play",
             TrackState::Stop => "Stop",
             TrackState::HearThrough => "Monitor",
         }
     }
 
+    /// Whether the track records in this state (and is therefore monitored).
+    pub fn records(self) -> bool {
+        matches!(
+            self,
+            TrackState::Record | TrackState::Overdub | TrackState::Stack
+        )
+    }
+
     /// All spellings, for "Erlaubt: ..." and typo suggestions.
-    pub fn names() -> [&'static str; 5] {
+    pub fn names() -> [&'static str; 6] {
         [
             TrackState::Record.as_str(),
             TrackState::Overdub.as_str(),
+            TrackState::Stack.as_str(),
             TrackState::Play.as_str(),
             TrackState::Stop.as_str(),
             TrackState::HearThrough.as_str(),

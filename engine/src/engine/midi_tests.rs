@@ -45,6 +45,7 @@ fn rig_with(latency: u32, extra: usize) -> Rig {
         loopback_channel: None,
         block: BLOCK,
         bars: 4,
+        input_channels: extra.max(1),
         ..SimSpec::default()
     };
     let mut sim = Sim::new(spec, silence());
@@ -941,4 +942,139 @@ fn a_stack_in_which_nothing_was_played_leaves_the_track_empty() {
     assert_eq!(status.refusal, super::command::Refusal::None);
     assert_eq!(status.ignored_commands, 0);
     assert!(sent(&rig, L, 6 * L).iter().all(|(_, m)| m[0] & 0xF0 != 0x90));
+}
+
+/// The owner's score, as he wrote it: two loops recorded in turn, then **at once** the drums on
+/// `stack` on an empty MIDI track - the first pass left empty while he gets from the guitar to the
+/// pads, a hit a hair before the one of the second pass, three played passes, Release, and the
+/// groove plays on. `played: false`: nothing is played on the pads at all.
+fn owners_drums(played: bool) -> (Rig, Vec<u64>) {
+    use crate::engine::runner::Runner;
+    use crate::engine::timeline::{TimeSignature, Timeline};
+    let yaml = "\
+bpm: 100
+time_signature: 4/4
+tracks:
+  Drums: {input: instrument, loop: midi, grid: 1/8t, midi: {device: \"MPD218 Port A\", channel: 10}}
+  melodic: {input: 1}
+  bass: {input: 2}
+sections:
+  - id: melodic
+    bars: 4
+    autorelease: true
+    tracks:
+      melodic: record
+  - id: bass
+    bars: 4
+    autorelease: true
+    tracks:
+      melodic: play
+      bass: record
+  - id: drums
+    bars: 4
+    autorelease: false
+    quantize: loop
+    tracks:
+      Drums: stack
+      melodic: play
+      bass: play
+  - id: groove
+    bars: 4
+    autorelease: false
+    tracks:
+      Drums: play
+      melodic: play
+      bass: play
+";
+    let score = crate::score::compile_score(yaml).expect("Partitur");
+    assert!(crate::score::score_notes(yaml).is_empty());
+    let mut rig = rig_with(0, 2);
+    let timeline = Timeline::new(48_000, 100.0, TimeSignature::new(4, 4));
+    let mut runner = Runner::new(score, timeline, BLOCK as u32).expect("Runner");
+    for cmd in super::runner::setup_commands(runner.score()) {
+        rig.sim.send(cmd);
+    }
+    runner.start(0);
+    for cmd in runner.take_commands() {
+        rig.sim.send(cmd);
+    }
+    let first = runner.armed_at().expect("armiert").1;
+    let bar = |n: u64| timeline.bar_start(first + n);
+    let step = |rig: &mut Rig, runner: &mut Runner, to: u64| {
+        while rig.sim.pos() < to {
+            rig.sim.step();
+            runner.tick(rig.sim.pos());
+            for cmd in runner.take_commands() {
+                rig.sim.send(cmd);
+            }
+        }
+    };
+    let hit = |rig: &mut Rig, runner: &mut Runner, at: u64, note: u8| {
+        step(rig, runner, at + OUT);
+        play(rig, at, [0x99, note, 100]);
+        step(rig, runner, at + 1_000 + OUT);
+        play(rig, at + 1_000, [0x89, note, 0]);
+    };
+    // The drums section: bars 8..12 is its first pass, which stays empty.
+    let passes: Vec<u64> = (0..5).map(|n| bar(8 + 4 * n)).collect();
+    if played {
+        // 300 frames before the one of pass 2 - inside the pre-roll, while pass 1 still runs.
+        hit(&mut rig, &mut runner, passes[1] - 300, 36);
+        for (n, note) in [(1usize, 38u8), (2, 42), (3, 46)] {
+            hit(&mut rig, &mut runner, passes[n] + 20_000, note);
+        }
+    }
+    // Release in the middle of the fourth pass (the third played one).
+    step(&mut rig, &mut runner, passes[3] + 100_000);
+    runner.next(rig.sim.pos());
+    for cmd in runner.take_commands() {
+        rig.sim.send(cmd);
+    }
+    assert_eq!(runner.armed_at().unwrap().1, first + 24, "am Ende des Durchlaufs");
+    step(&mut rig, &mut runner, bar(33));
+    assert_eq!(runner.view(rig.sim.pos()).section, Some(3), "groove laeuft");
+    let status = rig.sim.latest_status().unwrap();
+    assert_eq!(status.ignored_commands, 0, "{:?}", status.refusal);
+    (rig, passes)
+}
+
+#[test]
+fn the_owners_drums_start_with_an_empty_pass_and_stack_three_layers_on_the_grid() {
+    let (rig, passes) = owners_drums(true);
+    let track = rig.sim.core.track(0);
+    assert_eq!(track.layer_count(), 3, "der leere erste Durchlauf hinterlaesst keine Ebene");
+    assert_eq!(track.origin(), passes[0], "Ursprung = Sektionsanfang");
+    assert_eq!(track.loop_len(), passes[1] - passes[0], "Laenge = bars");
+    assert!(track.playing());
+    let ons = |layer: usize| -> Vec<(u8, i64)> {
+        raw(&rig, layer)
+            .iter()
+            .filter(|e| e.ev.kind == NoteKind::On)
+            .map(|e| (e.ev.d1, e.frame))
+            .collect()
+    };
+    // The early hit belongs to the first played pass, just before its one.
+    assert_eq!(ons(0), vec![(36, -300), (38, 20_000)]);
+    assert_eq!(ons(1), vec![(42, 20_000)]);
+    assert_eq!(ons(2), vec![(46, 20_000)]);
+    // The other two loops: the same grid in bars, one take each.
+    let melodic = rig.sim.core.track(1);
+    let bass = rig.sim.core.track(2);
+    assert_eq!(melodic.loop_len(), track.loop_len());
+    assert_eq!(bass.origin() + bass.loop_len(), track.origin(), "taktgenau hintereinander");
+    // The groove plays every hit of the three layers.
+    let got = sent(&rig, passes[4], passes[4] + track.loop_len() - 1_000);
+    let mut notes: Vec<u8> = got.iter().filter(|(_, m)| m[0] == 0x99).map(|(_, m)| m[1]).collect();
+    notes.sort();
+    assert_eq!(notes, vec![38, 42, 46], "{got:?}");
+    assert!(sent(&rig, passes[4] - 1_000, passes[4]).iter().any(|(_, m)| *m == [0x99, 36, 100]));
+}
+
+#[test]
+fn the_owners_drums_with_nothing_played_leave_the_track_empty_and_the_groove_runs_on() {
+    let (rig, _passes) = owners_drums(false);
+    let track = rig.sim.core.track(0);
+    assert_eq!(track.layer_count(), 0);
+    assert!(rig.sim.core.track(1).playing());
+    assert!(rig.sim.core.track(2).playing());
 }

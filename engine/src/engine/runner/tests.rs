@@ -965,6 +965,11 @@ struct Live {
 
 impl Live {
     fn new(yaml: &str) -> Self {
+        Self::with(yaml, mono(fingerprint))
+    }
+
+    /// The same with a signal of the test's choosing on the one input.
+    fn with(yaml: &str, played: crate::engine::sim::Played) -> Self {
         let score = compile_score(yaml).expect("uebersetzt");
         let timeline = Timeline::new(RATE, score.bpm, score.signature());
         let max_bars = score.sections.iter().map(|s| s.bars).max().unwrap();
@@ -980,7 +985,7 @@ impl Live {
                 layer_frames: Some(loop_capacity(&timeline, max_bars)),
                 ..Default::default()
             },
-            mono(fingerprint),
+            played,
         );
         let mut runner = Runner::new(score, timeline, BLOCK).expect("Runner");
         runner.start(0);
@@ -1471,4 +1476,305 @@ fn the_click_ends_with_the_score() {
     assert!(click_peak(&sim, end - bar, end) > 0.0, "der letzte Takt klickt");
     assert!(click_peak(&sim, first, first + 200) > 0.0);
     assert_eq!(click_peak(&sim, end, sim.pos()), 0.0, "nach dem Ende: still");
+}
+
+// ---------------------------------------------------------------------------------------------
+// `stack`: a new layer every pass until the section ends
+// ---------------------------------------------------------------------------------------------
+
+/// One `stack` section on an empty track that waits for Release, then `play`.
+const STACK: &str = "\
+bpm: 120
+tracks:
+  a: {input: 1}
+sections:
+  - id: drums
+    bars: 2
+    autorelease: false
+    quantize: loop
+    tracks:
+      a: stack
+  - id: groove
+    bars: 2
+    autorelease: false
+    tracks:
+      a: play
+";
+
+impl Live {
+    /// Release pressed at `pos`, the commands it produced handed to the engine.
+    fn release_at(&mut self, pos: u64) -> String {
+        self.run_to(pos);
+        let message = self.runner.next(self.sim.pos());
+        self.pump();
+        message
+    }
+
+    fn layers(&self) -> usize {
+        self.sim.core.track(0).layer_count()
+    }
+
+    /// Every sample of layer `layer` against the input that was played in pass `pass`.
+    fn assert_layer_is_pass(&self, layer: usize, pass: u64, played: &dyn Fn(u64) -> f32) {
+        let track = self.sim.core.track(0);
+        let (origin, len) = (track.origin(), track.loop_len());
+        let content = track.layer(layer).expect("Ebene").content(len);
+        for (i, &v) in content.iter().enumerate() {
+            let expect = played(origin + pass * len + i as u64 + R);
+            assert!(
+                (v - expect).abs() < 1e-6,
+                "Ebene {layer} (Durchlauf {pass}), Index {i}: {v} statt {expect}"
+            );
+        }
+    }
+}
+
+/// Where the first section of [`STACK`] begins - the same for every run started at 0.
+fn stack_first_bar() -> u64 {
+    Live::new(STACK).first_bar
+}
+
+/// Three passes on an empty track, Release in the middle of the third: three layers, each exactly
+/// the input of its own pass - no sample lost or doubled at a seam, an impulse on the boundary in
+/// exactly one layer at index 0 - the third pass recorded to its end, and the change on that end.
+#[test]
+fn three_passes_of_stack_on_an_empty_track_are_three_seamless_layers() {
+    let first_bar = stack_first_bar();
+    let seam = runner_for(STACK).scheduler().timeline.bar_start(first_bar + 2);
+    let played = move |k: u64| if k == seam + R { 1.0 } else { fingerprint(k) * 0.5 };
+    let mut live = Live::with(STACK, mono(played));
+    assert_eq!(live.first_bar, first_bar);
+    let (s0, s2, s4, s6) = (live.bar(0), live.bar(2), live.bar(4), live.bar(6));
+
+    let message = live.release_at(s4 + (s6 - s4) / 2);
+    assert_eq!(
+        live.runner.armed_at().expect("armed").1,
+        first_bar + 6,
+        "der Wechsel greift am Ende des laufenden Durchlaufs: {message}"
+    );
+    live.run_to(live.bar(10) + 2 * R);
+
+    let track = live.sim.core.track(0);
+    assert_eq!(live.layers(), 3, "drei Durchlaeufe, drei Ebenen");
+    assert_eq!(track.origin(), s0, "der erste Durchlauf hat den Loop definiert");
+    assert_eq!(track.loop_len(), s2 - s0, "die Sektionslaenge ist die Looplaenge");
+    assert!(track.take().is_none(), "nach dem dritten Durchlauf kein vierter");
+    assert!(track.playing());
+    for layer in 0..3 {
+        live.assert_layer_is_pass(layer, layer as u64, &played);
+    }
+    // The impulse: index 0 of layer 1, and nowhere in layer 0.
+    let len = track.loop_len();
+    assert_eq!(track.layer(1).unwrap().content(len)[0], 1.0);
+    assert!(track.layer(0).unwrap().content(len).iter().all(|&v| v != 1.0));
+    let status = live.sim.latest_status().unwrap();
+    assert_eq!(status.ignored_commands, 0, "die Engine hat nichts abgelehnt");
+    assert_eq!(live.runner.view(live.sim.pos()).section, Some(1));
+}
+
+/// The command stream of `stack` -> `play`: the latch on with the first pass, the first pass as a
+/// record, then nothing but the latch going off in the middle of the last pass. No `StartPlay`, no
+/// `StopPlay`, no take at the boundary - the loop simply keeps running.
+#[test]
+fn stack_then_play_sends_only_the_latch_off() {
+    let mut drive = Drive::new(STACK);
+    let (s0, s2, s4, s6) = (drive.at_bar(0), drive.at_bar(2), drive.at_bar(4), drive.at_bar(6));
+    drive.to(s4 + 1_000);
+    drive.release();
+    drive.to(drive.at_bar(10));
+    let len = s2 - s0;
+    assert_eq!(
+        drive.of(0),
+        vec![
+            Command::LatchOverdub { track: 0, on: true, at: s0 },
+            Command::StartRecord { track: 0, at: s0 },
+            Command::StopRecord { track: 0, at: s2 },
+            Command::StartPlay { track: 0, at: s2 },
+            Command::LatchOverdub { track: 0, on: false, at: s0 + 2 * len + len / 2 },
+        ]
+    );
+    assert!(s6.abs_diff(s0 + 3 * len) <= 2);
+    assert_eq!(drive.monitor_of(0), vec![true, false], "mithoeren wie bei overdub");
+}
+
+/// An empty pass in the middle is dropped; the passes around it keep their grid positions.
+#[test]
+fn an_empty_pass_in_a_stack_is_dropped() {
+    let first_bar = stack_first_bar();
+    let timeline = runner_for(STACK).scheduler().timeline;
+    let (q0, q1) = (timeline.bar_start(first_bar + 2), timeline.bar_start(first_bar + 4));
+    let played = move |k: u64| {
+        if (q0 + R..q1 + R).contains(&k) { 0.0 } else { fingerprint(k) * 0.5 }
+    };
+    let mut live = Live::with(STACK, mono(played));
+    live.release_at(live.bar(4) + 1_000);
+    live.run_to(live.bar(8) + 2 * R);
+    assert_eq!(live.layers(), 2, "der stille zweite Durchlauf ist verworfen");
+    live.assert_layer_is_pass(0, 0, &played);
+    live.assert_layer_is_pass(1, 2, &played);
+}
+
+/// The owner's way of starting the drums: the first pass left empty on an empty track. It leaves
+/// no layer, the grid is still the section's (origin on its first bar, length `bars`), and the first
+/// pass that was played is layer 1. Nothing played at all until Release: the track is empty, and
+/// the `play` after it runs on without a refusal.
+#[test]
+fn an_empty_first_pass_of_a_stack_keeps_the_grid() {
+    let first_bar = stack_first_bar();
+    let timeline = runner_for(STACK).scheduler().timeline;
+    let q1 = timeline.bar_start(first_bar + 2);
+    let played = move |k: u64| if k < q1 + R { 0.0 } else { fingerprint(k) * 0.5 };
+    let mut live = Live::with(STACK, mono(played));
+    live.release_at(live.bar(6) + 1_000);
+    live.run_to(live.bar(10) + 2 * R);
+    let track = live.sim.core.track(0);
+    assert_eq!(track.layer_count(), 3, "Durchlauf 2, 3, 4");
+    assert_eq!(track.origin(), live.bar(0));
+    assert_eq!(track.loop_len(), live.bar(2) - live.bar(0));
+    assert_eq!(track.muted_mask(), 0);
+    for layer in 0..3 {
+        live.assert_layer_is_pass(layer, layer as u64 + 1, &played);
+    }
+
+    let mut quiet = Live::with(STACK, crate::engine::sim::silence());
+    quiet.release_at(quiet.bar(4) + 1_000);
+    quiet.run_to(quiet.bar(12));
+    let status = quiet.sim.latest_status().unwrap();
+    assert_eq!(status.tracks()[0].layers, 0, "nichts gespielt, nichts da");
+    assert_eq!(status.ignored_commands, 0);
+    assert_eq!(quiet.runner.view(quiet.sim.pos()).section, Some(1));
+}
+
+/// `quantize: bar`: Release early in the third pass still lets that pass finish - a change never
+/// lands in a running take - and says so.
+#[test]
+fn a_stack_with_bar_quantisation_finishes_the_running_pass() {
+    let yaml = STACK.replace("quantize: loop", "quantize: bar");
+    let mut drive = Drive::new(&yaml);
+    drive.to(drive.at_bar(4) + 1_000);
+    let message = drive.release();
+    assert_eq!(drive.runner.armed_at().unwrap().1, drive.first_bar + 6, "{message}");
+    assert!(message.contains("never cut short"), "{message}");
+}
+
+/// Two `stack` sections in a row are one continuous stack: no command at the boundary.
+#[test]
+fn stack_after_stack_keeps_going_without_a_command() {
+    let yaml = STACK.replace("      a: play", "      a: stack");
+    let mut drive = Drive::new(&yaml);
+    drive.to(drive.at_bar(2) + 1_000);
+    drive.release();
+    drive.to(drive.at_bar(5));
+    assert_eq!(drive.of(0).len(), 4, "nur der Anfang: {:?}", drive.of(0));
+    assert_eq!(drive.section(), Some(1));
+}
+
+/// `stack` -> `overdub`: the last pass gets its `StopRecord`, so the overdub is queued behind it on
+/// the very grid point - through the real engine, without a refusal.
+#[test]
+fn an_overdub_after_a_stack_follows_on_the_grid() {
+    let yaml = STACK.replace("      a: play", "      a: overdub");
+    let mut live = Live::new(&yaml);
+    live.release_at(live.bar(2) + 1_000);
+    live.run_to(live.bar(8) + 2 * R);
+    let status = live.sim.latest_status().unwrap();
+    assert_eq!(status.ignored_commands, 0, "{:?}", status.refusal);
+    assert_eq!(live.layers(), 3, "zwei Stapel-Durchlaeufe und das Overdub");
+    for layer in 0..3 {
+        live.assert_layer_is_pass(layer, layer as u64, &fingerprint);
+    }
+}
+
+/// "Stop all" in the middle of a stack: the latch goes off, the running pass ends on the bar line,
+/// and the track stays silent.
+#[test]
+fn stop_all_ends_a_stack() {
+    let mut live = Live::new(STACK);
+    live.run_to(live.bar(3) + 1_000);
+    live.runner.stop_all(live.sim.pos());
+    live.pump();
+    live.run_to(live.bar(10));
+    let track = live.sim.core.track(0);
+    assert!(track.take().is_none());
+    assert!(!track.playing());
+    assert_eq!(track.layer_count(), 2);
+}
+
+/// The regression of ce2eeb2, for `stack`: whatever bar the score is started on, the stack's passes
+/// sit on the track's own grid `origin + n * len` (never on separately rounded bar lines), Release in
+/// the third pass lands at its end, and the overdub after it starts on exactly that grid point.
+#[test]
+fn a_stack_follows_its_own_grid_from_every_start_position() {
+    let yaml = "\
+bpm: 141
+time_signature: 3/4
+tracks:
+  voice: {input: 1}
+sections:
+  - id: rec
+    bars: 8
+    autorelease: true
+    tracks:
+      voice: record
+  - id: layers
+    bars: 8
+    autorelease: false
+    quantize: loop
+    tracks:
+      voice: stack
+  - id: more
+    bars: 8
+    autorelease: true
+    tracks:
+      voice: overdub
+";
+    let timeline = runner_for(yaml).scheduler().timeline;
+    for start_bar in 0..80u64 {
+        let mut runner = runner_for(yaml);
+        let est = timeline.bar_start(start_bar);
+        runner.start(est);
+        let first_bar = runner.armed_at().expect("armed").1;
+        let mut drive = Drive { commands: runner.take_commands(), first_bar, runner, pos: est };
+        let origin = drive.at_bar(0);
+        let len = drive.at_bar(8) - origin;
+        // The third pass of the stack: bars 24..32 after the first.
+        drive.to(drive.at_bar(26) + 100);
+        assert_eq!(drive.section(), Some(1), "start {start_bar}");
+        let message = drive.release();
+        assert_eq!(
+            drive.runner.armed_at().unwrap().1,
+            first_bar + 32,
+            "start {start_bar}: {message}"
+        );
+        drive.to(drive.at_bar(34));
+        let cmds = drive.of(0);
+        let latch: Vec<(bool, u64)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                Command::LatchOverdub { on, at, .. } => Some((*on, *at)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            latch,
+            vec![(true, origin + len), (false, origin + 3 * len + len / 2)],
+            "start {start_bar}"
+        );
+        let overdubs: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                Command::StartOverdub { at, .. } => Some(*at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            overdubs,
+            vec![origin + len, origin + 4 * len],
+            "start {start_bar}: erster Stapel-Durchlauf und das Overdub auf dem Loop-Raster"
+        );
+        assert!(
+            cmds.contains(&Command::StopRecord { track: 0, at: origin + 4 * len }),
+            "start {start_bar}: der letzte Durchlauf endet auf dem Raster"
+        );
+    }
 }

@@ -20,6 +20,9 @@
 //! |---|---|---|
 //! | egal | `record` | `StartRecord`, `StopRecord`, `StartPlay` - ein Take ueber die Sektion |
 //! | egal | `overdub` | `StartOverdub`, `StopRecord`, `StartPlay` - eine Ebene, ein Loop-Durchlauf |
+//! | nicht `stack` | `stack` | `LatchOverdub an`, dann der erste Durchlauf wie `record` (leere Spur) bzw. `overdub` |
+//! | `stack` | `stack` | **keins** - der Latch laeuft einfach weiter |
+//! | `stack` | anderes | `LatchOverdub aus` mitten im letzten Durchlauf (+ `StopRecord` an dessen Ende, wenn ein Take folgt), dann wie oben |
 //! | klingt schon | `play` | **keins** |
 //! | still | `play` | `StartPlay` |
 //! | klingt | `stop` / `hear_through` | `StopPlay` |
@@ -38,6 +41,23 @@
 //! so it knows the loop will be exactly `[start, end)` of the section it recorded in. Every track
 //! therefore carries a predicted geometry, written when the runner schedules a `record`, and the
 //! prediction is exact because nothing else sends commands while a score is running.
+//!
+//! # `stack`: the engine keeps overdubbing, the runner only opens and closes the latch
+//!
+//! A `stack` section does not schedule one take per pass. It switches the engine's continuous
+//! overdub ([`Command::LatchOverdub`], see `latch.rs`) on, timed for the first pass, and schedules
+//! that first pass exactly like `record` (empty track: origin = section start, length = `bars`) or
+//! like `overdub` (on the track's own grid). From then on the engine starts every further pass on
+//! the very sample the previous one ended - `origin + n * loop_len` by construction, never a bar
+//! line rounded on its own - and drops passes in which nothing was played.
+//!
+//! The end is known only once the following section is scheduled (at Release, or at once for an
+//! `autorelease` section). The latch goes off **in the middle of the last pass** - the pass that
+//! begins on the last grid point before the boundary - so that pass is recorded to its end and none
+//! follows it. Half a pass is far more than any jitter between the threads and far less than the
+//! pass itself. While a `stack` runs, "is a take still running here" is answered from the grid: the
+//! change position is pushed to the end of the pass running at that moment, exactly like the end of
+//! a planned take.
 //!
 //! # Why a change never lands inside a running take
 //!
@@ -218,6 +238,10 @@ struct TrackRun {
     take_end_bar: u64,
     /// Monitoring as last sent to the engine.
     monitor: bool,
+    /// A `stack` is running: the latch is on (or scheduled to go on) and no end is planned yet.
+    stacking: bool,
+    /// Where that latch went on - the start of the stack's first pass.
+    stack_from: u64,
 }
 
 /// What a display needs, as one snapshot.
@@ -347,6 +371,8 @@ impl Runner {
                 take_end: 0,
                 take_end_bar: 0,
                 monitor: false,
+                stacking: false,
+                stack_from: 0,
             })
             .collect();
         let bars = plans.iter().map(|p| p.bars).max().unwrap_or(1);
@@ -547,10 +573,20 @@ impl Runner {
         let mut stopped = 0usize;
         for track in 0..self.tracks.len() {
             let name = self.tracks[track].name.clone();
+            // A running stack: no further pass, and the one that runs is closed on the bar line
+            // like any other take.
+            let stacking = self.tracks[track].stacking;
+            if stacking {
+                self.out.push(Command::LatchOverdub {
+                    track,
+                    on: false,
+                    at: soon,
+                });
+            }
             // A take that is still running is closed on the bar line rather than left open; the
             // loop it defines is short, but the musician asked for silence.
             let take_end = self.tracks[track].take_end;
-            if take_end > bar {
+            if take_end > bar || stacking {
                 self.out.push(Command::StopRecord { track, at: bar });
             }
             if self.tracks[track].sounding || take_end != 0 {
@@ -573,6 +609,7 @@ impl Runner {
             self.tracks[track].sounding = false;
             self.tracks[track].target = ScoreState::Stop;
             self.tracks[track].take_end = 0;
+            self.tracks[track].stacking = false;
         }
 
         // An armed change cannot be recalled, so it is neutralised where it lands: a track it would
@@ -655,6 +692,7 @@ impl Runner {
             track.layers = 0;
             track.take_end = 0;
             track.take_end_bar = 0;
+            track.stacking = false;
             // A clear restores each track's start-up monitoring, which the caller then switches
             // off again; the runner's picture is "off" either way.
             track.monitor = false;
@@ -841,10 +879,8 @@ impl Runner {
 
     fn apply_monitor(&mut self, index: usize) {
         for track in 0..self.tracks.len() {
-            let want = matches!(
-                self.plans[index].want[track],
-                ScoreState::Record | ScoreState::Overdub | ScoreState::HearThrough
-            );
+            let state = self.plans[index].want[track];
+            let want = state.records() || state == ScoreState::HearThrough;
             self.set_monitor(track, want);
         }
     }
@@ -857,17 +893,77 @@ impl Runner {
     /// Returns the sample, the bar index, and whether a running take pushed the change further
     /// than the section's own grid would have put it.
     fn change_position(&self, est: u64, current: Placement) -> (u64, u64, bool) {
-        // The first bar a change may fall on: no earlier than the bar a running take ends in.
+        // The first bar a change may fall on: no earlier than the bar a running take ends in. A
+        // running stack has a take in every pass, so its end is the end of the pass that runs
+        // when the change could take effect at the earliest.
+        let earliest = est + self.sched.guard;
         let min_bar = self
             .tracks
             .iter()
-            .filter(|t| t.take_end != 0)
-            .map(|t| t.take_end_bar)
+            .filter(|t| t.take_end != 0 || t.stacking)
+            .map(|t| {
+                let mut bar = if t.take_end != 0 { t.take_end_bar } else { 0 };
+                if t.stacking && t.len > 0 {
+                    let pass_end = Scheduler::loop_grid_at_or_after(t.origin, t.len, earliest);
+                    bar = bar.max(self.bar_near(pass_end));
+                }
+                bar
+            })
             .max()
             .unwrap_or(0);
         let (at, at_bar) = self.grid_position(est, current, min_bar);
         let (_, free_bar) = self.grid_position(est, current, 0);
         (at, at_bar, at_bar > free_bar)
+    }
+
+    /// Half a beat in samples: the tolerance between a loop grid point and the bar line it belongs
+    /// to. The two are rounded separately and drift apart by up to a sample per pass; half a beat
+    /// is far more than that and far less than any loop, which is always whole bars.
+    fn slack(&self) -> u64 {
+        (self.sched.timeline.samples_per_beat() / 2.0) as u64
+    }
+
+    /// The bar whose line `pos` is (to within [`Self::slack`]) or lies in.
+    fn bar_near(&self, pos: u64) -> u64 {
+        self.sched.timeline.bar_index_at(pos + self.slack())
+    }
+
+    /// The end of a running stack, before the section that starts at `start` takes over.
+    ///
+    /// The last pass is the one that begins on the last grid point before `start`; the latch goes
+    /// off in its middle, so it is recorded to its end and nothing follows it. When a take follows
+    /// on this track, that pass also gets its `StopRecord`, which lets the engine queue the new
+    /// take behind it instead of refusing it as busy.
+    fn end_stack(&mut self, track: usize, start: u64, next: ScoreState) {
+        let slack = self.slack();
+        let t = &self.tracks[track];
+        let (origin, len, from) = (t.origin, t.len, t.stack_from);
+        let limit = start.saturating_sub(slack);
+        let last = if len == 0 || limit <= origin {
+            origin
+        } else {
+            origin + (limit - origin - 1) / len * len
+        };
+        let pass_end = last + len;
+        let off = (last + len / 2).max(from + 1);
+        self.out.push(Command::LatchOverdub {
+            track,
+            on: false,
+            at: off,
+        });
+        if matches!(next, ScoreState::Record | ScoreState::Overdub) {
+            self.out.push(Command::StopRecord {
+                track,
+                at: pass_end,
+            });
+        }
+        let bar = self.bar_near(pass_end);
+        let t = &mut self.tracks[track];
+        t.stacking = false;
+        if pass_end > t.take_end {
+            t.take_end = pass_end;
+            t.take_end_bar = bar;
+        }
     }
 
     /// The first point of the current section's quantisation grid at or after `est` plus the head
@@ -968,6 +1064,9 @@ impl Runner {
         for track in 0..self.tracks.len() {
             let want = plan.want[track];
             let name = self.tracks[track].name.clone();
+            if self.tracks[track].stacking && want != ScoreState::Stack {
+                self.end_stack(track, start, want);
+            }
             match want {
                 ScoreState::Record => {
                     let scheduled = self.sched.record_at(track, &name, start, plan.bars);
@@ -1037,6 +1136,56 @@ impl Runner {
                     t.sounding = true;
                     takes.push(track);
                 }
+                ScoreState::Stack if self.tracks[track].stacking => {
+                    // stack -> stack: the latch simply keeps going.
+                }
+                ScoreState::Stack => {
+                    // The latch goes on first, timed for the first pass, so that pass is judged
+                    // like every later one; then the first pass itself, exactly as `record` (empty
+                    // track - the section's `bars` become the loop) or `overdub` (on the track's own
+                    // grid, see there) would schedule it. Every further pass is the engine's.
+                    let t = &self.tracks[track];
+                    let (take_start, take_end, defines_loop) = if t.len == 0 {
+                        (start, end, true)
+                    } else {
+                        let slack = self.slack();
+                        let at = Scheduler::loop_grid_at_or_after(
+                            t.origin,
+                            t.len,
+                            start.saturating_sub(slack),
+                        );
+                        (at, at + t.len, false)
+                    };
+                    self.out.push(Command::LatchOverdub {
+                        track,
+                        on: true,
+                        at: take_start,
+                    });
+                    let scheduled = if defines_loop {
+                        self.sched.record_at(track, &name, start, plan.bars)
+                    } else {
+                        let layers = self.tracks[track].layers;
+                        self.sched
+                            .overdub_at(track, &name, take_start, take_end, layers)
+                    };
+                    self.push(scheduled);
+                    let take_end_bar = self.bar_near(take_end);
+                    let t = &mut self.tracks[track];
+                    if defines_loop {
+                        t.origin = take_start;
+                        t.len = take_end - take_start;
+                        t.len_bars = plan.bars;
+                        t.layers = 1;
+                    } else {
+                        t.layers = t.layers.saturating_add(1);
+                    }
+                    t.take_end = take_end;
+                    t.take_end_bar = take_end_bar;
+                    t.sounding = true;
+                    t.stacking = true;
+                    t.stack_from = take_start;
+                    takes.push(track);
+                }
                 ScoreState::Play => {
                     // The one case that must produce nothing: a track that is already sounding.
                     if !self.tracks[track].sounding && self.tracks[track].len > 0 {
@@ -1066,6 +1215,9 @@ impl Runner {
             bar1: 0,
         });
         for track in 0..self.tracks.len() {
+            if self.tracks[track].stacking {
+                self.end_stack(track, at, ScoreState::Stop);
+            }
             if self.tracks[track].sounding {
                 let name = self.tracks[track].name.clone();
                 let scheduled = self.sched.stop_play_at(track, &name, at);

@@ -1721,6 +1721,7 @@ impl EngineCore {
                 notes,
                 held_notes,
                 latched: self.latch.on(i),
+                placeholder: self.latch.placeholder(i),
                 midi_loop: track.midi_loop(),
                 layer_notes,
                 state: track.state(musical_input),
