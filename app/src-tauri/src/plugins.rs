@@ -286,6 +286,20 @@ pub fn init(app: &AppHandle) {
         .ok();
 }
 
+/// On the way out of the program, on the main thread, **after** the engine has stopped: save the
+/// rack, then close every window and unload every plugin in order (window, deactivate, the
+/// instance itself). A plugin the engine still holds is left alone - destroying it while it may
+/// be processing would be worse than leaking it. Returns how many were left alone.
+pub fn shutdown() -> usize {
+    MANAGER.with(|m| match m.try_borrow_mut() {
+        Ok(mut m) => m.shutdown(),
+        Err(_) => {
+            log!("Plugin host busy on the way out; plugins are left loaded.");
+            usize::MAX
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------------------------
 // Wire format
 // ---------------------------------------------------------------------------------------------
@@ -1332,6 +1346,12 @@ impl Manager {
             if open != s.editor_was_open {
                 s.editor_was_open = open;
                 rack_changed = true;
+                // What was done in the plugin's window need not be a parameter (a preset, a
+                // sample loaded): its state is saved when the window is closed.
+                if !open {
+                    self.dirty = true;
+                    self.last_change = Some(Instant::now());
+                }
             }
         }
         let meter_due = self
@@ -1348,6 +1368,28 @@ impl Manager {
         {
             self.save();
         }
+    }
+
+    fn shutdown(&mut self) -> usize {
+        self.save();
+        let mut kept = 0;
+        for mut slot in std::mem::take(&mut self.slots) {
+            slot.plugin.close_editor();
+            if Arc::strong_count(&slot.shared) > 1 {
+                log!(
+                    "Plugin {} is still in the engine on the way out and stays loaded.",
+                    slot.info.info.name
+                );
+                std::mem::forget(slot);
+                kept += 1;
+                continue;
+            }
+            if slot.active_gen.take().is_some() {
+                slot.plugin.deactivate();
+            }
+            drop(slot);
+        }
+        kept
     }
 
     fn save(&mut self) {

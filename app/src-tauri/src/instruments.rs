@@ -156,6 +156,64 @@ pub fn init(app: &AppHandle) {
         .ok();
 }
 
+/// Debug builds only, for checking a real instrument without a mouse:
+/// `HENRYS_LOOPER_DEV_INSTRUMENT_CHECK=<plugin id>` puts the instrument on a track "Dev check"
+/// (unless the last session's restore already did - then its state size is logged), opens its
+/// window, logs the window's geometry twice, closes it and **quits the program** through the
+/// normal way out. Run twice with the same config folder to see the state come back.
+#[cfg(debug_assertions)]
+pub fn dev_check(app: AppHandle) {
+    let Ok(id) = std::env::var("HENRYS_LOOPER_DEV_INSTRUMENT_CHECK") else {
+        return;
+    };
+    const TRACK: &str = "Dev check";
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(4));
+        let restored = on_main(|m| {
+            Ok(m.position(TRACK)
+                .map(|p| m.slots[p].plugin.save_state().map(|s| s.len())))
+        });
+        log!("dev check: restored from the last session: {restored:?}");
+        if !matches!(restored, Ok(Some(_))) {
+            let id = id.clone();
+            let put = on_main(move |m| m.put(TRACK, &id, None).map(|_| ()));
+            log!("dev check: put {put:?}");
+        }
+        let opened = on_main(|m| m.editor(TRACK, true).map(|_| ()));
+        log!("dev check: editor {opened:?}");
+        for _ in 0..2 {
+            std::thread::sleep(Duration::from_secs(2));
+            let report = on_main(|m| {
+                let p = m.position(TRACK).ok_or("gone")?;
+                let s = &m.slots[p];
+                Ok(format!(
+                    "{} | state {:?} bytes",
+                    s.plugin.editor_report().unwrap_or_default(),
+                    s.plugin.save_state().map(|s| s.len())
+                ))
+            });
+            log!("dev check: {report:?}");
+        }
+        let _ = on_main(|m| m.editor(TRACK, false).map(|_| ()));
+        std::thread::sleep(Duration::from_secs(1));
+        log!("dev check: quitting");
+        app.exit(0);
+    });
+}
+
+/// On the way out of the program, on the main thread, **after** the engine has stopped: save,
+/// then close every window and unload every instrument in order. One the engine still holds is
+/// left alone. Returns how many were left alone. Like [`crate::plugins::shutdown`].
+pub fn shutdown() -> usize {
+    MANAGER.with(|m| match m.try_borrow_mut() {
+        Ok(mut m) => m.shutdown(),
+        Err(_) => {
+            log!("Instrument host busy on the way out; instruments are left loaded.");
+            usize::MAX
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------------------------
 // Wire format
 // ---------------------------------------------------------------------------------------------
@@ -704,6 +762,12 @@ impl Manager {
             if open != s.editor_was_open {
                 s.editor_was_open = open;
                 changed = true;
+                // A sound loaded in the window (Kontakt: an instrument) need not move a
+                // parameter: the state is saved when the window is closed.
+                if !open {
+                    self.dirty = true;
+                    self.last_change = Some(Instant::now());
+                }
             }
             // A sound chosen in the instrument's own window is state that has to be kept.
             if !s.plugin.take_changed().is_empty() {
@@ -727,6 +791,31 @@ impl Manager {
         {
             self.save();
         }
+    }
+
+    fn shutdown(&mut self) -> usize {
+        // Saving half a restore would forget the instruments that are still to come.
+        if self.restoring.is_empty() {
+            self.save();
+        }
+        let mut kept = 0;
+        for mut slot in std::mem::take(&mut self.slots) {
+            slot.plugin.close_editor();
+            if Arc::strong_count(&slot.shared) > 1 {
+                log!(
+                    "Instrument {} is still in the engine on the way out and stays loaded.",
+                    slot.info.info.name
+                );
+                std::mem::forget(slot);
+                kept += 1;
+                continue;
+            }
+            if slot.active.take().is_some() {
+                slot.plugin.deactivate();
+            }
+            drop(slot);
+        }
+        kept
     }
 
     fn save(&mut self) {

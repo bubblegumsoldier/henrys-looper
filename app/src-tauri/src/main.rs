@@ -1078,6 +1078,8 @@ fn main() {
             // Plugin slots live on this (the main) thread; see `plugins.rs`.
             plugins::init(app.handle());
             instruments::init(app.handle());
+            #[cfg(debug_assertions)]
+            instruments::dev_check(app.handle().clone());
             // Recording to disk: settings from the config folder, recordings under Documents.
             recording::init(config_dir(app.handle()), app.path().document_dir().ok());
 
@@ -1190,6 +1192,53 @@ fn main() {
             dev_snapshot,
             dev_dump
         ])
-        .run(tauri::generate_context!())
-        .expect("the Tauri application did not start");
+        .build(tauri::generate_context!())
+        .expect("the Tauri application did not start")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                shut_down(app);
+            }
+        });
+}
+
+/// The way out, on the main thread, before the process ends: the engine stops (streams gone, every
+/// plugin processor handed back), plugin and instrument racks are saved and their plugins unloaded
+/// in order (window, deactivate, instance), then the plugin libraries get their `bundleExit`.
+///
+/// Plugin code is never unmapped. Some plugins (Kontakt 8) tear down their GUI framework from a
+/// static destructor in `exit()` unless the host did all of the above - and crash there. If any
+/// plugin could not be unloaded (the engine did not let go of it), the process ends with `_exit`
+/// right here: everything of ours is saved and flushed by then, and skipping the static
+/// destructors is what keeps a half-torn-down plugin from crashing on the way out.
+fn shut_down(app: &tauri::AppHandle) {
+    // Tauri may report the exit more than once; the way out is walked once.
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    if let Some(engine) = app.try_state::<EngineHandle>() {
+        let engine = engine.inner().clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(engine.stop());
+        });
+        // The audio thread may be waiting for this very thread; do not wait for it forever.
+        if rx.recv_timeout(std::time::Duration::from_secs(3)).is_err() {
+            log!("On the way out: the engine did not stop within 3 s.");
+        }
+    }
+    let kept = plugins::shutdown().saturating_add(instruments::shutdown());
+    let modules = looper_engine::plugin::shutdown();
+    log!(
+        "On the way out: plugins unloaded in {:?} ({kept} kept, {modules} libraries still in use).",
+        started.elapsed()
+    );
+    if kept > 0 || modules > 0 {
+        log!("Ending without static destructors, so a plugin still loaded cannot crash the exit.");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let _ = std::io::stderr().flush();
+        unsafe { libc::_exit(0) };
+    }
 }
