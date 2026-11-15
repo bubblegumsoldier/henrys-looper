@@ -142,7 +142,7 @@ use super::latch::Latches;
 use super::metro::Metronome;
 use super::source::{HostClock, SourceEndpoint, SourceRack, place_event};
 use super::timeline::Timeline;
-use super::track::{MAX_LAYERS, Track, TrackLatency};
+use super::track::{LayerStore, MAX_LAYERS, Track, TrackLatency};
 
 /// Size of the waiting room for commands that have been taken out of the queue but are not due
 /// yet. Allocated once, in the control thread; the audio thread only ever pushes into it and
@@ -1234,7 +1234,7 @@ impl EngineCore {
                     return;
                 }
                 match self.tracks[track].remove_layer(layer) {
-                    Some(buffer) => self.buffers.retire(buffer),
+                    Some(buffer) => self.retire_store(track, buffer),
                     None => self.refuse(Refusal::NoSuchTarget),
                 }
             }
@@ -1364,7 +1364,7 @@ impl EngineCore {
         let now = self.out_pos;
         for t in 0..self.tracks.len() {
             if let Some(buffer) = self.tracks[t].take_pending_buffer() {
-                self.buffers.retire(buffer);
+                self.retire_store(t, buffer);
             }
             if let Some(take) = self.tracks[t].take() {
                 let begun = take.start < now && self.musical_input_pos(t) > take.start;
@@ -1391,7 +1391,7 @@ impl EngineCore {
         self.latch.set(track, false);
         // A take queued behind one that is finishing is the newest thing; only it goes.
         if let Some(buffer) = self.tracks[track].take_pending_buffer() {
-            self.buffers.retire(buffer);
+            self.retire_store(track, buffer);
             return;
         }
         if let Some(take) = self.tracks[track].take() {
@@ -1399,7 +1399,7 @@ impl EngineCore {
             return;
         }
         match self.tracks[track].pop_layer() {
-            Some(buffer) => self.buffers.retire(buffer),
+            Some(buffer) => self.retire_store(track, buffer),
             None => self.refuse(Refusal::NoSuchTarget),
         }
     }
@@ -1413,7 +1413,7 @@ impl EngineCore {
         }
         self.tracks[track].cancel_take();
         if let Some(buffer) = self.tracks[track].pop_layer() {
-            self.buffers.retire(buffer);
+            self.retire_store(track, buffer);
         }
     }
 
@@ -1425,18 +1425,18 @@ impl EngineCore {
         // layer - it is the last one, since every take writes into the layer it pushed.
         if closed.is_some_and(|take| !take.defines_loop) && self.latch.closed_silent(track) {
             if let Some(buffer) = self.tracks[track].pop_layer() {
-                self.buffers.retire(buffer);
+                self.retire_store(track, buffer);
             }
         }
         if self.tracks[track].pending_defines_loop() {
             // What was queued is a completely new loop, so the old layers go back first.
             self.tracks[track].set_playing(false);
             while let Some(buffer) = self.tracks[track].pop_layer() {
-                self.buffers.retire(buffer);
+                self.retire_store(track, buffer);
             }
         }
         if let Some(buffer) = self.tracks[track].promote_pending() {
-            self.buffers.retire(buffer);
+            self.retire_store(track, buffer);
             self.refuse(Refusal::LayerLimit);
         }
         match self.tracks[track].take() {
@@ -1467,7 +1467,7 @@ impl EngineCore {
             return;
         };
         if let Some(previous) = self.tracks[track].set_pending(start, defines_loop, buffer) {
-            self.buffers.retire(previous);
+            self.retire_store(track, previous);
         }
     }
 
@@ -1495,7 +1495,7 @@ impl EngineCore {
         self.cancel_takes(track);
         self.tracks[track].set_playing(false);
         while let Some(buffer) = self.tracks[track].pop_layer() {
-            self.buffers.retire(buffer);
+            self.retire_store(track, buffer);
         }
     }
 
@@ -1503,7 +1503,17 @@ impl EngineCore {
     fn cancel_takes(&mut self, track: usize) {
         self.tracks[track].cancel_take();
         if let Some(buffer) = self.tracks[track].take_pending_buffer() {
-            self.buffers.retire(buffer);
+            self.retire_store(track, buffer);
+        }
+    }
+
+    /// Hand a layer's storage back to the control thread, whatever it holds.
+    fn retire_store(&mut self, track: usize, store: LayerStore) {
+        let _ = track;
+        match store {
+            LayerStore::Audio(buffer) => self.buffers.retire(buffer),
+            // No clip can exist without the MIDI loop stage; never dropped here either way.
+            LayerStore::Midi(clip) => std::mem::forget(clip),
         }
     }
 

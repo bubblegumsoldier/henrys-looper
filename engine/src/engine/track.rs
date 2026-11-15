@@ -100,7 +100,9 @@ use super::bus::{BUS_COUNT, Bus, BusSend};
 use super::frame::{Channels, Frame, TrackInput, pan_gains};
 use super::fx::smooth::Smoothed;
 use super::fx::{Chain, FxParam, FxPreset, FxSlot, FxStatus};
+use super::grid::{LoopGrid, PendingGeom};
 use super::insert::Spread;
+use super::midiloop::MidiClip;
 
 /// Upper end of a channel fader, linear: +12 dB. Enough to lift a quiet take to the level of the
 /// others; more is a gain-staging problem the fader should not hide.
@@ -213,38 +215,115 @@ impl TrackState {
     }
 }
 
-/// One recorded layer: a buffer somebody else allocated, plus how it is mixed.
+/// What one layer holds: interleaved samples, or the notes of a MIDI take. Both are allocated by
+/// the control thread and travel back to it the same way; the audio thread never creates or drops
+/// either.
+pub enum LayerStore {
+    /// Pre-allocated and zeroed, interleaved. Its length is the maximum loop length in frames times
+    /// the track's channel count.
+    Audio(Vec<f32>),
+    /// A pre-allocated note clip (`super::midiloop`).
+    Midi(Box<MidiClip>),
+}
+
+impl From<Vec<f32>> for LayerStore {
+    fn from(buffer: Vec<f32>) -> Self {
+        LayerStore::Audio(buffer)
+    }
+}
+
+impl From<Box<MidiClip>> for LayerStore {
+    fn from(clip: Box<MidiClip>) -> Self {
+        LayerStore::Midi(clip)
+    }
+}
+
+impl LayerStore {
+    /// Samples of an audio buffer, events a clip can hold.
+    pub fn len(&self) -> usize {
+        match self {
+            LayerStore::Audio(buffer) => buffer.len(),
+            LayerStore::Midi(clip) => clip.capacity(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_midi(&self) -> bool {
+        matches!(self, LayerStore::Midi(_))
+    }
+}
+
+/// One recorded layer: storage somebody else allocated, plus how it is mixed.
 pub struct Layer {
-    /// Pre-allocated and zeroed by the control thread, interleaved. Its length is the maximum loop
-    /// length in frames times [`Layer::channels`].
-    buffer: Vec<f32>,
-    /// Channel count of this buffer. A copy of the track's - every layer of a track has the same
-    /// one - kept here so a layer can answer "how many frames am I" on its own.
+    store: LayerStore,
+    /// Channel count of an audio buffer. A copy of the track's - every layer of a track has the
+    /// same one - kept here so a layer can answer "how many frames am I" on its own.
     channels: Channels,
     gain: f32,
     muted: bool,
 }
 
 impl Layer {
-    fn new(buffer: Vec<f32>, channels: Channels) -> Self {
+    fn new(store: LayerStore, channels: Channels) -> Self {
         Self {
-            buffer,
+            store,
             channels,
             gain: 1.0,
             muted: false,
         }
     }
 
-    /// How many frames fit into this buffer.
+    /// How many frames this layer can cover: the buffer length of an audio layer, the maximum loop
+    /// length the clip was handed of a MIDI one.
     #[inline]
     fn frames(&self) -> u64 {
-        (self.buffer.len() / self.channels.count()) as u64
+        match &self.store {
+            LayerStore::Audio(buffer) => (buffer.len() / self.channels.count()) as u64,
+            LayerStore::Midi(clip) => clip.max_frames(),
+        }
+    }
+
+    /// The samples of an audio layer; empty for a MIDI one.
+    #[inline]
+    fn samples(&self) -> &[f32] {
+        match &self.store {
+            LayerStore::Audio(buffer) => buffer,
+            LayerStore::Midi(_) => &[],
+        }
+    }
+
+    #[inline]
+    pub fn gain(&self) -> f32 {
+        self.gain
+    }
+
+    #[inline]
+    pub fn muted(&self) -> bool {
+        self.muted
+    }
+
+    pub fn clip(&self) -> Option<&MidiClip> {
+        match &self.store {
+            LayerStore::Midi(clip) => Some(clip),
+            LayerStore::Audio(_) => None,
+        }
+    }
+
+    pub fn clip_mut(&mut self) -> Option<&mut MidiClip> {
+        match &mut self.store {
+            LayerStore::Midi(clip) => Some(clip),
+            LayerStore::Audio(_) => None,
+        }
     }
 
     /// Layer content as interleaved samples, `frames` frames long. For tests and later WAV export.
     #[cfg(test)]
     pub fn content(&self, frames: u64) -> &[f32] {
-        &self.buffer[..frames as usize * self.channels.count()]
+        let samples = self.samples();
+        &samples[..(frames as usize * self.channels.count()).min(samples.len())]
     }
 
     /// One channel of the content, de-interleaved. For tests that check the two sides separately.
@@ -252,7 +331,10 @@ impl Layer {
     pub fn channel(&self, channel: usize, frames: u64) -> Vec<f32> {
         let n = self.channels.count();
         let c = channel.min(n - 1);
-        (0..frames as usize).map(|i| self.buffer[i * n + c]).collect()
+        let samples = self.samples();
+        (0..frames as usize)
+            .map(|i| samples.get(i * n + c).copied().unwrap_or(0.0))
+            .collect()
     }
 
     #[cfg(test)]
@@ -261,33 +343,7 @@ impl Layer {
     }
 }
 
-/// A take that is already scheduled while the previous one is still finishing.
-///
-/// This exists because of the latency compensation: when the output reaches the end of a take, its
-/// last `R` samples are still travelling in from the interface, so the take cannot be closed yet.
-/// Recording eight bars and overdubbing the next eight without a pause - the normal way to build a
-/// loop - would otherwise collide with itself. The buffer is fetched at scheduling time, in the
-/// control thread's supply, and only becomes a layer when the running take really ends.
-pub struct PendingTake {
-    start: u64,
-    end: Option<u64>,
-    defines_loop: bool,
-    buffer: Vec<f32>,
-}
-
-/// Open recording window of one track, in musical coordinates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Take {
-    /// First musical sample that goes into the layer.
-    pub start: u64,
-    /// One past the last musical sample, once a stop has been received.
-    pub end: Option<u64>,
-    /// Index of the layer this take writes into.
-    pub layer: usize,
-    /// A take that defines the loop geometry (the first layer of a track) writes sequentially from
-    /// index 0; an overdub writes into the existing grid and wraps at the loop end.
-    pub defines_loop: bool,
-}
+pub use super::grid::Take;
 
 pub struct Track {
     /// Which device input channel or channel pair this track records. Its channel count is the
@@ -301,15 +357,16 @@ pub struct Track {
     pan_default: f32,
     /// Room for `MAX_LAYERS` from the start, so pushing a layer never reallocates.
     layers: Vec<Layer>,
-    /// Musical position that loop index 0 corresponds to.
-    origin: u64,
-    /// Loop length in **frames**; 0 means "no loop yet".
-    loop_len: u64,
-    /// Frames written contiguously during a loop-defining take. Only that take needs it: it is
-    /// what bounds the loop length when the take is closed.
-    filled: u64,
-    take: Option<Take>,
-    pending: Option<PendingTake>,
+    /// Origin, loop length and the take state - the part that does not care what a layer holds.
+    grid: LoopGrid,
+    /// Storage of a take queued behind the running one (`grid.pending` is its geometry). Fetched
+    /// at scheduling time, in the control thread's supply, and only becomes a layer when the
+    /// running take really ends: when the output reaches the end of a take its last `R` samples are
+    /// still travelling in, so recording eight bars and overdubbing the next eight without a pause
+    /// would otherwise collide with itself.
+    pending_store: Option<LayerStore>,
+    /// Whether this track's takes store notes (a MIDI loop) rather than its instrument's sound.
+    midi_loop: bool,
     playing: bool,
     /// True while the transport stands: the loop is not heard, whatever `playing` says.
     held: bool,
@@ -384,11 +441,9 @@ impl Track {
             monitor_send: BusSend::MONITOR,
             monitor_send_default: BusSend::MONITOR,
             layers: Vec::with_capacity(MAX_LAYERS),
-            origin: 0,
-            loop_len: 0,
-            filled: 0,
-            take: None,
-            pending: None,
+            grid: LoopGrid::default(),
+            pending_store: None,
+            midi_loop: false,
             playing: false,
             held: false,
             monitor,
@@ -814,7 +869,7 @@ impl Track {
 
     #[inline]
     pub fn loop_len(&self) -> u64 {
-        self.loop_len
+        self.grid.loop_len
     }
 
     /// Musical position loop index 0 corresponds to; 0 while no take has defined a loop.
@@ -823,17 +878,17 @@ impl Track {
     /// on the global one - see `engine::schedule`.
     #[inline]
     pub fn origin(&self) -> u64 {
-        self.origin
+        self.grid.origin
     }
 
     #[inline]
     pub fn filled(&self) -> u64 {
-        self.filled
+        self.grid.filled
     }
 
     #[inline]
     pub fn has_content(&self) -> bool {
-        !self.layers.is_empty() && self.loop_len > 0
+        !self.layers.is_empty() && self.grid.loop_len > 0
     }
 
     #[inline]
@@ -863,7 +918,7 @@ impl Track {
     /// which the caller makes sure of.
     pub fn rebase(&mut self, origin: u64) {
         if !self.layers.is_empty() {
-            self.origin = origin;
+            self.grid.origin = origin;
         }
     }
 
@@ -884,7 +939,13 @@ impl Track {
 
     #[inline]
     pub fn take(&self) -> Option<Take> {
-        self.take
+        self.grid.take
+    }
+
+    /// The geometry of this track: origin, loop length, take state.
+    #[inline]
+    pub fn grid(&self) -> &LoopGrid {
+        &self.grid
     }
 
     /// Bit `i` is set when layer `i` is muted. Fits `MAX_LAYERS` and travels in the status snapshot.
@@ -899,7 +960,7 @@ impl Track {
     }
 
     pub fn state(&self, musical_input_pos: u64) -> TrackState {
-        match self.take {
+        match self.grid.take {
             Some(take) if musical_input_pos < take.start => TrackState::Armed,
             Some(take) if take.defines_loop => TrackState::Recording,
             Some(_) => TrackState::Overdub,
@@ -949,10 +1010,10 @@ impl Track {
     /// buffer arrives zeroed from the control thread.
     #[inline]
     pub fn read(&self, pos: u64) -> Frame {
-        if self.loop_len == 0 || pos < self.origin {
+        if self.grid.loop_len == 0 || pos < self.grid.origin || self.midi_loop {
             return Frame::SILENT;
         }
-        let frame_index = ((pos - self.origin) % self.loop_len) as usize;
+        let frame_index = ((pos - self.grid.origin) % self.grid.loop_len) as usize;
         let n = self.channels.count();
         // The one place a frame index becomes a buffer offset. See the module comment.
         let base = frame_index * n;
@@ -964,11 +1025,12 @@ impl Track {
             }
             // `loop_len` never exceeds a buffer's frame count, so this always hits; `get` keeps a
             // hypothetical mismatch from panicking inside the audio callback.
-            if let Some(&v) = layer.buffer.get(base) {
+            let samples = layer.samples();
+            if let Some(&v) = samples.get(base) {
                 left += v * layer.gain;
             }
             if n == 2 {
-                if let Some(&v) = layer.buffer.get(base + 1) {
+                if let Some(&v) = samples.get(base + 1) {
                     right += v * layer.gain;
                 }
             }
@@ -985,7 +1047,7 @@ impl Track {
     /// channel of `frame` is stored.
     #[inline]
     pub fn write(&mut self, pos: u64, frame: Frame) {
-        let Some(take) = self.take else {
+        let Some(take) = self.grid.take else {
             return;
         };
         let channels = self.channels;
@@ -993,27 +1055,17 @@ impl Track {
             return;
         };
         let capacity = layer.frames();
-        let index = if take.defines_loop {
-            let index = pos.wrapping_sub(self.origin);
-            if index >= capacity {
-                return;
-            }
-            // A loop-defining take is written strictly sequentially, so this is the only value
-            // `index` can have.
-            debug_assert_eq!(index, self.filled, "Luecke im Loop-Puffer");
-            self.filled = index + 1;
-            index
-        } else {
-            if self.loop_len == 0 {
-                return;
-            }
-            (pos - self.origin) % self.loop_len
+        let LayerStore::Audio(buffer) = &mut layer.store else {
+            return;
+        };
+        let Some(index) = self.grid.write_index(pos, capacity) else {
+            return;
         };
         let n = channels.count();
         // The second and last place a frame index becomes a buffer offset.
         let base = index as usize * n;
         for c in 0..n {
-            if let Some(slot) = layer.buffer.get_mut(base + c) {
+            if let Some(slot) = buffer.get_mut(base + c) {
                 *slot = frame.channel(c);
             }
         }
@@ -1025,96 +1077,84 @@ impl Track {
     /// loop, so it can never overwrite what it has just recorded. Both in frames.
     #[inline]
     pub fn take_limit(&self) -> Option<u64> {
-        let take = self.take?;
+        let take = self.grid.take?;
         let layer = self.layers.get(take.layer)?;
-        if take.defines_loop {
-            Some(take.start + layer.frames())
-        } else {
-            Some(take.start + self.loop_len)
-        }
+        self.grid.take_limit(layer.frames())
     }
 
     /// Start the first take of a new loop. The caller has already returned the old layers.
     ///
-    /// The buffer has to be long enough for `frames * channels` samples; the caller
+    /// An audio buffer has to be long enough for `frames * channels` samples; the caller
     /// (`process::take_spare`) picks it from the pool of the right channel count.
-    pub fn begin_loop_take(&mut self, start: u64, buffer: Vec<f32>) {
-        debug_assert!(self.layers.len() < MAX_LAYERS);
-        debug_assert_eq!(
-            buffer.len() % self.channels.count(),
-            0,
-            "Puffer passt nicht zur Kanalzahl des Tracks"
-        );
-        self.origin = start;
-        self.loop_len = 0;
-        self.filled = 0;
+    pub fn begin_loop_take(&mut self, start: u64, store: impl Into<LayerStore>) {
+        let store = store.into();
+        self.check_store(&store);
         self.playing = false;
-        self.layers.push(Layer::new(buffer, self.channels));
-        self.take = Some(Take {
-            start,
-            end: None,
-            layer: self.layers.len() - 1,
-            defines_loop: true,
-        });
+        self.layers.push(Layer::new(store, self.channels));
+        self.grid.begin_loop(start, self.layers.len() - 1);
     }
 
     /// Start a further layer on the existing grid.
-    pub fn begin_overdub_take(&mut self, start: u64, buffer: Vec<f32>) {
+    pub fn begin_overdub_take(&mut self, start: u64, store: impl Into<LayerStore>) {
+        let store = store.into();
+        self.check_store(&store);
+        self.layers.push(Layer::new(store, self.channels));
+        self.grid.begin_overdub(start, self.layers.len() - 1);
+    }
+
+    #[inline]
+    fn check_store(&self, store: &LayerStore) {
         debug_assert!(self.layers.len() < MAX_LAYERS);
-        debug_assert_eq!(
-            buffer.len() % self.channels.count(),
-            0,
-            "Puffer passt nicht zur Kanalzahl des Tracks"
-        );
-        self.layers.push(Layer::new(buffer, self.channels));
-        self.take = Some(Take {
-            start,
-            end: None,
-            layer: self.layers.len() - 1,
-            defines_loop: false,
-        });
+        if let LayerStore::Audio(buffer) = store {
+            debug_assert_eq!(
+                buffer.len() % self.channels.count(),
+                0,
+                "Puffer passt nicht zur Kanalzahl des Tracks"
+            );
+        }
     }
 
     /// Is a take running whose end is already known, i.e. one that is only waiting for its last
     /// `R` samples to arrive? A further take may be scheduled behind it.
     #[inline]
     pub fn take_is_finishing(&self) -> bool {
-        self.take.map(|t| t.end.is_some()).unwrap_or(false)
+        self.grid.take_is_finishing()
     }
 
     #[inline]
     pub fn pending_defines_loop(&self) -> bool {
-        self.pending.as_ref().map(|p| p.defines_loop).unwrap_or(false)
+        self.grid.pending.map(|p| p.defines_loop).unwrap_or(false)
     }
 
-    /// Queue a take behind the running one. Returns the buffer of a pending take that was replaced.
+    /// Queue a take behind the running one. Returns the storage of a pending take that was
+    /// replaced.
     pub fn set_pending(
         &mut self,
         start: u64,
         defines_loop: bool,
-        buffer: Vec<f32>,
-    ) -> Option<Vec<f32>> {
-        let previous = self.pending.take().map(|p| p.buffer);
-        self.pending = Some(PendingTake {
+        store: impl Into<LayerStore>,
+    ) -> Option<LayerStore> {
+        let previous = self.pending_store.replace(store.into());
+        self.grid.pending = Some(PendingGeom {
             start,
             end: None,
             defines_loop,
-            buffer,
         });
         previous
     }
 
-    /// Start the queued take now that the previous one is closed. Returns its buffer instead when
+    /// Start the queued take now that the previous one is closed. Returns its storage instead when
     /// it cannot be started after all.
-    pub fn promote_pending(&mut self) -> Option<Vec<f32>> {
-        let pending = self.pending.take()?;
+    pub fn promote_pending(&mut self) -> Option<LayerStore> {
+        let pending = self.grid.pending.take()?;
+        let store = self.pending_store.take()?;
         if self.layers.len() >= MAX_LAYERS {
-            return Some(pending.buffer);
+            return Some(store);
         }
         if pending.defines_loop {
-            self.begin_loop_take(pending.start, pending.buffer);
+            self.begin_loop_take(pending.start, store);
         } else {
-            self.begin_overdub_take(pending.start, pending.buffer);
+            self.begin_overdub_take(pending.start, store);
         }
         if let Some(end) = pending.end {
             self.set_take_end(end);
@@ -1122,9 +1162,10 @@ impl Track {
         None
     }
 
-    /// Hand back the buffer of a queued take, cancelling it.
-    pub fn take_pending_buffer(&mut self) -> Option<Vec<f32>> {
-        self.pending.take().map(|p| p.buffer)
+    /// Hand back the storage of a queued take, cancelling it.
+    pub fn take_pending_buffer(&mut self) -> Option<LayerStore> {
+        self.grid.pending = None;
+        self.pending_store.take()
     }
 
     /// Announce where the running take ends, before the last sample has been written.
@@ -1134,68 +1175,49 @@ impl Track {
     /// Publishing the length early is what lets playback start seamlessly at the loop boundary;
     /// the zeroed buffer keeps the not-yet-written tail silent instead of stale.
     pub fn set_take_end(&mut self, end: u64) {
-        // A stop that arrives after a further take was scheduled belongs to that one - the control
-        // thread always sends start and stop of a take as a pair, in that order.
-        if let Some(pending) = self.pending.as_mut() {
-            pending.end = Some(end.max(pending.start));
-            return;
-        }
         let capacity = self.take_capacity();
-        if let Some(take) = self.take.as_mut() {
-            let end = end.max(take.start);
-            take.end = Some(end);
-            if take.defines_loop {
-                self.loop_len = (end - take.start).min(capacity);
-            }
-        }
+        self.grid.set_take_end(end, capacity);
     }
 
     /// Close the take. `end` is the musical position just after its last sample.
     pub fn finish_take(&mut self, end: u64) {
-        if let Some(take) = self.take.take()
-            && take.defines_loop
-        {
-            self.loop_len = end.saturating_sub(self.origin).min(self.filled);
-        }
+        self.grid.finish_take(end);
     }
 
-    /// Frames the running take's buffer can hold.
+    /// Frames the running take's storage can hold.
     fn take_capacity(&self) -> u64 {
-        self.take
+        self.grid
+            .take
             .and_then(|t| self.layers.get(t.layer))
             .map(Layer::frames)
             .unwrap_or(0)
     }
 
-    /// Hand back the last layer, so the caller can return its buffer to the control thread.
+    /// Hand back the last layer, so the caller can return its storage to the control thread.
     ///
     /// Emptying a track resets its geometry: the next take defines a new loop.
-    pub fn pop_layer(&mut self) -> Option<Vec<f32>> {
+    pub fn pop_layer(&mut self) -> Option<LayerStore> {
         let layer = self.layers.pop()?;
         if self.layers.is_empty() {
-            self.origin = 0;
-            self.loop_len = 0;
-            self.filled = 0;
+            self.grid.reset();
             self.playing = false;
         }
-        Some(layer.buffer)
+        Some(layer.store)
     }
 
-    /// Remove one layer by index, handing its buffer back. Later layers move down by one.
-    pub fn remove_layer(&mut self, index: usize) -> Option<Vec<f32>> {
+    /// Remove one layer by index, handing its storage back. Later layers move down by one.
+    pub fn remove_layer(&mut self, index: usize) -> Option<LayerStore> {
         if index >= self.layers.len() {
             return None;
         }
-        // Moves at most `MAX_LAYERS` `Vec` headers - a memmove of a few hundred bytes, no
+        // Moves at most `MAX_LAYERS` small headers - a memmove of a few hundred bytes, no
         // allocation and no deallocation.
         let layer = self.layers.remove(index);
         if self.layers.is_empty() {
-            self.origin = 0;
-            self.loop_len = 0;
-            self.filled = 0;
+            self.grid.reset();
             self.playing = false;
         }
-        Some(layer.buffer)
+        Some(layer.store)
     }
 
     pub fn set_layer_muted(&mut self, index: usize, muted: bool) -> bool {
@@ -1218,14 +1240,55 @@ impl Track {
         }
     }
 
-    #[cfg(test)]
     pub fn layer(&self, index: usize) -> Option<&Layer> {
         self.layers.get(index)
     }
 
+    pub fn layer_mut(&mut self, index: usize) -> Option<&mut Layer> {
+        self.layers.get_mut(index)
+    }
+
+    /// Every layer, for the MIDI playback that walks them all.
+    pub fn layers_mut(&mut self) -> &mut [Layer] {
+        &mut self.layers
+    }
+
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+
     /// Cancel a running take without touching the layers that were finished before it.
     pub fn cancel_take(&mut self) {
-        self.take = None;
+        self.grid.take = None;
+    }
+
+    /// Whether this track's takes store notes instead of sound - a MIDI loop.
+    #[inline(always)]
+    pub fn midi_loop(&self) -> bool {
+        self.midi_loop
+    }
+
+    /// Switch what this track's takes store. Only on an instrument track, and only while it holds
+    /// nothing and records nothing - layers of two kinds on one track are not a thing yet.
+    pub fn set_midi_loop(&mut self, on: bool) -> bool {
+        if on && !self.is_instrument() {
+            return false;
+        }
+        if on == self.midi_loop {
+            return true;
+        }
+        if !self.layers.is_empty() || self.grid.take.is_some() || self.grid.pending.is_some() {
+            return false;
+        }
+        self.midi_loop = on;
+        true
+    }
+
+    /// Built that way by the control thread.
+    #[must_use]
+    pub fn with_midi_loop(mut self, on: bool) -> Self {
+        self.set_midi_loop(on);
+        self
     }
 
     /// Restore the monitoring state a fresh start would have. Called by "alles loeschen" after the
