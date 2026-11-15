@@ -19,7 +19,7 @@ use crate::proto::TrackConfig;
 
 /// Build a timeline for a tempo and check that a loop of `bars` bars can exist at it.
 ///
-/// Both German messages come from the engine: [`Timeline::validate`] for the tempo and
+/// Both messages come from the engine: [`Timeline::validate`] for the tempo and
 /// [`check_loop`] for the loop that would be shorter than the latency compensation.
 /// `latency_frames` is the **largest** compensation any track uses, not the default: the loop has
 /// to be longer than the write pointer trails the play pointer on the worst of them. Callers get
@@ -49,14 +49,14 @@ pub fn resolve_tracks(
     input_channels: usize,
 ) -> Result<Vec<TrackDef>, String> {
     if input_channels == 0 {
-        return Err("Das Geraet meldet keinen einzigen Eingangskanal.".to_string());
+        return Err("The device reports no input channel at all.".to_string());
     }
     if configs.is_empty() {
-        return Err("Kein Track angelegt. Es braucht mindestens einen.".to_string());
+        return Err("No track set up. At least one is needed.".to_string());
     }
     if configs.len() > MAX_TRACKS {
         return Err(format!(
-            "{} Tracks angefragt, moeglich sind hoechstens {MAX_TRACKS}.",
+            "{} tracks requested, at most {MAX_TRACKS} are possible.",
             configs.len()
         ));
     }
@@ -64,18 +64,18 @@ pub fn resolve_tracks(
     for config in configs {
         let name = config.name.trim();
         if name.is_empty() {
-            return Err("Ein Track ohne Namen geht nicht.".to_string());
+            return Err("A track needs a name.".to_string());
         }
         let channel = |number: u32| -> Result<usize, String> {
             if number == 0 {
                 return Err(format!(
-                    "Track \"{name}\": Eingaenge werden ab 1 gezaehlt, wie am Geraet beschriftet."
+                    "Track \"{name}\": inputs are counted from 1, as labelled on the device."
                 ));
             }
             if number as usize > input_channels {
                 return Err(format!(
-                    "Track \"{name}\" soll auf Eingang {number} hoeren, das Geraet liefert aber nur \
-                     {input_channels} Eingangskanaele (also Eingang 1 bis {input_channels})."
+                    "Track \"{name}\" is set to listen to input {number}, but the device only has \
+                     {input_channels} input channels (input 1 to {input_channels})."
                 ));
             }
             Ok(number as usize - 1)
@@ -86,8 +86,8 @@ pub fn resolve_tracks(
                 let right = channel(right)?;
                 if right == left {
                     return Err(format!(
-                        "Track \"{name}\" ist als stereo angelegt, nennt aber zweimal Eingang {}. \
-                         Ein Stereo-Track braucht zwei verschiedene Eingaenge.",
+                        "Track \"{name}\" is set up as stereo but names input {} twice. \
+                         A stereo track needs two different inputs.",
                         left + 1
                     ));
                 }
@@ -97,23 +97,22 @@ pub fn resolve_tracks(
         };
         if !(-1.0..=1.0).contains(&config.pan) {
             return Err(format!(
-                "Track \"{name}\": das Panorama muss zwischen -1 (ganz links) und 1 (ganz rechts) \
-                 liegen, angegeben wurde {}.",
+                "Track \"{name}\": pan must be between -1 (hard left) and 1 (hard right), \
+                 not {}.",
                 config.pan
             ));
         }
         if defs.iter().any(|d: &TrackDef| d.name == name) {
             return Err(format!(
-                "Der Trackname \"{name}\" kommt zweimal vor. Namen muessen eindeutig sein."
+                "The track name \"{name}\" appears twice. Names must be unique."
             ));
         }
         if config.latency_trim.unsigned_abs() as i64 > MAX_LATENCY_FRAMES
             || config.latency_frames.map(i64::from).unwrap_or(0) > MAX_LATENCY_FRAMES
         {
             return Err(format!(
-                "Track \"{name}\": die Latenzkompensation muss innerhalb von {MAX_LATENCY_FRAMES} \
-                 Frames liegen (zwei Sekunden bei 48 kHz). Das ist keine Latenz, sondern ein \
-                 Tippfehler."
+                "Track \"{name}\": the latency compensation must stay within {MAX_LATENCY_FRAMES} \
+                 frames (two seconds at 48 kHz). That is not a latency, it is a typo."
             ));
         }
         defs.push(TrackDef {
@@ -148,16 +147,17 @@ mod tests {
     }
 
     #[test]
-    fn a_tempo_the_loop_cannot_carry_is_refused_in_german() {
+    fn a_tempo_the_loop_cannot_carry_is_refused_in_words() {
         assert!(build_timeline(RATE, 100.0, 4, 4, 8, 827).is_ok());
         let err = build_timeline(RATE, 500.0, 4, 4, 8, 827).expect_err("BPM ausserhalb 1..400");
         assert!(err.contains("400"), "{err}");
         let err = build_timeline(RATE, 100.0, 4, 3, 8, 827).expect_err("Zaehlzeit 3 gibt es nicht");
-        assert!(err.contains("Notenlaenge"), "{err}");
+        // Wording-robust: the engine's sentence names the value it refuses.
+        assert!(err.contains(" 3 "), "{err}");
         // One bar at 400 BPM is 28800 samples, still longer than the compensation; a loop shorter
         // than the compensation is what check_loop exists for.
         let err = build_timeline(RATE, 400.0, 1, 4, 1, 20_000).expect_err("Loop zu kurz");
-        assert!(err.contains("Latenzkompensation"), "{err}");
+        assert!(err.contains("20000"), "{err}");
     }
 
     #[test]
@@ -173,11 +173,11 @@ mod tests {
         assert_eq!(ok[0].pan, 0.0, "ohne Angabe sitzt ein Track in der Mitte");
 
         for (configs, needle) in [
-            (vec![config("stimme", 3)], "Eingang 3"),
-            (vec![config("stimme", 0)], "ab 1"),
-            (vec![config("  ", 1)], "ohne Namen"),
-            (vec![config("a", 1), config("a", 2)], "eindeutig"),
-            (vec![], "mindestens einen"),
+            (vec![config("stimme", 3)], "input 3"),
+            (vec![config("stimme", 0)], "from 1"),
+            (vec![config("  ", 1)], "needs a name"),
+            (vec![config("a", 1), config("a", 2)], "unique"),
+            (vec![], "least one"),
         ] {
             let err = resolve_tracks(&configs, 2).expect_err(needle);
             assert!(err.contains(needle), "{err}");
@@ -191,7 +191,7 @@ mod tests {
     }
 
     /// A second input channel makes a stereo track, and every way of getting the pair wrong has
-    /// its own German sentence before a single buffer is allocated.
+    /// its own sentence before a single buffer is allocated.
     #[test]
     fn a_second_input_channel_makes_a_stereo_track() {
         let ok = resolve_tracks(&[config("stimme", 1), stereo("klavier", 3, 4)], 4).unwrap();
@@ -201,17 +201,17 @@ mod tests {
 
         // The right-hand channel is checked against the device exactly like the left one.
         let err = resolve_tracks(&[stereo("klavier", 2, 3)], 2).expect_err("Kanal 3 fehlt");
-        assert!(err.contains("Eingang 3"), "{err}");
+        assert!(err.contains("input 3"), "{err}");
 
         let err = resolve_tracks(&[stereo("klavier", 2, 2)], 4).expect_err("zweimal derselbe");
-        assert!(err.contains("zwei verschiedene"), "{err}");
+        assert!(err.contains("two different"), "{err}");
 
         let far = TrackConfig {
             pan: 1.5,
             ..TrackConfig::mono("stimme", 1)
         };
         let err = resolve_tracks(&[far], 2).expect_err("Panorama zu weit");
-        assert!(err.contains("Panorama"), "{err}");
+        assert!(err.contains("pan must be"), "{err}");
     }
 
     /// The per-track compensation travels from the start configuration into the track definition
@@ -245,7 +245,7 @@ mod tests {
             },
         ] {
             let err = resolve_tracks(&[bad], 2).expect_err("absurde Latenz");
-            assert!(err.contains("Tippfehler"), "{err}");
+            assert!(err.contains("typo"), "{err}");
         }
     }
 

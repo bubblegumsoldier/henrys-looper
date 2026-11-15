@@ -572,7 +572,7 @@ impl Manager {
                                 slot.error = None;
                                 slot.heard = false;
                                 log!(
-                                    "Plugin {} in {} Slot {} gestartet: {} Hz, Latenz {} Frames.",
+                                    "Plugin {} in {} slot {} started: {} Hz, latency {} frames.",
                                     slot.info.info.name,
                                     slot.target.address(),
                                     slot.index + 1,
@@ -591,7 +591,7 @@ impl Manager {
                 }
             }
             Err(e) => {
-                log!("Plugin {} startet nicht: {e}", slot.info.info.name);
+                log!("Plugin {} does not start: {e}", slot.info.info.name);
                 slot.error = Some(e);
             }
         }
@@ -648,7 +648,7 @@ impl Manager {
         }
         let instance = plugin::load(&entry.info)?;
         log!(
-            "Plugin geladen: {} ({}) in {} Slot {}",
+            "Plugin loaded: {} ({}) in {} slot {}",
             entry.info.name,
             entry.info.format.label(),
             target.address(),
@@ -700,7 +700,7 @@ impl Manager {
                 // The engine still holds it (no audio callbacks?). Destroying a plugin that may be
                 // processing would crash; keeping it in memory costs only memory.
                 log!(
-                    "Plugin {} kam nicht aus der Engine zurueck und bleibt im Speicher.",
+                    "Plugin {} did not come back from the engine and stays in memory.",
                     slot.info.info.name
                 );
                 std::mem::forget(slot);
@@ -710,7 +710,7 @@ impl Manager {
             slot.plugin.deactivate();
         }
         log!(
-            "Plugin entfernt: {} aus {} Slot {}",
+            "Plugin removed: {} from {} slot {}",
             slot.info.info.name,
             target.address(),
             index + 1
@@ -881,7 +881,7 @@ impl Manager {
             if s.active_gen.is_some() && !s.heard && s.shared.blocks() > 0 {
                 s.heard = true;
                 log!(
-                    "Plugin {} in {} Slot {}: Audio laeuft durch ({} Bloecke).",
+                    "Plugin {} in {} slot {}: audio is passing through ({} blocks).",
                     s.info.info.name,
                     s.target.address(),
                     s.index + 1,
@@ -940,7 +940,7 @@ impl Manager {
         if let Ok(text) = serde_json::to_string_pretty(&rack)
             && let Err(e) = std::fs::write(&path, text)
         {
-            log!("Plugin-Belegung nicht gespeichert: {e}");
+            log!("Plugin rack not saved: {e}");
         }
     }
 
@@ -979,7 +979,7 @@ impl Manager {
                         && let Ok(slot) = self.slot_mut(target, saved.slot)
                         && let Err(e) = slot.plugin.load_state(&state)
                     {
-                        log!("Zustand von {} nicht geladen: {e}", saved.name);
+                        log!("State of {} not loaded: {e}", saved.name);
                     }
                     if saved.bypass
                         && let Ok(slot) = self.slot(target, saved.slot)
@@ -988,7 +988,7 @@ impl Manager {
                     }
                 }
                 Err(e) => {
-                    log!("Plugin {} nicht wiederhergestellt: {e}", saved.name);
+                    log!("Plugin {} not restored: {e}", saved.name);
                     emit(PluginEvent::Notice {
                         message: format!("\"{}\" was not loaded again: {e}", saved.name),
                     });
@@ -1086,14 +1086,14 @@ pub async fn plugin_catalog() -> Result<CatalogView, String> {
 pub async fn plugin_scan(full: Option<bool>) -> Result<CatalogView, String> {
     blocking(move || {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        log!("Plugin-Scan gestartet{}.", if full == Some(true) { " (vollstaendig)" } else { "" });
+        log!("Plugin scan started{}.", if full == Some(true) { " (full)" } else { "" });
         let plugins = scan::scan(&exe, full.unwrap_or(false), |label| {
             emit(PluginEvent::Scan {
                 label: label.to_string(),
             });
         });
         log!(
-            "Plugin-Scan fertig: {} gefunden, {} ladbar.",
+            "Plugin scan done: {} found, {} loadable.",
             plugins.len(),
             plugins.iter().filter(|p| p.loadable()).count()
         );

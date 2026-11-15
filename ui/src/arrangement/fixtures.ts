@@ -11,7 +11,7 @@ export function henry(): ScoreDoc {
     time_signature: "3/4",
     tracks: [
       { name: "gitarre", input: 2 },
-      { name: "voice", input: 1, comments: { after: "monitor: true ist Default" } },
+      { name: "voice", input: 1, comments: { after: "monitor: true is the default" } },
     ],
     midi: [
       { key: "transport.goto.4", note: 40 },
@@ -24,7 +24,7 @@ export function henry(): ScoreDoc {
       { id: "gitarre_rec", bars: 8, autorelease: true, tracks: [{ track: "gitarre", state: "record" }, { track: "voice", state: "hear_through" }] },
       { id: "voice_1", bars: 8, autorelease: true, tracks: [{ track: "gitarre", state: "play" }, { track: "voice", state: "record" }] },
       { id: "voice_2", bars: 8, autorelease: true, tracks: [{ track: "gitarre", state: "play" }, { track: "voice", state: "overdub" }] },
-      { id: "voice_3", repeat: "voice_2", autorelease: false, quantize: "loop", tracks: [], comments: { before: ["Ebene 3."] } },
+      { id: "voice_3", repeat: "voice_2", autorelease: false, quantize: "loop", tracks: [], comments: { before: ["Layer 3."] } },
       { id: "alles", bars: 8, autorelease: false, quantize: "bar", tracks: [{ track: "gitarre", state: "play" }, { track: "voice", state: "play" }] },
       { id: "ende", bars: 1, autorelease: false, tracks: [] },
     ],

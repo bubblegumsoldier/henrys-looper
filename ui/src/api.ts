@@ -51,15 +51,15 @@ export function insideTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-/** Tauri rejects with whatever the command returned as `Err` - here always a German sentence. */
+/** Tauri rejects with whatever the command returned as `Err` - here always a whole sentence. */
 function sentence(e: unknown): string {
   if (!insideTauri()) {
-    return "Diese Oberfläche läuft nicht im Anwendungsfenster, sondern im Browser - dort gibt es keine Engine. Starte sie mit `cargo tauri dev`.";
+    return "This window is running in a browser, not in the app window - there is no engine here. Start the app with `cargo tauri dev`.";
   }
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
   if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
-  return "Unbekannter Fehler auf der Rust-Seite.";
+  return "Unknown error on the Rust side.";
 }
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {

@@ -58,8 +58,8 @@ export function useLooperEvents(): Bridge {
         setStatus("closed");
         setError(
           insideTauri()
-            ? `Die Rust-Seite meldet sich nicht: ${(e as Error).message}`
-            : "Diese Oberfläche läuft nicht im Anwendungsfenster, sondern im Browser - dort gibt es keine Engine. Starte sie mit `cargo tauri dev`.",
+            ? `The Rust side does not answer: ${(e as Error).message}`
+            : "This window is running in a browser, not in the app window - there is no engine here. Start the app with `cargo tauri dev`.",
         );
         return;
       }

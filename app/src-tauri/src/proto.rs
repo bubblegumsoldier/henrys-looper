@@ -204,8 +204,8 @@ fn parse_send(
         None => Ok(fallback),
         Some(text) => BusSend::parse(text).ok_or_else(|| {
             format!(
-                "Track \"{track}\": \"{text}\" ist keine Bus-Angabe fuer \"{field}\". Erlaubt sind \
-                 main, monitor, main+monitor und none."
+                "Track \"{track}\": \"{text}\" is not a bus setting for \"{field}\". Allowed are \
+                 main, monitor, main+monitor and none."
             )
         }),
     }
@@ -231,13 +231,13 @@ impl BusOutConfig {
     pub fn to_output(self, bus: Bus) -> Result<BusOutput, String> {
         if self.channel == 0 {
             return Err(format!(
-                "{}: Ausgaenge werden ab 1 gezaehlt, wie am Geraet beschriftet.",
+                "{}: outputs are counted from 1, as labelled on the device.",
                 bus.label()
             ));
         }
         if self.width == 0 || self.width > 2 {
             return Err(format!(
-                "{}: ein Bus liegt auf einem Kanal oder auf einem Paar, nicht auf {}.",
+                "{}: a bus sits on one channel or on a pair, not on {}.",
                 bus.label(),
                 self.width
             ));
@@ -401,8 +401,8 @@ impl StartConfig {
                 let out = config.to_output(bus)?;
                 if out.first + out.width > output_channels {
                     return Err(format!(
-                        "{}: das Geraet hat {output_channels} Ausgangskanaele, Kanal {} gibt es \
-                         nicht.",
+                        "{}: the device has {output_channels} output channels, there is no \
+                         channel {}.",
                         bus.label(),
                         out.first + out.width
                     ));
@@ -423,7 +423,7 @@ impl StartConfig {
             if let Some(value) = value {
                 if !(0.0..=MAX_BUS_GAIN).contains(&value) {
                     return Err(format!(
-                        "{}: die Lautstaerke muss zwischen 0.0 und {MAX_BUS_GAIN} liegen.",
+                        "{}: the level must be between 0.0 and {MAX_BUS_GAIN}.",
                         bus.label()
                     ));
                 }
@@ -1104,15 +1104,15 @@ impl FxParamName {
         if self.needs_band() {
             let Some(band) = band else {
                 return Err(
-                    "Dieser Parameter gehoert zu einem EQ-Band; es fehlt die Angabe \"band\" \
-                     (0, 1 oder 2)."
+                    "This parameter belongs to an EQ band; \"band\" is missing \
+                     (0, 1 or 2)."
                         .to_string(),
                 );
             };
             let band = band as usize;
             if band >= EQ_BANDS {
                 return Err(format!(
-                    "Es gibt die EQ-Baender 0 bis {}, nicht {band}.",
+                    "There are EQ bands 0 to {}, not {band}.",
                     EQ_BANDS - 1
                 ));
             }
@@ -1136,7 +1136,7 @@ impl FxParamName {
             FxParamName::ReverbDamping => FxParam::ReverbDamping(v),
             FxParamName::ReverbMix => FxParam::ReverbMix(v),
             // The band-scoped names are all handled above.
-            _ => unreachable!("Band-Parameter werden oben behandelt"),
+            _ => unreachable!("band parameters are handled above"),
         })
     }
 }
@@ -1682,7 +1682,7 @@ mod tests {
         assert_eq!(event.input_peaks, vec![0.5], "mono: ein Pegel");
         assert_eq!(event.output_peaks, vec![1.0, 1.0], "der Bus ist immer stereo");
         assert_eq!(event.state, TrackStateName::Playing);
-        assert_eq!(event.state_label, "Wiedergabe");
+        assert_eq!(event.state_label, TrackState::Playing.label());
         assert_eq!(event.loop_samples, 96_000);
         assert!((event.loop_seconds - 2.0).abs() < 1e-9);
         assert_eq!(event.layers.len(), 3);
@@ -1756,20 +1756,20 @@ mod tests {
         };
         let event = track_event(0, "gitarre", &sample_status(), &[], RATE, lead);
         assert_eq!(event.pending_kind, Some(PendingKindName::Record));
-        assert_eq!(event.pending_label.as_deref(), Some("Aufnahme"));
+        assert_eq!(event.pending_label.as_deref(), Some(PendingKind::Record.label()));
         assert_eq!(event.pending_bars, 5);
         assert_eq!(event.pending_beats, 2);
 
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["pending_kind"], json!("record"));
-        assert_eq!(value["pending_label"], json!("Aufnahme"));
+        assert_eq!(value["pending_label"], json!(PendingKind::Record.label()));
 
-        // Every kind the scheduler can announce has a snake_case name and a German word.
+        // Every kind the scheduler can announce has a snake_case name and a word.
         for (kind, wire, label) in [
-            (PendingKind::Record, "record", "Aufnahme"),
+            (PendingKind::Record, "record", "Record"),
             (PendingKind::Overdub, "overdub", "Overdub"),
-            (PendingKind::Play, "play", "Wiedergabe"),
-            (PendingKind::Stop, "stop", "Stopp"),
+            (PendingKind::Play, "play", "Play"),
+            (PendingKind::Stop, "stop", "Stop"),
         ] {
             let name: PendingKindName = kind.into();
             assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
@@ -1815,16 +1815,16 @@ mod tests {
     }
 
     /// Every state the engine can report must survive the round trip as a snake_case string, and
-    /// keep its German label - the frontend switches on the one and prints the other.
+    /// keep its label - the frontend switches on the one and prints the other.
     #[test]
     fn track_states_serialise_as_snake_case() {
         let pairs = [
-            (TrackState::Empty, "empty", "leer"),
-            (TrackState::Armed, "armed", "scharf"),
-            (TrackState::Recording, "recording", "Aufnahme"),
+            (TrackState::Empty, "empty", "Empty"),
+            (TrackState::Armed, "armed", "Armed"),
+            (TrackState::Recording, "recording", "Record"),
             (TrackState::Overdub, "overdub", "Overdub"),
-            (TrackState::Ready, "ready", "bereit"),
-            (TrackState::Playing, "playing", "Wiedergabe"),
+            (TrackState::Ready, "ready", "Ready"),
+            (TrackState::Playing, "playing", "Play"),
         ];
         for (state, wire, label) in pairs {
             let name: TrackStateName = state.into();
@@ -1970,11 +1970,11 @@ mod tests {
     #[test]
     fn every_effect_enum_travels_as_snake_case_in_both_directions() {
         for (slot, wire, label) in [
-            (FxSlot::HighPass, "high_pass", "Hochpass"),
+            (FxSlot::HighPass, "high_pass", "High-pass"),
             (FxSlot::Eq, "eq", "EQ"),
-            (FxSlot::Comp, "comp", "Kompressor"),
+            (FxSlot::Comp, "comp", "Compressor"),
             (FxSlot::Delay, "delay", "Delay"),
-            (FxSlot::Reverb, "reverb", "Hall"),
+            (FxSlot::Reverb, "reverb", "Reverb"),
         ] {
             let name: FxSlotName = slot.into();
             assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
@@ -1983,10 +1983,10 @@ mod tests {
         }
 
         for (preset, wire, label) in [
-            (FxPreset::Dry, "dry", "trocken"),
-            (FxPreset::Voice, "voice", "stimme"),
-            (FxPreset::PiezoGuitar, "piezo_guitar", "gitarre"),
-            (FxPreset::Custom, "custom", "eigen"),
+            (FxPreset::Dry, "dry", "dry"),
+            (FxPreset::Voice, "voice", "voice"),
+            (FxPreset::PiezoGuitar, "piezo_guitar", "guitar"),
+            (FxPreset::Custom, "custom", "custom"),
         ] {
             let name: FxPresetName = preset.into();
             assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
@@ -2024,11 +2024,15 @@ mod tests {
         let event = fx_event(&voice_status(), RATE);
         assert!(!event.bypass, "das Stimme-Preset schaltet die Kette ein");
         assert_eq!(event.preset, FxPresetName::Voice);
-        assert_eq!(event.preset_label, "stimme");
-        assert_eq!(event.letters, "HEK-R", "Delay ist in diesem Preset aus");
+        assert_eq!(event.preset_label, FxPreset::Voice.label());
+        let letters: String = FxSlot::all()
+            .iter()
+            .map(|s| if *s == FxSlot::Delay { '-' } else { s.letter() })
+            .collect();
+        assert_eq!(event.letters, letters, "Delay ist in diesem Preset aus");
         assert_eq!(event.effects.len(), 5);
         assert_eq!(event.effects[0].name, FxSlotName::HighPass);
-        assert_eq!(event.effects[0].label, "Hochpass");
+        assert_eq!(event.effects[0].label, FxSlot::HighPass.label());
         assert!(event.effects[0].on);
         assert!(!event.effects[3].on, "Delay aus");
 
@@ -2087,7 +2091,7 @@ mod tests {
         let err = FxParamName::BandHz
             .to_param(1_000.0, Some(7))
             .expect_err("Band 7 gibt es nicht");
-        assert!(err.contains("0 bis 2"), "{err}");
+        assert!(err.contains("0 to 2"), "{err}");
         // A knob that is not band-scoped ignores a band rather than refusing it.
         assert!(FxParamName::ReverbMix.to_param(0.2, Some(9)).is_ok());
         assert_eq!(
@@ -2315,7 +2319,7 @@ mod tests {
         let event = score_event("Henry 3/4", &a_view(), &names);
         assert_eq!(event.title, "Henry 3/4");
         assert_eq!(event.phase, PhaseName::Running);
-        assert_eq!(event.phase_label, "laeuft");
+        assert_eq!(event.phase_label, Phase::Running.label());
         assert_eq!(event.section, Some(1));
         assert_eq!(event.section_id, "voice_1");
         assert_eq!(event.section_count, 5);
@@ -2328,14 +2332,15 @@ mod tests {
         assert_eq!(event.tracks[0].index, 0);
         assert_eq!(event.tracks[0].name, "gitarre");
         assert_eq!(event.tracks[0].state, ScoreState::Play);
-        assert_eq!(event.tracks[0].label, "Wiedergabe");
-        assert_eq!(event.tracks[1].label, "Aufnahme");
+        assert_eq!(event.tracks[0].label, ScoreState::Play.label());
+        assert_eq!(event.tracks[1].label, ScoreState::Record.label());
 
         let armed = event.armed.as_ref().expect("ein Wechsel ist armiert");
         assert_eq!(armed.section, Some(2), "die Karte, die gleich dran ist");
         assert_eq!(armed.bars, 5);
         assert!(!armed.count_in);
-        assert_eq!(armed.text, "Wechsel armiert: \"voice_2\" in 5 Takten");
+        // Wording-robust: the runner's sentence names the section and the distance.
+        assert!(armed.text.contains("\"voice_2\"") && armed.text.contains('5'), "{}", armed.text);
 
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["phase"], json!("running"));
@@ -2383,13 +2388,13 @@ mod tests {
     /// Every phase travels as a snake_case string and keeps the German word beside it - the
     /// frontend switches on the one and prints the other, exactly as with the track states.
     #[test]
-    fn phases_serialise_as_snake_case_and_keep_their_german_word() {
+    fn phases_serialise_as_snake_case_and_keep_their_word() {
         for (phase, wire, label) in [
-            (Phase::Idle, "idle", "bereit"),
-            (Phase::CountIn, "count_in", "Einzaehler"),
-            (Phase::Running, "running", "laeuft"),
-            (Phase::Finished, "finished", "Ende"),
-            (Phase::Stopped, "stopped", "gestoppt"),
+            (Phase::Idle, "idle", "ready"),
+            (Phase::CountIn, "count_in", "count-in"),
+            (Phase::Running, "running", "running"),
+            (Phase::Finished, "finished", "end"),
+            (Phase::Stopped, "stopped", "stopped"),
         ] {
             let name: PhaseName = phase.into();
             assert_eq!(serde_json::to_value(name).unwrap(), json!(wire));
@@ -2397,16 +2402,16 @@ mod tests {
         }
     }
 
-    /// The five target states of a score, in the spelling the YAML uses and with the German word
+    /// The five target states of a score, in the spelling the YAML uses and with the word
     /// the block preview prints.
     #[test]
     fn score_target_states_travel_as_the_yaml_spells_them() {
         for (state, wire, label) in [
-            (ScoreState::Record, "record", "Aufnahme"),
+            (ScoreState::Record, "record", "Record"),
             (ScoreState::Overdub, "overdub", "Overdub"),
-            (ScoreState::Play, "play", "Wiedergabe"),
-            (ScoreState::Stop, "stop", "still"),
-            (ScoreState::HearThrough, "hear_through", "mithoeren"),
+            (ScoreState::Play, "play", "Play"),
+            (ScoreState::Stop, "stop", "Stop"),
+            (ScoreState::HearThrough, "hear_through", "Monitor"),
         ] {
             assert_eq!(serde_json::to_value(state).unwrap(), json!(wire));
             assert_eq!(state.as_str(), wire, "Wire-Name und YAML-Schreibweise sind dasselbe");
@@ -2431,7 +2436,7 @@ mod tests {
         assert!(issue.message.contains("gitare"), "{}", issue.message);
         assert_eq!(
             issue.suggestion.as_deref(),
-            Some("meintest du 'gitarre'?"),
+            Some("did you mean 'gitarre'?"),
             "der Vorschlag ist ein eigenes Feld"
         );
 
@@ -2602,9 +2607,9 @@ mod tests {
         assert!(!routing.overlaps());
         assert_eq!(split.bus_gain_pair().expect("Lautstaerken"), [1.0, 0.5]);
 
-        // A socket the device has not got is a German sentence, not a silent bus.
+        // A socket the device has not got is a sentence, not a silent bus.
         let err = split.bus_routing(1).expect_err("Kanal 2 gibt es nicht");
-        assert!(err.contains("Ausgangskanaele"), "{err}");
+        assert!(err.contains("output channels"), "{err}");
 
         let too_loud: StartConfig = serde_json::from_value(json!({
             "tracks": [TrackConfig::mono("stimme", 1)],
@@ -2612,7 +2617,7 @@ mod tests {
         }))
         .expect("StartConfig");
         let err = too_loud.bus_gain_pair().expect_err("zu laut");
-        assert!(err.contains("Lautstaerke"), "{err}");
+        assert!(err.contains("level must be"), "{err}");
     }
 
     /// A track says where it is heard in words, and a word that is not a bus is refused by name.

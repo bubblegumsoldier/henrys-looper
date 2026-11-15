@@ -103,7 +103,7 @@ const RUNNING_TICK: Duration = Duration::from_millis(4);
 /// The same while nothing runs - then there is nothing to service and only requests matter.
 const IDLE_TICK: Duration = Duration::from_millis(200);
 /// The one sentence for "there is nothing to talk to yet", so every command says it the same way.
-const NO_ENGINE: &str = "Die Engine laeuft nicht. Erst starten.";
+const NO_ENGINE: &str = "The engine is not running. Start it first.";
 
 // ---------------------------------------------------------------------------------------------
 // What the frontend can ask for
@@ -302,7 +302,7 @@ impl EngineHandle {
         std::thread::Builder::new()
             .name("looper-engine".into())
             .spawn(move || host_thread(rx, app))
-            .expect("Audio-Thread liess sich nicht starten");
+            .expect("the audio thread did not start");
         Self { tx }
     }
 
@@ -310,9 +310,9 @@ impl EngineHandle {
         let (tx, rx) = mpsc::channel();
         self.tx
             .send(make(tx))
-            .map_err(|_| "Der Audio-Thread laeuft nicht mehr.".to_string())?;
+            .map_err(|_| "The audio thread is no longer running.".to_string())?;
         rx.recv()
-            .map_err(|_| "Der Audio-Thread hat nicht geantwortet.".to_string())?
+            .map_err(|_| "The audio thread did not answer.".to_string())?
     }
 
     pub fn list_devices(&self) -> Result<DeviceReport, String> {
@@ -392,7 +392,7 @@ impl EngineHandle {
 // ---------------------------------------------------------------------------------------------
 
 fn host_thread(rx: Receiver<Request>, app: AppHandle) {
-    log!("Audio-Thread bereit (Engine laeuft noch nicht).");
+    log!("Audio thread ready (engine not running yet).");
     let mut session: Option<Session> = None;
     // The MIDI side lives here rather than inside `Session`, because it outlives one: a controller
     // stays connected across a stop and a restart of the engine, and the learn mode has to work
@@ -417,7 +417,7 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
         if let Some(active) = session.as_mut() {
             active.service(&app);
             if active.finished() {
-                log!("Engine hat sich selbst beendet.");
+                log!("The engine ended by itself.");
                 stop_session(&mut session, &app);
             }
         }
@@ -427,7 +427,7 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
 
     // The handle was dropped, so the app is going down. Give the device back properly anyway.
     stop_session(&mut session, &app);
-    log!("Audio-Thread beendet.");
+    log!("Audio thread ended.");
 }
 
 fn handle(
@@ -443,10 +443,10 @@ fn handle(
                 match &host.error {
                     Some(e) => log!("Host {}: {e}", host.name),
                     None => log!(
-                        "Host {}: {} Geraete, Standard-Ausgang {}",
+                        "Host {}: {} devices, default output {}",
                         host.name,
                         host.devices.len(),
-                        host.default_output.as_deref().unwrap_or("keiner")
+                        host.default_output.as_deref().unwrap_or("none")
                     ),
                 }
             }
@@ -456,7 +456,7 @@ fn handle(
             // Restart with a different configuration is a stop plus a start; doing it here rather
             // than refusing keeps the frontend from having to sequence two commands.
             if session.is_some() {
-                log!("Engine laeuft bereits - wird fuer den Neustart gestoppt.");
+                log!("Engine already running - stopping it for the restart.");
                 stop_session(session, app);
             }
             match Session::start(*config) {
@@ -468,8 +468,8 @@ fn handle(
                     let info = active.info.clone();
                     let stereo = info.tracks.iter().filter(|t| t.channels() == 2).count();
                     log!(
-                        "Engine gestartet: {} / {} @ {} Hz, {} Frames, {} Tracks ({} davon stereo), \
-                         Latenz-Vorgabe {} Frames, {} Tracks mit eigenem Wert.",
+                        "Engine started: {} / {} @ {} Hz, {} frames, {} tracks ({} of them stereo), \
+                         default latency {} frames, {} tracks with their own value.",
                         info.host,
                         info.output_device,
                         info.sample_rate,
@@ -486,18 +486,18 @@ fn handle(
                     let _ = reply.send(Ok(info));
                 }
                 Err(e) => {
-                    log!("Engine startet nicht: {e}");
+                    log!("Engine does not start: {e}");
                     let _ = reply.send(Err(e));
                 }
             }
         }
         Request::Stop(reply) => {
             if session.is_none() {
-                let _ = reply.send(Err("Die Engine laeuft nicht.".to_string()));
+                let _ = reply.send(Err("The engine is not running.".to_string()));
                 return;
             }
             stop_session(session, app);
-            log!("Engine gestoppt.");
+            log!("Engine stopped.");
             let _ = reply.send(Ok(()));
         }
         Request::Act(action, reply) => {
@@ -506,7 +506,7 @@ fn handle(
                 None => Err(NO_ENGINE.to_string()),
             };
             if let Err(e) = &result {
-                log!("Kommando abgelehnt: {e}");
+                log!("Command refused: {e}");
             }
             let _ = reply.send(result);
         }
@@ -514,7 +514,7 @@ fn handle(
             let result = load_score_onto(session, midi, app, &yaml, count_in);
             match &result {
                 Ok(loaded) => {
-                    log!("Partitur geladen: {}", loaded.message);
+                    log!("Score loaded: {}", loaded.message);
                     // The score's `midi:` block supplements the profile for this one piece - the
                     // same overlay the CLI does. Every pad the score takes over is said out loud.
                     match midi.set_score(Some(&loaded.score)) {
@@ -526,7 +526,7 @@ fn handle(
                         }
                         Err(issues) => {
                             let text = format!(
-                                "Die MIDI-Bindungen der Partitur wurden nicht uebernommen: {}",
+                                "The score's MIDI bindings were not applied: {}",
                                 issues.join(" ")
                             );
                             log!("{text}");
@@ -537,7 +537,7 @@ fn handle(
                     // catch up with that before they act.
                     midi.rearm();
                 }
-                Err(e) => log!("Partitur nicht geladen: {e}"),
+                Err(e) => log!("Score not loaded: {e}"),
             }
             let _ = reply.send(result);
         }
@@ -547,7 +547,7 @@ fn handle(
                 None => Err(NO_ENGINE.to_string()),
             };
             if let Ok(message) = &result {
-                log!("Partitur: {message}");
+                log!("Score: {message}");
             }
             let _ = reply.send(result);
         }
@@ -563,7 +563,7 @@ fn handle(
             let result = midi.open(&device);
             match &result {
                 Ok(view) => log!("MIDI: {}", view.message.as_deref().unwrap_or("")),
-                Err(e) => log!("MIDI-Eingang nicht geoeffnet: {e}"),
+                Err(e) => log!("MIDI input not opened: {e}"),
             }
             let _ = reply.send(result);
         }
@@ -592,7 +592,7 @@ fn handle(
             let result = midi.save();
             match &result {
                 Ok(saved) => log!("MIDI: {}", saved.message),
-                Err(e) => log!("MIDI-Profil nicht gespeichert: {e}"),
+                Err(e) => log!("MIDI profile not saved: {e}"),
             }
             let _ = reply.send(result);
         }
@@ -757,7 +757,7 @@ fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHand
         // also do its old job on the way in.
         if midi.is_learning() {
             if let Some(report) = midi.feed_learn(link, &event) {
-                log!("MIDI gelernt: {}", report.note.as_deref().unwrap_or(""));
+                log!("MIDI learned: {}", report.note.as_deref().unwrap_or(""));
             }
             continue;
         }
@@ -789,7 +789,7 @@ fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHand
                 midi.report(link, &event, MidiOutcome::Absorbed, target.as_ref(), Some(reason));
             }
             Resolution::Refused(reason) => {
-                log!("MIDI abgelehnt: {reason}");
+                log!("MIDI refused: {reason}");
                 midi.report(link, &event, MidiOutcome::Refused, target.as_ref(), Some(reason));
             }
             Resolution::Action(action) => {
@@ -828,7 +828,7 @@ fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHand
                         midi.report(link, &event, MidiOutcome::Action, target.as_ref(), message);
                     }
                     Err(e) => {
-                        log!("MIDI abgelehnt: {e}");
+                        log!("MIDI refused: {e}");
                         midi.report(link, &event, MidiOutcome::Refused, target.as_ref(), Some(e));
                     }
                 }
@@ -1045,7 +1045,7 @@ fn load_score_onto(
         active.last.map(|(status, _)| status).as_ref(),
         active.scheduler.quantize,
     );
-    log!("Engine wird fuer die Partitur neu aufgebaut: {mismatch}");
+    log!("Rebuilding the engine for the score: {mismatch}");
     // Not `stop_session`: that would tell the frontend "stopped" and the live view would flip to
     // the setup screen for the moment the rebuild takes.
     if let Some(old) = session.take() {
@@ -1057,7 +1057,7 @@ fn load_score_onto(
             midi.rearm();
         }
         Err(e) => {
-            log!("Neuaufbau gescheitert: {e}");
+            log!("Rebuild failed: {e}");
             let restored = Session::start(previous);
             let note = match &restored {
                 Ok(_) => "The previous setup is running again.",
@@ -1069,7 +1069,7 @@ fn load_score_onto(
             ));
         }
     }
-    let active = session.as_mut().expect("eben gestartet");
+    let active = session.as_mut().expect("just started");
     let info = active.info.clone();
     let _ = app.emit(ENGINE_EVENT, &info);
     let loaded = active.load_score(yaml, count_in)?;
@@ -1205,7 +1205,7 @@ fn survey_devices() -> DeviceReport {
             Err(e) => {
                 hosts.push(HostInfo {
                     name,
-                    error: Some(format!("Host liess sich nicht oeffnen: {e}")),
+                    error: Some(format!("Could not open the host: {e}")),
                     default_input: None,
                     default_output: None,
                     devices: Vec::new(),
@@ -1220,7 +1220,7 @@ fn survey_devices() -> DeviceReport {
             Err(e) => {
                 hosts.push(HostInfo {
                     name,
-                    error: Some(format!("Geraeteliste nicht lesbar: {e}")),
+                    error: Some(format!("Could not read the device list: {e}")),
                     default_input,
                     default_output,
                     devices: Vec::new(),
@@ -1234,12 +1234,12 @@ fn survey_devices() -> DeviceReport {
             let mut note: Option<String> = None;
             let input_configs = configs_of(
                 device.supported_input_configs(),
-                "Eingangskonfigurationen",
+                "Input configurations",
                 &mut note,
             );
             let output_configs = configs_of(
                 device.supported_output_configs(),
-                "Ausgangskonfigurationen",
+                "Output configurations",
                 &mut note,
             );
             infos.push(DeviceInfo {
@@ -1299,12 +1299,13 @@ pub fn compile(yaml: &str) -> CompileOutcome {
     }
 }
 
-/// The same complaints as one German block, for a caller with nowhere to put markers - the load
+/// The same complaints as one block of text, for a caller with nowhere to put markers - the load
 /// command, whose answer is a single sentence.
 fn render_issues(error: &ScoreError) -> String {
     let mut out = format!(
-        "Die Partitur laesst sich nicht uebersetzen ({} Fehler):",
-        error.issues.len()
+        "The score does not compile ({} error{}):",
+        error.issues.len(),
+        if error.issues.len() == 1 { "" } else { "s" }
     );
     for issue in &error.issues {
         out.push_str("\n  ");
@@ -1322,15 +1323,15 @@ fn render_issues(error: &ScoreError) -> String {
 fn run_calibration(config: CalibrateConfig, engine_running: bool) -> Result<CalibrateOutcome, String> {
     if engine_running {
         return Err(
-            "Die Engine laeuft. Zum Kalibrieren erst stoppen - die Messung braucht das Geraet \
-             fuer sich."
+            "The engine is running. Stop it before calibrating - the measurement needs the device \
+             to itself."
                 .to_string(),
         );
     }
     if !logfile::enabled() {
         return Err(format!(
-            "Es laesst sich keine Logdatei schreiben ({}). Die Kalibrierung gibt ihr Ergebnis \
-             dort aus und wird deshalb nicht gestartet.",
+            "No log file can be written ({}). The calibration reports its result there, so it \
+             is not started.",
             logfile::path().display()
         ));
     }
@@ -1363,18 +1364,18 @@ fn run_calibration(config: CalibrateConfig, engine_running: bool) -> Result<Cali
     };
     let path = logfile::path().display().to_string();
     log!(
-        "Kalibrierung startet: {} Laeufe, {} Takte, Pruefwert {} Frames, Track {}.",
+        "Calibration starts: {} runs, {} bars, test value {} frames, track {}.",
         opts.runs,
         opts.bars,
         opts.latency_frames,
         opts.for_track
     );
     cmd_calibrate(&dev, &opts)?;
-    log!("Kalibrierung fertig.");
+    log!("Calibration done.");
     Ok(CalibrateOutcome {
         message: format!(
-            "Kalibrierung abgeschlossen. Der vollstaendige Bericht mit der Empfehlung fuer die \
-             Latenzkompensation dieses Tracks steht in der Logdatei: {path}"
+            "Calibration finished. The full report, with the recommended latency compensation \
+             for this track, is in the log file: {path}"
         ),
         log_path: path,
     })
@@ -1480,8 +1481,8 @@ impl Session {
         let rate = setup.sample_rate();
         if setup.out_plan.config.sample_rate != rate {
             return Err(format!(
-                "Ein- und Ausgang laufen auf verschiedenen Sampleraten ({} und {}). \
-                 Die Zeitachse der Engine setzt eine gemeinsame Clock voraus.",
+                "Input and output run at different sample rates ({} and {}). \
+                 The engine's timeline needs one shared clock.",
                 rate, setup.out_plan.config.sample_rate
             ));
         }
@@ -1640,10 +1641,10 @@ impl Session {
         // order gives them the origin the 827 samples were measured against.
         input
             .play()
-            .map_err(|e| format!("Eingangsstream startet nicht: {e}"))?;
+            .map_err(|e| format!("The input stream does not start: {e}"))?;
         output
             .play()
-            .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+            .map_err(|e| format!("The output stream does not start: {e}"))?;
         crate::plugins::engine_started(inserts, rate);
 
         let loop_samples = timeline.span_bars(0, config.bars);
@@ -1797,7 +1798,7 @@ impl Session {
             // message only shows the newest sentence, and two equal sentences in a row would look
             // like one).
             for text in notices {
-                log!("Partitur: {text}");
+                log!("Score: {text}");
                 let _ = app.emit(NOTICE_EVENT, NoticeEvent::score(&text));
                 self.message = Some(text);
             }
@@ -1929,23 +1930,21 @@ impl Session {
     fn load_score(&mut self, yaml: &str, count_in: Option<u32>) -> Result<ScoreLoaded, String> {
         if self.score_is_playing() {
             return Err(
-                "Es laeuft schon eine Partitur. Erst \"Alles stoppen\" - ein Wechsel mitten im Lauf \
-                 wuerde die schon armierten Kommandos im Audio-Thread stehen lassen, die keiner \
-                 mehr zurueckholen kann."
+                "A score is already running. Press \"Stop all\" first - switching in the middle of a \
+                 run would leave commands armed in the audio thread that nobody can call back."
                     .to_string(),
             );
         }
         let score = compile_score(yaml).map_err(|error| render_issues(&error))?;
 
-        // The layout check comes from the engine library and carries its own German instructions.
+        // The layout check comes from the engine library and carries its own instructions.
         check_tracks(&score, &self.defs)?;
 
         if let Some(busy) = self.first_non_empty_track() {
             return Err(format!(
-                "Track \"{busy}\" ist nicht leer. Eine Partitur wird nur auf eine leere Sitzung \
-                 geladen - der Runner plant jeden Overdub gegen die Loop-Geometrie der Takes, die \
-                 er selbst geschickt hat, und einen von Hand aufgenommenen Loop sieht er nicht. \
-                 Erst \"Alles leeren\", dann laden."
+                "Track \"{busy}\" is not empty. A score only loads onto an empty session - the \
+                 runner plans every overdub against the loops of the takes it sent itself, and it \
+                 cannot see a loop recorded by hand. Press \"Clear all\" first, then load."
             ));
         }
 
@@ -1982,11 +1981,10 @@ impl Session {
         self.runner = Some(runner);
 
         let message = format!(
-            "Partitur \"{title}\" geladen: {sections} Sektionen, {:.1} BPM, {}, laengste Sektion \
-             {bars} Takte, {count_in} Takt{} Einzaehler.",
+            "Score \"{title}\" loaded: {sections} sections, {:.1} BPM, {}, longest section \
+             {bars} bars, {count_in}-bar count-in.",
             score.bpm,
             score.time_signature,
-            if count_in == 1 { "" } else { "e" },
         );
         self.message = Some(message.clone());
         Ok(ScoreLoaded {
@@ -1996,13 +1994,13 @@ impl Session {
         })
     }
 
-    /// One press of the score transport. The answer is always a German sentence - see
+    /// One press of the score transport. The answer is always a sentence - see
     /// [`ScoreAction`].
     fn score_act(&mut self, action: ScoreAction) -> Result<String, String> {
         let est = self.estimated_pos();
         let Some(runner) = self.runner.as_mut() else {
             return Err(
-                "Es ist keine Partitur geladen. Erst im Reiter \"Partitur\" eine laden.".to_string(),
+                "No score is loaded. Load one in the Arrangement first.".to_string(),
             );
         };
         let message = match action {
@@ -2084,10 +2082,10 @@ impl Session {
     fn check_track(&self, track: usize) -> Result<(), String> {
         if track >= self.tracks.len() {
             return Err(format!(
-                "{} Gemeint war Track {}, vorhanden sind 1 bis {}.",
+                "{} You meant track {}; there are tracks 1 to {}.",
                 Refusal::NoSuchTarget
                     .message()
-                    .unwrap_or("Unbekanntes Ziel."),
+                    .unwrap_or("Unknown target."),
                 track + 1,
                 self.tracks.len()
             ));
@@ -2102,17 +2100,17 @@ impl Session {
             let name = &self.tracks[track].name;
             return Err(if ts.layers == 0 {
                 format!(
-                    "{} \"{name}\" hat keine Ebenen.",
+                    "{} \"{name}\" has no layers.",
                     Refusal::NoSuchTarget
                         .message()
-                        .unwrap_or("Unbekanntes Ziel.")
+                        .unwrap_or("Unknown target.")
                 )
             } else {
                 format!(
-                    "{} \"{name}\" hat die Ebenen 1 bis {}.",
+                    "{} \"{name}\" has layers 1 to {}.",
                     Refusal::NoSuchTarget
                         .message()
-                        .unwrap_or("Unbekanntes Ziel."),
+                        .unwrap_or("Unknown target."),
                     ts.layers
                 )
             });
@@ -2122,7 +2120,7 @@ impl Session {
         if matches!(ts.state, TrackState::Recording | TrackState::Overdub) {
             return Err(Refusal::Busy
                 .message()
-                .unwrap_or("Track ist beschaeftigt.")
+                .unwrap_or("The track is busy.")
                 .to_string());
         }
         Ok(())
@@ -2197,16 +2195,16 @@ impl Session {
             Action::SetMonitor { track, on } => {
                 self.cmd.send(Command::SetMonitor { track, on })?;
                 self.message = Some(format!(
-                    "\"{}\": Mithoeren {}.",
+                    "\"{}\": Monitor {}.",
                     self.tracks[track].name,
-                    if on { "an" } else { "aus" }
+                    if on { "on" } else { "off" }
                 ));
                 Ok(())
             }
             Action::SetPan { track, pan } => {
                 if !(-1.0..=1.0).contains(&pan) {
                     return Err(
-                        "Das Panorama muss zwischen -1 (ganz links) und 1 (ganz rechts) liegen."
+                        "Pan must be between -1 (hard left) and 1 (hard right)."
                             .to_string(),
                     );
                 }
@@ -2283,7 +2281,7 @@ impl Session {
             Action::SetBusGain { bus, gain } => {
                 if !(0.0..=MAX_BUS_GAIN).contains(&gain) {
                     return Err(format!(
-                        "Die Bus-Lautstaerke muss zwischen 0.0 und {MAX_BUS_GAIN} liegen."
+                        "The bus level must be between 0.0 and {MAX_BUS_GAIN}."
                     ));
                 }
                 self.cmd.send(Command::SetBusGain { bus, gain })?;
@@ -2293,11 +2291,11 @@ impl Session {
             }
             Action::SetBusOutput { bus, out } => {
                 if out.width == 0 || out.width > 2 {
-                    return Err("Ein Bus liegt auf einem Kanal oder auf einem Paar.".to_string());
+                    return Err("A bus sits on one channel or on a pair.".to_string());
                 }
                 self.cmd.send(Command::SetBusOutput { bus, out })?;
                 self.message = Some(format!(
-                    "{} liegt auf Ausgang {}.{}",
+                    "{} is on output {}.{}",
                     bus.label(),
                     out.label(),
                     if out.first + out.width > self.output_channels {
@@ -2312,7 +2310,7 @@ impl Session {
             Action::SetTrackLatency { track, latency } => self.set_track_latency(track, latency),
             Action::SetClick { on } => {
                 self.cmd.send(Command::SetClick { on })?;
-                self.message = Some(format!("Klick {}.", if on { "an" } else { "aus" }));
+                self.message = Some(format!("Click {}.", if on { "on" } else { "off" }));
                 Ok(())
             }
             // Levels, like a bus fader: no message per mouse move, the value comes back in the
@@ -2337,10 +2335,10 @@ impl Session {
                     muted,
                 })?;
                 self.message = Some(format!(
-                    "\"{}\": Ebene {} {}.",
+                    "\"{}\": layer {} {}.",
                     self.tracks[track].name,
                     layer + 1,
-                    if muted { "stumm" } else { "wieder hoerbar" }
+                    if muted { "muted" } else { "audible again" }
                 ));
                 Ok(())
             }
@@ -2351,7 +2349,7 @@ impl Session {
                     self.tracks[track].gains.remove(layer);
                 }
                 self.message = Some(format!(
-                    "\"{}\": Ebene {} entfernt.",
+                    "\"{}\": layer {} removed.",
                     self.tracks[track].name,
                     layer + 1
                 ));
@@ -2360,7 +2358,7 @@ impl Session {
             Action::LayerGain { track, layer, gain } => {
                 self.check_layer(track, layer)?;
                 if !(0.0..=4.0).contains(&gain) {
-                    return Err("Die Lautstaerke muss zwischen 0.0 und 4.0 liegen.".to_string());
+                    return Err("The level must be between 0.0 and 4.0.".to_string());
                 }
                 self.cmd.send(Command::SetLayerGain { track, layer, gain })?;
                 let gains = &mut self.tracks[track].gains;
@@ -2369,7 +2367,7 @@ impl Session {
                 }
                 gains[layer] = gain;
                 self.message = Some(format!(
-                    "\"{}\": Ebene {} auf {gain:.2}.",
+                    "\"{}\": layer {} at {gain:.2}.",
                     self.tracks[track].name,
                     layer + 1
                 ));
@@ -2398,9 +2396,9 @@ impl Session {
             Action::FxBypass { track, on } => {
                 self.cmd.send(Command::SetFxBypass { track, on })?;
                 self.message = Some(format!(
-                    "\"{}\": Effektkette {}.",
+                    "\"{}\": effect chain {}.",
                     self.tracks[track].name,
-                    if on { "umgangen" } else { "aktiv" }
+                    if on { "bypassed" } else { "active" }
                 ));
                 Ok(())
             }
@@ -2410,7 +2408,7 @@ impl Session {
                     "\"{}\": {} {}.",
                     self.tracks[track].name,
                     slot.label(),
-                    if on { "an" } else { "aus" }
+                    if on { "on" } else { "off" }
                 ));
                 Ok(())
             }
@@ -2430,7 +2428,7 @@ impl Session {
                 }
                 self.cmd.send(Command::LoadFxPreset { track, preset })?;
                 self.message = Some(format!(
-                    "\"{}\": Preset \"{}\" geladen.",
+                    "\"{}\": preset \"{}\" loaded.",
                     self.tracks[track].name,
                     preset.label()
                 ));
@@ -2449,8 +2447,8 @@ impl Session {
             || latency.measured.map(i64::from).unwrap_or(0) > MAX_LATENCY_FRAMES
         {
             return Err(format!(
-                "Die Latenzkompensation muss innerhalb von {MAX_LATENCY_FRAMES} Frames liegen \
-                 (zwei Sekunden bei 48 kHz)."
+                "The latency compensation must stay within {MAX_LATENCY_FRAMES} frames \
+                 (two seconds at 48 kHz)."
             ));
         }
         let worst = max_latency(
@@ -2471,12 +2469,12 @@ impl Session {
         let rate = self.info.sample_rate.max(1) as f64;
         let effective = latency.resolve(self.info.latency_frames);
         self.message = Some(format!(
-            "\"{}\": Latenzkompensation {effective} Frames ({:.2} ms){}. Wirkt auf kommende \
-             Aufnahmen, nicht auf schon Aufgenommenes.",
+            "\"{}\": latency compensation {effective} frames ({:.2} ms){}. Applies to recordings \
+             from now on, not to what is already recorded.",
             self.tracks[track].name,
             effective as f64 * 1000.0 / rate,
             if latency.inherits() {
-                format!(" - globale Vorgabe {}", self.info.latency_frames)
+                format!(" - global default {}", self.info.latency_frames)
             } else {
                 String::new()
             },
@@ -2485,7 +2483,7 @@ impl Session {
     }
 
     /// A new tempo redefines what every sample position means, so it is only accepted while every
-    /// track is empty. The German sentence for the refusal is the engine's own.
+    /// track is empty. The sentence for the refusal is the engine's own.
     fn set_tempo(&mut self, bpm: f64, beats_per_bar: u32, beat_unit: u32) -> Result<(), String> {
         self.reconfigure(bpm, beats_per_bar, beat_unit, self.scheduler.bars)?;
         self.message = Some(format!("Tempo {bpm} BPM, {beats_per_bar}/{beat_unit}."));
@@ -2627,7 +2625,7 @@ mod tests {
     /// Deliberately the one failure that needs no hardware: everything past it opens the
     /// interface, which is not something a test may do.
     #[test]
-    fn an_unknown_host_is_refused_in_german_before_any_device_is_opened() {
+    fn an_unknown_host_is_refused_in_words_before_any_device_is_opened() {
         let config: StartConfig = serde_json::from_str(
             r#"{"host": "gibtsnicht", "tracks": [{"name": "stimme", "input_channel": 1}]}"#,
         )
@@ -2638,7 +2636,10 @@ mod tests {
             Ok(_) => panic!("den Host gibt es nicht, das haette scheitern muessen"),
         };
         assert!(err.contains("gibtsnicht"), "{err}");
-        assert!(err.contains("Verfuegbar"), "die Meldung zaehlt die Hosts auf: {err}");
+        // Wording-robust: the sentence lists the hosts this system has, whatever it says around them.
+        for host in cpal::available_hosts() {
+            assert!(err.contains(&host.to_string()), "die Meldung zaehlt die Hosts auf: {err}");
+        }
     }
 
     /// The transport belongs to the runner while a score plays, the mix belongs to the human. This
@@ -3002,13 +3003,13 @@ mod tests {
         assert!(outcome.errors.iter().all(|i| i.line.is_some()));
     }
 
-    /// The load command has nowhere to put markers, so it says the same thing as one German block -
+    /// The load command has nowhere to put markers, so it says the same thing as one block of text -
     /// with the positions in it, so it can be pasted back into the editor.
     #[test]
-    fn the_load_command_renders_every_complaint_into_one_german_block() {
+    fn the_load_command_renders_every_complaint_into_one_block() {
         let error = compile_score("bpm: 100\n").expect_err("ohne tracks und sections");
         let text = render_issues(&error);
-        assert!(text.starts_with("Die Partitur laesst sich nicht uebersetzen"), "{text}");
+        assert!(text.starts_with("The score does not compile"), "{text}");
         assert_eq!(
             text.lines().count(),
             1 + error.issues.len(),

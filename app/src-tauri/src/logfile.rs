@@ -72,11 +72,11 @@ pub fn init(dir: &Path) -> PathBuf {
     }
 
     write(&format!(
-        "Henrys Looper {} gestartet, {}",
+        "Henrys Looper {} started, {}",
         env!("CARGO_PKG_VERSION"),
         utc_now()
     ));
-    write(&format!("Logdatei: {}", file.display()));
+    write(&format!("Log file: {}", file.display()));
     file
 }
 

@@ -143,7 +143,7 @@ describe("tracks", () => {
     expect(doc.sections[0].tracks[1].track).toBe("vox");
     expect(keys(doc)).toContain("track.vox.record");
     expect(keys(doc)).toContain("track.2.play");
-    expect(doc.tracks[1].comments).toEqual({ after: "monitor: true ist Default" });
+    expect(doc.tracks[1].comments).toEqual({ after: "monitor: true is the default" });
   });
 
   it("moves and renumbers index bindings", () => {

@@ -11,7 +11,7 @@
 //! `spawn_blocking`. That is rule 3 from `docs/architektur.md` section 7: the Tauri main thread is
 //! MAINSTA and drives the window's message pump, so blocking it freezes the window.
 //!
-//! Errors are `Result<_, String>` with German sentences, because they end up in front of a
+//! Errors are `Result<_, String>` with whole sentences, because they end up in front of a
 //! musician. Where the engine already has a sentence for a situation, that sentence is used.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -41,7 +41,7 @@ use proto::{
     StartConfig,
 };
 
-/// Run blocking work on Tauri's blocking pool and translate a lost worker into German.
+/// Run blocking work on Tauri's blocking pool and turn a lost worker into a sentence.
 async fn offload<T, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -49,7 +49,7 @@ where
 {
     tauri::async_runtime::spawn_blocking(work)
         .await
-        .map_err(|e| format!("Die Arbeit im Hintergrund wurde abgebrochen: {e}"))?
+        .map_err(|e| format!("The background work was cancelled: {e}"))?
 }
 
 /// Every per-track and per-layer command funnels through here.
@@ -187,9 +187,9 @@ async fn track_bus(
     engine: State<'_, EngineHandle>,
 ) -> Result<(), String> {
     let source = TrackSource::parse(&source)
-        .ok_or_else(|| format!("\"{source}\" ist keine Quelle. Es gibt loop und monitor."))?;
+        .ok_or_else(|| format!("\"{source}\" is not a source. There are loop and monitor."))?;
     let bus = Bus::parse(&bus)
-        .ok_or_else(|| format!("\"{bus}\" ist kein Bus. Es gibt main und monitor."))?;
+        .ok_or_else(|| format!("\"{bus}\" is not a bus. There are main and monitor."))?;
     // One bit of a set. The set is read back on the host thread, where the newest engine snapshot
     // is - doing it here would need a round trip, and switching Main off without reading it first
     // would take the track off the headphones as well.
@@ -212,7 +212,7 @@ async fn track_bus(
 #[tauri::command(rename_all = "snake_case")]
 async fn bus_gain(bus: String, gain: f32, engine: State<'_, EngineHandle>) -> Result<(), String> {
     let bus = Bus::parse(&bus)
-        .ok_or_else(|| format!("\"{bus}\" ist kein Bus. Es gibt main und monitor."))?;
+        .ok_or_else(|| format!("\"{bus}\" is not a bus. There are main and monitor."))?;
     act(engine, Action::SetBusGain { bus, gain }).await
 }
 
@@ -229,7 +229,7 @@ async fn bus_output(
     engine: State<'_, EngineHandle>,
 ) -> Result<(), String> {
     let bus = Bus::parse(&bus)
-        .ok_or_else(|| format!("\"{bus}\" ist kein Bus. Es gibt main und monitor."))?;
+        .ok_or_else(|| format!("\"{bus}\" is not a bus. There are main and monitor."))?;
     let out = BusOutConfig { channel, width }.to_output(bus)?;
     act(engine, Action::SetBusOutput { bus, out }).await
 }
@@ -435,7 +435,7 @@ async fn fx_band_kind(
 ) -> Result<(), String> {
     if band as usize >= MAX_EQ_BANDS {
         return Err(format!(
-            "Es gibt die EQ-Baender 0 bis {}, nicht {band}.",
+            "There are EQ bands 0 to {}, not {band}.",
             MAX_EQ_BANDS - 1
         ));
     }
@@ -496,7 +496,7 @@ async fn set_quantize(
 //   while somebody types, so it must work with the engine stopped, with the engine running and
 //   with a score playing - and it must hand back the compiler's issue list *positioned*, because
 //   the editor turns each entry into a marker on a line.
-// * The four transport commands answer with a **German sentence instead of nothing**. The runner
+// * The four transport commands answer with a **sentence instead of nothing**. The runner
 //   does not fail: `score_goto` while a change is armed reports how far the armed change still is
 //   and sends not one command. That sentence is the answer, so the frontend prints it rather than
 //   guessing from a silent success.
@@ -765,7 +765,7 @@ async fn midi_close(
 /// Arm the learn mode for one address, or cancel it with `null`.
 ///
 /// `address` is the dotted path of the clicked control - `track.1.record`, `global.click`,
-/// `track.2.fx.reverb.mix`. It is parsed on the Rust side, so a wrong one is a German sentence
+/// `track.2.fx.reverb.mix`. It is parsed on the Rust side, so a wrong one is a sentence
 /// rather than a binding on nothing. The next control that arrives becomes that address and the
 /// mode disarms itself; the result travels on `looper://midi`.
 #[tauri::command(rename_all = "snake_case")]
@@ -865,7 +865,7 @@ fn main() {
 
             let info = host::app_info();
             log!(
-                "ASIO eingebaut: {}. Hoechstens {} Tracks, {} Ebenen je Track.",
+                "ASIO built in: {}. At most {} tracks, {} layers per track.",
                 info.asio_built,
                 info.max_tracks,
                 info.max_layers
@@ -949,5 +949,5 @@ fn main() {
             dev_snapshot
         ])
         .run(tauri::generate_context!())
-        .expect("Tauri-Anwendung liess sich nicht starten");
+        .expect("the Tauri application did not start");
 }

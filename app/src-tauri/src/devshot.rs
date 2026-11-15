@@ -30,7 +30,7 @@ pub fn snapshot(window: &tauri::WebviewWindow, path: String) -> Result<String, S
                     } else {
                         unsafe { (*error).localizedDescription().to_string() }
                     };
-                    Err(format!("Snapshot fehlgeschlagen: {reason}"))
+                    Err(format!("Snapshot failed: {reason}"))
                 } else {
                     let image = unsafe { &*image };
                     image
@@ -42,7 +42,7 @@ pub fn snapshot(window: &tauri::WebviewWindow, path: String) -> Result<String, S
                         .map(|png| png.writeToFile_atomically(&NSString::from_str(&path), true))
                         .filter(|ok| *ok)
                         .map(|_| path.clone())
-                        .ok_or_else(|| format!("PNG konnte nicht nach {path} geschrieben werden"))
+                        .ok_or_else(|| format!("Could not write the PNG to {path}"))
                 };
                 let _ = tx.send(result);
             });
@@ -50,10 +50,10 @@ pub fn snapshot(window: &tauri::WebviewWindow, path: String) -> Result<String, S
         })
         .map_err(|e| e.to_string())?;
     rx.recv_timeout(std::time::Duration::from_secs(10))
-        .map_err(|_| "Snapshot: keine Antwort von WebKit".to_string())?
+        .map_err(|_| "Snapshot: no answer from WebKit".to_string())?
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn snapshot(_window: &tauri::WebviewWindow, _path: String) -> Result<String, String> {
-    Err("dev_snapshot gibt es nur auf macOS.".into())
+    Err("dev_snapshot exists on macOS only.".into())
 }

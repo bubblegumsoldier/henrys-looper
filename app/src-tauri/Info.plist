@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Henrys Looper nimmt die Eingaenge des Audio-Interfaces auf, um Loops aufzuzeichnen.</string>
+  <string>Henrys Looper records the inputs of your audio interface to make loops.</string>
 </dict>
 </plist>

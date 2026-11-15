@@ -814,32 +814,30 @@ export interface ScoreStatus {
 }
 
 /**
- * The German word for each target state, and for each phase.
+ * The word for each target state, and for each phase - the same words as `shell/terms.ts`.
  *
  * The wire format carries a `label` beside every one of these, and it is deliberately **not** what
- * gets printed here: the Rust side spells German without umlauts throughout, because the same
- * sentences go to a Windows console (`Einzaehler`, `mithoeren`). This window is not a console, and
- * the rest of it already writes `Mithören`. So the words the UI can derive itself - the five states
- * and the five phases - are spelled properly here, and only the runner's whole *sentences* are
- * printed as they arrive.
+ * gets printed here: the words the UI can derive itself - the five states and the five phases - are
+ * taken from the UI's own vocabulary, and only the runner's whole *sentences* are printed as they
+ * arrive.
  *
  * The table has to exist anyway: a compiled section carries states, not labels, so the block
  * preview could not print a word without it.
  */
 export const SCORE_STATE_LABEL: Record<ScoreState, string> = {
-  record: "Aufnahme",
+  record: "Record",
   overdub: "Overdub",
-  play: "Wiedergabe",
-  stop: "still",
-  hear_through: "mithören",
+  play: "Play",
+  stop: "Stop",
+  hear_through: "Monitor",
 };
 
 export const PHASE_LABEL: Record<Phase, string> = {
-  idle: "bereit",
-  count_in: "Einzähler",
-  running: "läuft",
-  finished: "Ende",
-  stopped: "gestoppt",
+  idle: "Ready",
+  count_in: "Count-in",
+  running: "Running",
+  finished: "Finished",
+  stopped: "Stopped",
 };
 
 // ---------------------------------------------------------------------------------------------
