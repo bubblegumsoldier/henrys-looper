@@ -368,6 +368,17 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
         routing,
     })?;
 
+    // The score's `mixer:` section: faders, mutes, chains and bus levels, by track name.
+    if let Some(mixer) = &score.mixer {
+        let names: Vec<String> = score.tracks.iter().map(|t| t.name.clone()).collect();
+        for command in crate::score::mixer::mixer_commands(mixer, &names, &[]) {
+            if let Err(e) = cmd.send(command) {
+                println!("WARNING:  the score's mix was not applied completely: {e}");
+                break;
+            }
+        }
+    }
+
     let mut runner = Runner::new(score, timeline, buffer_frames)?.with_count_in(opts.count_in);
 
     println!(

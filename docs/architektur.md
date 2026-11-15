@@ -1261,11 +1261,112 @@ neben den MIDI-Profilen. Im laufenden Betrieb gibt es keine Prozesstrennung: ein
 `plugin-rack.json` und kommt beim Start wieder; stürzt das Wiederherstellen ab, wird es beim
 nächsten Start übersprungen.
 
-**MIDI.** `track.<n>.insert.<slot>.bypass` (Schalter), `track.<n>.insert.<slot>.param.<id>`
+**Slots gehören dem Spurnamen, nicht der Position** (seit 2026-11). Partitur und Setup ordnen
+Spuren verschieden (Setup `stimme, gitarre`, Partitur `gitarre, voice`); nach Position landete
+der De-Esser der Stimme dann auf der Gitarre. `plugin-rack.json` (Version 2) ist nach Spurname
+(`tracks`) bzw. `main`/`monitor` (`buses`) geschlüsselt. Jeder Engine-Start übergibt dem Manager
+die Spurliste: Slots einer vorhandenen Spur werden an deren Position eingesetzt, Slots einer
+fehlenden Spur bleiben **geparkt** (geladen, in der Datei, in Einrichtung > Plugins aufgeführt)
+und kommen zurück, sobald es die Spur wieder gibt. Die Kommandos und das UI sagen weiter
+`track.<n>` — gemeint ist die Position in der laufenden Engine, also der Kanalzug.
+
+*Umbenennen.* `app/src-tauri/src/layout.rs` merkt sich die zuletzt gelaufene Spurliste in
+`layout.json` und vergleicht bei jedem Start: verschwundener und neuer Name auf **denselben
+Eingängen** (eindeutig) oder — sonst — genau ein verschwundener und ein neuer Name an
+**derselben Position** gelten als Umbenennung; Plugins und Mix (`mixer.json`) ziehen mit. Hat der
+neue Name schon eigene Slots, wird nichts überschrieben. Alles Unsichere ist keine Umbenennung.
+
+*Migration.* Eine Datei im alten Format (`slots: [{target: "track.2", …}]`) wird beim Lesen
+übernommen: `track.<n>` wird zum Namen, den die `n`-te Spur der letzten bekannten Spurliste hatte;
+ist die nicht bekannt (erster Start nach dem Update), bleibt der Slot eine Position und wird beim
+ersten Engine-Start an die Spur gebunden, die dort steht. Nichts geht verloren; die alte Datei
+bleibt als `plugin-rack.json.v1` liegen. Plugins, die beim Wiederherstellen nicht laden
+(deinstalliert, nicht gescannt), bleiben ebenfalls in der Datei.
+
+**MIDI.** `track.<name>.insert.<slot>.bypass` (Schalter), `track.<name>.insert.<slot>.param.<id>`
 (0..1, Pickup), dasselbe unter `global.bus.<main|monitor>.insert.…`. Die Id ist die des Plugins.
+Die App vergibt die Adressen mit dem **Spurnamen**, damit ein gelernter Regler dem Plugin folgt,
+wenn eine Partitur die Spuren anders ordnet; ein Name, der in keiner Adresse stehen kann (nur
+Ziffern, Punkt, Leerzeichen), wird als Position geschrieben. Schon gelernte Belegungen der Form
+`track.<n>.insert…` bleiben positionsbezogen wie alle `track.<n>.*`-Adressen: nach einem
+Umordnen greifen sie auf den Slot der Spur, die jetzt an Position `n` steht (oder ins Leere).
+Wer das nicht will, lernt sie einmal neu.
 
 **Nicht gebaut.** Instrumente (werden gelistet, nicht geladen), Sidechain, MIDI an Plugins,
 Latenzausgleich über Busse hinweg, Windows-Host (kompiliert, sagt „nur macOS“).
+
+## 15. Der Mix bleibt beim Stück
+
+Fader, Mute, die eingebaute Kette je Spur und die Pegel der Busse, des Klicks und des Mithörens
+überleben, was sie früher zurückgesetzt hat: Neustart der App, Neustart der Engine, und den
+Neuaufbau beim Laden einer Partitur mit anderen Spuren.
+
+**Mit Partitur steht der Mix in der Partitur**, im optionalen Abschnitt `mixer:`
+(`engine/src/score/mixer.rs`; Parser `score/read/mixer.rs`, Dokumentmodell in `score/doc.rs`):
+
+```yaml
+mixer:
+  buses: {main: 0, monitor: -6, click: -12, inputs: 0}   # dB; inputs = Mithören
+  tracks:
+    voice: {gain: -3.5, preset: voice}
+    guitar:
+      gain: -1
+      mute: true
+      preset: piezo_guitar
+      comp: {threshold: -12}   # nur was vom Preset abweicht
+      reverb: {on: false}
+```
+
+* Pegel in dB, auf 0,1 dB gerundet; `-100` und weniger ist Stille, Obergrenze +12 dB.
+* Eine Kette ist ein Preset (`dry`, `voice`, `piezo_guitar`; fehlt = `dry`) plus Effektzeilen
+  (`high_pass`, `eq`, `band1`…`band3`, `comp`, `delay`, `reverb`), die nur die genannten Felder
+  überschreiben. `bypass` fehlt = Kette aus genau dann, wenn kein Effekt an ist — wie die Presets.
+* In einem Eintrag heißt ein fehlendes Feld Standardwert; eine Spur ohne Eintrag behält, was sie
+  hat. Fehlt der Abschnitt ganz, ändert sich nichts — alte Partituren lesen und rendern sich
+  unverändert.
+* Kommentare hängen wie überall am Element (Eintrag, Feldzeile, `buses`/`tracks`).
+* **Solo wird nicht gespeichert**: ein vergessenes Solo in einer gespeicherten Partitur macht
+  beim nächsten Laden alle anderen Spuren stumm — auf der Bühne. **Mute schon**: eine
+  stummgeschaltete Spur ist eine Entscheidung über das Arrangement und am Kanalzug sichtbar.
+* Pan, Busrouting und Mithören sind keine Mixer-Felder, sondern stehen schon unter `tracks:`.
+
+*Laden.* Der Host wendet den Abschnitt nach Namen an (`load_score`, auch nach dem Neuaufbau),
+über gewöhnliche Kommandos, höchstens 48 je Runde (`MIX_BATCH`), damit die Kommando-Queue nie
+überläuft. Eine Kette, die schon stimmt, wird nicht neu geladen (das setzte ihre Filter zurück).
+
+*Rückweg.* Jede menschliche Mix-Änderung (Maus, Taste, MIDI — alles läuft durch `Session::apply`)
+zählt `mixer_rev` im Status hoch; das Arrangement (`ui/src/mixer/scoreMix.ts`) fragt nach einer
+Ruhepause von 350 ms `mixer_take` und schreibt **nur die geänderten Einträge** per `docStore.edit`
+in die offene Partitur — die Datei ist dann geändert, ⌘S speichert den Mix mit. Hat die Partitur
+noch keinen Abschnitt, wird beim ersten Mal der ganze Mix geschrieben. Das gilt nur, wenn das
+offene Dokument das geladene ist (Dokument-Id aus dem Laden, nach einem Fenster-Reload: gleiche
+Spurnamen). Der `mixer:`-Block zählt nicht für „geladene Partitur ist veraltet“.
+
+*Undo/Redo — Entscheidung.* Mix-Änderungen sind Schritte in derselben Historie wie Rasteränderungen
+(`docStore.ts`), eine Geste (eine Fader-Fahrt) ist **ein** Schritt. Undo/Redo und Tippen im
+`mixer:`-Block bewegen die Engine mit (`mixer_apply`): der Abschnitt der geladenen Partitur und
+der Klang stimmen immer überein. Alternativen verworfen: Undo nur im Text (Datei und Klang
+liefen auseinander, ⌘S speicherte etwas anderes als man hört) und Mix außerhalb der Historie
+(ein späteres Undo einer Rasteränderung würde den Mix im Text zurückdrehen). Ein *anderes*
+geöffnetes Dokument bewegt die Engine nie; erst „Load“ wendet seinen Mix an.
+
+**Ohne Partitur (freier Modus)** gibt es keine Datei. Der Host schreibt Fader, Mute und Kette je
+Spurname nach `mixer.json` im Konfigurationsordner (1 s nach der letzten Änderung und beim
+Stoppen) und wendet ihn bei jedem Engine-Start an — auch beim Neuaufbau für eine Partitur, deren
+Spuren gleich heißen (deren `mixer:` gilt danach). Einträge fehlender Spuren bleiben stehen. Die
+Bus-, Klick- und Mithörpegel gehören im freien Modus zum Setup (Startkonfiguration): das UI trägt
+sie dort ein, die Engine startet damit, und der Neuaufbau übernimmt sie aus dem laufenden Zustand.
+
+Der Konfigurationsordner (`~/Library/Application Support/henrys-looper/`) lässt sich mit
+`HENRYS_LOOPER_CONFIG_DIR` umlenken; die Tests benutzen eigene temporäre Verzeichnisse.
+
+**Empfehlung, nicht gebaut: Plugins in der Partitur.** Technisch ginge es (`mixer.tracks.<name>.
+inserts: [{plugin: vst3:…, bypass, state: <base64>}]`), aber der Zustand eines Plugins ist ein
+binärer, oft mehrere Kilobyte großer Blob, der die Partitur unlesbar und schlecht diffbar macht,
+und die Partitur würde an installierte Plugins gebunden (ein anderer Rechner lädt sie nicht
+sauber). Vorschlag für später: in der Partitur nur, **welches** Plugin auf welcher Spur sitzt
+(Id, Slot, Bypass, ggf. ein benannter Preset des Plugins), den Zustand weiter in
+`plugin-rack.json` bzw. einer Datei neben der Partitur (`song.yaml` + `song.plugins.json`).
 
 ## 13. Arbeitsweise
 

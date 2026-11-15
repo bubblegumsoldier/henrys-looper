@@ -190,6 +190,15 @@ schreibgeschützt.
 - **File** (Neu, Öffnen, Zuletzt, Sichern) und **Load** (mit Einzähler) in der Werkzeugleiste.
   Läuft eine Partitur, ist das Arrangement gesperrt; ein Klick auf einen Sektionsmarker springt.
 
+**Mix speichern.** Ist eine Partitur geladen, landet jede Mixer-Änderung (Fader, Mute,
+Effekte, Bus-/Klick-/Mithörpegel — per Maus, Taste oder MIDI) nach einem Moment im Abschnitt
+`mixer:` der Partitur; die Datei gilt als geändert, ⌘S speichert den Mix mit dem Stück, ⌘Z nimmt
+eine Fader-Fahrt samt Klang zurück. Beim Laden wird der Abschnitt angewendet, auch nach dem
+Neuaufbau der Engine. Solo wird absichtlich nicht gespeichert. Ohne Partitur merkt sich die App
+den Mix je Spurname in `mixer.json` (Konfigurationsordner) und die Buspegel im Setup. Plugins
+gehören ebenfalls dem Spurnamen (`plugin-rack.json`), nicht der Spurnummer. Details:
+`docs/architektur.md`, Abschnitt 15.
+
 Die Logik dahinter (Bearbeitungsoperationen, Verweise, Undo) testet `npm test` in `ui/` (vitest).
 
 ## Benutzen
