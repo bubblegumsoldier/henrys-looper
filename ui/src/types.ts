@@ -259,6 +259,14 @@ export interface LooperTrackStatus {
   strip_peaks: number[];
   /** Louder side of that. */
   strip_peak: number;
+  /** Played by an instrument over MIDI instead of an input channel. */
+  instrument?: boolean;
+  /** An instrument sits in the track's slot and runs. */
+  instrument_loaded?: boolean;
+  /** Note ons that reached the track (wrapping counter) - the activity light blinks when it moves. */
+  notes?: number;
+  /** Keys held down right now. */
+  held_notes?: number;
 }
 
 /** Event `looper://status`, pushed about twenty times a second while the engine runs. */
@@ -446,6 +454,24 @@ export interface StartTrack {
    * `monitor`: the room usually has the musician through the PA's own channel.
    */
   monitor_bus: string;
+  /**
+   * Set: the track is played by an instrument plugin over MIDI (the input channels are then
+   * ignored; the track is stereo). Which plugin lives with the plugins, by track name.
+   */
+  instrument?: StartInstrument | null;
+}
+
+/** What plays an instrument track. */
+export interface StartInstrument {
+  /** MIDI port name or a unique part of it; null: every connected device. */
+  device: string | null;
+  /** 1..16; null: every channel. */
+  channel: number | null;
+  /** Key range (MIDI note numbers); null: all keys. Keys outside stay with the MIDI bindings. */
+  note_low?: number | null;
+  note_high?: number | null;
+  /** Heard whenever it is played (default true). */
+  monitor: boolean;
 }
 
 /** Where one bus leaves the machine, as the setup writes it. */

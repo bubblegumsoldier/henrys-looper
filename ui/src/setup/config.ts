@@ -102,6 +102,7 @@ export function loadStored(): StartConfig {
             // ones the engine would have used anyway.
             bus: stored.bus ?? "main+monitor",
             monitor_bus: stored.monitor_bus ?? "monitor",
+            instrument: stored.instrument ?? null,
           };
         })
       : DEFAULT_SETUP.tracks;

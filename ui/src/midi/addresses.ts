@@ -88,6 +88,8 @@ export const GLOBAL = {
   clickGain: "global.click_gain",
   /** Volume of every monitored live input. */
   monitorGain: "global.monitor_gain",
+  /** "All notes off" on every instrument. */
+  panic: "global.panic",
 } as const;
 
 /** Volume of one output bus - the fader that moves the headphones without moving the room. */
@@ -121,7 +123,8 @@ export type TrackPart =
   | "gain"
   | "mute"
   | "solo"
-  | "latency_trim";
+  | "latency_trim"
+  | "instrument.panic";
 
 export function trackAddress(track: number, part: TrackPart): string {
   return `track.${track + 1}.${part}`;

@@ -14,6 +14,9 @@ import { PluginsPage } from "../plugins/PluginsPage";
 import { RecordingPage } from "../recording/RecordingPage";
 import { busGainAddress, GLOBAL, quantizeAddress, trackAddress } from "../midi/addresses";
 import { useMidiView } from "../midi/store";
+import { midiApi } from "../api";
+import { instrumentApi, instrumentOf, noteName, setInstruments, useInstruments } from "../plugins/instruments";
+import { InstrumentPicker } from "../mixer/InstrumentSlot";
 import { IS_MAC } from "../platform";
 import { currentStatus, structureSignature, useStatusSlice } from "../status";
 import { Icon } from "../shell/Icon";
@@ -47,6 +50,7 @@ import type {
   Quantize,
   StartBusOut,
   StartConfig,
+  StartInstrument,
   StartTrack,
 } from "../types";
 
@@ -796,7 +800,7 @@ function TracksCard({
       ? "At least one track."
       : config.tracks.some((t) => t.name.trim() === "")
         ? "Every track needs a name."
-        : config.tracks.some((t) => t.input_channel_right === t.input_channel)
+        : config.tracks.some((t) => !t.instrument && t.input_channel_right === t.input_channel)
           ? "A stereo track needs two different inputs."
           : null;
 
@@ -869,21 +873,43 @@ function TracksCard({
                   </td>
                   <td>
                     <span className="row" style={{ gap: 4 }}>
-                      <Select width={110} value={t.input_channel} options={inputs} onChange={(v) => setTrack(i, { input_channel: v })} />
-                      {t.input_channel_right !== null && (
-                        <Select
-                          width={110}
-                          value={t.input_channel_right}
-                          options={inputs}
-                          onChange={(v) => setTrack(i, { input_channel_right: v })}
+                      <Select
+                        width={110}
+                        value={t.instrument ? 0 : t.input_channel}
+                        options={[...inputs, { value: 0, label: T.instrument }]}
+                        title="An input of the interface, or an instrument plugin played over MIDI"
+                        onChange={(v) =>
+                          setTrack(
+                            i,
+                            v === 0
+                              ? { instrument: t.instrument ?? { device: null, channel: null, monitor: true } }
+                              : { input_channel: v, instrument: null },
+                          )
+                        }
+                      />
+                      {t.instrument ? (
+                        <InstrumentInputFields
+                          track={t.name}
+                          value={t.instrument}
+                          onChange={(instrument) => setTrack(i, { instrument })}
                         />
+                      ) : (
+                        t.input_channel_right !== null && (
+                          <Select
+                            width={110}
+                            value={t.input_channel_right}
+                            options={inputs}
+                            onChange={(v) => setTrack(i, { input_channel_right: v })}
+                          />
+                        )
                       )}
                     </span>
                   </td>
                   <td>
                     <Seg
                       small
-                      value={t.input_channel_right === null ? 1 : 2}
+                      disabled={!!t.instrument}
+                      value={t.input_channel_right === null && !t.instrument ? 1 : 2}
                       options={[
                         { value: 1, label: T.mono, title: "One input, recorded mono" },
                         { value: 2, label: T.stereo, title: "A pair of inputs, recorded stereo" },
@@ -947,12 +973,103 @@ function TracksCard({
         <div className="hint">
           A microphone or a guitar records <b>mono</b> - half the memory, no audible difference. A keyboard or a
           pad from a sample library belongs on an input <b>pair</b>; the two need not be neighbours.{" "}
+          <b>{T.instrument}</b> plays an instrument plugin from a MIDI keyboard instead: pick the plugin, the
+          device and the channel; it is always heard and recorded stereo, and what it plays is looped as sound.{" "}
           <b>Latency</b> is the measured path of this input in frames (empty: the global default of{" "}
           {config.latency_frames}); <b>Trim</b> is added on top for what no measurement sees and survives the
           next calibration. Pan and volume are set per track in Live (track details).
         </div>
       </div>
     </>
+  );
+}
+
+/** The MIDI side of an instrument track in the setup: plugin, device, channel. */
+function InstrumentInputFields({
+  track,
+  value,
+  onChange,
+}: {
+  track: string;
+  value: StartInstrument;
+  onChange: (v: StartInstrument) => void;
+}) {
+  const [ports, setPorts] = useState<string[]>([]);
+  useEffect(() => {
+    midiApi.ports().then((list) => setPorts(list.map((p) => p.name)), () => setPorts([]));
+  }, []);
+  const devices = [
+    { value: "", label: T.allDevices },
+    ...ports.map((p) => ({ value: p, label: p })),
+    ...(value.device && !ports.includes(value.device) ? [{ value: value.device, label: `${value.device} (not connected)` }] : []),
+  ];
+  const channels = [{ value: 0, label: T.allChannels }, ...Array.from({ length: 16 }, (_, c) => ({ value: c + 1, label: `${T.channelShort} ${c + 1}` }))];
+  return (
+    <>
+      <InstrumentChoice track={track} />
+      <Select
+        width={150}
+        value={value.device ?? ""}
+        options={devices}
+        title="Which MIDI keyboard plays this track"
+        onChange={(v) => onChange({ ...value, device: v === "" ? null : v })}
+      />
+      <Select
+        width={100}
+        value={value.channel ?? 0}
+        options={channels}
+        title="Which MIDI channel plays this track. Notes on other channels stay with the MIDI bindings."
+        onChange={(v) => onChange({ ...value, channel: v === 0 ? null : v })}
+      />
+    </>
+  );
+}
+
+/** The instrument plugin of a track, by name: a button that opens the picker. */
+function InstrumentChoice({ track }: { track: string }) {
+  const { rack } = useInstruments();
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const inst = instrumentOf(rack, track);
+  return (
+    <>
+      <button
+        className="btn s"
+        style={{ width: 150, justifyContent: "flex-start", overflow: "hidden" }}
+        title={inst ? `${inst.name} · ${inst.vendor} - click to choose another` : T.instrumentPick}
+        onClick={(e) => setAnchor(anchor ? null : e.currentTarget)}
+      >
+        <Icon name="plug" />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{inst ? inst.name : T.instrumentNone}</span>
+      </button>
+      {inst && (
+        <button
+          className="btn s sq ghost"
+          title="Open the instrument's window"
+          disabled={!inst.has_editor}
+          onClick={() => run(async () => setInstruments(await instrumentApi.editor(track, !inst.editor_open)))}
+        >
+          <Icon name="sliders" />
+        </button>
+      )}
+      {anchor && <InstrumentPicker track={track} anchor={anchor} onClose={() => setAnchor(null)} />}
+    </>
+  );
+}
+
+/** A running instrument track: plugin and how it is played, read only except for the plugin. */
+function LiveInstrumentCell({ t }: { t: LooperTrackStatus }) {
+  const config = useConfig();
+  const input = config.tracks.find((c) => c.name === t.name)?.instrument ?? null;
+  const how = input
+    ? `${input.device ?? T.allDevices} · ${input.channel ? `${T.channelShort} ${input.channel}` : T.allChannels}${
+        input.note_low != null || input.note_high != null ? ` · ${noteName(input.note_low ?? 0)}–${noteName(input.note_high ?? 127)}` : ""
+      }`
+    : T.midiIn;
+  return (
+    <span className="row" style={{ gap: 4 }}>
+      <InstrumentChoice track={t.name} />
+      <span className="dim" title="Device and channel apply on the next start">{how}</span>
+    </span>
   );
 }
 
@@ -975,9 +1092,13 @@ function LiveTrackRow({ t }: { t: LooperTrackStatus }) {
         </span>
       </td>
       <td>
-        <span className="field ro" style={{ width: 120 }}>
-          Input {t.input_channels.join("–")}
-        </span>
+        {t.instrument ? (
+          <LiveInstrumentCell t={t} />
+        ) : (
+          <span className="field ro" style={{ width: 120 }}>
+            Input {t.input_channels.join("–")}
+          </span>
+        )}
       </td>
       <td>
         <Seg small disabled value={t.channels} options={[{ value: 1, label: T.mono }, { value: 2, label: T.stereo }]} onChange={() => undefined} />

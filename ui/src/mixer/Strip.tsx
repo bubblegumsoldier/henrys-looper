@@ -23,6 +23,7 @@ import type { BusId, LooperStatus, LooperTrackStatus, TrackSourceId } from "../t
 import { Fader, Knob, linear, type Curve } from "./controls";
 import { FX_LETTER, FX_NAME, FX_PRESETS, FX_SLOT_ORDER, presetLabel } from "./fxModel";
 import { InsertSlots } from "./InsertSlots";
+import { InstrumentCaps, InstrumentSlot } from "./InstrumentSlot";
 import { Popover } from "./Popover";
 import { PeakHold, VMeter } from "./meters";
 import { MAX_TRACK_GAIN, SCALE_MARKS, faderText, gainToDb, gainToPos, panText, posToGain } from "./scale";
@@ -146,6 +147,12 @@ function StripImpl({ track: t, selected, implicitMute, onSelect, actions }: Prop
       aria-label={`Channel ${i + 1}: ${t.name}`}
     >
       <div className="zone">
+        {t.instrument && (
+          <>
+            <InstrumentCaps index={i} track={t.name} />
+            <InstrumentSlot track={t.name} />
+          </>
+        )}
         <span className="caps">
           Inserts
           {fx && <PresetMenu track={i} preset={fx.preset} actions={actions} />}
@@ -180,7 +187,7 @@ function StripImpl({ track: t, selected, implicitMute, onSelect, actions }: Prop
             </button>
           </div>
         )}
-        <InsertSlots target={`track.${i + 1}`} rows={2} />
+        <InsertSlots target={`track.${i + 1}`} rows={t.instrument ? 1 : 2} />
       </div>
 
       <div className="zone">
@@ -268,9 +275,7 @@ function StripImpl({ track: t, selected, implicitMute, onSelect, actions }: Prop
         </div>
         <div className="nm">
           <span className="tname">{t.name}</span>
-          <span className="in">
-            {T.input} {t.input_channels.join("–")}
-          </span>
+          <span className="in">{t.instrument ? T.midiIn : `${T.input} ${t.input_channels.join("–")}`}</span>
           <div className="grow" />
           <span className={`st ${kind}`} title={stateTitle(t, kind)}>
             <Icon name={STATE_ICON[kind]} />
