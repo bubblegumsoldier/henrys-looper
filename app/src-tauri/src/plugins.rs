@@ -1234,22 +1234,27 @@ impl Manager {
     }
 
     fn editor(&mut self, owner: &Owner, index: usize, open: bool) -> Result<RackView, String> {
-        let title = {
+        let (title, key) = {
             let slot = self.slot(owner, index)?;
-            format!(
-                "{} - {} slot {}",
-                slot.info.info.name,
-                match owner {
-                    Owner::Track(name) => format!("Track {name}"),
-                    Owner::Bus(b) => format!("{} bus", b.label()),
-                    Owner::Position(p) => format!("Track {}", p + 1),
-                },
-                index + 1
+            let place = match owner {
+                Owner::Track(name) => name.clone(),
+                Owner::Bus(b) => format!("{} bus", b.label()),
+                Owner::Position(p) => format!("Track {}", p + 1),
+            };
+            (
+                format!("{} \u{2013} {place} \u{b7} slot {}", slot.info.info.name, index + 1),
+                format!("insert/{place}/{index}"),
             )
         };
         let slot = self.slot_mut(owner, index)?;
         if open {
-            slot.plugin.open_editor(&title)?;
+            let started = Instant::now();
+            slot.plugin.open_editor(&title, &key)?;
+            log!(
+                "Plugin window {title} open after {:?}: {}",
+                started.elapsed(),
+                slot.plugin.editor_report().unwrap_or_default()
+            );
         } else {
             slot.plugin.close_editor();
         }

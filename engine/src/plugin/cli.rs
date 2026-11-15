@@ -25,7 +25,18 @@ pub enum PluginOpts {
         /// How long the window stays open
         #[arg(long, default_value_t = 5.0)]
         seconds: f64,
+        /// Halfway through, resize the window as a user would, to WIDTHxHEIGHT points
+        #[arg(long)]
+        resize: Option<String>,
+        /// Draw the editor into this PNG file at the end (no screen capture)
+        #[arg(long)]
+        png: Option<std::path::PathBuf>,
+        /// Close and open the window this many times before the timed part
+        #[arg(long, default_value_t = 0)]
+        reopen: u32,
     },
+    /// Check the editor window's sizing rules with stand-in views (macOS, opens windows briefly)
+    EditorSelftest,
 }
 
 pub fn cmd_plugins(opts: &PluginOpts) -> Result<(), String> {
@@ -54,7 +65,22 @@ pub fn cmd_plugins(opts: &PluginOpts) -> Result<(), String> {
             Ok(())
         }
         PluginOpts::Probe { plugin } => probe(&find(plugin)?),
-        PluginOpts::Edit { plugin, seconds } => edit(&find(plugin)?, *seconds),
+        PluginOpts::EditorSelftest => editor_selftest(),
+        PluginOpts::Edit {
+            plugin,
+            seconds,
+            resize,
+            png,
+            reopen,
+        } => edit(
+            &find(plugin)?,
+            &EditOpts {
+                seconds: *seconds,
+                resize: resize.clone(),
+                png: png.clone(),
+                reopen: *reopen,
+            },
+        ),
     }
 }
 
@@ -120,7 +146,35 @@ fn probe(found: &Scanned) -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn edit(found: &Scanned, seconds: f64) -> Result<(), String> {
+fn editor_selftest() -> Result<(), String> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+    let mtm = MainThreadMarker::new().ok_or("not on the main thread")?;
+    NSApplication::sharedApplication(mtm).finishLaunching();
+    match super::editor::self_test() {
+        Ok(lines) => {
+            lines.iter().for_each(|l| println!("{l}"));
+            println!("editor window: all checks passed");
+            Ok(())
+        }
+        Err(e) => Err(format!("editor window check failed: {e}")),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn editor_selftest() -> Result<(), String> {
+    Err(super::UNSUPPORTED.to_string())
+}
+
+struct EditOpts {
+    seconds: f64,
+    resize: Option<String>,
+    png: Option<std::path::PathBuf>,
+    reopen: u32,
+}
+
+#[cfg(target_os = "macos")]
+fn edit(found: &Scanned, opts: &EditOpts) -> Result<(), String> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
@@ -128,31 +182,91 @@ fn edit(found: &Scanned, seconds: f64) -> Result<(), String> {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     app.finishLaunching();
+    let resize = match &opts.resize {
+        Some(text) => {
+            let (w, h) = text
+                .split_once('x')
+                .and_then(|(w, h)| Some((w.parse::<f64>().ok()?, h.parse::<f64>().ok()?)))
+                .ok_or_else(|| format!("--resize wants WIDTHxHEIGHT, not '{text}'"))?;
+            Some((w, h))
+        }
+        None => None,
+    };
+    let started = std::time::Instant::now();
     let mut plugin = super::load(&found.info)?;
-    let processor = plugin.activate(48_000.0, 512)?;
-    plugin.open_editor(&found.info.name)?;
-    println!(
-        "{}: editor window open = {}, view {:?} points",
-        found.info.name,
-        plugin.editor_open(),
-        plugin.editor_size()
-    );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
+    println!("loaded in {:?}", started.elapsed());
+    let instrument = found.info.kind == super::Kind::Instrument;
+    let mut effect = None;
+    let mut synth = None;
+    if instrument {
+        synth = Some(plugin.activate_instrument(48_000.0, 512)?);
+    } else {
+        effect = Some(plugin.activate(48_000.0, 512)?);
+    }
+    let report = |plugin: &dyn super::PluginInstance, when: &str| {
+        println!(
+            "[{when}] open = {}, view {:?}: {}",
+            plugin.editor_open(),
+            plugin.editor_size(),
+            plugin.editor_report().unwrap_or_default()
+        );
+    };
+    let opened = std::time::Instant::now();
+    plugin.open_editor(&found.info.name, "cli")?;
+    println!("editor opened in {:?}", opened.elapsed());
+    report(plugin.as_ref(), "open");
+    for i in 0..opts.reopen {
+        super::editor::pump_events(0.2);
+        plugin.close_editor();
+        report(plugin.as_ref(), &format!("closed {}", i + 1));
+        super::editor::pump_events(0.2);
+        plugin.open_editor(&found.info.name, "cli")?;
+        report(plugin.as_ref(), &format!("open again {}", i + 1));
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs_f64(opts.seconds);
+    let half = std::time::Instant::now() + std::time::Duration::from_secs_f64(opts.seconds / 2.0);
+    let mut resized = resize.is_none();
+    let mut reported = false;
     while std::time::Instant::now() < deadline {
         super::editor::pump_events(0.05);
+        if !reported && std::time::Instant::now() + std::time::Duration::from_secs(1) > half {
+            report(plugin.as_ref(), "settled");
+            reported = true;
+        }
+        if !resized && std::time::Instant::now() > half {
+            let (w, h) = resize.unwrap();
+            plugin.editor_resize_as_user(w, h);
+            report(plugin.as_ref(), &format!("user resize to {w}x{h}"));
+            super::editor::pump_events(0.5);
+            report(plugin.as_ref(), "after resize");
+            resized = true;
+        }
         let changed = plugin.take_changed();
         if !changed.is_empty() {
-            println!("  changed in the editor: {changed:?}");
+            println!("  changed in the editor: {} parameters", changed.len());
+        }
+    }
+    report(plugin.as_ref(), "end");
+    if let Some(path) = &opts.png {
+        match plugin.editor_snapshot_png() {
+            Some(png) => {
+                std::fs::write(path, &png).map_err(|e| e.to_string())?;
+                println!("editor drawn into {} ({} bytes)", path.display(), png.len());
+            }
+            None => println!("the editor could not be drawn into a picture"),
         }
     }
     plugin.close_editor();
     println!("closed: editor window open = {}", plugin.editor_open());
-    drop(processor);
+    drop(effect);
+    drop(synth);
     plugin.deactivate();
+    drop(plugin);
+    super::shutdown();
     Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
-fn edit(_found: &Scanned, _seconds: f64) -> Result<(), String> {
+fn edit(_found: &Scanned, _opts: &EditOpts) -> Result<(), String> {
     Err(super::UNSUPPORTED.to_string())
 }

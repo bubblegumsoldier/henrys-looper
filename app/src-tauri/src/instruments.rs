@@ -648,8 +648,15 @@ impl Manager {
             .ok_or_else(|| format!("Track \"{track}\" has no instrument."))?;
         let slot = &mut self.slots[p];
         if open {
-            let title = format!("{} - {}", slot.info.info.name, slot.track);
-            slot.plugin.open_editor(&title)?;
+            let title = format!("{} \u{2013} {}", slot.info.info.name, slot.track);
+            let started = std::time::Instant::now();
+            slot.plugin
+                .open_editor(&title, &format!("instrument/{}", slot.track))?;
+            log!(
+                "Instrument window {title} open after {:?}: {}",
+                started.elapsed(),
+                slot.plugin.editor_report().unwrap_or_default()
+            );
         } else {
             slot.plugin.close_editor();
         }

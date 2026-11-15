@@ -1379,7 +1379,7 @@ impl PluginInstance for Vst3Plugin {
         self.controller.is_some()
     }
 
-    fn open_editor(&mut self, title: &str) -> Result<(), String> {
+    fn open_editor(&mut self, title: &str, key: &str) -> Result<(), String> {
         if let Some(window) = self.window.borrow().as_ref() {
             window.show();
             return Ok(());
@@ -1403,11 +1403,29 @@ impl PluginInstance for Vst3Plugin {
         let resizable = unsafe { view.canResize() } == kResultTrue;
         let window = EditorWindow::new(
             title,
+            key,
             (rect.right - rect.left) as f64,
             (rect.bottom - rect.top) as f64,
             resizable,
         )?;
         let parent = window.content_view();
+        if resizable {
+            // The user dragged the window: the plugin may adjust the size, then takes it.
+            let v = view.clone();
+            window.on_user_resize(Box::new(move |w, h| {
+                let mut r = ViewRect {
+                    left: 0,
+                    top: 0,
+                    right: w.round() as i32,
+                    bottom: h.round() as i32,
+                };
+                unsafe {
+                    v.checkSizeConstraint(&mut r);
+                    v.onSize(&mut r);
+                }
+                Some(((r.right - r.left) as f64, (r.bottom - r.top) as f64))
+            }));
+        }
         *self.window.borrow_mut() = Some(window);
         let frame = ComWrapper::new(Frame {
             window: self.window.clone(),
@@ -1449,6 +1467,36 @@ impl PluginInstance for Vst3Plugin {
 
     fn editor_size(&self) -> Option<(f64, f64)> {
         self.window.borrow().as_ref().map(|w| w.view_size())
+    }
+
+    fn editor_report(&self) -> Option<String> {
+        let window = self.window.borrow();
+        let window = window.as_ref()?;
+        let mut rect = ViewRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        let said = match &self.view {
+            Some(v) if unsafe { v.getSize(&mut rect) } == kResultOk => format!(
+                "{}x{}",
+                rect.right - rect.left,
+                rect.bottom - rect.top
+            ),
+            _ => "-".to_string(),
+        };
+        Some(format!("{}, plugin says {said}", window.report()))
+    }
+
+    fn editor_resize_as_user(&self, width: f64, height: f64) {
+        if let Some(w) = self.window.borrow().as_ref() {
+            w.resize_as_user(width, height);
+        }
+    }
+
+    fn editor_snapshot_png(&self) -> Option<Vec<u8>> {
+        self.window.borrow().as_ref().and_then(|w| w.snapshot_png())
     }
 
     fn take_changed(&mut self) -> Vec<u32> {

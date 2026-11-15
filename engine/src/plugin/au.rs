@@ -1022,7 +1022,7 @@ impl PluginInstance for AuPlugin {
         true
     }
 
-    fn open_editor(&mut self, title: &str) -> Result<(), String> {
+    fn open_editor(&mut self, title: &str, key: &str) -> Result<(), String> {
         if let Some(window) = &self.editor {
             window.show();
             return Ok(());
@@ -1035,7 +1035,7 @@ impl PluginInstance for AuPlugin {
                 true,
             ),
         };
-        let mut window = EditorWindow::new(title, 400.0, 300.0, false)?;
+        let mut window = EditorWindow::new(title, key, 400.0, 300.0, false)?;
         let embedded = unsafe { window.embed(view) };
         if owned {
             unsafe { send0(view as *mut AnyObject, sel!(release)) };
@@ -1058,6 +1058,20 @@ impl PluginInstance for AuPlugin {
 
     fn editor_size(&self) -> Option<(f64, f64)> {
         self.editor.as_ref().map(|w| w.view_size())
+    }
+
+    fn editor_report(&self) -> Option<String> {
+        self.editor.as_ref().map(|w| w.report())
+    }
+
+    fn editor_resize_as_user(&self, width: f64, height: f64) {
+        if let Some(w) = &self.editor {
+            w.resize_as_user(width, height);
+        }
+    }
+
+    fn editor_snapshot_png(&self) -> Option<Vec<u8>> {
+        self.editor.as_ref().and_then(|w| w.snapshot_png())
     }
 
     fn take_changed(&mut self) -> Vec<u32> {

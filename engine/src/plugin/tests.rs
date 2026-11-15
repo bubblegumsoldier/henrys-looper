@@ -323,7 +323,7 @@ fn the_test_vst3_behaves_exactly_as_built() {
     assert_eq!(plugin.param(0), 1.0);
     assert_eq!(plugin.param_text(0, 0.5), "0.50");
     assert!(plugin.has_editor());
-    assert!(plugin.open_editor("x").is_err(), "das Test-Plugin hat keine eigene Ansicht");
+    assert!(plugin.open_editor("x", "test").is_err(), "das Test-Plugin hat keine eigene Ansicht");
 
     let mut processor = plugin.activate(48_000.0, 256).expect("startet");
     assert_eq!(plugin.latency(), 64);

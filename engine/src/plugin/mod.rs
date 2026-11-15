@@ -142,12 +142,25 @@ pub trait PluginInstance {
     /// [`Self::activate_instrument`]) is dropped.
     fn deactivate(&mut self);
     fn has_editor(&self) -> bool;
-    /// Open the plugin's own window, or bring it to the front. Main thread only.
-    fn open_editor(&mut self, title: &str) -> Result<(), String>;
+    /// Open the plugin's own window, or bring it to the front. Main thread only. `key` names the
+    /// slot, so a window opens where the last one of that slot stood.
+    fn open_editor(&mut self, title: &str, key: &str) -> Result<(), String>;
     fn close_editor(&mut self);
     fn editor_open(&self) -> bool;
     /// Size of the editor's view in points, while it exists.
     fn editor_size(&self) -> Option<(f64, f64)> {
+        None
+    }
+    /// The editor window's geometry as one log line (`editor::EditorWindow::report`).
+    fn editor_report(&self) -> Option<String> {
+        None
+    }
+    /// Resize the editor window the way a user dragging its corner would.
+    fn editor_resize_as_user(&self, width: f64, height: f64) {
+        let _ = (width, height);
+    }
+    /// The editor's content drawn into a PNG (no screen capture involved).
+    fn editor_snapshot_png(&self) -> Option<Vec<u8>> {
         None
     }
     /// Parameters the plugin changed by itself (in its editor) since the last call.
