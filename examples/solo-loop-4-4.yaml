@@ -1,0 +1,56 @@
+# Ein einziger Loop zum Warmwerden: eine Gitarre, ein Mikrofon, 4/4.
+#
+# Die Gitarre nimmt vier Takte auf, danach kommen Ebenen dazu, solange du willst
+# (Release beendet das Stapeln am Ende des laufenden Durchlaufs). Dann spielt alles,
+# bis Release das Ende einleitet.
+#
+# Verkabelung am Interface:
+#   Eingang 1  Mikrofon (voice)
+#   Eingang 2  Gitarre
+title: Solo loop 4/4
+bpm: 96
+time_signature: 4/4
+
+tracks:
+  guitar: {input: 2, pan: -0.2}
+  voice:  {input: 1, pan: 0.2}
+
+sections:
+  # Vier Takte Gitarre. Die Stimme ist zu hoeren, wird aber nicht aufgenommen.
+  - id: guitar
+    bars: 4
+    autorelease: true
+    tracks:
+      guitar: record
+      voice: hear_through
+
+  # Weitere Gitarren-Ebenen, je eine pro Durchlauf, bis Release.
+  - id: layers
+    bars: 4
+    autorelease: false
+    quantize: loop
+    tracks:
+      guitar: overdub
+      voice: hear_through
+
+  # Die Stimme bekommt ihren eigenen Loop ueber acht Takte.
+  - id: voice
+    bars: 8
+    autorelease: true
+    tracks:
+      guitar: play
+      voice: record
+
+  # Alles klingt, du spielst live darueber. Release beendet am naechsten Taktstrich.
+  - id: jam
+    bars: 8
+    autorelease: false
+    quantize: bar
+    tracks:
+      guitar: play
+      voice: play
+
+  # Ein Takt Stille zum Schluss.
+  - id: end
+    bars: 1
+    autorelease: true

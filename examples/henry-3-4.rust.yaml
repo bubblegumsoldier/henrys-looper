@@ -1,6 +1,6 @@
 # Henrys 3/4-Song fuer die eigene Engine: Gitarre-Loop, dann drei Voice-Ebenen stapeln.
 #
-# Inhaltlich dieselbe Partitur wie examples/henry-3-4-group.yaml, nur ohne Ableton:
+# Inhaltlich dieselbe Partitur wie examples/legacy-python/henry-3-4-group.yaml, nur ohne Ableton:
 # es gibt keine Gruppenspuren und keine Layer-Reserve mehr. Die Engine legt Ebenen selbst an,
 # so viele wie gebraucht werden. Ein Track sagt nur noch, auf welchem Eingang er hoert.
 #

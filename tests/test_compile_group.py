@@ -132,7 +132,7 @@ sections: [{id: a, bars: 1}]
 
 
 def test_example_group_score_compiles():
-    text = (ROOT / "examples" / "henry-3-4-group.yaml").read_text(encoding="utf-8")
+    text = (ROOT / "examples" / "legacy-python" / "henry-3-4-group.yaml").read_text(encoding="utf-8")
     score = compile_score(text)
     voice = score.track("voice")
     assert voice.is_group and voice.group == "voice" and voice.pool_size == 6

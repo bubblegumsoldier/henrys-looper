@@ -420,7 +420,7 @@ def compile_score(yaml_text: str) -> CompiledScore:
 
     if not isinstance(data, CommentedMap):
         raise ScoreError([ScoreIssue(1, 1, "Die Partitur muss ein Mapping mit 'bpm', 'tracks' und "
-                                     "'sections' sein.", "Beispiel: examples/example-song.yaml")])
+                                     "'sections' sein.", "Beispiel: examples/legacy-python/example-song.yaml")])
 
     # 1) schema (an enum error on a field that already has a type error is just noise)
     schema_errors = list(_VALIDATOR.iter_errors(data))

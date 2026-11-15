@@ -29,7 +29,7 @@ log = logging.getLogger("looper.backend")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 ROOT = Path(__file__).resolve().parent.parent
-EXAMPLE_SCORE = ROOT / "examples" / "example-song.yaml"
+EXAMPLE_SCORE = ROOT / "examples" / "legacy-python" / "example-song.yaml"
 UI_DIST = ROOT / "ui" / "dist"
 
 DEFAULT_YAML = """\

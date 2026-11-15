@@ -16,7 +16,7 @@ looper/                     # M2 — reine Python-Bibliothek, kein FastAPI, kein
   runner.py                 # Runner
   midi.py                   # MidiInput (mido) → normalisierte MIDI-Events
   __main__.py               # CLI: python -m looper compile <file> | run <file> --engine ableton|sim
-examples/example-song.yaml  # M2
+examples/legacy-python/example-song.yaml  # M2
 backend/app.py              # M3 — FastAPI, importiert aus looper
 ui/                         # M3 — React + Vite + CodeMirror 6
 spike/                      # M1, bleibt unangetastet

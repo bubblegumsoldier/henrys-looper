@@ -1,0 +1,73 @@
+# Drei Spuren im 3/4-Takt: Rhythmus-Gitarre, Bass-Linie (ueber dieselbe Gitarre,
+# eine Oktave tiefer gespielt) und Gesang. Zeigt repeat:, Panorama und eine Sektion,
+# in der eine Spur bewusst schweigt.
+#
+# Verkabelung am Interface:
+#   Eingang 1  Mikrofon (voice)
+#   Eingang 2  Gitarre (rhythm und bass)
+title: Waltz, three tracks
+bpm: 132
+time_signature: 3/4
+
+tracks:
+  rhythm: {input: 2, pan: -0.35}
+  bass:   {input: 2, pan: 0.0}
+  voice:  {input: 1, pan: 0.15}
+
+sections:
+  # Acht Takte Rhythmus-Gitarre aufnehmen.
+  - id: rhythm
+    bars: 8
+    autorelease: true
+    tracks:
+      rhythm: record
+      voice: hear_through
+
+  # Acht Takte Bass darueber, auf einer eigenen Spur.
+  - id: bass
+    bars: 8
+    autorelease: true
+    tracks:
+      rhythm: play
+      bass: record
+      voice: hear_through
+
+  # Strophe: Gesang live, die Loops laufen, bis Release.
+  - id: verse
+    bars: 8
+    autorelease: false
+    quantize: loop
+    tracks:
+      rhythm: play
+      bass: play
+      voice: hear_through
+
+  # Refrain: der Gesang wird als Loop festgehalten.
+  - id: chorus
+    bars: 8
+    autorelease: true
+    tracks:
+      rhythm: play
+      bass: play
+      voice: record
+
+  # Breakdown: nur Gesang und Rhythmus, der Bass setzt aus.
+  - id: breakdown
+    bars: 8
+    autorelease: false
+    quantize: loop
+    tracks:
+      rhythm: play
+      voice: play
+
+  # Letzter Refrain: alles zusammen, bis Release.
+  - id: last_chorus
+    repeat: breakdown
+    tracks:
+      rhythm: play
+      bass: play
+      voice: play
+
+  - id: end
+    bars: 1
+    autorelease: true

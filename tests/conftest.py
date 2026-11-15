@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-EXAMPLE = ROOT / "examples" / "example-song.yaml"
+EXAMPLE = ROOT / "examples" / "legacy-python" / "example-song.yaml"
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
