@@ -217,3 +217,10 @@
 /* A marker too narrow for its badge anchors it on the left, so it runs to the right instead of
    over the badge of the section before. */
 .hl-arr .sec.narrow[data-midi-key]::after { right: auto; left: 0; }
+
+/* A track selected in the grid: its score settings and its mixer channel, as two tabs in one panel. */
+.hl-arr .insp.tabbed { overflow: hidden; }
+.hl-arr .insp.tabbed > .insp { border-left: 0; flex: 1; min-height: 0; }
+.hl-arr .insp-tabs { padding: 8px 14px; border-bottom: 1px solid var(--line-2); flex: none; }
+.hl-arr .insp-tabs .seg { width: 100%; }
+.hl-arr .insp-tabs .seg > button { flex: 1; justify-content: center; }

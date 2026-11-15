@@ -174,3 +174,11 @@
 
 .presetfield { flex: 1; min-width: 0; justify-content: space-between; cursor: pointer; }
 .presetfield .chev { --ic: 12px; color: var(--tx-3); }
+
+/* An instrument channel's loop type and grid, and the way to where they are edited. */
+.loopline { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 14px; border: 0; border-bottom: 1px solid var(--line-1);
+  background: none; color: var(--tx-2); font-size: var(--fs-11); text-align: left; font-variant-numeric: var(--num); }
+.loopline .what { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loopline .go { flex: none; color: var(--accent); display: inline-flex; align-items: center; gap: 4px; }
+button.loopline { cursor: pointer; }
+button.loopline:hover { background: var(--bg-2); color: var(--tx-1); }

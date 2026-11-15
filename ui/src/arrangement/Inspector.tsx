@@ -5,7 +5,9 @@
 //! clips (shown as their section, with the clip's track highlighted, as in the mockup), a track.
 
 import { useEffect, useState, type ReactNode } from "react";
-import { midiApi } from "../api";
+import { api, midiApi } from "../api";
+import { currentStatus, useStatusSlice } from "../status";
+import { editorIsLoaded, followLoaded } from "./scoreActions";
 import { InstrumentPicker } from "../mixer/InstrumentSlot";
 import { noteName } from "../plugins/instruments";
 import { usePlugins } from "../plugins/store";
@@ -28,6 +30,8 @@ interface Props {
   setSel: (s: Selection) => void;
   edit: (op: (d: ScoreDoc) => ScoreDoc) => void;
   onIssue: (issue: ModelIssue) => void;
+  /** The runner holds a score that is not this text: score changes wait for Load. */
+  stale?: boolean;
 }
 
 export function Inspector(p: Props) {
@@ -586,7 +590,7 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
 // A track
 // ---------------------------------------------------------------------------------------------
 
-function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, index }: Props & { index: number }) {
+function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, stale, index }: Props & { index: number }) {
   const t = doc.tracks[index];
   const monitor = t.monitor !== false;
   const loopMain = busHas(t.bus, "main+monitor", "main");
@@ -651,41 +655,6 @@ function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, index
         {t.instrument ? (
           <>
             <InstrumentRows doc={doc} track={t} editable={editable} edit={edit} patch={patch} />
-            <div className="frow">
-              <label>{T.loopKind}</label>
-              <div>
-                <select
-                  className="field sel"
-                  value={t.loop === "midi" ? "midi" : "audio"}
-                  disabled={!editable}
-                  title="What a take stores: the instrument's sound (Audio) or the notes, played back through the instrument (MIDI)"
-                  onChange={(e) => patch({ loop: e.target.value === "midi" ? "midi" : undefined, ...(e.target.value === "midi" ? {} : { grid: undefined }) })}
-                >
-                  <option value="audio">{T.loopAudio}</option>
-                  <option value="midi">{T.loopMidi}</option>
-                </select>
-              </div>
-            </div>
-            {t.loop === "midi" && (
-              <div className="frow">
-                <label>{T.noteGrid}</label>
-                <div>
-                  <select
-                    className="field sel"
-                    value={t.grid ?? "none"}
-                    disabled={!editable}
-                    title="Notes play on this grid - the recorded ones too. The recording itself never changes."
-                    onChange={(e) => patch({ grid: e.target.value === "none" ? undefined : e.target.value })}
-                  >
-                    {GRID_CHOICES.map((g) => (
-                      <option key={g.value} value={g.value}>
-                        {g.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            )}
           </>
         ) : (
           <>
@@ -732,6 +701,7 @@ function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, index
               : "This input is never heard live. Record, Overdub and Monitor still work, but without hearing yourself."}
         </div>
       </div>
+      {t.instrument && <MidiLoopSection doc={doc} index={index} editable={editable} edit={edit} stale={stale} />}
       <div className="insp-s">
         <span className="caps">Output</span>
         <div className="frow">
@@ -827,6 +797,92 @@ function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, index
         </button>
       </div>
     </>
+  );
+}
+
+/**
+ * What a take of an instrument track stores, the note grid it plays on and its transposition - its
+ * own section, so nobody has to look for them under the input. These are score fields: they reach
+ * the engine with Load. Grid and transposition the engine can also take at once, so while the
+ * editor holds exactly the loaded score they are sent along right away (`followLoaded`).
+ */
+function MidiLoopSection({ doc, index, editable, edit, stale }: { doc: ScoreDoc; index: number; editable: boolean; edit: Props["edit"]; stale?: boolean }) {
+  const t = doc.tracks[index];
+  const midi = t.midi ?? {};
+  const loaded = useStatusSlice((s) => s.score !== null);
+  // Only a track the engine plays the same way can follow at once.
+  const live = (needsMidiLoop: boolean) => {
+    const e = currentStatus().tracks.find((x) => x.name === t.name);
+    return e && e.instrument && (!needsMidiLoop || e.midi_loop) ? e.index : null;
+  };
+  const setGrid = (grid: string) => {
+    const was = editorIsLoaded();
+    edit((d) => ops.patchTrack(d, index, { grid: grid === "none" ? undefined : grid }));
+    const at = live(true);
+    if (at !== null) followLoaded(was, () => api.trackGrid(at, grid));
+  };
+  const setTranspose = (v: number) => {
+    const was = editorIsLoaded();
+    const clean = Object.fromEntries(Object.entries({ ...midi, transpose: v === 0 ? undefined : v }).filter(([, x]) => x !== undefined)) as TrackMidi;
+    edit((d) => ops.patchTrack(d, index, { midi: Object.keys(clean).length > 0 ? clean : undefined }));
+    const at = live(false);
+    if (at !== null) followLoaded(was, () => api.trackTranspose(at, v));
+  };
+  const here = loaded && !stale && editorIsLoaded();
+  return (
+    <div className="insp-s" aria-label="MIDI loop">
+      <span className="caps">MIDI loop</span>
+      <div className="frow">
+        <label>{T.loopKind}</label>
+        <div>
+          <Seg
+            value={t.loop === "midi" ? "midi" : "audio"}
+            disabled={!editable}
+            onPick={(v) => edit((d) => ops.patchTrack(d, index, { loop: v === "midi" ? "midi" : undefined, ...(v === "midi" ? {} : { grid: undefined }) }))}
+            options={[
+              { value: "audio", label: T.loopAudio },
+              { value: "midi", label: T.loopMidi },
+            ]}
+          />
+        </div>
+      </div>
+      {t.loop === "midi" && (
+        <div className="frow">
+          <label>{T.noteGrid}</label>
+          <div>
+            <select
+              className="field sel"
+              value={t.grid ?? "none"}
+              disabled={!editable}
+              title="Notes play on this grid - the recorded ones too. The recording itself never changes."
+              onChange={(e) => setGrid(e.target.value)}
+            >
+              {GRID_CHOICES.map((g) => (
+                <option key={g.value} value={g.value}>
+                  {g.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
+      <div className="frow">
+        <label>{T.transpose}</label>
+        <div>
+          <TransposeControl value={midi.transpose ?? 0} disabled={!editable} onChange={setTranspose} />
+        </div>
+      </div>
+      <div className="hint">
+        {t.loop === "midi" ? "A take stores the notes and plays them through the instrument. " : "A take stores the instrument’s sound. "}
+        {stale ? (
+          <span className="warnline">{T.appliesAfterLoad}: the loaded score is an older version of this one.</span>
+        ) : here ? (
+          <>Grid and transpose change in the running engine at once; the loop type applies after Load.</>
+        ) : (
+          <>{T.appliesAfterLoad}.</>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -960,18 +1016,8 @@ function InstrumentRows({
           )}
         </div>
       </div>
-      <div className="frow">
-        <label>{T.transpose}</label>
-        <div>
-          <TransposeControl
-            value={midi.transpose ?? 0}
-            disabled={!editable}
-            onChange={(v) => setMidi({ ...midi, transpose: v === 0 ? undefined : v })}
-          />
-        </div>
-      </div>
       <div className="hint">
-        Only the plugin’s id goes into the score; its sound stays on this computer. Keys outside the range stay with the MIDI bindings; the range is checked before the transposition.
+        Only the plugin’s id goes into the score; its sound stays on this computer. Keys outside the range stay with the MIDI bindings.
       </div>
     </>
   );

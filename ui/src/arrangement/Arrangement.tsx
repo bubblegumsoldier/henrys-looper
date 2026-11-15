@@ -30,9 +30,12 @@ import { useScoreFile } from "../scoreFile";
 import { docStore, useDoc, useEngineTracks, useRun } from "./useDoc";
 import "./arrangement.css";
 import { Ticker } from "../shell/Toasts";
-import { ChannelPanel, Mixer, MixerToggle, mixerEditorClass, selectChannelByName, useMixer } from "../mixer";
+import { ChannelPanel, Mixer, MixerToggle, mixerEditorClass, selectChannelByName, useMixer, useStripPicks } from "../mixer";
+import { mixerState } from "../mixer/store";
+import { currentStatus } from "../status";
 
 type View = "grid" | "text";
+type TrackTab = "track" | "channel";
 
 const PHASE_WORD: Record<string, string> = {
   none: "no score loaded",
@@ -198,6 +201,40 @@ export function Arrangement({ onGoto, actions }: Props) {
   const selTrack = sel.kind === "track" ? sel.index : sel.kind === "cells" ? sel.focus.track : null;
   const selTrackName = selTrack !== null ? doc?.tracks[selTrack]?.name : undefined;
   useEffect(() => selectChannelByName(selTrackName), [selTrackName]);
+
+  // The panel on the right. A track selected in the grid gets two tabs - its score settings
+  // ("Track") and its mixer channel ("Channel"); the tab last chosen is kept, except that clicking
+  // a channel strip in the mixer asks for that channel, so it opens "Channel". A section or a clip
+  // always gets the inspector, mixer or not; a bus picked in the mixer its inserts.
+  const [tab, setTabRaw] = useState<TrackTab>(() => stored("arr.trackTab", "track"));
+  const setTab = (t: TrackTab) => {
+    setTabRaw(t);
+    store("arr.trackTab", t);
+  };
+  const picks = useStripPicks();
+  const seenPicks = useRef(picks);
+  useEffect(() => {
+    if (picks === seenPicks.current) return;
+    seenPicks.current = picks;
+    const m = mixerState();
+    const name = m.bus === null ? currentStatus().tracks[m.selected]?.name : undefined;
+    const index = name !== undefined && doc ? doc.tracks.findIndex((t) => t.name === name) : -1;
+    if (index >= 0) {
+      setSel({ kind: "track", index });
+      setTab("channel");
+    } else {
+      // A bus, or a channel the score does not have: the panel shows it on its own.
+      setSel(NONE);
+      setMixerOnly(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [picks]);
+  const [mixerOnly, setMixerOnly] = useState(false);
+  useEffect(() => {
+    if (selRaw.kind !== "score") setMixerOnly(false);
+  }, [selRaw]);
+  const panel: "track" | "inspector" | "bus" =
+    sel.kind === "track" ? "track" : mixer.open && sel.kind === "score" && (mixerOnly || !doc) ? "bus" : "inspector";
   const locked = run.playing;
   const editable = !locked && state.inSync && doc !== null;
 
@@ -483,9 +520,28 @@ export function Arrangement({ onGoto, actions }: Props) {
               )}
               {mixer.open && <Mixer />}
             </div>
-            {inspector && mixer.open && <ChannelPanel />}
-            {inspector && !mixer.open && doc && (
-              <Inspector doc={doc} errors={state.inSync ? errors : []} notes={state.notes ?? []} editable={editable} sel={sel} setSel={setSel} edit={edit} onIssue={showIssue} />
+            {inspector && panel === "bus" && <ChannelPanel />}
+            {inspector && panel === "inspector" && doc && (
+              <Inspector doc={doc} errors={state.inSync ? errors : []} notes={state.notes ?? []} editable={editable} sel={sel} setSel={setSel} edit={edit} onIssue={showIssue} stale={actions.stale} />
+            )}
+            {inspector && panel === "track" && doc && (
+              <div className="insp tabbed">
+                <div className="insp-tabs" role="tablist" aria-label="Track or channel">
+                  <div className="seg">
+                    {(["track", "channel"] as const).map((t) => (
+                      <button key={t} role="tab" aria-selected={tab === t} className={tab === t ? "on" : undefined} onClick={() => setTab(t)}>
+                        <i className={`ic ${t === "track" ? "ic-grid" : "ic-sliders"}`} />
+                        {t === "track" ? T.trackTab : T.channelTab}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {tab === "track" ? (
+                  <Inspector doc={doc} errors={state.inSync ? errors : []} notes={state.notes ?? []} editable={editable} sel={sel} setSel={setSel} edit={edit} onIssue={showIssue} stale={actions.stale} />
+                ) : (
+                  <ChannelPanel expect={selTrackName} onTrackTab={() => setTab("track")} />
+                )}
+              </div>
             )}
           </div>
         ) : (

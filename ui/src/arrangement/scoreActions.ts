@@ -44,6 +44,34 @@ export interface ScoreActions {
 /** The text the runner was last given from here. */
 let loadedText: string | null = null;
 
+const plain = (t: string) => withoutCountIn(withoutMixer(t));
+
+/** The runner holds a score, and it is exactly the text in the editor. */
+export function editorIsLoaded(): boolean {
+  return loadedText !== null && currentStatus().score !== null && plain(loadedText) === plain(scoreFile().text);
+}
+
+/**
+ * Follow an edit the engine can take at once (a track's note grid, its transposition): call this
+ * right after the edit, while the editor still holds the loaded text. Sends `push` to the engine
+ * and, once the edit is rendered, counts the new text as loaded - engine and score agree again, so
+ * the score does not turn stale. Does nothing when the editor was not the loaded score.
+ */
+export function followLoaded(wasLoaded: boolean, push: () => Promise<void>): void {
+  if (!wasLoaded) return;
+  void (async () => {
+    try {
+      await push();
+      await docStore.settled();
+      loadedText = scoreFile().text;
+      for (const l of loadedListeners) l();
+    } catch (e) {
+      fail((e as Error).message);
+    }
+  })();
+}
+const loadedListeners = new Set<() => void>();
+
 export function useScoreActions(): ScoreActions {
   const [recent, setRecent] = useState<RecentFile[]>([]);
   const [defaultDir, setDefaultDir] = useState<string | null>(null);
@@ -187,7 +215,11 @@ export function useScoreActions(): ScoreActions {
 
   // The mix and the count-in are kept in step with the engine both ways, so they do not make the
   // loaded score stale - unless the runner's count-in really differs from the document's.
-  const plain = (t: string) => withoutCountIn(withoutMixer(t));
+  useEffect(() => {
+    const l = () => setLoadedRev((n) => n + 1);
+    loadedListeners.add(l);
+    return () => void loadedListeners.delete(l);
+  }, []);
   const stale =
     inRunner &&
     loadedText !== null &&

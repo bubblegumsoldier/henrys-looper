@@ -21,6 +21,26 @@ export interface MixerState {
   bus: BusId | null;
 }
 
+/**
+ * Counts clicks on a strip (channel or bus) in the mixer, so the arrangement can tell "the musician
+ * picked this in the mixer" from "the panel follows the grid". Not remembered.
+ */
+let picks = 0;
+const pickListeners = new Set<() => void>();
+function picked(): void {
+  picks++;
+  for (const l of pickListeners) l();
+}
+export function useStripPicks(): number {
+  return useSyncExternalStore(
+    (l) => {
+      pickListeners.add(l);
+      return () => pickListeners.delete(l);
+    },
+    () => picks,
+  );
+}
+
 const KEY = "looper.mixer";
 export const MIN_HEIGHT = 300;
 /** Room for the device column of a strip, its buses and a usable fader. */
@@ -64,12 +84,14 @@ export function useMixer(): MixerState {
 }
 
 /** Select a channel - from a strip, from the arrangement, from anywhere. */
-export function selectChannel(track: number): void {
+export function selectChannel(track: number, fromStrip = false): void {
+  if (fromStrip) picked();
   if (state.selected !== track || state.bus !== null) setMixer({ selected: track, bus: null });
 }
 
 /** Show a bus in the panel - from its strip. */
 export function selectBus(bus: BusId): void {
+  picked();
   if (state.bus !== bus) setMixer({ bus });
 }
 

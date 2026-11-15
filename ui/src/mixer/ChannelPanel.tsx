@@ -9,15 +9,23 @@ import { Icon } from "../shell/Icon";
 import { HMeter } from "../live/HMeter";
 import { STATE_ICON, STATE_WORD, T } from "../shell/terms";
 import { currentStatus, structureSignature, useStatusSlice } from "../status";
-import type { LooperStatus } from "../types";
+import type { LooperStatus, LooperTrackStatus } from "../types";
 import { channelActions } from "./actions";
 import { LatencyRows, LayerList } from "./ChannelParts";
+import { GRID_CHOICES } from "../live/MidiLoopRows";
 import { DeviceChain } from "../devices/DeviceChain";
 import { busOwner, trackOwner } from "../devices/model";
 import { stripKind, trackColor } from "./Strip";
 import { useMixer } from "./store";
 
-export function ChannelPanel() {
+interface Props {
+  /** The score track the arrangement has selected: a channel of another name is not shown for it. */
+  expect?: string;
+  /** Opens the arrangement's "Track" tab, where the score's loop type, grid and transpose are edited. */
+  onTrackTab?: () => void;
+}
+
+export function ChannelPanel({ expect, onTrackTab }: Props = {}) {
   const { selected, bus } = useMixer();
   const signature = useStatusSlice(structureSignature);
   const defaultLatency = useStatusSlice((s) => s.latency_frames);
@@ -48,6 +56,18 @@ export function ChannelPanel() {
         </div>
         <div className="chan-body">
           <DeviceChain owner={busOwner(bus)} size="dense" title={bus === "main" ? T.main : T.monitorBus} />
+        </div>
+      </aside>
+    );
+  }
+
+  if (track && expect !== undefined && track.name !== expect) {
+    return (
+      <aside className="insp chan">
+        <div className="insp-h">
+          <span className="caps">Channel</span>
+          <h2>{expect}</h2>
+          <div className="sub">The engine has no channel named {expect} - Load the score to create it.</div>
         </div>
       </aside>
     );
@@ -91,6 +111,7 @@ export function ChannelPanel() {
       </div>
 
       <div className="chan-body">
+        {track.instrument && <LoopLine track={track} onTrackTab={onTrackTab} />}
         <DeviceChain owner={trackOwner(i)} track={chain} size="dense" />
 
         <LayerList track={track} actions={channelActions} />
@@ -122,5 +143,25 @@ export function ChannelPanel() {
         </div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * What a take of this instrument track stores and the grid it plays on, as the engine has it now -
+ * with a way to where it is changed (the arrangement's "Track" tab), so nobody looks for it here.
+ */
+function LoopLine({ track, onTrackTab }: { track: LooperTrackStatus; onTrackTab?: () => void }) {
+  const midi = !!track.midi_loop;
+  const grid = GRID_CHOICES.find((g) => g.value === (track.grid ?? "none"))?.label ?? track.grid ?? "";
+  const transpose = track.transpose ?? 0;
+  const text = `${T.loopKind}: ${midi ? T.loopMidi : T.loopAudio}${midi ? ` · grid ${grid.toLowerCase()}` : ""}${transpose ? ` · ${transpose > 0 ? "+" : ""}${transpose} st` : ""}`;
+  if (!onTrackTab) return <div className="loopline">{text}</div>;
+  return (
+    <button className="loopline" onClick={onTrackTab} title="Loop type, note grid and transpose belong to the score - edit them in the Track tab">
+      <span className="what">{text}</span>
+      <span className="go">
+        edit in Track <Icon name="arr-r" />
+      </span>
+    </button>
   );
 }

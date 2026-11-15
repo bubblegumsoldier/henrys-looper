@@ -45,7 +45,7 @@ export function Mixer() {
   const resizing = useRef<{ y: number; h: number } | null>(null);
   const section = useRef<HTMLElement | null>(null);
 
-  const onSelect = useCallback((t: number) => selectChannel(t), []);
+  const onSelect = useCallback((t: number) => selectChannel(t, true), []);
 
   const startResize = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (m.full) return;
