@@ -41,7 +41,7 @@ import { currentConfig } from "../setup/config";
 import { PositionPanel, type Clock } from "./PositionPanel";
 import { ReleasePanel } from "./ReleasePanel";
 import { ArrangementStrip } from "./ArrangementStrip";
-import { TrackTile, trackColor } from "./TrackTile";
+import { TrackTile, clearTrackAsked, trackColor } from "./TrackTile";
 import { clearAllAsked } from "./ClockBar";
 import { TrackDetail, type TrackActions } from "./TrackDetail";
 import { DELAY_NOTES, FX_NAME, FX_PRESETS, FX_SLOT_ORDER } from "../mixer/fxModel";
@@ -289,6 +289,12 @@ function Stage({ onOpenArrangement }: Props) {
       }
       // Other Shift keys belong to the score transport (Shift+S stops the whole run).
       if (e.shiftKey) return;
+      // Z or Backspace: undo the last take, whichever track it was on.
+      if (e.key === "Backspace" || e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        run(() => api.undoLast());
+        return;
+      }
       const { tracks: list, selected: current, click } = state.current;
 
       if (e.key === "Escape" && chord.current) {
@@ -352,6 +358,14 @@ function Stage({ onOpenArrangement }: Props) {
         case "q":
           e.preventDefault();
           actions.mute(track.index, !track.muted);
+          break;
+        case "u":
+          e.preventDefault();
+          actions.undo(track.index);
+          break;
+        case "c":
+          e.preventDefault();
+          clearTrackAsked(track.index, track.name);
           break;
         case "i":
           e.preventDefault();

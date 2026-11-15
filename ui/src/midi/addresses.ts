@@ -83,6 +83,8 @@ export function gotoAddress(section: number): string {
 export const GLOBAL = {
   click: "global.click",
   clearAll: "global.clear_all",
+  /** Undo the newest take over all tracks - one foot switch, no track to pick. */
+  undo: "global.undo",
   tempo: "global.tempo",
   /** Tap tempo - a button, so a foot switch can set the tempo. */
   tapTempo: "global.tap_tempo",
@@ -120,6 +122,7 @@ export type TrackPart =
   | "play"
   | "stop"
   | "clear"
+  | "undo"
   | "monitor"
   | "pan"
   | "gain"

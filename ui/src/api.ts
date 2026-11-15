@@ -88,6 +88,10 @@ export const api = {
   trackStop: (track: number) => call<void>("track_stop", { track }),
   trackPlay: (track: number) => call<void>("track_play", { track }),
   trackClear: (track: number) => call<void>("track_clear", { track }),
+  /** Undo on one track: its running take, or else its newest layer. */
+  trackUndo: (track: number) => call<void>("track_undo", { track }),
+  /** Undo the newest take over all tracks. */
+  undoLast: () => call<void>("undo_last"),
   trackMonitor: (track: number, on: boolean) => call<void>("track_monitor", { track, on }),
   /** Where the track sits between the speakers: -1 hard left, 0 centre, +1 hard right. */
   trackPan: (track: number, pan: number) => call<void>("track_pan", { track, pan }),

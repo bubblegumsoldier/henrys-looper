@@ -21,6 +21,8 @@ export interface ChannelActions extends FxActions {
   layerRemove: (track: number, layer: number) => void;
   layerGain: (track: number, layer: number, gain: number) => void;
   clear: (track: number) => void;
+  /** Undo: the running take, or else the newest layer. */
+  undo: (track: number) => void;
 }
 
 export const channelActions: ChannelActions = {
@@ -35,6 +37,7 @@ export const channelActions: ChannelActions = {
   layerRemove: (t, l) => run(() => api.layerRemove(t, l)),
   layerGain: (t, l, gain) => run(() => api.layerGain(t, l, gain)),
   clear: (t) => run(() => api.trackClear(t)),
+  undo: (t) => run(() => api.trackUndo(t)),
   fxBypass: (t, on) => run(() => api.fxBypass(t, on)),
   fxEnable: (t, effect, on) => run(() => api.fxEnable(t, effect, on)),
   fxPreset: (t, preset) => run(() => api.fxPreset(t, preset)),

@@ -24,8 +24,11 @@ export const T = {
   monitor: "Monitor",
   clear: "Clear",
   clearTrack: "Clear track",
+  undo: "Undo",
+  undoLast: "Undo last take",
   tap: "Tap",
   tempoLocked: "Clear all loops to change tempo, time signature or loop length.",
+  tempoLockedShort: "Clear all loops to change",
   mute: "Mute",
   muted: "Muted",
   /** Overdub mode, setup and tile. */

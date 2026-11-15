@@ -523,6 +523,18 @@ async fn set_count_in(bars: u32, engine: State<'_, EngineHandle>) -> Result<(), 
     act(engine, Action::SetCountIn { bars }).await
 }
 
+/// Undo on one track: its running take, or else its newest layer.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_undo(track: usize, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::Undo { track }).await
+}
+
+/// Undo the newest take over all tracks.
+#[tauri::command(rename_all = "snake_case")]
+async fn undo_last(engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::UndoLast).await
+}
+
 /// What `O` does in free looping: `"latch"` (stays on until pressed again, every pass a layer) or
 /// `"once"` (one pass).
 #[tauri::command(rename_all = "snake_case")]
@@ -1076,6 +1088,8 @@ fn main() {
             set_quantize,
             set_overdub_mode,
             tap_tempo,
+            track_undo,
+            undo_last,
             set_count_in,
             fx_bypass,
             fx_enable,

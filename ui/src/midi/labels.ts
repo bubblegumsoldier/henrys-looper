@@ -104,6 +104,7 @@ const TRACK_PART: Record<string, string> = {
   play: T.play,
   stop: T.stop,
   clear: T.clear,
+  undo: T.undo,
   monitor: T.monitor,
   pan: T.pan,
   latency_trim: "Latency trim",
@@ -112,6 +113,7 @@ const TRACK_PART: Record<string, string> = {
 const GLOBAL_PART: Record<string, string> = {
   "global.click": "Click on/off",
   "global.clear_all": T.clearAll,
+  "global.undo": T.undoLast,
   "global.tempo": T.tempo,
   "global.tap_tempo": "Tap tempo",
   "global.quantize.bar": T.quantizeBar,

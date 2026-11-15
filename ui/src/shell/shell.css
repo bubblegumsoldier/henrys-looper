@@ -427,7 +427,6 @@ table.tt .tn2 input.name-in { height: 24px; }
 
 /* Three small buttons in the second row: Stop, Monitor, Mute. Mute is the stage switch for "this
    track out, the loop keeps its place" - a warm colour, so it never reads as Monitor. */
-.tbtns .tb.stop, .tbtns .tb.hear { grid-column: span 2; }
 .tb.hear.mute.on { background: rgba(245,185,66,.16); color: #ffe2a6; border-color: var(--warn); }
 .tb.hear.mute.on .ic { color: var(--warn); }
 
@@ -448,7 +447,7 @@ table.tt .tn2 input.name-in { height: 24px; }
 .clockbar .cb-sel { height: 44px; padding: 0 10px; border-radius: 8px; background: #111317; color: #fff; border: 1px solid var(--line-3); font-size: 17px; font-weight: var(--fw-semibold); }
 .clockbar .cb-free { display: inline-flex; align-items: center; gap: 6px; color: var(--tx-2); font-size: 15px; }
 .clockbar .cb-num { width: 58px; height: 44px; font-size: 17px; text-align: center; border-radius: 8px; background: #111317; color: #fff; border: 1px solid var(--line-3); }
-.clockbar .cb-note { flex-basis: 100%; font-size: 13px; color: var(--warn); }
+.clockbar .cb-note { font-size: 13px; line-height: 1.2; color: var(--warn); max-width: 120px; }
 .clockbar .cb-lock { display: inline-flex; color: var(--warn); }
 .clockbar .cb-lock .ic { --ic: 18px; }
 @container (max-width: 1200px) {
@@ -469,3 +468,12 @@ table.tt .tn2 input.name-in { height: 24px; }
   background: #15181d; border: 1px solid var(--line-3); color: var(--tx-2); font-size: 15px; font-weight: var(--fw-semibold); white-space: nowrap; }
 .release .rh .cin-btn.on { color: var(--st-armed); border-color: var(--st-armed); }
 .release .rh .cin-btn .ic { --ic: 18px; }
+
+/* Second button row: Stop, Monitor, Undo, Mute - four in the space of three. */
+.tbtns { grid-template-columns: repeat(12, minmax(0, 1fr)); }
+.tbtns .tb { grid-column: span 4; }
+.tbtns .tb.stop, .tbtns .tb.hear { grid-column: span 3; }
+.live.tiles-two .tbtns { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.tile .tn .more:disabled { opacity: .35; }
+
+.pos .kick .lv-chip.lock { color: var(--warn); border-color: rgba(245,185,66,.45); background: rgba(245,185,66,.08); white-space: nowrap; }

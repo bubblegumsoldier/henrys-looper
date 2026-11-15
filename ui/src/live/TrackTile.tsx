@@ -6,6 +6,9 @@
 
 import { memo, useCallback, type CSSProperties } from "react";
 import { HMeter } from "./HMeter";
+import { api } from "../api";
+import { confirmAction } from "../dialogs";
+import { run } from "../shell/notes";
 import type { TrackActions } from "./TrackDetail";
 import { trackAddress } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
@@ -24,6 +27,13 @@ import {
   type StateKind,
 } from "../shell/terms";
 import type { LooperStatus, LooperTrackStatus, ScoreState } from "../types";
+
+/** "Clear track", asked first: every layer of this track is gone afterwards. */
+export function clearTrackAsked(track: number, name: string): void {
+  void confirmAction(`Clear track "${name}" deletes every layer of it.`, T.clearTrack, T.clearTrack).then((ok) => {
+    if (ok) run(() => api.trackClear(track));
+  });
+}
 
 /** The identity colour of a track: --trk-1 … --trk-8, by position. */
 export function trackColor(index: number): string {
@@ -126,6 +136,19 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
             <i key={n} className={d} />
           ))}
         </span>
+        <button
+          className="more"
+          data-midi={trackAddress(i, "clear")}
+          disabled={empty && !writing}
+          onClick={(e) => {
+            e.stopPropagation();
+            clearTrackAsked(i, track.name);
+          }}
+          title={`${T.clearTrack} · key C (asks first)`}
+          aria-label={T.clearTrack}
+        >
+          <Icon name="trash" />
+        </button>
         <button
           className="more"
           onClick={(e) => {
@@ -251,6 +274,20 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         >
           <Icon name="hear" />
           <span>{T.monitor}</span>
+        </button>
+        <button
+          className="tb hear undo"
+          data-midi={trackAddress(i, "undo")}
+          disabled={empty && !writing}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect(i);
+            actions.undo(i);
+          }}
+          title={`${T.undo} · key U: the running take, or else the newest layer. Z or Backspace undoes the last take of any track.`}
+        >
+          <Icon name="arr-l" />
+          <span>{T.undo}</span>
         </button>
         <button
           className={`tb hear mute${track.muted ? " on" : ""}`}

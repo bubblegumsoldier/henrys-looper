@@ -7,6 +7,7 @@
 import type { CSSProperties } from "react";
 import { Icon } from "../shell/Icon";
 import { ClockBar } from "./ClockBar";
+import { useStatusSlice } from "../status";
 import { GLOBAL } from "../midi/addresses";
 import type { ScoreView } from "../shell/scoreTransport";
 import { PHASE, T, bars, num } from "../shell/terms";
@@ -37,6 +38,8 @@ interface Props {
 }
 
 export function PositionPanel({ clock, score, compiled }: Props) {
+  // The grid can only change while every track is empty - the engine's own rule (ClockBar).
+  const tempoLocked = useStatusSlice((s) => s.tracks.some((t) => t.state !== "empty"));
   const withScore = score.loaded && score.section !== null;
   const barInLoop = clock.bars > 0 ? ((clock.bar - 1) % clock.bars) + 1 : clock.bar;
   const bar = withScore ? score.bar : barInLoop;
@@ -115,6 +118,12 @@ export function PositionPanel({ clock, score, compiled }: Props) {
               <Icon name={clock.quantize === "loop" ? "loop" : "bar"} />
               {clock.quantize === "loop" ? T.quantizeLoop : T.quantizeBar}
             </span>
+            {tempoLocked && (
+              <span className="lv-chip lock" title={T.tempoLocked}>
+                <Icon name="lock" />
+                Tempo locked<span className="hide-s">&nbsp;· Clear all to change</span>
+              </span>
+            )}
           </>
         )}
       </div>

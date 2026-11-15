@@ -244,7 +244,6 @@ export function ClockBar({ clock, free }: { clock: Clock; free: boolean }) {
         <Icon name="trash" />
         <span>{T.clearAll}</span>
       </button>
-      {locked && <div className="cb-note">{T.tempoLocked}</div>}
     </div>
   );
 }

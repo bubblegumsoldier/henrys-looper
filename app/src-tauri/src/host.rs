@@ -128,6 +128,22 @@ const MIX_SAVE_DELAY: Duration = Duration::from_secs(1);
 /// The one sentence for "there is nothing to talk to yet", so every command says it the same way.
 const NO_ENGINE: &str = "The engine is not running. Start it first.";
 
+/// Keep the order in which layers appeared (one track index per layer, oldest first) in step with
+/// the layer counts of two snapshots: a new layer goes on top, a removed one comes off that track's
+/// newest entry. The top is what "undo last take" removes.
+fn follow_layers(order: &mut Vec<usize>, before: &[u8], after: &[u8]) {
+    for (track, (&old, &new)) in before.iter().zip(after).enumerate() {
+        for _ in old..new {
+            order.push(track);
+        }
+        for _ in new..old {
+            if let Some(at) = order.iter().rposition(|&t| t == track) {
+                order.remove(at);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Tap tempo
 // ---------------------------------------------------------------------------------------------
@@ -191,6 +207,10 @@ pub enum Action {
     StopTrack { track: usize },
     Play { track: usize },
     ClearTrack { track: usize },
+    /// The looper's undo on one track: its running take, or else its newest layer.
+    Undo { track: usize },
+    /// Undo the newest take over all tracks - a foot switch needs no track selection.
+    UndoLast,
     SetMonitor { track: usize, on: bool },
     /// Where a track sits between the speakers: -1.0 hard left, 0.0 centre, +1.0 hard right.
     SetPan { track: usize, pan: f32 },
@@ -311,6 +331,8 @@ impl Action {
                 | Action::StopTrack { .. }
                 | Action::Play { .. }
                 | Action::ClearTrack { .. }
+                | Action::Undo { .. }
+                | Action::UndoLast
                 | Action::ClearAll
                 | Action::Transport { .. }
                 | Action::SetTempo { .. }
@@ -327,6 +349,7 @@ impl Action {
             | Action::StopTrack { track }
             | Action::Play { track }
             | Action::ClearTrack { track }
+            | Action::Undo { track }
             | Action::SetMonitor { track, .. }
             | Action::SetPan { track, .. }
             | Action::SetTrackGain { track, .. }
@@ -347,6 +370,7 @@ impl Action {
             } => Some(track),
             Action::Panic { track: None }
             | Action::ClearAll
+            | Action::UndoLast
             | Action::Transport { .. }
             | Action::SetClick { .. }
             | Action::SetClickGain { .. }
@@ -831,6 +855,8 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
         MidiAction::Play { track } => MidiIntent::Session(Action::Play { track }),
         MidiAction::StopTrack { track } => MidiIntent::Session(Action::StopTrack { track }),
         MidiAction::ClearTrack { track } => MidiIntent::Session(Action::ClearTrack { track }),
+        MidiAction::Undo { track } => MidiIntent::Session(Action::Undo { track }),
+        MidiAction::UndoLast => MidiIntent::Session(Action::UndoLast),
         MidiAction::Monitor { track, on } => {
             MidiIntent::Session(Action::SetMonitor { track, on })
         }
@@ -1735,6 +1761,10 @@ struct Session {
     score_yaml: Option<String>,
     /// Tap tempo, whichever way the taps come in.
     taps: TapTempo,
+    /// Which track got each layer, oldest first - what "undo last take" walks back. Kept from the
+    /// layer counts of the snapshots, so a layer the engine dropped by itself (an empty pass of a
+    /// continuous overdub) leaves it as well.
+    layer_order: Vec<usize>,
     /// Start and end (bar 1) of a running free-looping count-in.
     count_in: Option<(u64, u64)>,
     /// The engine's end of the MIDI routing queue (`looper_engine::engine::source`).
@@ -2096,6 +2126,7 @@ impl Session {
             section_watch: SectionWatch::default(),
             score_yaml: None,
             taps: TapTempo::default(),
+            layer_order: Vec::new(),
             count_in: None,
             feeds,
             routes: vec![TrackRoute::NONE; instrument_inputs.len()],
@@ -2269,6 +2300,7 @@ impl Session {
                 }
                 ui.gains.truncate(layers);
             }
+            self.note_layers(&status);
             self.last = Some((status, Instant::now()));
         }
 
@@ -2741,6 +2773,44 @@ impl Session {
     /// its grid when it reaches `at`; this side moves its mirror now, so every take scheduled from
     /// here on is planned on the grid the engine will have by then. Both use the very same number,
     /// so they agree even when the command arrives late and acts after `at`.
+    /// Follow the layer counts of a new snapshot into [`Session::layer_order`].
+    fn note_layers(&mut self, status: &Status) {
+        let before: Vec<u8> = (0..self.tracks.len()).map(|i| self.status_of(i).layers).collect();
+        let after: Vec<u8> = (0..self.tracks.len())
+            .map(|i| status.tracks().get(i).map(|t| t.layers).unwrap_or(0))
+            .collect();
+        follow_layers(&mut self.layer_order, &before, &after);
+    }
+
+    /// Undo on one track: a running (or armed) take is thrown away with its layer, otherwise the
+    /// newest layer goes. The sentence says which.
+    fn undo(&mut self, track: usize) -> Result<(), String> {
+        let ts = self.status_of(track);
+        let name = self.tracks[track].name.clone();
+        let take = matches!(
+            ts.state,
+            TrackState::Recording | TrackState::Overdub | TrackState::Armed
+        );
+        if !take && ts.layers == 0 {
+            return Err(format!("\"{name}\" has nothing to undo."));
+        }
+        self.cmd.send(Command::UndoLayer { track })?;
+        self.scheduler.disarm_track(track);
+        self.message = Some(if take {
+            match ts.state {
+                TrackState::Overdub => format!(
+                    "Undo: the running overdub pass on \"{name}\" is discarded, overdub off."
+                ),
+                _ => format!("Undo: the take on \"{name}\" is discarded."),
+            }
+        } else if ts.layers == 1 {
+            format!("Removed layer 1 of \"{name}\" - the track is empty.")
+        } else {
+            format!("Removed layer {} of \"{name}\".", ts.layers)
+        });
+        Ok(())
+    }
+
     /// Whether a free-looping count-in is still counting.
     fn counting_in(&self) -> bool {
         self.count_in.is_some_and(|(_, end)| self.estimated_pos() < end)
@@ -3070,6 +3140,11 @@ impl Session {
                 let plan = self.scheduler.play(track, &name, est);
                 self.send_all(plan)
             }
+            Action::Undo { track } => self.undo(track),
+            Action::UndoLast => match self.layer_order.last().copied() {
+                Some(track) => self.undo(track),
+                None => Err("Nothing to undo.".to_string()),
+            },
             Action::ClearTrack { track } => {
                 let name = self.tracks[track].name.clone();
                 let plan = self.scheduler.clear_track(track, &name, est);
@@ -3729,6 +3804,24 @@ impl Session {
 mod tests {
     use super::*;
 
+    /// "Undo last take" hits the take that came last, whichever track it was on, and a layer the
+    /// engine dropped by itself (or an undo) takes its entry with it.
+    #[test]
+    fn the_global_undo_follows_the_order_the_layers_appeared_in() {
+        let mut order = Vec::new();
+        follow_layers(&mut order, &[0, 0], &[1, 0]); // guitar records
+        follow_layers(&mut order, &[1, 0], &[1, 1]); // voice records
+        follow_layers(&mut order, &[1, 1], &[3, 1]); // two guitar overdubs
+        assert_eq!(order.last(), Some(&0));
+        follow_layers(&mut order, &[3, 1], &[2, 1]); // undo
+        follow_layers(&mut order, &[2, 1], &[2, 2]); // voice layer
+        assert_eq!(order, vec![0, 1, 0, 1]);
+        follow_layers(&mut order, &[2, 2], &[2, 1]); // the empty pass was dropped
+        assert_eq!(order.last(), Some(&0), "dann ist wieder die Gitarre dran");
+        follow_layers(&mut order, &[2, 1], &[0, 1]); // guitar cleared
+        assert_eq!(order, vec![1]);
+    }
+
     #[test]
     fn tap_tempo_takes_the_median_gap_and_starts_over_after_a_pause() {
         let t0 = Instant::now();
@@ -3901,6 +3994,8 @@ mod tests {
             (Target::Play(track()), Action::Play { track: 0 }),
             (Target::StopTrack(track()), Action::StopTrack { track: 0 }),
             (Target::ClearTrack(track()), Action::ClearTrack { track: 0 }),
+            (Target::Undo(track()), Action::Undo { track: 0 }),
+            (Target::UndoLast, Action::UndoLast),
             (Target::ClearAll, Action::ClearAll),
             (Target::Transport, Action::Transport { run: None }),
             (Target::TapTempo, Action::TapTempo),
