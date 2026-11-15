@@ -57,6 +57,8 @@ pub enum MidiAction {
     ScoreGoto(usize),
 
     // ---- global ------------------------------------------------------------------------------
+    /// Start the clock of free looping if it stands, stop it if it runs.
+    Transport,
     Click(bool),
     ClearAll,
     Tempo(f64),
@@ -133,6 +135,7 @@ impl MidiAction {
                 | MidiAction::StopTrack { .. }
                 | MidiAction::ClearTrack { .. }
                 | MidiAction::ClearAll
+                | MidiAction::Transport
                 | MidiAction::Tempo(_)
                 | MidiAction::SetQuantize(_)
         )
@@ -459,6 +462,7 @@ impl Router {
             Target::ScoreStopAll => MidiAction::ScoreStopAll,
             Target::ScoreGoto(section) => MidiAction::ScoreGoto(*section),
             Target::ClearAll => MidiAction::ClearAll,
+            Target::Transport => MidiAction::Transport,
             Target::Quantize(quantize) => MidiAction::SetQuantize(*quantize),
             Target::Record(_) => MidiAction::Record { track },
             Target::Overdub(_) => MidiAction::Overdub { track },

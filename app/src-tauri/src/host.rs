@@ -155,6 +155,9 @@ pub enum Action {
     LayerRemove { track: usize, layer: usize },
     LayerGain { track: usize, layer: usize, gain: f32 },
     ClearAll,
+    /// Start or stop the clock of free looping; `None` toggles. While it stands nothing counts,
+    /// clicks or plays; the loops are kept and a start plays them from bar 1.
+    Transport { run: Option<bool> },
     SetClick { on: bool },
     /// Volume of the click, linear.
     SetClickGain { gain: f32 },
@@ -221,6 +224,7 @@ impl Action {
                 | Action::Play { .. }
                 | Action::ClearTrack { .. }
                 | Action::ClearAll
+                | Action::Transport { .. }
                 | Action::SetTempo { .. }
                 | Action::SetQuantize { .. }
         )
@@ -250,6 +254,7 @@ impl Action {
             | Action::FxParam { track, .. }
             | Action::FxPreset { track, .. } => Some(track),
             Action::ClearAll
+            | Action::Transport { .. }
             | Action::SetClick { .. }
             | Action::SetClickGain { .. }
             | Action::SetMonitorGain { .. }
@@ -654,6 +659,7 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
 
         MidiAction::Click(on) => MidiIntent::Session(Action::SetClick { on }),
         MidiAction::ClearAll => MidiIntent::Session(Action::ClearAll),
+        MidiAction::Transport => MidiIntent::Session(Action::Transport { run: None }),
         MidiAction::Tempo(bpm) => MidiIntent::Session(Action::SetTempo {
             bpm,
             beats_per_bar: signature.beats_per_bar,
@@ -1472,6 +1478,9 @@ struct Session {
     reapply_at: Option<u64>,
     /// What this session was started with - the base for rebuilding it around a score's tracks.
     config: StartConfig,
+    /// Whether the transport runs, as this thread last told the engine. Mirrored rather than read
+    /// from the snapshot because a Record pressed right after Stop must already know it stands.
+    transport: bool,
 }
 
 impl Session {
@@ -1565,6 +1574,9 @@ impl Session {
         // to the plugin manager once the streams run (`crate::plugins`).
         let (inserts, insert_endpoint) = crate::plugins::engine_channel();
         core.attach_inserts(insert_endpoint);
+        // The app opens with the clock standing: nothing blinks or clicks until the musician
+        // presses Start, records something, or loads a score.
+        core.hold_transport();
 
         // ---- input stream: whole frames into the FIFO, nothing else ------------------------
         let stats_in = Arc::clone(&stats);
@@ -1735,6 +1747,7 @@ impl Session {
             stopped: false,
             reapply_at: None,
             config: started_with,
+            transport: false,
         })
     }
 
@@ -1839,13 +1852,24 @@ impl Session {
     fn event(&self, status: &Status) -> StatusEvent {
         let rate = self.info.sample_rate.max(1);
         let stats = &self.stats;
+        // Whether anything on screen may count. With a score loaded the engine's clock runs the
+        // whole time (the runner plans on it), but before the start and after "Stop all" nothing
+        // is playing, and a display that counts bars of nothing is only a distraction. Display
+        // only: the runner and the engine never see this.
+        let transport = status.transport && (self.runner.is_none() || self.score_is_playing());
+        let (bar, beat, beat_offset) = if transport {
+            (status.bar + 1, status.beat + 1, status.beat_offset)
+        } else {
+            (1, 1, 0)
+        };
         StatusEvent {
             running: true,
+            transport,
             pos: status.pos,
             seconds: status.pos as f64 / rate as f64,
-            bar: status.bar + 1,
-            beat: status.beat + 1,
-            beat_offset: status.beat_offset,
+            bar,
+            beat,
+            beat_offset,
             samples_per_beat: status.samples_per_beat,
             bpm: status.bpm,
             beats_per_bar: self.scheduler.timeline.signature().beats_per_bar,
@@ -1882,7 +1906,10 @@ impl Session {
                     let timeline = &self.scheduler.timeline;
                     let bar = timeline.samples_per_beat() * timeline.beats_per_bar() as f64;
                     if bar > 0.0 {
-                        let into = if ts.loop_len > 0 {
+                        let into = if ts.loop_len > 0 && !status.transport {
+                            // A standing loop stands at its top - which is where a start puts it.
+                            Some(0)
+                        } else if ts.loop_len > 0 {
                             Some(status.pos.saturating_sub(ts.origin) % ts.loop_len)
                         } else if ts.filled > 0 {
                             Some(ts.filled)
@@ -1998,6 +2025,15 @@ impl Session {
 
         let title = score.title.clone();
         let sections = score.sections.len();
+        // The runner owns the clock from here on and plans every bar on the grid it is handed, so
+        // that grid has to be running - and has to be the one handed over. A free-looping stop
+        // must never hold a score's count-in, so the transport starts now and stays running for
+        // as long as the score is loaded; the display stands still on its own while nothing plays
+        // (`Session::event`).
+        if !self.transport {
+            let at = self.scheduler.soon(self.estimated_pos());
+            self.start_transport_at(at)?;
+        }
         let runner = Runner::new(score.clone(), self.scheduler.timeline, self.info.buffer_frames)?
             .with_count_in(count_in.unwrap_or(DEFAULT_COUNT_IN_BARS));
         // What the runner really uses: a requested 0 is one bar, and the sentence says so.
@@ -2150,6 +2186,56 @@ impl Session {
         Ok(())
     }
 
+    /// Start the transport at `at`: bar 1 is there, on both sides of the queue. The engine moves
+    /// its grid when it reaches `at`; this side moves its mirror now, so every take scheduled from
+    /// here on is planned on the grid the engine will have by then. Both use the very same number,
+    /// so they agree even when the command arrives late and acts after `at`.
+    fn start_transport_at(&mut self, at: u64) -> Result<(), String> {
+        self.cmd.send(Command::TransportStart { at })?;
+        self.scheduler.timeline = self.scheduler.timeline.with_zero(at);
+        self.transport = true;
+        Ok(())
+    }
+
+    /// Start/Stop of free looping. With a score loaded the score's own Start / Stop all are the
+    /// transport, and this one is refused rather than allowed to hold a running count-in.
+    fn set_transport(&mut self, run: Option<bool>) -> Result<(), String> {
+        if self.runner.is_some() {
+            return Err(
+                "A score is loaded - its transport is Start and Stop all in the Arrangement."
+                    .to_string(),
+            );
+        }
+        let run = run.unwrap_or(!self.transport);
+        if run == self.transport {
+            return Ok(());
+        }
+        if run {
+            let at = self.scheduler.soon(self.estimated_pos());
+            self.start_transport_at(at)?;
+            self.message = Some("Transport started at bar 1.".to_string());
+        } else {
+            self.cmd.send(Command::TransportStop)?;
+            self.transport = false;
+            self.scheduler.disarm_all();
+            self.message = Some(
+                "Transport stopped. The loops are kept; Start plays them from bar 1.".to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Record or overdub pressed while the clock stands: start it right away and let the take
+    /// begin on that very bar 1 rather than a loop later. The start is sent first, so among the
+    /// two commands stamped for the same sample it acts first.
+    fn start_for_take(&mut self) -> Result<(), String> {
+        if self.transport || self.runner.is_some() {
+            return Ok(());
+        }
+        let at = self.scheduler.soon(self.estimated_pos());
+        self.start_transport_at(at)
+    }
+
     fn send_all(&mut self, plan: Scheduled) -> Result<(), String> {
         for command in plan.commands {
             self.cmd.send(command)?;
@@ -2170,15 +2256,26 @@ impl Session {
         let est = self.estimated_pos();
 
         match action {
+            Action::Transport { run } => self.set_transport(run),
             Action::Record { track } => {
                 let name = self.tracks[track].name.clone();
+                // With the clock standing, `soon(est)` is the new bar 1 and therefore the first
+                // point of every grid - `record` lands exactly on it.
+                self.start_for_take()?;
                 let plan = self.scheduler.record(track, &name, est);
                 self.tracks[track].gains.clear();
                 self.send_all(plan)
             }
             Action::Overdub { track } => {
-                let ts = self.status_of(track);
+                let mut ts = self.status_of(track);
                 let name = self.tracks[track].name.clone();
+                if !self.transport && self.runner.is_none() {
+                    self.start_for_take()?;
+                    // The engine re-anchors every loop on the new bar 1; plan on that grid.
+                    if ts.loop_len > 0 {
+                        ts.origin = self.scheduler.timeline.zero();
+                    }
+                }
                 // `origin` and `loop_len` are this track's own grid; a further layer has to start
                 // on it, not on the global one. See looper_engine::engine::schedule.
                 let plan =
@@ -2194,6 +2291,15 @@ impl Session {
             }
             Action::Play { track } => {
                 let name = self.tracks[track].name.clone();
+                if !self.transport {
+                    // No bar to wait for: the track is on play at once and is heard from bar 1
+                    // when the transport starts.
+                    let plan = self.scheduler.play_at(track, &name, self.scheduler.soon(est));
+                    return self.send_all(Scheduled {
+                        message: format!("\"{name}\": Play - heard when the transport starts."),
+                        ..plan
+                    });
+                }
                 let plan = self.scheduler.play(track, &name, est);
                 self.send_all(plan)
             }
@@ -2560,6 +2666,8 @@ impl Session {
         // Every allocation at the new layer length happens on this thread; the old stock is
         // dropped here and the engine hands back what it still holds.
         self.pool.set_layer_frames(layer_frames as usize);
+        // Bar 1 stays where the transport put it, exactly as the engine keeps it on `SetTempo`.
+        let timeline = timeline.with_zero(self.scheduler.timeline.zero());
         self.scheduler.timeline = timeline;
         self.scheduler.bars = bars;
         self.update_timeline_info(&timeline, layer_frames);
@@ -2745,6 +2853,7 @@ mod tests {
             (Target::StopTrack(track()), Action::StopTrack { track: 0 }),
             (Target::ClearTrack(track()), Action::ClearTrack { track: 0 }),
             (Target::ClearAll, Action::ClearAll),
+            (Target::Transport, Action::Transport { run: None }),
             (
                 Target::Tempo,
                 Action::SetTempo {
@@ -2926,6 +3035,7 @@ mod tests {
             MidiAction::StopTrack { track: 0 },
             MidiAction::ClearTrack { track: 0 },
             MidiAction::ClearAll,
+            MidiAction::Transport,
             MidiAction::Tempo(120.0),
             MidiAction::SetQuantize(Quantize::Bar),
             MidiAction::Click(true),

@@ -678,6 +678,10 @@ pub struct TrackStatusEvent {
 #[serde(rename_all = "snake_case")]
 pub struct StatusEvent {
     pub running: bool,
+    /// Whether the clock runs. `false` means: bar 1, beat 1, nothing counts, nothing blinks. In free
+    /// looping it is the musician's Start/Stop; with a score loaded it is true from the count-in to
+    /// the end of the run and false before the start and after "Stop all".
+    pub transport: bool,
     /// Absolute sample position on the engine's output timeline.
     pub pos: u64,
     /// The same, in seconds since the engine started.
@@ -764,6 +768,7 @@ impl StatusEvent {
     pub fn idle() -> Self {
         Self {
             running: false,
+            transport: false,
             pos: 0,
             seconds: 0.0,
             bar: 1,
@@ -1886,6 +1891,7 @@ mod tests {
                 "seconds",
                 "spares",
                 "tracks",
+                "transport",
                 "xruns",
             ]
         );

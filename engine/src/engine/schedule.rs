@@ -258,6 +258,12 @@ impl Scheduler {
         }
     }
 
+    /// Forget every countdown. What a transport stop needs: the engine drops everything that was
+    /// armed, and a display still counting down to it would be counting down to nothing.
+    pub fn disarm_all(&mut self) {
+        self.pending = [None; MAX_TRACKS];
+    }
+
     fn disarm(&mut self, track: usize) {
         if let Some(slot) = self.pending.get_mut(track) {
             *slot = None;

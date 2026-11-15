@@ -457,6 +457,9 @@ pub enum Target {
     ScoreGoto(usize),
 
     // ---- global ----------------------------------------------------------------------------
+    /// Start or stop the clock of free looping (`transport.toggle`). Not part of the score's
+    /// transport: it needs no score, and while a score runs it is refused like a record pad.
+    Transport,
     Click,
     ClearAll,
     Tempo,
@@ -521,6 +524,7 @@ impl Target {
             | Target::ScoreStopAll
             | Target::ScoreGoto(_)
             | Target::ClearAll
+            | Target::Transport
             | Target::Quantize(_)
             | Target::Record(_)
             | Target::Overdub(_)
@@ -599,6 +603,7 @@ impl Target {
             | Target::ScoreGoto(_)
             | Target::Click
             | Target::ClearAll
+            | Target::Transport
             | Target::Tempo
             | Target::BusGain(_)
             | Target::ClickGain
@@ -676,6 +681,7 @@ impl Target {
                 | Target::StopTrack(_)
                 | Target::ClearTrack(_)
                 | Target::ClearAll
+                | Target::Transport
                 | Target::Tempo
                 | Target::Quantize(_)
         )
@@ -693,6 +699,7 @@ impl Target {
             Target::ScoreNext => "Release (next section)".to_string(),
             Target::ScoreStopAll => "Stop all".to_string(),
             Target::ScoreGoto(i) => format!("Go to section {}", i + 1),
+            Target::Transport => "Start/stop transport".to_string(),
             Target::Click => "Click".to_string(),
             Target::ClearAll => "Clear all".to_string(),
             Target::Tempo => "Tempo".to_string(),
@@ -762,6 +769,7 @@ impl Target {
             ["transport", "start"] => Ok(Target::ScoreStart),
             ["transport", "next"] => Ok(Target::ScoreNext),
             ["transport", "stop_all"] => Ok(Target::ScoreStopAll),
+            ["transport", "toggle"] => Ok(Target::Transport),
             ["transport", "goto", n] => Ok(Target::ScoreGoto(one_based(n, "section")?)),
             ["global", "click"] => Ok(Target::Click),
             ["global", "clear_all"] => Ok(Target::ClearAll),
@@ -958,6 +966,7 @@ impl fmt::Display for Target {
             Target::ScoreNext => f.write_str("transport.next"),
             Target::ScoreStopAll => f.write_str("transport.stop_all"),
             Target::ScoreGoto(i) => write!(f, "transport.goto.{}", i + 1),
+            Target::Transport => f.write_str("transport.toggle"),
             Target::Click => f.write_str("global.click"),
             Target::ClearAll => f.write_str("global.clear_all"),
             Target::Tempo => f.write_str("global.tempo"),
@@ -1060,6 +1069,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
     let mut out = vec![Target::ScoreStart, Target::ScoreNext, Target::ScoreStopAll];
     out.extend((0..sections).map(Target::ScoreGoto));
     out.extend([
+        Target::Transport,
         Target::Click,
         Target::ClearAll,
         Target::Tempo,

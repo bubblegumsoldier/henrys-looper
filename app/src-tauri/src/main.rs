@@ -326,6 +326,14 @@ async fn clear_all(engine: State<'_, EngineHandle>) -> Result<(), String> {
     act(engine, Action::ClearAll).await
 }
 
+/// Start (`true`), stop (`false`) or toggle (`null`) the clock of free looping. While it stands the
+/// display sits at bar 1, the click is silent and the loops are kept but not heard; a start plays
+/// them from bar 1. Refused while a score is loaded - the score has its own Start / Stop all.
+#[tauri::command(rename_all = "snake_case")]
+async fn transport(run: Option<bool>, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::Transport { run }).await
+}
+
 /// Metronome on or off. The click grid keeps running either way.
 #[tauri::command(rename_all = "snake_case")]
 async fn set_click(on: bool, engine: State<'_, EngineHandle>) -> Result<(), String> {
@@ -924,6 +932,7 @@ fn main() {
             layer_remove,
             layer_gain,
             clear_all,
+            transport,
             set_click,
             set_tempo,
             click_gain,
