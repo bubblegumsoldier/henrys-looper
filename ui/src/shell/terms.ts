@@ -131,6 +131,16 @@ export const T = {
   deleteRecording: "Delete",
   recordingSaved: "Recording saved",
   recordingDiscarded: "Recording discarded",
+
+  // --- the effect chain ----------------------------------------------------------
+  fxOn: "On",
+  fxOff: "Off",
+  /** Banner over a bypassed chain - the whole bar is the button that switches it in. */
+  chainBypassed: "Chain bypassed – click to switch in",
+  chainBypassedHint:
+    "Nothing of the chain is heard: the track passes bit for bit. Click to switch the chain in - turning any knob or switching an effect on does that too.",
+  /** Tile caption when the chain is bypassed although effects are on. */
+  fxBypassedShort: "FX bypassed",
 } as const;
 
 /** The word for a score target state. */

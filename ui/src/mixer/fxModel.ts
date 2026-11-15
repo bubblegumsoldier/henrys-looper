@@ -6,7 +6,7 @@
 //! knob that lies about what is reachable. The defaults are the engine's `Chain::new` values, which
 //! is what a double-click on a knob goes back to.
 
-import type { BandKindName, DelayNoteName, FxParamName, FxPresetName, FxSlotName } from "../types";
+import type { BandKindName, DelayNoteName, FxParamName, FxPresetName, FxSlotName, FxStatus } from "../types";
 
 /** Everything the effect part of a channel can ask the engine to do. */
 export interface FxActions {
@@ -42,6 +42,26 @@ export const FX_PRESETS: { name: LoadablePreset; label: string; hint: string }[]
 /** What a preset is called on screen, including the reported `custom`. */
 export function presetLabel(preset: FxPresetName): string {
   return FX_PRESETS.find((p) => p.name === preset)?.label ?? "Custom";
+}
+
+/** Whether one effect of a chain is switched on. */
+export function fxOn(fx: Pick<FxStatus, "effects">, name: FxSlotName): boolean {
+  return fx.effects.find((e) => e.name === name)?.on ?? false;
+}
+
+/** The effects switched on, in signal order. */
+export function fxOnList(fx: Pick<FxStatus, "effects">): FxSlotName[] {
+  return FX_SLOT_ORDER.filter((name) => fxOn(fx, name));
+}
+
+/**
+ * The preset as the picker shows it. Never "Dry" while an effect is on: a hand on a knob makes the
+ * engine report `custom`, and a chain that came in some other way (a `mixer:` section, an older
+ * engine) is caught here, so the picker cannot claim "everything off" while a reverb rings.
+ */
+export function shownPreset(fx: Pick<FxStatus, "preset" | "effects">): FxPresetName {
+  if (fx.preset === "dry" && fxOnList(fx).length > 0) return "custom";
+  return fx.preset;
 }
 
 /** One letter per effect, in signal order: the `H E C D R` strip. */

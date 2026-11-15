@@ -154,6 +154,17 @@ pub enum Command {
     },
     /// One knob of one track's chain.
     SetFxParam { track: usize, param: FxParam },
+    /// A hand on an effect's switch: like `SetFxEnabled`, but switching on also takes the chain
+    /// out of bypass and gives a delay or reverb at mix 0 a start mix. What the window, a MIDI
+    /// controller and the terminal send; a score's `mixer:` section uses the exact commands.
+    TouchFxEnabled {
+        track: usize,
+        slot: FxSlot,
+        on: bool,
+    },
+    /// A hand on a knob: like `SetFxParam`, and the knob's effect is switched on as by
+    /// `TouchFxEnabled`.
+    TouchFxParam { track: usize, param: FxParam },
     /// Load a ready-made chain. The one command the musician uses on stage.
     LoadFxPreset { track: usize, preset: FxPreset },
     /// Start the transport: from `at` on the clock runs, the click sounds and every track that is
@@ -203,6 +214,8 @@ impl Command {
             | Command::SetFxBypass { .. }
             | Command::SetFxEnabled { .. }
             | Command::SetFxParam { .. }
+            | Command::TouchFxEnabled { .. }
+            | Command::TouchFxParam { .. }
             | Command::LoadFxPreset { .. }
             | Command::TransportStop
             | Command::Stop => None,
@@ -232,6 +245,8 @@ impl Command {
             | Command::SetFxBypass { track, .. }
             | Command::SetFxEnabled { track, .. }
             | Command::SetFxParam { track, .. }
+            | Command::TouchFxEnabled { track, .. }
+            | Command::TouchFxParam { track, .. }
             | Command::LoadFxPreset { track, .. } => Some(*track),
             Command::ClearAll { .. }
             | Command::SetClick { .. }

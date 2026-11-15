@@ -602,6 +602,22 @@ impl Track {
         }
     }
 
+    /// A hand on an effect's switch - see [`crate::engine::fx::Chain::touch_enabled`].
+    #[inline]
+    pub fn touch_fx_enabled(&mut self, slot: FxSlot, on: bool) {
+        for chain in self.fx.iter_mut() {
+            chain.touch_enabled(slot, on);
+        }
+    }
+
+    /// A hand on a knob - see [`crate::engine::fx::Chain::touch_param`].
+    #[inline]
+    pub fn touch_fx_param(&mut self, param: FxParam) {
+        for chain in self.fx.iter_mut() {
+            chain.touch_param(param);
+        }
+    }
+
     #[inline]
     pub fn load_fx_preset(&mut self, preset: FxPreset) {
         for chain in self.fx.iter_mut() {

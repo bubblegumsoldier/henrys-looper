@@ -190,9 +190,10 @@ impl MidiAction {
                 Command::SetLayerGain { track, layer, gain }
             }
             MidiAction::FxBypass { track, on } => Command::SetFxBypass { track, on },
-            MidiAction::FxEnable { track, slot, on } => Command::SetFxEnabled { track, slot, on },
+            // A controller is a hand: switching on or turning a knob makes the effect heard.
+            MidiAction::FxEnable { track, slot, on } => Command::TouchFxEnabled { track, slot, on },
             MidiAction::FxPreset { track, preset } => Command::LoadFxPreset { track, preset },
-            MidiAction::FxParam { track, param } => Command::SetFxParam { track, param },
+            MidiAction::FxParam { track, param } => Command::TouchFxParam { track, param },
             _ => return None,
         })
     }

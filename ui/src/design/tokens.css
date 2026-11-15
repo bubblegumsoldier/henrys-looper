@@ -76,6 +76,12 @@
   --st-armed-soft: rgba(247, 208, 70, 0.14);
   --st-armed-line: rgba(247, 208, 70, 0.75);
 
+  /* Effekt an (eingebaute Kette): Power-Schalter, Kettenbuchstaben, Kachel. Kein Spurzustand. */
+  --fx-on: #7fd3ff;
+  --fx-on-text: #bfe8ff;
+  --fx-on-soft: rgba(127, 211, 255, 0.10);
+  --fx-on-line: rgba(127, 211, 255, 0.45);
+
   --st-empty: #4b525d;               /* Leer (Laufzeit) — gestrichelter Umriss                  */
   --st-ready: #2ed58c;               /* Bereit (Loop vorhanden, steht) — Dreieck als Umriss     */
 

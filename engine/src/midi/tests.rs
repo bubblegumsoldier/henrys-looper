@@ -501,11 +501,42 @@ fn an_event_becomes_the_right_command_with_the_right_target_and_value() {
     );
     assert_eq!(
         action.command(),
-        Some(Command::SetFxParam {
+        Some(Command::TouchFxParam {
             track: 1,
             param: FxParam::ReverbMix(1.0)
         })
     );
+}
+
+/// A learned knob is a hand: from "dry" - everything off, chain bypassed - turning the reverb
+/// knob makes the reverb heard, without a second press on its switch or on the bypass.
+#[test]
+fn a_learned_fx_knob_switches_its_effect_and_the_chain_in() {
+    use crate::engine::fx::{Chain, FxPreset, FxSlot};
+
+    let mut router = router_with(vec![(
+        "ch1.cc22",
+        Binding::new(Target::FxKnob(TrackRef::Index(1), FxKnob::ReverbSize))
+            .with_takeover(Takeover::Jump),
+    )]);
+    let layout = layout();
+    let ctx = Context::bare(&layout);
+    let command = router
+        .resolve(&cc(22, 100), &ctx)
+        .action()
+        .expect("eine Absicht")
+        .command()
+        .expect("ein Engine-Kommando");
+    let Command::TouchFxParam { track: 1, param } = command else {
+        panic!("kein Handgriff am Regler: {command:?}");
+    };
+    let mut chain = Chain::new(48_000);
+    chain.load_preset(FxPreset::Dry);
+    chain.touch_param(param);
+    assert!(chain.enabled(FxSlot::Reverb));
+    assert!(!chain.bypassed());
+    assert!(chain.settings().reverb_mix > 0.0, "an, aber unhoerbar");
+    assert_eq!(chain.preset(), FxPreset::Custom);
 }
 
 #[test]

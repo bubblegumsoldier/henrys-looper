@@ -110,6 +110,12 @@ const TAIL_SWITCH_MS: f32 = 80.0;
 const BYPASS_MS: f32 = 25.0;
 /// Safety margin added to the computed tail before a silent chain is allowed to go idle.
 const TAIL_MARGIN_MS: f32 = 500.0;
+/// The wet share a delay or reverb gets when a hand switches it on while its mix stands at 0 -
+/// as it does after "dry". Without it the effect would be on and still inaudible. Not a default:
+/// `ChainSettings::default()` keeps 0, because a saved `mixer:` section only writes what differs
+/// from its preset, and a changed default would change how every old song sounds.
+pub const DELAY_START_MIX: f32 = 0.2;
+pub const REVERB_START_MIX: f32 = 0.2;
 
 // ---------------------------------------------------------------------------------------------
 // Names
@@ -494,6 +500,36 @@ pub enum FxParam {
     ReverbMix(f32),
 }
 
+impl FxParam {
+    /// The effect this knob belongs to.
+    pub fn slot(self) -> FxSlot {
+        match self {
+            FxParam::HighPassHz(_) => FxSlot::HighPass,
+            FxParam::BandKind { .. }
+            | FxParam::BandHz { .. }
+            | FxParam::BandQ { .. }
+            | FxParam::BandGainDb { .. } => FxSlot::Eq,
+            FxParam::CompThresholdDb(_)
+            | FxParam::CompRatio(_)
+            | FxParam::CompAttackMs(_)
+            | FxParam::CompReleaseMs(_)
+            | FxParam::CompKneeDb(_)
+            | FxParam::CompMakeupDb(_) => FxSlot::Comp,
+            FxParam::DelayNote(_)
+            | FxParam::DelayFeedback(_)
+            | FxParam::DelayMix(_) => FxSlot::Delay,
+            FxParam::ReverbSize(_) | FxParam::ReverbDamping(_) | FxParam::ReverbMix(_) => {
+                FxSlot::Reverb
+            }
+        }
+    }
+
+    /// Whether this is the wet share of its effect - the one knob a start mix must not overrule.
+    fn is_mix(self) -> bool {
+        matches!(self, FxParam::DelayMix(_) | FxParam::ReverbMix(_))
+    }
+}
+
 /// What the chain of one track currently is, for the status snapshot. `Copy`, like everything
 /// that crosses the thread boundary.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -815,6 +851,53 @@ impl Chain {
             }
         }
         self.preset = FxPreset::Custom;
+    }
+
+    // ---- what a hand does --------------------------------------------------------------------
+    //
+    // `set_enabled` and `set_param` are exact: a score's `mixer:` section is replayed through
+    // them and must land on the state it describes, bypass and all. A hand is different - whoever
+    // switches an effect on or turns one of its knobs wants to hear it. These two are what the
+    // window, the MIDI controller and the terminal send.
+
+    /// A hand on an effect's switch. Switching on also takes the chain out of bypass and gives a
+    /// delay or reverb at mix 0 a start mix, so "on" is never silent. Switching off is exactly off.
+    pub fn touch_enabled(&mut self, slot: FxSlot, on: bool) {
+        if !on {
+            self.set_enabled(slot, false);
+            return;
+        }
+        self.engage(slot, true);
+    }
+
+    /// A hand on a knob: the knob moves, and its effect is switched on and the chain in, as by
+    /// [`Chain::touch_enabled`].
+    pub fn touch_param(&mut self, param: FxParam) {
+        self.set_param(param);
+        self.engage(param.slot(), !param.is_mix());
+    }
+
+    fn engage(&mut self, slot: FxSlot, start_mix: bool) {
+        if start_mix && !self.enabled(slot) {
+            match slot {
+                FxSlot::Delay if self.set.delay_mix == 0.0 => {
+                    self.delay.set_mix(DELAY_START_MIX);
+                    self.set.delay_mix = self.delay.mix();
+                }
+                FxSlot::Reverb if self.set.reverb_mix == 0.0 => {
+                    self.reverb.set_mix(REVERB_START_MIX);
+                    self.set.reverb_mix = self.reverb.mix();
+                }
+                _ => {}
+            }
+        }
+        // Both mark the chain as edited only if they change something: pressing "on" on an
+        // effect a preset already switched on leaves the preset's name standing.
+        self.set_enabled(slot, true);
+        if self.bypass {
+            self.set_bypass(false);
+            self.preset = FxPreset::Custom;
+        }
     }
 
     fn set_comp(&mut self, edit: impl FnOnce(&mut CompSettings)) {

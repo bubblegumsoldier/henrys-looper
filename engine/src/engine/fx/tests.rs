@@ -138,6 +138,69 @@ fn every_effect_can_be_switched_on_its_own() {
     assert_eq!(chain.preset(), FxPreset::Custom, "das war kein Preset mehr");
 }
 
+/// A hand on a knob of an effect that is off: the effect comes on and the chain in, so turning
+/// the reverb up from "dry" is heard - the exact `set_param` a score replays leaves both alone.
+#[test]
+fn touching_a_knob_switches_its_effect_and_the_chain_in() {
+    let mut chain = Chain::new(RATE);
+    chain.load_preset(FxPreset::Dry);
+    chain.set_param(FxParam::ReverbMix(0.4));
+    assert!(chain.bypassed() && !chain.enabled(FxSlot::Reverb), "exakt bleibt exakt");
+
+    let mut chain = Chain::new(RATE);
+    chain.load_preset(FxPreset::Dry);
+    chain.touch_param(FxParam::ReverbMix(0.4));
+    assert!(!chain.bypassed());
+    assert!(chain.enabled(FxSlot::Reverb));
+    assert_eq!(chain.settings().reverb_mix, 0.4, "der gedrehte Mix bleibt, wie er gedreht wurde");
+    for other in [FxSlot::HighPass, FxSlot::Eq, FxSlot::Comp, FxSlot::Delay] {
+        assert!(!chain.enabled(other), "{} wurde mitgeschaltet", other.label());
+    }
+    assert_eq!(chain.preset(), FxPreset::Custom);
+
+    // Every knob belongs to the effect it switches on.
+    for (param, slot) in [
+        (FxParam::HighPassHz(120.0), FxSlot::HighPass),
+        (FxParam::BandGainDb { band: 1, db: 3.0 }, FxSlot::Eq),
+        (FxParam::CompRatio(4.0), FxSlot::Comp),
+        (FxParam::DelayFeedback(0.4), FxSlot::Delay),
+        (FxParam::ReverbSize(0.7), FxSlot::Reverb),
+    ] {
+        let mut chain = Chain::new(RATE);
+        chain.touch_param(param);
+        assert!(chain.enabled(slot) && !chain.bypassed(), "{param:?}");
+    }
+}
+
+/// Switching delay or reverb on by hand from "dry", where their mix is 0, must be audible; a mix
+/// somebody set stays as it is, and switching off is plain off.
+#[test]
+fn switching_a_tail_effect_on_from_dry_is_audible() {
+    let mut chain = Chain::new(RATE);
+    chain.load_preset(FxPreset::Dry);
+    chain.touch_enabled(FxSlot::Reverb, true);
+    chain.touch_param(FxParam::DelayFeedback(0.5));
+    assert!(!chain.bypassed());
+    assert_eq!(chain.settings().reverb_mix, REVERB_START_MIX);
+    assert_eq!(chain.settings().delay_mix, DELAY_START_MIX);
+
+    chain.touch_enabled(FxSlot::Reverb, false);
+    assert!(!chain.enabled(FxSlot::Reverb));
+    assert!(!chain.bypassed(), "aus heisst nur aus, nicht Bypass");
+    assert_eq!(chain.settings().reverb_mix, REVERB_START_MIX, "der Mix bleibt fuers naechste Mal");
+
+    let mut chain = Chain::new(RATE);
+    chain.load_preset(FxPreset::Voice);
+    chain.touch_enabled(FxSlot::Delay, true);
+    assert_eq!(chain.settings().delay_mix, 0.22, "ein Preset-Mix wird nicht ueberschrieben");
+
+    // On on an effect that already is on changes nothing, the preset's name included.
+    let mut chain = Chain::new(RATE);
+    chain.load_preset(FxPreset::Voice);
+    chain.touch_enabled(FxSlot::Reverb, true);
+    assert_eq!(chain.preset(), FxPreset::Voice);
+}
+
 /// Switching an effect on while the music runs must not produce a step. The steepest a 220 Hz
 /// sine of amplitude 0.5 can move between two samples is 0.0144; anything much above that is a
 /// discontinuity, and a discontinuity is a click.

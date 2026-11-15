@@ -21,7 +21,7 @@ import { Icon } from "../shell/Icon";
 import { ENGINE_STATE_KIND, STATE_ICON, STATE_WORD, T, type StateKind } from "../shell/terms";
 import type { BusId, LooperStatus, LooperTrackStatus, TrackSourceId } from "../types";
 import { Fader, Knob, linear, type Curve } from "./controls";
-import { FX_LETTER, FX_NAME, FX_PRESETS, FX_SLOT_ORDER, presetLabel } from "./fxModel";
+import { FX_LETTER, FX_NAME, FX_PRESETS, FX_SLOT_ORDER, presetLabel, shownPreset } from "./fxModel";
 import { InsertSlots } from "./InsertSlots";
 import { InstrumentCaps, InstrumentSlot } from "./InstrumentSlot";
 import { Popover } from "./Popover";
@@ -157,7 +157,7 @@ function StripImpl({ track: t, selected, implicitMute, onSelect, actions }: Prop
         {!t.instrument && (
           <span className="caps">
             Inserts
-            {fx && <PresetMenu track={i} preset={fx.preset} actions={actions} />}
+            {fx && <PresetMenu track={i} preset={shownPreset(fx)} actions={actions} />}
           </span>
         )}
         {fx && (

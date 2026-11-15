@@ -1031,9 +1031,9 @@ impl Control {
         };
         let track = self.active;
         let on = !ts.fx.settings.enabled[slot.index()];
-        self.send(Command::SetFxEnabled { track, slot, on });
-        let hint = if ts.fx.bypass {
-            " (the whole chain is still bypassed - press f)"
+        self.send(Command::TouchFxEnabled { track, slot, on });
+        let hint = if on && ts.fx.bypass {
+            " (chain switched in)"
         } else {
             ""
         };
@@ -1069,7 +1069,7 @@ impl Control {
             return;
         };
         let track = self.active;
-        self.send(Command::SetFxParam {
+        self.send(Command::TouchFxParam {
             track,
             param: FxParam::DelayNote(note),
         });

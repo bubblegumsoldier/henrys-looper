@@ -3216,17 +3216,24 @@ impl Session {
                 Ok(())
             }
             Action::FxEnable { track, slot, on } => {
-                self.cmd.send(Command::SetFxEnabled { track, slot, on })?;
+                // A hand (window or MIDI): on also switches the chain in - see `TouchFxEnabled`.
+                self.cmd.send(Command::TouchFxEnabled { track, slot, on })?;
+                let bypassed = self
+                    .last
+                    .and_then(|(s, _)| s.tracks().get(track).map(|t| t.fx.bypass))
+                    .unwrap_or(false);
                 self.message = Some(format!(
-                    "\"{}\": {} {}.",
+                    "\"{}\": {} {}{}.",
                     self.tracks[track].name,
                     slot.label(),
-                    if on { "on" } else { "off" }
+                    if on { "on" } else { "off" },
+                    if on && bypassed { ", chain switched in" } else { "" }
                 ));
                 Ok(())
             }
             Action::FxParam { track, param } => {
-                self.cmd.send(Command::SetFxParam { track, param })?;
+                // Turning a knob of an effect that is off switches it (and the chain) on.
+                self.cmd.send(Command::TouchFxParam { track, param })?;
                 // No message: a knob being turned is not news, and a sentence per mouse move
                 // would make the status line flicker. The new value comes back in the status.
                 Ok(())

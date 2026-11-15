@@ -19,6 +19,7 @@ import {
   fxSlotAddress,
 } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
+import { T } from "../shell/terms";
 import { useStatusEffect, useStatusSlice } from "../status";
 import type { FxParamName, FxSlotName, FxStatus, LooperStatus } from "../types";
 import { HBar, Knob, linear, logarithmic, type Curve } from "./controls";
@@ -34,7 +35,9 @@ import {
   FX_PRESETS,
   FX_SHORT,
   FX_SLOT_ORDER,
+  fxOn,
   presetLabel,
+  shownPreset,
   type FxActions,
   type ParamSpec,
 } from "./fxModel";
@@ -129,6 +132,10 @@ export function CompReduction({ track, on }: { track: number; on: boolean }) {
   );
 }
 
+/**
+ * The power switch of one effect: lit when on, an outline when off. Switching on also switches a
+ * bypassed chain in (the host does that), so one press is always enough to hear it.
+ */
 function OnSwitch({ track, slot, on, actions }: { track: number; slot: FxSlotName; on: boolean; actions: FxActions }) {
   return (
     <button
@@ -136,10 +143,11 @@ function OnSwitch({ track, slot, on, actions }: { track: number; slot: FxSlotNam
       data-midi={fxSlotAddress(track, slot)}
       onClick={() => actions.fxEnable(track, slot, !on)}
       aria-pressed={on}
-      title={`${FX_NAME[slot]} ${on ? "on - click to switch off" : "off - click to switch on"}`}
+      aria-label={`${FX_NAME[slot]} ${on ? T.fxOn : T.fxOff}`}
+      title={`${FX_NAME[slot]} ${on ? "on - click to switch off" : "off - click to switch on (turning one of its knobs does that too)"}`}
     >
       <Icon name="power" />
-      {on ? "On" : "Off"}
+      {on ? T.fxOn : T.fxOff}
     </button>
   );
 }
@@ -154,7 +162,7 @@ export function FxEditor({ track, fx, actions }: Props) {
   const [sel, setSel] = useState<FxSlotName | "plugins">("eq");
   const [pick, setPick] = useState<EqPick>(0);
   const sampleRate = useStatusSlice((s) => s.sample_rate);
-  const on = (name: FxSlotName) => fx.effects.find((e) => e.name === name)?.on ?? false;
+  const on = (name: FxSlotName) => fxOn(fx, name);
   const band = typeof pick === "number" ? fx.bands[pick] : undefined;
 
   const choosePick = (p: EqPick) => {
@@ -185,6 +193,13 @@ export function FxEditor({ track, fx, actions }: Props) {
           </div>
         </div>
 
+        {fx.bypass && (
+          <button className="bypbanner" onClick={() => actions.fxBypass(track, false)} title={T.chainBypassedHint}>
+            <Icon name="power" />
+            {T.chainBypassed}
+          </button>
+        )}
+
         <div className={`chain${fx.bypass ? " byp" : ""}`} role="tablist" aria-label="Effects">
           {FX_SLOT_ORDER.map((name) => (
             <button
@@ -200,7 +215,10 @@ export function FxEditor({ track, fx, actions }: Props) {
               onDoubleClick={() => actions.fxEnable(track, name, !on(name))}
               title={`${FX_NAME[name]} (${on(name) ? "on" : "off"}). Click to edit, double-click to switch.`}
             >
-              <b>{FX_LETTER[name]}</b>
+              <b>
+                <i className="led" aria-hidden="true" />
+                {FX_LETTER[name]}
+              </b>
               {FX_SHORT[name]}
             </button>
           ))}
@@ -222,7 +240,7 @@ export function FxEditor({ track, fx, actions }: Props) {
         )}
 
         {sel !== "plugins" && (
-        <div className="fxsec">
+        <div className={`fxsec${on(sel) ? "" : " off"}`}>
           <div className="fxsec-h">
             <span className="caps">{sel === "eq" && band ? `EQ · band ${band.number}` : FX_NAME[sel]}</span>
             {sel === "eq" && (
@@ -334,7 +352,7 @@ export function FxEditor({ track, fx, actions }: Props) {
         <span className="caps">Compressor · Delay · Reverb</span>
         <CompReduction track={track} on={on("comp")} />
         <DelayNotes track={track} fx={fx} actions={actions} />
-        <div className="frow">
+        <div className={`frow${on("reverb") ? "" : " off"}`}>
           <label>Reverb mix</label>
           <div>
             <MixBar track={track} value={fx.reverb_mix} actions={actions} />
@@ -347,7 +365,7 @@ export function FxEditor({ track, fx, actions }: Props) {
 
 function DelayNotes({ track, fx, actions }: Props) {
   return (
-    <div className="frow">
+    <div className={`frow${fxOn(fx, "delay") ? "" : " off"}`}>
       <label>
         Delay <span className="dim num">{Math.round(fx.delay_ms)} ms</span>
       </label>
@@ -395,15 +413,16 @@ function MixBar({ track, value, actions }: { track: number; value: number; actio
 /** The preset as a drop-down, as in the mockup; every entry carries its MIDI address. */
 function PresetPicker({ track, fx, actions }: Props) {
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  const shown = shownPreset(fx);
   return (
     <>
       <button
         className="field sel presetfield"
         onClick={(e) => setAnchor(anchor ? null : e.currentTarget)}
         aria-expanded={anchor !== null}
-        title={fx.preset === "custom" ? "A knob was moved since the last preset" : "Load a ready-made chain"}
+        title={shown === "custom" ? "A knob was moved or an effect switched since the last preset" : "Load a ready-made chain"}
       >
-        {presetLabel(fx.preset)}
+        {presetLabel(shown)}
         <Icon name="chev-d" className="chev" />
       </button>
       {anchor && (
@@ -412,8 +431,8 @@ function PresetPicker({ track, fx, actions }: Props) {
             <button
               key={p.name}
               role="menuitemradio"
-              aria-checked={fx.preset === p.name}
-              className={fx.preset === p.name ? "on" : ""}
+              aria-checked={shown === p.name}
+              className={shown === p.name ? "on" : ""}
               data-midi={fxPresetAddress(track, p.name)}
               title={`${p.hint}. In Live: key V, then ${n + 1}.`}
               onClick={() => {

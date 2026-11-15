@@ -1252,6 +1252,10 @@ impl EngineCore {
                 self.tracks[track].set_fx_enabled(slot, on)
             }
             Command::SetFxParam { track, param } => self.tracks[track].set_fx_param(param),
+            Command::TouchFxEnabled { track, slot, on } => {
+                self.tracks[track].touch_fx_enabled(slot, on)
+            }
+            Command::TouchFxParam { track, param } => self.tracks[track].touch_fx_param(param),
             Command::LoadFxPreset { track, preset } => self.tracks[track].load_fx_preset(preset),
             // Two stores. The values are read once per block in `render`.
             Command::SetClickGain { gain } => {

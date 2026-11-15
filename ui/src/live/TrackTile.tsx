@@ -9,6 +9,7 @@ import { HMeter } from "./HMeter";
 import type { TrackActions } from "./TrackDetail";
 import { trackAddress } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
+import { FX_LETTER, FX_NAME, fxOnList } from "../mixer/fxModel";
 import {
   ENGINE_STATE_KIND,
   PENDING,
@@ -119,6 +120,7 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         <span>
           {track.instrument ? T.midiIn : `${T.input} ${track.input_channels.join("–")}`}
         </span>
+        <FxLetters track={track} />
         <span className="lay" title={`${track.layers.length} ${track.layers.length === 1 ? "layer" : "layers"}`}>
           {dots.map((d, n) => (
             <i key={n} className={d} />
@@ -257,6 +259,22 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         </button>
       </div>
     </article>
+  );
+}
+
+/** The built-in effects that are on, as their letters; struck through while the chain is bypassed. */
+function FxLetters({ track }: { track: LooperTrackStatus }) {
+  const on = track.fx ? fxOnList(track.fx) : [];
+  if (!track.fx || on.length === 0) return null;
+  const bypassed = track.fx.bypass;
+  const names = on.map((n) => FX_NAME[n]).join(", ");
+  return (
+    <span
+      className={`fxs${bypassed ? " byp" : ""}`}
+      title={bypassed ? `${T.fxBypassedShort}: ${names} · key I` : `Effects on: ${names} · key I`}
+    >
+      {on.map((n) => FX_LETTER[n]).join("")}
+    </span>
   );
 }
 

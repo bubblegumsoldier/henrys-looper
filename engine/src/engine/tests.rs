@@ -1771,6 +1771,41 @@ fn the_delay_time_comes_from_the_engine_timeline() {
     assert_eq!(status.tracks()[0].fx.delay_samples, 32_000);
 }
 
+/// The engine routes a hand's commands to the chain: from "dry", one turn of the reverb knob is
+/// enough to hear the reverb, and the status the mix persistence reads says so.
+#[test]
+fn touching_an_fx_knob_from_dry_switches_effect_and_chain_in() {
+    use super::fx::{FxParam, FxPreset, FxSlot};
+
+    let mut sim = Sim::new(spec_4_4(), silence());
+    sim.send(Command::LoadFxPreset {
+        track: 0,
+        preset: FxPreset::Dry,
+    });
+    sim.send(Command::TouchFxParam {
+        track: 0,
+        param: FxParam::ReverbSize(0.8),
+    });
+    sim.send(Command::TouchFxEnabled {
+        track: 0,
+        slot: FxSlot::Comp,
+        on: true,
+    });
+    sim.run_blocks(4);
+    let fx = sim.latest_status().expect("Status").tracks()[0].fx;
+    assert!(!fx.bypass);
+    assert_eq!(fx.letters(), "--C-R");
+    assert!(fx.settings.reverb_mix > 0.0);
+    assert_eq!(fx.preset, FxPreset::Custom);
+
+    // The panic switch stays a real bypass.
+    sim.send(Command::SetFxBypass { track: 0, on: true });
+    sim.run_blocks(4);
+    let fx = sim.latest_status().expect("Status").tracks()[0].fx;
+    assert!(fx.bypass);
+    assert_eq!(fx.letters(), "--C-R");
+}
+
 // -------------------------------------------------------------------------------------------
 // 13. Stereo: two channels in, two channels out, and nothing swapped on the way
 // -------------------------------------------------------------------------------------------
