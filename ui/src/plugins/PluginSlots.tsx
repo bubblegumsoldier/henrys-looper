@@ -205,7 +205,7 @@ function SlotRow({ slot: s, first, last, prevSlot, nextSlot, paramsOpen, toggleP
 /** A dragged slider would otherwise send a command per pixel. */
 const PARAM_THROTTLE_MS = 40;
 
-function ParamList({
+export function ParamList({
   target,
   slot,
   run,

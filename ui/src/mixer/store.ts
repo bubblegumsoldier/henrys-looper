@@ -4,6 +4,7 @@
 
 import { useSyncExternalStore } from "react";
 import { currentStatus } from "../status";
+import type { BusId } from "../types";
 
 export type MixerShow = "all" | "buses";
 
@@ -16,14 +17,17 @@ export interface MixerState {
   show: MixerShow;
   /** The channel the detail panel shows, 0-based. */
   selected: number;
+  /** A bus the panel shows instead of a channel (its inserts), or null. */
+  bus: BusId | null;
 }
 
 const KEY = "looper.mixer";
 export const MIN_HEIGHT = 300;
-export const DEFAULT_HEIGHT = 440;
+/** Room for the device column of a strip, its buses and a usable fader. */
+export const DEFAULT_HEIGHT = 480;
 
 function load(): MixerState {
-  const base: MixerState = { open: false, full: false, height: DEFAULT_HEIGHT, show: "all", selected: 0 };
+  const base: MixerState = { open: false, full: false, height: DEFAULT_HEIGHT, show: "all", selected: 0, bus: null };
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) ?? "null") as Partial<MixerState> | null;
     return saved ? { ...base, ...saved } : base;
@@ -61,7 +65,12 @@ export function useMixer(): MixerState {
 
 /** Select a channel - from a strip, from the arrangement, from anywhere. */
 export function selectChannel(track: number): void {
-  if (state.selected !== track) setMixer({ selected: track });
+  if (state.selected !== track || state.bus !== null) setMixer({ selected: track, bus: null });
+}
+
+/** Show a bus in the panel - from its strip. */
+export function selectBus(bus: BusId): void {
+  if (state.bus !== bus) setMixer({ bus });
 }
 
 /**

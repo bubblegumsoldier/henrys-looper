@@ -1,8 +1,9 @@
 //! One channel strip of the mixer, top to bottom as on a console:
 //!
 //! ```text
-//!  INSERTS   preset ▾    the built-in chain as letters (H E C D R, each a switch), chain bypass,
-//!            + Plugin    and the plugin slots
+//!  DEVICES preset ▾ ⏻  the device column in signal order, one narrow row each: [instrument],
+//!  ⏻ High-p. …         the five built-in effects, the plug-ins, "+" - a click on a name opens
+//!  ⏻ Plugin  +         that device in the channel panel (devices/CompactChain)
 //!  BUSES        Main Monitor   loop and monitored input, each to the room and the headphones;
 //!  Loop         [ ]  [ ]       the ear switches input monitoring itself on and off
 //!  Input        [ ]  [ ]
@@ -15,15 +16,15 @@
 //!
 //! A click on the strip's background selects the channel for the detail panel.
 
-import { memo, useState, type CSSProperties } from "react";
-import { fxAddress, fxPresetAddress, fxSlotAddress, sendAddress, trackAddress } from "../midi/addresses";
+import { memo, useMemo, useState, type CSSProperties } from "react";
+import { fxPresetAddress, sendAddress, trackAddress } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
 import { ENGINE_STATE_KIND, STATE_ICON, STATE_WORD, T, type StateKind } from "../shell/terms";
 import type { BusId, LooperStatus, LooperTrackStatus, TrackSourceId } from "../types";
 import { Fader, Knob, linear, type Curve } from "./controls";
-import { FX_LETTER, FX_NAME, FX_PRESETS, FX_SLOT_ORDER, presetLabel, shownPreset } from "./fxModel";
-import { InsertSlots } from "./InsertSlots";
-import { InstrumentCaps, InstrumentSlot } from "./InstrumentSlot";
+import { FX_PRESETS, presetLabel, shownPreset } from "./fxModel";
+import { CompactChain } from "../devices/CompactChain";
+import { trackOwner } from "../devices/model";
 import { Popover } from "./Popover";
 import { PeakHold, VMeter } from "./meters";
 import { MAX_TRACK_GAIN, SCALE_MARKS, faderText, gainToDb, gainToPos, panText, posToGain } from "./scale";
@@ -138,6 +139,10 @@ function StripImpl({ track: t, selected, implicitMute, onSelect, actions }: Prop
   const fx = t.fx;
   const gain = t.gain ?? 1;
   const stereo = t.channels === 2;
+  const chain = useMemo(
+    () => (fx ? { index: i, name: t.name, instrument: !!t.instrument, fx, actions } : undefined),
+    [fx, i, t.name, t.instrument, actions],
+  );
 
   return (
     <div
@@ -147,50 +152,12 @@ function StripImpl({ track: t, selected, implicitMute, onSelect, actions }: Prop
       aria-label={`Channel ${i + 1}: ${t.name}`}
     >
       <div className="zone">
-        {t.instrument && (
-          <>
-            <InstrumentCaps index={i} track={t.name} />
-            <InstrumentSlot track={t.name} />
-          </>
-        )}
-        {/* An instrument strip has no room for a second caption: its preset is in the inspector. */}
-        {!t.instrument && (
-          <span className="caps">
-            Inserts
-            {fx && <PresetMenu track={i} preset={shownPreset(fx)} actions={actions} />}
-          </span>
-        )}
-        {fx && (
-          <div className="fxrow">
-            <span className={`fxl${fx.bypass ? " byp" : ""}`}>
-              {FX_SLOT_ORDER.map((name) => {
-                const on = fx.effects.find((e) => e.name === name)?.on ?? false;
-                return (
-                  <button
-                    key={name}
-                    className={on ? "on" : ""}
-                    data-midi={fxSlotAddress(i, name)}
-                    onClick={() => actions.fxEnable(i, name, !on)}
-                    aria-pressed={on}
-                    title={`${FX_NAME[name]}: ${on ? "on" : "off"}`}
-                  >
-                    {on ? FX_LETTER[name] : "–"}
-                  </button>
-                );
-              })}
-            </span>
-            <button
-              className={`btn s sq ghost pw${fx.bypass ? "" : " on"}`}
-              data-midi={fxAddress(i, "bypass")}
-              onClick={() => actions.fxBypass(i, !fx.bypass)}
-              aria-pressed={!fx.bypass}
-              title={fx.bypass ? "Effect chain bypassed - passes bit for bit. Click to switch it in." : "Effect chain in. Click to bypass it."}
-            >
-              <Icon name="power" />
-            </button>
-          </div>
-        )}
-        <InsertSlots target={`track.${i + 1}`} rows={t.instrument ? 1 : 2} />
+        <CompactChain
+          owner={trackOwner(i)}
+          track={chain}
+          onSelect={() => onSelect(i)}
+          caption={fx && <PresetMenu track={i} preset={shownPreset(fx)} actions={actions} />}
+        />
       </div>
 
       <div className="zone">

@@ -2,7 +2,7 @@
 //! of the two output buses. Track slots live in each track's drawer.
 
 import { pluginApi } from "./api";
-import { PluginSlots } from "./PluginSlots";
+import { DeviceChain } from "../devices/DeviceChain";
 import { markScanning, setCatalog, setNotice, usePlugins } from "./store";
 import type { ScannedPlugin } from "./types";
 
@@ -104,10 +104,10 @@ export function PluginsPage() {
         </section>
       )}
       <section className="card">
-        <PluginSlots target="bus.main" title="Main bus" />
+        <DeviceChain owner="bus.main" size="dense" title="Main bus" />
       </section>
       <section className="card">
-        <PluginSlots target="bus.monitor" title="Monitor bus" />
+        <DeviceChain owner="bus.monitor" size="dense" title="Monitor bus" />
       </section>
     </>
   );

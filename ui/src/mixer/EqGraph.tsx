@@ -2,12 +2,16 @@
 //! formulas the engine filters with (`engine/src/engine/fx/biquad.rs`: RBJ cookbook, Butterworth
 //! high-pass, shelves with slope 1), evaluated on the unit circle at the engine's sample rate.
 //!
+//! One graph per device, never a shared one: `mode="eq"` draws the three bands with their handles
+//! (and the high-pass, when it is on, as a faint labelled line - it shapes what you hear, but it is
+//! not this device's to drag); `mode="hp"` draws the high-pass alone with its one handle.
+//!
 //! The handles are the controls: drag a band sideways for its frequency and up and down for its
 //! gain (Shift for fine), scroll on it for its Q, double-click to flatten it. The high-pass handle
 //! moves sideways only. Clicking a handle selects that band for the knobs below the graph.
 //!
-//! An effect that is off adds nothing to the curve - the line is what the channel sounds like -
-//! but its handles stay, dimmed, so it can be set up before it is switched in.
+//! The line is the device's own curve, also while the device is off (the graph is dimmed then), so
+//! it can be set up before it is heard - and dragging a handle switches the device on.
 
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { fxAddress, fxBandAddress } from "../midi/addresses";
@@ -88,12 +92,28 @@ function magDb([b0, b1, b2, a1, a2]: Coeffs, fs: number, hz: number): number {
   return 10 * Math.log10((nr * nr + ni * ni) / Math.max(1e-24, dr * dr + di * di));
 }
 
+/** Which filters a curve includes, and whether their switches (and the chain bypass) count. */
+export interface CurveParts {
+  hp: boolean;
+  eq: boolean;
+  /** True: what is heard - an effect that is off, or a bypassed chain, adds nothing. False: the
+   *  device's own shape, whatever its switch says. */
+  heard: boolean;
+}
+
+const ALL_HEARD: CurveParts = { hp: true, eq: true, heard: true };
+
 /** The curve of one chain, in dB at `n` log-spaced points. Exported for the tests. */
-export function responseDb(fx: FxStatus, fs: number, n = 140): { hz: number; db: number }[] {
-  const on = (name: string) => !fx.bypass && (fx.effects.find((e) => e.name === name)?.on ?? false);
+export function responseDb(
+  fx: Pick<FxStatus, "bypass" | "effects" | "high_pass_hz" | "bands">,
+  fs: number,
+  n = 140,
+  parts: CurveParts = ALL_HEARD,
+): { hz: number; db: number }[] {
+  const on = (name: string) => !parts.heard || (!fx.bypass && (fx.effects.find((e) => e.name === name)?.on ?? false));
   const filters: Coeffs[] = [];
-  if (on("high_pass")) filters.push(highPass(fs, fx.high_pass_hz));
-  if (on("eq")) for (const b of fx.bands) if (b.gain_db !== 0) filters.push(band(fs, b.kind, b.hz, b.q, b.gain_db));
+  if (parts.hp && on("high_pass")) filters.push(highPass(fs, fx.high_pass_hz));
+  if (parts.eq && on("eq")) for (const b of fx.bands) if (b.gain_db !== 0) filters.push(band(fs, b.kind, b.hz, b.q, b.gain_db));
   const out: { hz: number; db: number }[] = [];
   for (let i = 0; i <= n; i += 1) {
     const hz = hzOf((i / n) * W);
@@ -107,11 +127,19 @@ export function responseDb(fx: FxStatus, fs: number, n = 140): { hz: number; db:
 /** Which handle is selected: the high-pass, or band 0..2. */
 export type EqPick = "hp" | number;
 
+/** The curve as an SVG path in a `w` × `h` box - also the mini curve of a device row. */
+export function curvePath(curve: { hz: number; db: number }[], w = W, h = H, dbView = DB_VIEW): string {
+  const y = (db: number) => h / 2 - (Math.max(-dbView, Math.min(dbView, db)) / dbView) * (h / 2 - 1);
+  return curve.map((p, i) => `${i ? "L" : "M"}${((xOf(p.hz) / W) * w).toFixed(1)} ${y(p.db).toFixed(1)}`).join(" ");
+}
+
 interface Props {
   track: number;
   fx: FxStatus;
   sampleRate: number;
   actions: FxActions;
+  /** Which device this graph belongs to. */
+  mode: "eq" | "hp";
   pick: EqPick;
   onPick: (p: EqPick) => void;
 }
@@ -121,7 +149,7 @@ interface Override {
   bands: Record<number, { hz?: number; gain?: number; q?: number }>;
 }
 
-export function EqGraph({ track, fx, sampleRate, actions, pick, onPick }: Props) {
+export function EqGraph({ track, fx, sampleRate, actions, mode, pick, onPick }: Props) {
   const fs = sampleRate > 0 ? sampleRate : 48000;
   const svg = useRef<SVGSVGElement | null>(null);
   // While a handle is held, the graph follows the hand; the engine is told at most every 60 ms.
@@ -152,10 +180,14 @@ export function EqGraph({ track, fx, sampleRate, actions, pick, onPick }: Props)
       return o ? { ...b, hz: o.hz ?? b.hz, gain_db: o.gain ?? b.gain_db, q: o.q ?? b.q } : b;
     }),
   };
-  const curve = responseDb(shown, fs);
-  const path = curve.map((p, i) => `${i ? "L" : "M"}${xOf(p.hz).toFixed(1)} ${yOf(p.db).toFixed(1)}`).join(" ");
   const eqOn = fx.effects.find((e) => e.name === "eq")?.on ?? false;
   const hpOn = fx.effects.find((e) => e.name === "high_pass")?.on ?? false;
+  const own = mode === "eq" ? eqOn : hpOn;
+  const curve = responseDb(shown, fs, 140, { hp: mode === "hp", eq: mode === "eq", heard: false });
+  const path = curve.map((p, i) => `${i ? "L" : "M"}${xOf(p.hz).toFixed(1)} ${yOf(p.db).toFixed(1)}`).join(" ");
+  // The other filter that shapes the same spectrum, faint: the high-pass under the EQ, if it is on.
+  const ghost = mode === "eq" && hpOn && !fx.bypass ? responseDb(shown, fs, 100, { hp: true, eq: false, heard: false }) : null;
+  const ghostPath = ghost?.map((p, i) => `${i ? "L" : "M"}${xOf(p.hz).toFixed(1)} ${yOf(p.db).toFixed(1)}`).join(" ");
   const hpDb = curve.reduce((best, p) => (Math.abs(p.hz - shown.high_pass_hz) < Math.abs(best.hz - shown.high_pass_hz) ? p : best), curve[0]);
 
   const toLocal = (e: { clientX: number; clientY: number }) => {
@@ -236,8 +268,8 @@ export function EqGraph({ track, fx, sampleRate, actions, pick, onPick }: Props)
   const gridF = [50, 100, 200, 500, 1000, 2000, 5000, 10000];
 
   return (
-    <div className={`eqgraph${fx.bypass ? " byp" : ""}`}>
-      <svg ref={svg} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-label="EQ curve">
+    <div className={`eqgraph ${mode}${fx.bypass || !own ? " byp" : ""}`}>
+      <svg ref={svg} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-label={mode === "eq" ? "EQ curve" : "High-pass curve"}>
         <g className="grid">
           {[-12, -6, 6, 12].map((db) => (
             <line key={db} x1={0} x2={W} y1={yOf(db)} y2={yOf(db)} />
@@ -247,6 +279,7 @@ export function EqGraph({ track, fx, sampleRate, actions, pick, onPick }: Props)
             <line key={f} x1={xOf(f)} x2={xOf(f)} y1={0} y2={H} />
           ))}
         </g>
+        {ghostPath && <path className="ghost" d={ghostPath} />}
         <path className="fill" d={`${path} L${W} ${H} L0 ${H} Z`} />
         <path className="line" d={path} />
         <g className="lbl">
@@ -259,10 +292,16 @@ export function EqGraph({ track, fx, sampleRate, actions, pick, onPick }: Props)
           <text x={xOf(10000) + 3} y={H - 4}>
             10k
           </text>
+          {ghost && (
+            <text className="ghostlbl" x={xOf(shown.high_pass_hz) + 4} y={12}>
+              High-pass
+            </text>
+          )}
         </g>
       </svg>
       {/* Handles in HTML over the SVG: a stretched SVG would draw them as ellipses. */}
       <div className="handles">
+        {mode === "hp" && (
         <Handle
           x={xOf(shown.high_pass_hz)}
           y={yOf(hpDb?.db ?? 0)}
@@ -277,7 +316,8 @@ export function EqGraph({ track, fx, sampleRate, actions, pick, onPick }: Props)
           up={up}
           reset={() => actions.fxSet(track, "high_pass_hz", 80)}
         />
-        {shown.bands.map((b) => (
+        )}
+        {mode === "eq" && shown.bands.map((b) => (
           <Handle
             key={b.index}
             x={xOf(b.hz)}

@@ -9,7 +9,9 @@ import { T } from "../shell/terms";
 import type { BusId, LooperStatus } from "../types";
 import { busActions } from "./actions";
 import { DragNumber, Fader, linear } from "./controls";
-import { InsertSlots } from "./InsertSlots";
+import { CompactChain } from "../devices/CompactChain";
+import { busOwner } from "../devices/model";
+import { selectBus } from "./store";
 import { Popover } from "./Popover";
 import { PeakHold, VMeter } from "./meters";
 import { MAX_BUS_GAIN, faderText, gainToDb } from "./scale";
@@ -86,15 +88,14 @@ function OutputPick({ bus, g }: { bus: BusView; g: BusGlobals }) {
   );
 }
 
-function BusStripImpl({ bus, g }: { bus: BusView; g: BusGlobals }) {
+function BusStripImpl({ bus, g, selected }: { bus: BusView; g: BusGlobals; selected: boolean }) {
   const index = bus.id === "main" ? 0 : 1;
   const pick = (s: LooperStatus) => s.buses[index]?.peaks ?? [0, 0];
   const name = bus.id === "main" ? `${T.main} · Room` : `${T.monitorBus} · Phones`;
   return (
-    <div className="strip bus" aria-label={`${bus.id === "main" ? T.main : T.monitorBus} bus`}>
+    <div className={`strip bus${selected ? " sel" : ""}`} onPointerDown={() => selectBus(bus.id)} aria-label={`${bus.id === "main" ? T.main : T.monitorBus} bus`}>
       <div className="zone">
-        <span className="caps">Inserts</span>
-        <InsertSlots target={`bus.${bus.id}`} rows={2} />
+        <CompactChain owner={busOwner(bus.id)} onSelect={() => selectBus(bus.id)} />
       </div>
       <div className="zone">
         <span className="caps">Output</span>

@@ -145,6 +145,17 @@ export const T = {
     "Nothing of the chain is heard: the track passes bit for bit. Click to switch the chain in - turning any knob or switching an effect on does that too.",
   /** Tile caption when the chain is bypassed although effects are on. */
   fxBypassedShort: "FX bypassed",
+  devices: "Devices",
+  builtIn: "Built-in",
+  plugIns: "Plug-ins",
+  addPlugin: "Add plugin",
+  chainOn: "Chain on",
+  chainBypassedShort: "Bypassed",
+  openEditor: "Open editor",
+  closeEditor: "Close editor",
+  removeDevice: "Remove",
+  changeDevice: "Change…",
+  plugUnsupported: "Plugins are available on macOS only for now.",
 } as const;
 
 /** The word for a score target state. */

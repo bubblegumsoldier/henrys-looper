@@ -1,7 +1,7 @@
 //! The detail panel of the selected channel, right of the arrangement while the mixer is open
-//! (design/arrangement-mixer.html, `aside.insp`): its effect chain with every parameter, its layers,
-//! and its input side - level, latency and trim. Together with the strip this is everything the
-//! old track card and the Live drawer could do.
+//! (design/arrangement-mixer.html, `aside.insp`): its device column (`devices/DeviceChain`, the same
+//! one the Live view's track detail shows), its layers, and its input side - level, latency and
+//! trim. With a bus selected (its strip was clicked) it shows that bus's inserts instead.
 
 import { useCallback, useMemo, type CSSProperties } from "react";
 import { trackAddress } from "../midi/addresses";
@@ -12,12 +12,13 @@ import { currentStatus, structureSignature, useStatusSlice } from "../status";
 import type { LooperStatus } from "../types";
 import { channelActions } from "./actions";
 import { LatencyRows, LayerList } from "./ChannelParts";
-import { FxEditor } from "./FxEditor";
+import { DeviceChain } from "../devices/DeviceChain";
+import { busOwner, trackOwner } from "../devices/model";
 import { stripKind, trackColor } from "./Strip";
 import { useMixer } from "./store";
 
 export function ChannelPanel() {
-  const { selected } = useMixer();
+  const { selected, bus } = useMixer();
   const signature = useStatusSlice(structureSignature);
   const defaultLatency = useStatusSlice((s) => s.latency_frames);
   const sampleRate = useStatusSlice((s) => s.sample_rate);
@@ -25,6 +26,32 @@ export function ChannelPanel() {
   const track = useMemo(() => currentStatus().tracks[selected] ?? currentStatus().tracks[0], [signature, selected]);
   const i = track?.index ?? 0;
   const inPeaks = useCallback((s: LooperStatus) => s.tracks[i]?.input_peaks ?? [0], [i]);
+
+  const chain = useMemo(
+    () => (track?.fx ? { index: i, name: track.name, instrument: !!track.instrument, fx: track.fx, actions: channelActions } : undefined),
+    [track, i],
+  );
+
+  if (bus) {
+    const name = bus === "main" ? `${T.main} · Room` : `${T.monitorBus} · Phones`;
+    return (
+      <aside className="insp chan" aria-label={`${name} bus`}>
+        <div className="insp-h">
+          <div className="kicker">
+            <span className="caps">Bus · {T.plugIns}</span>
+          </div>
+          <h2>
+            <Icon name={bus === "main" ? "speaker" : "phones"} />
+            {name}
+          </h2>
+          <div className="sub">Inserts where the bus leaves the machine, before its volume.</div>
+        </div>
+        <div className="chan-body">
+          <DeviceChain owner={busOwner(bus)} size="dense" title={bus === "main" ? T.main : T.monitorBus} />
+        </div>
+      </aside>
+    );
+  }
 
   if (!track) {
     return (
@@ -46,7 +73,7 @@ export function ChannelPanel() {
     <aside className="insp chan" style={{ "--c": trackColor(i) } as CSSProperties} aria-label={`Channel ${i + 1}: ${track.name}`}>
       <div className="insp-h">
         <div className="kicker">
-          <span className="caps">Channel {i + 1} · Effect chain</span>
+          <span className="caps">Channel {i + 1} · {T.devices}</span>
           <span className={`st ${kind}`}>
             <Icon name={STATE_ICON[kind]} />
             {STATE_WORD[kind]}
@@ -64,7 +91,7 @@ export function ChannelPanel() {
       </div>
 
       <div className="chan-body">
-        {track.fx && <FxEditor track={i} fx={track.fx} actions={channelActions} />}
+        <DeviceChain owner={trackOwner(i)} track={chain} size="dense" />
 
         <LayerList track={track} actions={channelActions} />
 

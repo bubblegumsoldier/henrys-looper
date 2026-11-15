@@ -123,6 +123,10 @@ async function runStep(step: Step): Promise<void> {
     case "midiProfile":
       setMidiView(await midiApi.profile(step.action as MidiProfileAction));
       return;
+    case "scroll":
+      // Bring an element into view inside its scrolling panel: {"do": "scroll", "sel": ".dev", "index": 5}
+      document.querySelectorAll<HTMLElement>(String(step.sel))[Number(step.index ?? 0)]?.scrollIntoView({ block: "start" });
+      return;
     case "clickSel":
       // A click on the first element matching a CSS selector (a row, a button).
       document.querySelector<HTMLElement>(String(step.sel))?.click();

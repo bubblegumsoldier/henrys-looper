@@ -1,0 +1,114 @@
+/* The device column (DeviceChain) and its compact form on a mixer strip (CompactChain).
+   Colours: --fx-on for a device that is on, --warn for a bypassed chain, --accent only for the
+   drop target while dragging (a selection), never for a state. */
+
+/* --- the column -------------------------------------------------------------------------------- */
+.devchain { --row-h: 30px; --dev-fs: var(--fs-12); display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line-1); }
+.devchain.stage { --row-h: 44px; --dev-fs: 15px; }
+.dev-head { display: flex; flex-direction: column; gap: 6px; }
+.dev-head-ctl { display: flex; gap: 6px; align-items: center; }
+.dev-head-ctl .presetfield { flex: 1; min-width: 0; gap: 6px; justify-content: flex-start; }
+.dev-head-ctl .presetfield .chev { margin-left: auto; }
+.devchain.stage .dev-head-ctl .presetfield, .devchain.stage .dev-head-ctl .btn { height: 34px; font-size: var(--fs-13, 13px); }
+.btn.chainsw { gap: 5px; flex: none; min-width: 96px; justify-content: center; font-weight: var(--fw-semibold); }
+.btn.chainsw.on { color: var(--tx-inv); background: var(--fx-on); border-color: transparent; }
+.btn.chainsw.out { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); border: 1px dashed color-mix(in srgb, var(--warn) 65%, transparent); }
+
+.bypbanner { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; min-height: 26px; padding: 3px 8px; border-radius: 4px; font-size: var(--fs-11); font-weight: var(--fw-semibold); color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); border: 1px dashed color-mix(in srgb, var(--warn) 60%, transparent); cursor: pointer; }
+.bypbanner:hover { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--tx-1); }
+.bypbanner .ic { --ic: 12px; }
+.devchain.stage .bypbanner { min-height: 36px; font-size: var(--fs-12); }
+
+.devlist { display: flex; flex-direction: column; gap: 3px; }
+.dev-sep { display: flex; align-items: center; gap: 8px; margin: 4px 0 1px; font-size: 9px; font-weight: var(--fw-semibold); letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--tx-4); }
+.dev-sep::after { content: ""; flex: 1; height: 1px; background: var(--line-2); }
+.dev-sep:first-child { margin-top: 0; }
+
+.dvc { border: 1px solid var(--line-2); border-radius: 6px; background: var(--bg-2); min-width: 0; }
+.dvc.on { box-shadow: inset 3px 0 0 var(--fx-on); }
+.dvc.held { box-shadow: inset 3px 0 0 var(--fx-on-line); }
+.dvc.err { border-color: rgba(255, 92, 108, .5); }
+.dvc.open { border-color: var(--line-3); background: var(--bg-1); }
+.dvc.dropover { box-shadow: 0 -2px 0 var(--accent); }
+.dev-h { display: flex; align-items: center; height: var(--row-h); min-width: 0; }
+.dvc .pwr { width: var(--row-h); height: var(--row-h); flex: none; display: grid; place-items: center; color: var(--tx-4); border-right: 1px solid var(--line-1); border-radius: 6px 0 0 6px; }
+.dvc .pwr .ic { --ic: 14px; }
+.devchain.stage .dvc .pwr .ic { --ic: 18px; }
+.dvc .pwr:not(.lead):hover { color: var(--fx-on); background: var(--fx-on-soft); }
+.dvc .pwr.on { color: var(--fx-on); }
+.dvc.held .pwr.on { color: var(--fx-on-line); }
+.dvc .pwr.lead .nled { width: 8px; height: 8px; border-radius: 50%; background: var(--tx-4); transition: background .08s, box-shadow .08s; }
+.dvc .pwr.lead .nled.lit { background: var(--st-play); box-shadow: 0 0 5px var(--st-play); }
+.dev-main { flex: 1; min-width: 0; height: 100%; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 10px; text-align: left; font-size: var(--dev-fs); color: var(--tx-1); }
+.dev-main:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
+.dev-n { font-weight: var(--fw-semibold); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.dev-s { margin-left: auto; display: flex; align-items: center; gap: 6px; color: var(--tx-3); font-size: var(--fs-11); font-variant-numeric: var(--num); white-space: nowrap; overflow: hidden; flex: none; max-width: 60%; }
+.devchain.stage .dev-s { font-size: var(--fs-12); }
+.dvc.off .dev-n, .dvc.off .dev-s { color: var(--tx-4); }
+.dvc.off .dev-n { font-weight: var(--fw-medium); }
+.dev-chev { --ic: 11px; color: var(--tx-4); flex: none; }
+.dev-grip { display: grid; place-items: center; width: 22px; height: 100%; color: var(--tx-4); cursor: grab; flex: none; }
+.dev-grip .ic { --ic: 12px; }
+.dvc[draggable="true"]:active { cursor: grabbing; }
+
+.minicurve { flex: none; overflow: visible; }
+.minicurve line { stroke: var(--line-3); stroke-width: 1; }
+.minicurve path { fill: none; stroke: var(--fx-on); stroke-width: 1.4; }
+.dvc.off .minicurve path, .dvc.held .minicurve path { stroke: var(--tx-4); }
+.gr.mini { width: 34px; flex: none; }
+.gr.mini .bar { height: 4px; }
+
+.dev-b { padding: 10px 12px 12px; border-top: 1px solid var(--line-1); display: flex; flex-direction: column; gap: 10px; }
+/* A device that is off: its controls dimmed, but every one of them still works - turning one
+   switches the device on. */
+.dvc.off .dev-b > :not(.dev-acts):not(.plg-error) { opacity: .55; transition: opacity .12s; }
+.dvc.off .dev-b > :hover { opacity: .9; }
+.dev-sub { display: flex; align-items: center; gap: 8px; }
+.dev-sub .seg { flex: 1; --ctl-h: 24px; }
+.dev-sub .seg > * { flex: 1; font-size: var(--fs-11); }
+.dev-b .seg.kinds { width: 100%; --ctl-h: 24px; }
+.dev-b .seg.kinds > * { flex: 1; font-size: var(--fs-11); }
+.dev-b .kn-row { grid-template-columns: repeat(4, 1fr); }
+.dev-b .kn-row.three { grid-template-columns: repeat(3, 1fr); row-gap: 10px; }
+.dev-acts { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.dev-acts .grow { flex: 1; }
+.dev-hint { color: var(--tx-3); font-size: var(--fs-11); padding: 2px 2px; }
+.dev-add { display: flex; align-items: center; justify-content: center; gap: 6px; height: var(--row-h); border: 1px dashed var(--line-3); border-radius: 6px; color: var(--tx-3); font-size: var(--dev-fs); }
+.dev-add:not(:disabled):hover { color: var(--tx-1); border-color: var(--line-4); background: var(--bg-2); }
+.dev-add:disabled { opacity: .5; cursor: default; }
+.devchain.stage .kn-row { gap: 10px; }
+
+/* EQ graph inside a device: its own curve, dimmed while the device is off */
+.dvc .eqgraph.byp svg { opacity: .7; }
+.eqgraph .ghost { fill: none; stroke: var(--tx-3); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.eqgraph .lbl text.ghostlbl { fill: var(--tx-3); }
+.eqgraph.hp { height: 80px; }
+
+/* --- the compact column of a mixer strip ----------------------------------------------------- */
+.cchain { display: flex; flex-direction: column; gap: 2px; min-height: 0; height: 100%; }
+.cchain > .caps { display: flex; align-items: center; gap: 4px; }
+.cchain > .caps .presetbtn { margin-left: auto; }
+.cchain .cpw { width: 14px; height: 14px; display: grid; place-items: center; color: var(--tx-4); border-radius: 3px; flex: none; }
+.cchain > .caps:not(:has(.presetbtn)) .cpw { margin-left: auto; }
+.cchain .cpw .ic { --ic: 10px; }
+.cchain .cpw.on { color: var(--fx-on); }
+.cchain .cpw.out { color: var(--warn); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--warn) 60%, transparent); }
+.crows { display: flex; flex-direction: column; gap: 1px; overflow-y: auto; min-height: 0; flex: 1; scrollbar-width: none; }
+.crow { display: flex; align-items: center; gap: 4px; height: 14px; flex: none; padding: 0 4px 0 3px; border-radius: 3px; background: var(--bg-3); font-size: 9.5px; color: var(--tx-4); }
+.crow.on { color: var(--tx-1); background: var(--fx-on-soft); }
+.crow.held { color: var(--tx-3); }
+.crow.err { color: var(--err); background: rgba(255, 92, 108, .08); }
+.crow .cled { width: 9px; height: 9px; flex: none; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--tx-4); padding: 0; transform: scale(.75); }
+.crow.on .cled { background: var(--fx-on); box-shadow: 0 0 4px var(--fx-on); }
+.crow.held .cled { box-shadow: inset 0 0 0 1.5px var(--fx-on-line); }
+.crow .cled:hover { box-shadow: inset 0 0 0 1px var(--tx-1); }
+.crow .cn { flex: 1; min-width: 0; height: 100%; text-align: left; color: inherit; font: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.crow .cn:hover { color: var(--tx-1); }
+.crow.inst .nled { width: 6px; height: 6px; margin: 0 1px; flex: none; border-radius: 50%; background: var(--tx-4); }
+.crow.inst .nled.lit { background: var(--st-play); box-shadow: 0 0 4px var(--st-play); }
+.crow.na { justify-content: center; }
+.csep { display: block; height: 1px; background: var(--line-2); margin: 2px 1px; flex: none; }
+.cadd { height: 14px; flex: none; display: grid; place-items: center; border: 1px dashed var(--line-2); border-radius: 3px; color: var(--tx-4); }
+.cadd .ic { --ic: 9px; }
+.cadd:not(:disabled):hover { color: var(--tx-1); border-color: var(--line-4); }
+.cadd:disabled { opacity: .4; }

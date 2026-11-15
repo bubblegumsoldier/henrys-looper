@@ -4,10 +4,10 @@
 //! key `I` for the selected track.
 //!
 //! The same controls live in the Arrangement mode's mixer and its channel panel; this drawer is
-//! built from the same pieces (`mixer/FxEditor`, `mixer/ChannelParts`, `mixer/controls`), so a
+//! built from the same pieces (`devices/DeviceChain`, `mixer/ChannelParts`, `mixer/controls`), so a
 //! control looks, behaves and is addressed by MIDI the same way in both modes.
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { HMeter } from "./HMeter";
 import { sendAddress, trackAddress } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
@@ -15,7 +15,8 @@ import { T, num } from "../shell/terms";
 import type { BusId, LooperStatus, LooperTrackStatus, TrackSourceId } from "../types";
 import type { ChannelActions } from "../mixer/actions";
 import { Knob, linear } from "../mixer/controls";
-import { FxEditor } from "../mixer/FxEditor";
+import { DeviceChain } from "../devices/DeviceChain";
+import { trackOwner } from "../devices/model";
 import { LatencyRows, LayerList } from "../mixer/ChannelParts";
 import { FADER_CURVE } from "../mixer/Strip";
 import { MAX_TRACK_GAIN, faderText, panText } from "../mixer/scale";
@@ -137,6 +138,10 @@ interface Props {
 export function TrackDetail({ track, color, actions, defaultLatency, onClose }: Props) {
   const i = track.index;
   const empty = track.state === "empty";
+  const chain = useMemo(
+    () => (track.fx ? { index: i, name: track.name, instrument: !!track.instrument, fx: track.fx, actions } : undefined),
+    [track.fx, i, track.name, track.instrument, actions],
+  );
   const inPeaks = useCallback((s: LooperStatus) => s.tracks[i]?.input_peaks ?? [0], [i]);
   const outPeaks = useCallback((s: LooperStatus) => s.tracks[i]?.strip_peaks ?? s.tracks[i]?.output_peaks ?? [0, 0], [i]);
 
@@ -192,11 +197,9 @@ export function TrackDetail({ track, color, actions, defaultLatency, onClose }: 
           <SendRow track={i} status={track} actions={actions} />
         </section>
 
-        {track.fx && (
-          <section className="insp-s drawer-fx">
-            <FxEditor track={i} fx={track.fx} actions={actions} />
-          </section>
-        )}
+        <section className="insp-s drawer-fx">
+          <DeviceChain owner={trackOwner(i)} track={chain} size="stage" />
+        </section>
 
         <section className="insp-s drawer-fx">
           <LayerList track={track} actions={actions} />

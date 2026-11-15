@@ -11,7 +11,7 @@ import { useEngine } from "../shell/engine";
 import { channelActions } from "./actions";
 import { BusStrip, busSignature, type BusGlobals, type BusView } from "./BusStrip";
 import { Strip } from "./Strip";
-import { MIN_HEIGHT, selectChannel, setMixer, useMixer } from "./store";
+import { DEFAULT_HEIGHT, MIN_HEIGHT, selectChannel, setMixer, useMixer } from "./store";
 
 export function Mixer() {
   const m = useMixer();
@@ -84,7 +84,7 @@ export function Mixer() {
           onPointerDown={startResize}
           onPointerMove={moveResize}
           onPointerUp={endResize}
-          onDoubleClick={() => setMixer({ height: 440 })}
+          onDoubleClick={() => setMixer({ height: DEFAULT_HEIGHT })}
           title="Drag to resize the mixer · double-click for the default height"
           role="separator"
           aria-orientation="horizontal"
@@ -140,7 +140,7 @@ export function Mixer() {
               <Strip
                 key={t.index}
                 track={t}
-                selected={t.index === m.selected}
+                selected={t.index === m.selected && m.bus === null}
                 implicitMute={anySolo && !t.soloed}
                 onSelect={onSelect}
                 actions={channelActions}
@@ -148,7 +148,7 @@ export function Mixer() {
             ))}
           {showTracks && <div className="strip-gap" />}
           {buses.map((b) => (
-            <BusStrip key={b.id} bus={b} g={globals} />
+            <BusStrip key={b.id} bus={b} g={globals} selected={m.bus === b.id} />
           ))}
           {showTracks && tracks.length < 8 && (
             <div className="strip ghoststrip" title="Tracks are set up in Setup → Tracks; a new track restarts the engine.">
