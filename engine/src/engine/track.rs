@@ -1262,6 +1262,19 @@ impl Track {
         self.grid.take = None;
     }
 
+    /// A MIDI take covers time rather than samples: the engine tells a loop-defining one how far the
+    /// musical position has come, which is what bounds its loop length when it closes.
+    pub fn advance_filled(&mut self, pos: u64) {
+        let capacity = self.take_capacity();
+        if let Some(take) = self.grid.take
+            && take.defines_loop
+            && pos >= self.grid.origin
+        {
+            let covered = (pos - self.grid.origin).min(capacity);
+            self.grid.filled = self.grid.filled.max(covered);
+        }
+    }
+
     /// Whether this track's takes store notes instead of sound - a MIDI loop.
     #[inline(always)]
     pub fn midi_loop(&self) -> bool {

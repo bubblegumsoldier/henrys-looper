@@ -24,6 +24,7 @@ use super::bus::{
     BUS_CHANNELS, BUS_COUNT, BUS_SAMPLES, Bus, BusRouting, BusSend, place_buses,
 };
 use super::frame::{Channels, Frame, TrackInput};
+use super::midiloop::{CLIP_EVENTS, ClipPool, clip_channel, frames_per_tick};
 use super::process::{EngineConfig, EngineCore, loop_capacity, spare_slots_for};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{MAX_LAYERS, Track, TrackLatency};
@@ -226,6 +227,9 @@ pub struct Sim {
     /// Output latency of the simulated device in frames, when the simulation hands the engine a
     /// host clock (`super::source`). Host time is simply `position / rate`.
     clock: Option<u64>,
+    /// The control thread's clip pool, once [`Sim::with_clips`] attached the MIDI-loop stage.
+    pub clips: Option<ClipPool>,
+    timeline: Timeline,
 }
 
 impl Sim {
@@ -305,7 +309,17 @@ impl Sim {
             dev_frame: vec![0.0; output_channels],
             clock: None,
             rate: spec.sample_rate,
+            clips: None,
+            timeline,
         }
+    }
+
+    /// Attach the MIDI-loop stage and service its pool before every block, as the host does.
+    pub fn with_clips(&mut self) {
+        let (mut pool, endpoint) = clip_channel(CLIP_EVENTS);
+        pool.service(|_| 0, frames_per_tick(&self.timeline));
+        self.core.attach_clips(endpoint);
+        self.clips = Some(pool);
     }
 
     /// From now on hand the engine a host clock before every block, with an output latency of
@@ -393,6 +407,13 @@ impl Sim {
             self.last_status = Some(s);
         }
         self.pool.service(self.last_status.as_ref());
+        if let Some(clips) = self.clips.as_mut() {
+            let status = self.last_status;
+            clips.service(
+                |t| status.map_or(0, |s| s.tracks[t].loop_len),
+                frames_per_tick(&self.timeline),
+            );
+        }
 
         let ch = self.input_channels;
         for j in 0..self.block {

@@ -71,3 +71,5 @@ mod transport_tests;
 mod source_tests;
 #[cfg(test)]
 mod latch_tests;
+#[cfg(test)]
+mod midi_tests;

@@ -280,12 +280,12 @@ impl MidiClip {
         self.external = true;
     }
 
-    /// Play-list events with an offset in `from..to` (both inside the loop, `from <= to`).
+    /// Indices of the play-list events with an offset in `from..to` (both inside the loop).
     #[inline]
-    pub fn window(&self, from: u64, to: u64) -> &[PlayEvent] {
+    pub fn window(&self, from: u64, to: u64) -> (usize, usize) {
         let a = self.play.partition_point(|e| u64::from(e.offset) < from);
         let b = self.play.partition_point(|e| u64::from(e.offset) < to);
-        &self.play[a..b.max(a)]
+        (a, b.max(a))
     }
 }
 
@@ -461,6 +461,31 @@ impl OpenNotes {
     #[inline]
     pub fn settled(&self) -> bool {
         self.open == 0
+    }
+
+    /// Take out the next open note or pedal at or after slot `cursor` (advanced past it), as
+    /// `(channel, note or None for the pedal, start frame)`. Starting at 0 and calling until
+    /// `None` empties everything in one pass over the slots.
+    pub fn pop_one(&mut self, cursor: &mut usize) -> Option<(u8, Option<u8>, i64)> {
+        while self.open > 0 && *cursor < 16 * 129 {
+            let (c, k) = (*cursor / 129, *cursor % 129);
+            *cursor += 1;
+            if k < 128 {
+                let slot = &mut self.on[c][k];
+                if *slot != CLOSED {
+                    let on = *slot;
+                    *slot = CLOSED;
+                    self.open -= 1;
+                    return Some((c as u8, Some(k as u8), on));
+                }
+            } else if self.pedal[c] != CLOSED {
+                let on = self.pedal[c];
+                self.pedal[c] = CLOSED;
+                self.open -= 1;
+                return Some((c as u8, None, on));
+            }
+        }
+        None
     }
 
     /// Every open note and pedal, as `(channel, note or None for the pedal, start frame)`, then

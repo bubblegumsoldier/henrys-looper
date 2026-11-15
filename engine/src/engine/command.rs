@@ -131,6 +131,9 @@ pub enum Command {
     /// armed, or queued) is cancelled together with its layer - in a continuous overdub that ends
     /// it; otherwise the newest layer goes. The last layer leaves the track empty. Untimed.
     UndoLayer { track: usize },
+    /// What this track's takes store: the notes (`midi: true`, a MIDI loop - instrument tracks
+    /// only) or the sound. Refused with `Busy` while the track holds or records anything. Untimed.
+    SetLoopKind { track: usize, midi: bool },
     /// Metronome on or off. The click grid keeps running either way.
     SetClick { on: bool },
     /// Volume of the click, linear, clamped to `0..=MAX_LEVEL_GAIN`. Untimed: a level, not an event.
@@ -218,6 +221,7 @@ impl Command {
             | Command::SetLayerGain { .. }
             | Command::RemoveLayer { .. }
             | Command::UndoLayer { .. }
+            | Command::SetLoopKind { .. }
             | Command::SetClick { .. }
             | Command::SetClickGain { .. }
             | Command::SetMonitorGain { .. }
@@ -254,6 +258,7 @@ impl Command {
             | Command::SetLayerGain { track, .. }
             | Command::RemoveLayer { track, .. }
             | Command::UndoLayer { track }
+            | Command::SetLoopKind { track, .. }
             | Command::SetFxBypass { track, .. }
             | Command::SetFxEnabled { track, .. }
             | Command::SetFxParam { track, .. }
@@ -391,6 +396,10 @@ pub struct TrackStatus {
     /// Whether the overdub of this track keeps going into the next pass (`Command::LatchOverdub`).
     /// During a first recording it means "overdub next".
     pub latched: bool,
+    /// Whether this track's takes store notes - a MIDI loop.
+    pub midi_loop: bool,
+    /// On a MIDI loop: note ons recorded in each layer.
+    pub layer_notes: [u16; super::track::MAX_LAYERS],
 }
 
 impl Default for TrackStatus {
@@ -426,6 +435,8 @@ impl Default for TrackStatus {
             notes: 0,
             held_notes: 0,
             latched: false,
+            midi_loop: false,
+            layer_notes: [0; super::track::MAX_LAYERS],
         }
     }
 }
@@ -912,11 +923,14 @@ mod tests {
     /// The channel strip was such a decision: fader, mute, solo and a stereo strip meter are 16
     /// bytes per track, 128 for eight - 1816 in all. The limit moved from 1792 to 1920; a mixer
     /// whose meter does not move with its fader is worth a hundred bytes per snapshot.
+    ///
+    /// MIDI loops were the next: the note count of every layer (sixteen `u16` per track) is what
+    /// lets a MIDI layer show "42 notes" instead of a waveform - 2144 bytes, limit 2176.
     #[test]
     fn the_status_snapshot_stays_small_enough_to_memcpy_in_a_callback() {
         let size = std::mem::size_of::<Status>();
         assert!(
-            size <= 1_920,
+            size <= 2_176,
             "Der Status ist auf {size} Bytes gewachsen - das wandert bei jedem Snapshot durch \
              den Audio-Callback."
         );

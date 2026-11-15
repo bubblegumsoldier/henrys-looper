@@ -140,9 +140,12 @@ use super::frame::{Channels, Frame};
 use super::insert::{InsertEndpoint, InsertRack, MAX_BLOCK, PluginTransport, Spread};
 use super::latch::Latches;
 use super::metro::Metronome;
-use super::source::{HostClock, SourceEndpoint, SourceRack, place_event};
+use super::source::{HostClock, SourceEndpoint, SourceRack, heard_at, place_event};
 use super::timeline::Timeline;
-use super::track::{LayerStore, MAX_LAYERS, Track, TrackLatency};
+use super::track::{MAX_LAYERS, Track, TrackLatency};
+
+#[path = "midiproc.rs"]
+mod midiproc;
 
 /// Size of the waiting room for commands that have been taken out of the queue but are not due
 /// yet. Allocated once, in the control thread; the audio thread only ever pushes into it and
@@ -253,6 +256,8 @@ pub struct EngineCore {
     /// End of a running count-in (`Command::CountIn`): until then the click sounds whatever its
     /// switch says, and the loops stay held.
     count_in: Option<u64>,
+    /// The MIDI-loop stage (`super::midiloop`), if the host attached it.
+    midi: Option<Box<midiproc::MidiLoops>>,
 }
 
 impl EngineCore {
@@ -307,6 +312,7 @@ impl EngineCore {
             instrument_delay: None,
             latch: Latches::default(),
             count_in: None,
+            midi: None,
         }
     }
 
@@ -405,6 +411,7 @@ impl EngineCore {
         self.collect_commands();
         self.collect_inserts();
         self.collect_capture();
+        self.collect_clips();
         self.publish_tempo();
         let in_frames = input.len() / self.input_channels;
         let out_frames = output.len() / BUS_SAMPLES;
@@ -420,6 +427,7 @@ impl EngineCore {
 
         self.out_pos += out_frames as u64;
         self.in_index += in_frames as u64;
+        self.advance_midi();
         self.since_status += out_frames as u64;
         if self.since_status >= self.status_interval {
             self.since_status = 0;
@@ -542,17 +550,36 @@ impl EngineCore {
         let start = self.out_pos;
         match clock {
             Some(clock) => {
-                rack.gather(|ns| place_event(ns, start, clock.playback_ns, rate, delay));
+                rack.gather(
+                    start,
+                    |ns| place_event(ns, start, clock.playback_ns, rate, delay),
+                    |ns| heard_at(ns, start, clock.playback_ns, rate),
+                );
             }
-            // Without a clock there is no "when": everything sounds at the top of this block.
-            None => rack.gather(|_| start),
+            // Without a clock there is no "when": everything sounds at the top of this block, and
+            // was heard there.
+            None => rack.gather(start, |_| start, |_| start as i64),
         }
         rack.set_transport(transport);
-        rack.render(start, frames);
+        let _ = frames;
         for (t, track) in self.tracks.iter_mut().enumerate() {
             if track.is_instrument() {
                 track.set_source_base(delay + rack.latency(t));
             }
+        }
+        self.record_midi();
+    }
+
+    /// Render the instruments for frames `from..to` of this process call - the piece the commands
+    /// left between them - with the MIDI layers' events for exactly that piece.
+    fn render_source_piece(&mut self, from: usize, to: usize) {
+        if self.sources.is_none() {
+            return;
+        }
+        let start = self.out_pos;
+        self.play_midi(start + from as u64, start + to as u64);
+        if let Some(rack) = self.sources.as_deref_mut() {
+            rack.render_range(start, from, to);
         }
     }
 
@@ -574,6 +601,8 @@ impl EngineCore {
                 continue;
             }
             let latency = self.tracks[t].latency_frames();
+            // A MIDI loop records the notes, not this sound; the recorder still hears it.
+            let midi_loop = self.tracks[t].midi_loop();
             for i in 0..frames {
                 let (l, r) = match self.sources.as_deref() {
                     Some(rack) => rack.frame(t, i),
@@ -586,7 +615,7 @@ impl EngineCore {
                     continue;
                 }
                 let (pos, frame) = (q - latency, Frame::new(l, r));
-                let wrote = self.record_frame(t, pos, frame);
+                let wrote = !midi_loop && self.record_frame(t, pos, frame);
                 // The recorder hears the instrument like any live input, at the same position.
                 if let Some(capture) = self.capture.as_deref_mut().and_then(CaptureSlot::session) {
                     let track = &self.tracks[t];
@@ -661,6 +690,7 @@ impl EngineCore {
                 None => out_frames,
             };
             if boundary > cursor {
+                self.render_source_piece(cursor, boundary);
                 let start = self.out_pos + cursor as u64;
                 // Frame indices become sample offsets only here, on the way into the output slice.
                 if self.inserts.as_ref().is_some_and(|r| r.active()) {
@@ -1119,6 +1149,7 @@ impl EngineCore {
                 } else {
                     self.clear_track(track);
                     self.begin_take(track, start, true);
+                    self.midi_take_begun(track, true);
                 }
             }
             Command::StartOverdub { track, at } => {
@@ -1143,6 +1174,7 @@ impl EngineCore {
                         self.clear_track(track);
                     }
                     self.begin_take(track, start, defines_loop);
+                    self.midi_take_begun(track, true);
                 }
             }
             Command::LatchOverdub { track, on } => self.latch.set(track, on),
@@ -1151,9 +1183,18 @@ impl EngineCore {
                 // still travelling in from the interface. Publishing it here is what makes the
                 // switch from recording to playing seamless at the loop boundary.
                 self.tracks[track].set_take_end(at);
+                self.midi_length_known(track);
             }
             Command::StartPlay { track, .. } => self.tracks[track].set_playing(true),
-            Command::StopPlay { track, .. } => self.tracks[track].set_playing(false),
+            Command::StopPlay { track, .. } => {
+                self.tracks[track].set_playing(false);
+                self.release_layers(track, None);
+            }
+            Command::SetLoopKind { track, midi } => {
+                if !self.tracks[track].set_midi_loop(midi) {
+                    self.refuse(Refusal::Busy);
+                }
+            }
             Command::ClearTrack { track, .. } => {
                 self.latch.set(track, false);
                 self.clear_track(track);
@@ -1220,6 +1261,8 @@ impl EngineCore {
             } => {
                 if !self.tracks[track].set_layer_muted(layer, muted) {
                     self.refuse(Refusal::NoSuchTarget);
+                } else if muted {
+                    self.release_layers(track, Some(layer));
                 }
             }
             Command::SetLayerGain { track, layer, gain } => {
@@ -1303,8 +1346,9 @@ impl EngineCore {
             Command::TransportStart { at } => self.start_transport(at),
             Command::CountIn { at, end } => {
                 self.start_transport(at);
-                for track in self.tracks.iter_mut() {
-                    track.set_held(true);
+                for track in 0..self.tracks.len() {
+                    self.tracks[track].set_held(true);
+                    self.release_layers(track, None);
                 }
                 self.count_in = Some(end);
             }
@@ -1314,6 +1358,7 @@ impl EngineCore {
                 for track in 0..self.tracks.len() {
                     self.cancel_takes(track);
                     self.tracks[track].set_playing(false);
+                    self.release_layers(track, None);
                 }
                 self.stopped = true;
             }
@@ -1380,6 +1425,7 @@ impl EngineCore {
                 }
             }
             self.tracks[t].set_held(true);
+            self.release_layers(t, None);
         }
         self.transport = false;
     }
@@ -1420,7 +1466,13 @@ impl EngineCore {
     /// Close a take and immediately start whatever was queued behind it.
     fn finish_take(&mut self, track: usize, end: u64) {
         let closed = self.tracks[track].take();
+        if closed.is_some() {
+            self.midi_take_closing(track);
+        }
         self.tracks[track].finish_take(end);
+        if closed.is_some() {
+            self.midi_take_closed(track, end);
+        }
         // A latched pass in which nothing was played goes again before anything else can push a
         // layer - it is the last one, since every take writes into the layer it pushed.
         if closed.is_some_and(|take| !take.defines_loop) && self.latch.closed_silent(track) {
@@ -1440,7 +1492,11 @@ impl EngineCore {
             self.refuse(Refusal::LayerLimit);
         }
         match self.tracks[track].take() {
-            Some(take) => self.latch.begun(track, !take.defines_loop),
+            Some(take) => {
+                self.latch.begun(track, !take.defines_loop);
+                self.midi_length_known(track);
+                self.midi_take_begun(track, false);
+            }
             // Nothing queued behind it: a latched track carries straight on with the next pass,
             // starting on the very sample the closed take ended on.
             None if closed.is_some() && self.latch.on(track) => {
@@ -1452,6 +1508,8 @@ impl EngineCore {
                     if self.tracks[track].take().is_none() {
                         // `begin_take` has said why (no buffer); do not try again every frame.
                         self.latch.set(track, false);
+                    } else {
+                        self.midi_take_begun(track, false);
                     }
                 }
             }
@@ -1461,8 +1519,7 @@ impl EngineCore {
 
     /// Queue a take behind the one that is currently finishing.
     fn schedule_take(&mut self, track: usize, start: u64, defines_loop: bool) {
-        let channels = self.tracks[track].channels();
-        let Some(buffer) = self.take_spare(channels) else {
+        let Some(buffer) = self.take_store(track) else {
             self.refuse(Refusal::NoBuffer);
             return;
         };
@@ -1477,8 +1534,7 @@ impl EngineCore {
             self.refuse(Refusal::LayerLimit);
             return;
         }
-        let channels = self.tracks[track].channels();
-        let Some(buffer) = self.take_spare(channels) else {
+        let Some(buffer) = self.take_store(track) else {
             self.refuse(Refusal::NoBuffer);
             return;
         };
@@ -1507,16 +1563,6 @@ impl EngineCore {
         }
     }
 
-    /// Hand a layer's storage back to the control thread, whatever it holds.
-    fn retire_store(&mut self, track: usize, store: LayerStore) {
-        let _ = track;
-        match store {
-            LayerStore::Audio(buffer) => self.buffers.retire(buffer),
-            // No clip can exist without the MIDI loop stage; never dropped here either way.
-            LayerStore::Midi(clip) => std::mem::forget(clip),
-        }
-    }
-
     fn refuse(&mut self, reason: Refusal) {
         self.ignored_commands += 1;
         self.refusal = reason;
@@ -1531,6 +1577,11 @@ impl EngineCore {
     #[inline]
     fn musical_input_pos(&self, track: usize) -> u64 {
         match self.tracks.get(track) {
+            // A MIDI loop is recorded from time stamps: the oldest one still to come was heard `C`
+            // before the output position.
+            Some(t) if t.midi_loop() => self
+                .out_pos
+                .saturating_sub(self.instrument_delay.unwrap_or(0)),
             Some(t) if t.is_instrument() => self.out_pos.saturating_sub(t.latency_frames()),
             Some(t) => self.in_index.saturating_sub(t.latency_frames()),
             None => self.in_index.saturating_sub(self.latency),
@@ -1547,6 +1598,7 @@ impl EngineCore {
         let mut tracks = [TrackStatus::default(); MAX_TRACKS];
         for (i, slot) in tracks.iter_mut().enumerate().take(self.tracks.len()) {
             let musical_input = self.musical_input_pos(i);
+            let layer_notes = self.layer_notes(i);
             let rack = self.sources.as_deref();
             let (instrument_loaded, notes, held_notes) = match rack {
                 Some(r) => (r.has_instrument(i), r.notes(i), r.held(i).min(255) as u8),
@@ -1559,6 +1611,8 @@ impl EngineCore {
                 notes,
                 held_notes,
                 latched: self.latch.on(i),
+                midi_loop: track.midi_loop(),
+                layer_notes,
                 state: track.state(musical_input),
                 layers: track.layer_count() as u8,
                 muted_mask: track.muted_mask(),

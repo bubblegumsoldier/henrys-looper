@@ -80,7 +80,7 @@ pub const MAX_PORTS: usize = 16;
 
 /// Events one track can have waiting for their position. Far more than ten fingers and a pedal
 /// produce in one block; what does not fit is dropped and counted.
-pub const PENDING_EVENTS: usize = 512;
+pub const PENDING_EVENTS: usize = 2048;
 
 /// Capacity of a port's fast queue between the driver callback and the audio thread.
 pub const FEED_QUEUE: usize = 1024;
@@ -126,6 +126,9 @@ pub struct SourceId(pub u8);
 
 impl SourceId {
     pub const LIVE: SourceId = SourceId(0);
+    /// Everything the track's MIDI layers play. Each layer keeps its own tracker as well
+    /// (`super::midiloop::MidiClip::tracker`); this one is what a panic ends.
+    pub const LOOP: SourceId = SourceId(1);
 
     /// The source of MIDI layer `n` (0-based). Reserved for the MIDI loop.
     pub fn layer(n: usize) -> SourceId {
@@ -663,6 +666,32 @@ impl NoteTracker {
         self.used == 0
     }
 
+    /// Channels whose sustain pedal this source holds down.
+    pub fn sustain(&self) -> u16 {
+        self.sustain
+    }
+
+    /// End this source's own notes and lift its pedal - and nothing else. Unlike
+    /// [`NoteTracker::release`] there is no "all notes off": a MIDI layer that is stopped shares its
+    /// instrument with the live keys, and those keep sounding.
+    pub fn release_own(&mut self, mut emit: impl FnMut([u8; 3])) {
+        for c in 0..16u8 {
+            let words = self.on[c as usize];
+            for (w, word) in words.iter().enumerate() {
+                let mut bits = *word;
+                while bits != 0 {
+                    let b = bits.trailing_zeros() as u8;
+                    bits &= bits - 1;
+                    emit([0x80 | c, w as u8 * 64 + b, 0]);
+                }
+            }
+            if self.sustain & (1 << c) != 0 {
+                emit([0xB0 | c, 64, 0]);
+            }
+        }
+        *self = Self::default();
+    }
+
     /// Emit what ends everything this source started: a note off per held note, the sustain pedal
     /// up where it was down, and "all notes off" (CC 123) on every channel that was used - the
     /// last for instruments that keep voices of their own the tracker cannot see. Then forget.
@@ -720,6 +749,8 @@ struct Pending {
     at: u64,
     msg: [u8; 3],
     source: SourceId,
+    /// Meant for "right now" (an ending): not counted as late.
+    now: bool,
 }
 
 /// One track's stereo source output for a whole process call.
@@ -757,6 +788,16 @@ pub struct SourceRack {
     leaked: u64,
     /// The clock at the first frame of the next [`SourceRack::render`]; set by the engine.
     transport: PluginTransport,
+    /// Per track: a MIDI loop - live events are rendered as early as possible (the recording
+    /// position comes from the time stamp, not from the rendering), and every routed event is
+    /// also handed to the engine with the position it was heard at.
+    midi: [bool; MAX_TRACKS],
+    /// Per MIDI-loop track, the events of this call with their heard position, for recording.
+    pub(crate) heard: Vec<Vec<(i64, [u8; 3])>>,
+    /// Per track, what the instrument was sent in this process call, as (frame in the call, msg) -
+    /// for the recorder's MIDI file. Only collected while `tap` is set.
+    pub(crate) sent: Vec<Vec<(u32, [u8; 3])>>,
+    tap: bool,
 }
 
 impl SourceRack {
@@ -790,7 +831,75 @@ impl SourceRack {
             dropped: 0,
             leaked: 0,
             transport: PluginTransport::standing(48_000.0),
+            midi: [false; MAX_TRACKS],
+            heard: (0..MAX_TRACKS)
+                .map(|_| Vec::with_capacity(PENDING_EVENTS))
+                .collect(),
+            sent: (0..MAX_TRACKS)
+                .map(|_| Vec::with_capacity(PENDING_EVENTS))
+                .collect(),
+            tap: false,
         }
+    }
+
+    /// Whether track `track` is a MIDI loop - see the field.
+    #[inline]
+    pub fn set_midi(&mut self, track: usize, on: bool) {
+        if let Some(m) = self.midi.get_mut(track) {
+            *m = on;
+        }
+    }
+
+    /// Collect what each instrument is sent (for a MIDI file of the session).
+    #[inline]
+    pub fn set_tap(&mut self, on: bool) {
+        self.tap = on;
+    }
+
+    /// Channels on which the musician holds the sustain pedal of a track down.
+    pub fn live_sustain(&self, track: usize) -> u16 {
+        self.trackers
+            .get(track)
+            .map_or(0, |t| t[SourceId::LIVE.0 as usize].sustain())
+    }
+
+    /// An ending for a track's instrument that has to go out before anything else at the start of
+    /// the next rendered piece - a MIDI layer that is stopped, muted or removed.
+    #[inline]
+    pub fn push_now(&mut self, track: usize, msg: [u8; 3]) {
+        let Some(list) = self.pending.get_mut(track) else {
+            return;
+        };
+        if list.len() >= PENDING_EVENTS {
+            self.dropped += 1;
+            return;
+        }
+        let i = list.partition_point(|e| e.now);
+        list.insert(i, Pending {
+            at: 0,
+            msg,
+            source: SourceId::LOOP,
+            now: true,
+        });
+    }
+
+    /// One event of a track's MIDI layers at output position `at`.
+    #[inline]
+    pub fn push_loop(&mut self, track: usize, at: u64, msg: [u8; 3]) {
+        let Some(list) = self.pending.get_mut(track) else {
+            return;
+        };
+        if list.len() >= PENDING_EVENTS {
+            self.dropped += 1;
+            return;
+        }
+        let i = list.partition_point(|e| e.at <= at);
+        list.insert(i, Pending {
+            at,
+            msg,
+            source: SourceId::LOOP,
+            now: false,
+        });
     }
 
     /// The clock at the first frame of the next [`SourceRack::render`]. Each chunk of that call
@@ -940,7 +1049,13 @@ impl SourceRack {
     /// output position it has to sound at.
     ///
     /// `place` turns a host time into that position; without a clock it answers `block_start`.
-    pub fn gather(&mut self, place: impl Fn(u64) -> u64) {
+    ///
+    /// A MIDI-loop track gets its events at `start`, as early as possible, and every one of them
+    /// also lands in its `heard` list with the position `heard` gives it.
+    pub fn gather(&mut self, start: u64, place: impl Fn(u64) -> u64, heard: impl Fn(u64) -> i64) {
+        for list in self.heard.iter_mut() {
+            list.clear();
+        }
         for p in 0..MAX_PORTS {
             let Some(feed) = self.feeds[p].as_mut() else {
                 continue;
@@ -950,10 +1065,14 @@ impl SourceRack {
             };
             // Bounded: a port's queue holds at most FEED_QUEUE events.
             while let Ok(event) = rx.pop() {
-                let at = place(event.host_ns);
+                let fixed = place(event.host_ns);
                 for t in 0..MAX_TRACKS {
                     if !self.routes[t].takes(p, event.msg) {
                         continue;
+                    }
+                    let at = if self.midi[t] { start } else { fixed };
+                    if self.midi[t] && self.heard[t].len() < PENDING_EVENTS {
+                        self.heard[t].push((heard(event.host_ns), event.msg));
                     }
                     if event.msg[0] & 0xF0 == 0x90 && event.msg[2] > 0 {
                         self.notes[t] = self.notes[t].wrapping_add(1);
@@ -969,6 +1088,7 @@ impl SourceRack {
                         at,
                         msg: event.msg,
                         source: SourceId::LIVE,
+                        now: false,
                     });
                 }
             }
@@ -978,22 +1098,42 @@ impl SourceRack {
     /// Render every instrument for one process call of `frames` frames starting at `start`, into
     /// [`SourceRack::out`]. Long calls are cut into pieces of [`MAX_BLOCK`].
     pub fn render(&mut self, start: u64, frames: usize) {
-        let frames = frames.min(self.capacity);
-        let panic_all = std::mem::take(&mut self.panic_all);
+        self.render_range(start, 0, frames);
+    }
+
+    /// Render frames `from..to` of the process call that starts at `start`. The engine renders a
+    /// call in the pieces its commands cut it into, so a MIDI layer that starts or stops in the
+    /// middle of a call does so on its frame.
+    pub fn render_range(&mut self, start: u64, from: usize, to: usize) {
+        let to = to.min(self.capacity);
+        if from == 0 {
+            for sent in self.sent.iter_mut() {
+                sent.clear();
+            }
+        }
+        if from >= to {
+            return;
+        }
+        let panic_all = if from == 0 {
+            std::mem::take(&mut self.panic_all)
+        } else {
+            false
+        };
         for t in 0..MAX_TRACKS {
             let out = &mut self.out[t];
-            out.l[..frames].fill(0.0);
-            out.r[..frames].fill(0.0);
+            out.l[from..to].fill(0.0);
+            out.r[from..to].fill(0.0);
             let Some(instrument) = self.slots[t].as_mut() else {
                 // Nothing to play it on: what was waiting is dropped, nothing can hang.
                 self.pending[t].clear();
                 self.flush_live[t] = false;
                 continue;
             };
-            let panic = instrument.shared.panic.swap(false, Ordering::Relaxed) || panic_all;
-            let mut done = 0;
-            while done < frames {
-                let n = (frames - done).min(MAX_BLOCK);
+            let panic = from == 0
+                && (instrument.shared.panic.swap(false, Ordering::Relaxed) || panic_all);
+            let mut done = from;
+            while done < to {
+                let n = (to - done).min(MAX_BLOCK);
                 let chunk_start = start + done as u64;
                 let chunk_end = chunk_start + n as u64;
                 self.scratch.clear();
@@ -1012,9 +1152,11 @@ impl SourceRack {
                     }
                 }
                 let list = &mut self.pending[t];
-                let due = list.partition_point(|e| e.at < chunk_end);
+                let due = list.partition_point(|e| e.now || e.at < chunk_end);
                 for e in &list[..due] {
-                    let offset = if e.at < chunk_start {
+                    let offset = if e.now {
+                        0
+                    } else if e.at < chunk_start {
                         self.late += 1;
                         0
                     } else {
@@ -1027,6 +1169,14 @@ impl SourceRack {
                     });
                 }
                 list.drain(..due);
+                if self.tap {
+                    let sent = &mut self.sent[t];
+                    for e in &self.scratch {
+                        if sent.len() < PENDING_EVENTS {
+                            sent.push((done as u32 + e.offset, e.msg));
+                        }
+                    }
+                }
                 let out = &mut self.out[t];
                 let (l, r) = (
                     &mut out.l[done..done + n],
