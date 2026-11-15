@@ -32,7 +32,7 @@ import "./arrangement.css";
 import { Ticker } from "../shell/Toasts";
 import { ChannelPanel, Mixer, MixerToggle, mixerEditorClass, selectChannelByName, useMixer, useStripPicks } from "../mixer";
 import { mixerState } from "../mixer/store";
-import { currentStatus } from "../status";
+import { currentStatus, useStatusSlice } from "../status";
 
 type View = "grid" | "text";
 type TrackTab = "track" | "channel";
@@ -200,7 +200,9 @@ export function Arrangement({ onGoto, actions }: Props) {
   // The mixer's detail panel follows the track selected in the grid.
   const selTrack = sel.kind === "track" ? sel.index : sel.kind === "cells" ? sel.focus.track : null;
   const selTrackName = selTrack !== null ? doc?.tracks[selTrack]?.name : undefined;
-  useEffect(() => selectChannelByName(selTrackName), [selTrackName]);
+  // Also when the engine's tracks change (a Load renames and rebuilds them).
+  const engineNames = useStatusSlice((s) => s.tracks.map((t) => t.name).join("\n"));
+  useEffect(() => selectChannelByName(selTrackName), [selTrackName, engineNames]);
 
   // The panel on the right. A track selected in the grid gets two tabs - its score settings
   // ("Track") and its mixer channel ("Channel"); the tab last chosen is kept, except that clicking

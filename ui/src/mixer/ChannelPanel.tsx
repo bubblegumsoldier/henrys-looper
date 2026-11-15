@@ -31,7 +31,12 @@ export function ChannelPanel({ expect, onTrackTab }: Props = {}) {
   const defaultLatency = useStatusSlice((s) => s.latency_frames);
   const sampleRate = useStatusSlice((s) => s.sample_rate);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const track = useMemo(() => currentStatus().tracks[selected] ?? currentStatus().tracks[0], [signature, selected]);
+  const track = useMemo(() => {
+    const all = currentStatus().tracks;
+    // A track chosen in the arrangement is found by its name: positions need not agree.
+    if (expect !== undefined) return all.find((t) => t.name === expect) ?? all[selected] ?? all[0];
+    return all[selected] ?? all[0];
+  }, [signature, selected, expect]);
   const i = track?.index ?? 0;
   const inPeaks = useCallback((s: LooperStatus) => s.tracks[i]?.input_peaks ?? [0], [i]);
 
