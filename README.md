@@ -34,6 +34,12 @@ Typischer Ablauf: Setup → Gerät wählen → *Start engine* → Arrangement �
 (z. B. `examples/henry-3-4.rust.yaml`) → *Load* → Live → *Start* (Leertaste) → *Release*
 (Leertaste) an den Stellen, die bis Release loopen → *Stop all* (⇧S) → *Back to start*.
 
+Ohne Partitur (freies Loopen) steht die Uhr nach dem Engine-Start auf Takt 1: kein Klick, nichts
+zählt. *Start* (Leertaste) lässt sie laufen, *Stop* hält sie an; die Loops bleiben erhalten und
+spielen beim nächsten Start von vorn. `R` bei stehender Uhr startet sie und nimmt ab Takt 1 auf.
+Ein Stopp verwirft eine noch nicht fertige erste Aufnahme und beendet einen Overdub an der
+Stoppstelle.
+
 **Tastenkürzel**
 
 | Wo | Taste | Wirkung |
@@ -45,6 +51,7 @@ Typischer Ablauf: Setup → Gerät wählen → *Start engine* → Arrangement �
 | Live | `X` / `V` / `D` + Ziffer | Effekt an/aus · Preset laden · Delay-Notenwert |
 | Live | `K` | Klick an/aus |
 | Live/Arrangement | Leertaste oder `N` | Partitur starten bzw. *Release* |
+| Live/Arrangement, ohne Partitur | Leertaste | Uhr starten/stoppen (*Start*/*Stop*, MIDI `transport.toggle`) |
 | Live/Arrangement | `⇧S` | *Stop all* |
 | Arrangement | `⌘N` `⌘O` `⌘S` `⇧⌘S` | New · Open · Save · Save as |
 | Arrangement | `⌘Z` / `⇧⌘Z` · `⌘D` · `+`/`-` · `⌫` · `Esc` | Undo/Redo · Sektion duplizieren · Zoom · zurücksetzen · Auswahl aufheben |

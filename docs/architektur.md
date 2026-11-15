@@ -745,6 +745,7 @@ speichern. Deshalb bekommt jede bedienbare Sache einen gepunkteten Pfad:
 
 ```text
 transport.start | transport.next | transport.stop_all | transport.goto.<n>
+transport.toggle                         (Uhr des freien Loopens; mit Partitur abgewiesen)
 global.click | global.clear_all | global.tempo | global.quantize.bar|loop
 global.bus.<main|monitor>.gain
 track.<ref>.record | overdub | play | stop | clear | monitor | pan | latency_trim
