@@ -162,6 +162,32 @@ async fn track_pan(track: usize, pan: f32, engine: State<'_, EngineHandle>) -> R
     act(engine, Action::SetPan { track, pan }).await
 }
 
+/// What a take of an instrument track stores: `midi` - the notes, played back through the
+/// instrument - or `audio`, its sound. Only while the track is empty.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_loop_kind(
+    track: usize,
+    kind: String,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    let midi = match kind.as_str() {
+        "midi" => true,
+        "audio" => false,
+        other => return Err(format!("The loop is 'audio' or 'midi', not '{other}'.")),
+    };
+    act(engine, Action::SetLoopKind { track, midi }).await
+}
+
+/// The note grid a MIDI loop's layers are played on: `none`, `1/4`, `1/8`, `1/16`, `1/8t`,
+/// `1/16t`. Acts on what is already recorded too, and never changes the recording itself.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_grid(track: usize, grid: String, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    let grid = looper_engine::engine::midiloop::NoteGrid::parse(&grid).ok_or_else(|| {
+        format!("'{grid}' is not a note grid (none, 1/4, 1/8, 1/16, 1/8t, 1/16t).")
+    })?;
+    act(engine, Action::SetNoteGrid { track, grid }).await
+}
+
 /// The channel fader of one track, linear: 0.0 is silence, 1.0 is 0 dB, the top is +12 dB
 /// (`MAX_TRACK_GAIN`). After the effect chain and the plugin inserts, before the panner; smoothed
 /// in the engine, so a jump is a short ramp. Never reaches a recording.
@@ -1069,6 +1095,8 @@ fn main() {
             track_clear,
             track_monitor,
             track_pan,
+            track_loop_kind,
+            track_grid,
             track_gain,
             track_mute,
             track_solo,

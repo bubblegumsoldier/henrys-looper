@@ -166,13 +166,13 @@ pub struct TrackSource {
     /// plugin it is stands in `mixer.tracks.<name>.instrument`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument: Option<InstrumentSource>,
-    /// What a take of this track stores: `audio` (the default, and the only one the engine has) or
-    /// `midi` (reserved: the notes, for an instrument track - parsed and checked, not played yet).
+    /// What a take of this track stores: `audio` (the default - the sound) or `midi` (the notes,
+    /// played back through the instrument; instrument tracks only).
     #[serde(default, rename = "loop", skip_serializing_if = "LoopKind::is_audio")]
     pub loop_kind: LoopKind,
-    /// Note grid a later quantisation will snap a MIDI take to (`none`, `1/4`, `1/8`, `1/16`,
-    /// `1/8t`, `1/16t`). Reserved: parsed and checked, no effect yet. Not to be confused with a
-    /// section's `quantize:`, which is about *when a section changes*.
+    /// Note grid the track's MIDI layers are played on (`none`, `1/4`, `1/8`, `1/16`, `1/8t`,
+    /// `1/16t`) - never changing what was recorded, and with no effect on an audio loop. Not to be
+    /// confused with a section's `quantize:`, which is about *when a section changes*.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<String>,
 }
@@ -317,8 +317,8 @@ pub struct SectionSource {
     pub quantize: Option<Quantize>,
     #[serde(default)]
     pub tracks: OrderedMap<TrackState>,
-    /// Per-clip note grid (`keys: {state: play, grid: 1/16}`), overriding the track's `grid:`.
-    /// Reserved like the track's own: parsed and checked, no effect yet.
+    /// Per-clip note grid (`keys: {state: play, grid: 1/16}`), overriding the track's `grid:` while
+    /// the section runs.
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub grids: OrderedMap<String>,
     /// 1-based line the section starts on. Not part of the written format - the reader fills it in
@@ -390,10 +390,10 @@ pub struct CompiledTrack {
     /// Present on an instrument track (`input: instrument`); `input`/`input_channel` are 0 then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instrument: Option<InstrumentSource>,
-    /// Reserved, see [`TrackSource::loop_kind`].
+    /// What a take stores, see [`TrackSource::loop_kind`].
     #[serde(default, rename = "loop", skip_serializing_if = "LoopKind::is_audio")]
     pub loop_kind: LoopKind,
-    /// Reserved, see [`TrackSource::grid`].
+    /// The note grid of the track's MIDI layers, see [`TrackSource::grid`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<String>,
 }
@@ -448,6 +448,11 @@ pub struct CompiledSection {
     pub quantize: Quantize,
     /// One entry per track of the score, in track order. Missing in the source means `stop`.
     pub tracks: OrderedMap<TrackState>,
+    /// Per-clip note grids of this section (`keys: {state: play, grid: 1/16}`): while the section
+    /// runs, the named track's MIDI layers are played on this grid instead of the track's own.
+    /// A section with `repeat:` and no grids of its own takes those of the section it repeats.
+    #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
+    pub grids: OrderedMap<String>,
     /// 1-based line this section starts on, for the block preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_line: Option<u32>,

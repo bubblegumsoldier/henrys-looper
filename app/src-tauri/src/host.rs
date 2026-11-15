@@ -47,6 +47,7 @@ use looper_engine::engine::command::{
     buffer_channel, command_channel, status_channel,
 };
 use looper_engine::engine::frame::{Channels, TrackInput};
+use looper_engine::engine::midiloop::{CLIP_EVENTS, ClipPool, NoteGrid, clip_channel, frames_per_tick};
 use looper_engine::engine::source::{FeedMsg, FeedSender, HostClock, TrackRoute, source_channel};
 use looper_engine::engine::fx::{FxParam, FxPreset, FxSlot};
 use looper_engine::engine::live::MAX_LATENCY_FRAMES;
@@ -271,6 +272,12 @@ pub enum Action {
     SetQuantize { quantize: Quantize },
     /// "All notes off" on one track's instrument, or on every instrument.
     Panic { track: Option<usize> },
+    /// What a take of an instrument track stores: its notes (a MIDI loop) or its sound. Only
+    /// while the track is empty.
+    SetLoopKind { track: usize, midi: bool },
+    /// The note grid a track's MIDI layers are played on - the ones already recorded included.
+    /// Changes nothing that was recorded and can be set back any time.
+    SetNoteGrid { track: usize, grid: NoteGrid },
     /// What `O` does in free looping: stay on until pressed again, or one pass.
     SetOverdubMode { mode: OverdubMode },
     /// Bars of count-in before a take that starts the standing clock of free looping (0 = off).
@@ -365,6 +372,8 @@ impl Action {
             | Action::FxEnable { track, .. }
             | Action::FxParam { track, .. }
             | Action::FxPreset { track, .. }
+            | Action::SetLoopKind { track, .. }
+            | Action::SetNoteGrid { track, .. }
             | Action::Panic {
                 track: Some(track),
             } => Some(track),
@@ -1383,6 +1392,9 @@ fn instrument_input(track: &CompiledTrack) -> Option<InstrumentInput> {
         note_low: midi.note_low,
         note_high: midi.note_high,
         monitor: track.monitor,
+        loop_kind: (track.loop_kind == looper_engine::score::LoopKind::Midi)
+            .then(|| "midi".to_string()),
+        grid: track.grid.clone(),
     })
 }
 
@@ -1782,6 +1794,12 @@ struct Session {
     /// `C` and the late events as last logged.
     logged_delay: Option<u32>,
     logged_late: u32,
+    /// The MIDI loops' clips: supplied, mirrored and quantised here (`looper_engine::engine::
+    /// midiloop`).
+    clips: ClipPool,
+    /// Per track, the note grid its setup or score gives it; a section of a running score may
+    /// override it for one clip (`CompiledSection::grids`).
+    grids: [NoteGrid; MAX_TRACKS],
 }
 
 impl Session {
@@ -1859,8 +1877,15 @@ impl Session {
                 Track::new(d.input, monitor, d.pan, rate)
                     .with_latency(d.latency)
                     .with_sends(d.loop_send, d.monitor_send)
+                    .with_midi_loop(instrument.as_ref().is_some_and(InstrumentInput::midi_loop))
             })
             .collect();
+        let mut grids = [NoteGrid::None; MAX_TRACKS];
+        for (slot, instrument) in grids.iter_mut().zip(instrument_inputs.iter()) {
+            if let Some(i) = instrument {
+                *slot = i.note_grid();
+            }
+        }
         let mut core = EngineCore::new(EngineConfig {
             timeline,
             latency_frames: config.latency_frames,
@@ -1890,6 +1915,13 @@ impl Session {
         // (`crate::instruments`), the routing and the port feeds from this one.
         let (instrument_tx, feeds, source_endpoint) = source_channel(64);
         core.attach_sources(source_endpoint, scratch_frames);
+        // MIDI loops: the clips are born here, before any stream exists.
+        let (mut clips, clip_endpoint) = clip_channel(CLIP_EVENTS);
+        for (t, grid) in grids.iter().enumerate() {
+            clips.set_grid(t, *grid);
+        }
+        clips.service(|_| 0, frames_per_tick(&timeline));
+        core.attach_clips(clip_endpoint);
         // The app opens with the clock standing: nothing blinks or clicks until the musician
         // presses Start, records something, or loads a score.
         core.hold_transport();
@@ -2136,6 +2168,8 @@ impl Session {
             last_connect: None,
             logged_delay: None,
             logged_late: 0,
+            clips,
+            grids,
         };
         // The free mode's faders and chains, by track name - before anything is played, so the
         // first note already sounds the way the last session ended.
@@ -2250,6 +2284,81 @@ impl Session {
 
     /// One round of control-thread duty: take the newest status, keep the buffer pool filled, and
     /// push an event if the rate allows.
+    /// One turn of the clip pool, after deciding which note grid each track is played on right
+    /// now: its own, or that of the clip the running section gives it.
+    fn service_clips(&mut self) {
+        let mut want = self.grids;
+        if let (Some(runner), Some((status, _))) = (self.runner.as_ref(), self.last)
+            && let Some(section) = runner
+                .view(status.pos)
+                .section
+                .and_then(|s| runner.score().sections.get(s))
+        {
+            for (t, ui) in self.tracks.iter().enumerate().take(MAX_TRACKS) {
+                if let Some(grid) = section
+                    .grids
+                    .get(ui.name.as_str())
+                    .and_then(|g| NoteGrid::parse(g))
+                {
+                    want[t] = grid;
+                }
+            }
+        }
+        for (t, grid) in want.iter().enumerate() {
+            if self.clips.grid(t) != *grid {
+                self.clips.set_grid(t, *grid);
+            }
+        }
+        let status = self.last.map(|(s, _)| s);
+        let fpt = frames_per_tick(&self.scheduler.timeline);
+        self.clips.service(
+            |t| status.and_then(|s| s.tracks().get(t).map(|x| x.loop_len)).unwrap_or(0),
+            fpt,
+        );
+    }
+
+    /// Change what is stored about an instrument track's input everywhere it is kept: the
+    /// running engine's description, the configuration a rebuild starts from.
+    fn update_instrument(&mut self, track: usize, f: impl Fn(&mut InstrumentInput)) {
+        if let Some(Some(input)) = self.instrument_inputs.get_mut(track) {
+            f(input);
+        }
+        if let Some(Some(input)) = self.info.tracks.get_mut(track).map(|t| t.instrument.as_mut()) {
+            f(input);
+        }
+        if let Some(Some(input)) = self.config.tracks.get_mut(track).map(|t| t.instrument.as_mut()) {
+            f(input);
+        }
+    }
+
+    /// [`Action::SetLoopKind`].
+    fn set_loop_kind(&mut self, track: usize, midi: bool) -> Result<(), String> {
+        let name = self.tracks[track].name.clone();
+        if self.instrument_inputs.get(track).is_none_or(Option::is_none) {
+            return Err(format!(
+                "\"{name}\" records an input of the interface - only an instrument track can loop \
+                 MIDI."
+            ));
+        }
+        let ts = self.status_of(track);
+        if ts.layers > 0 || ts.state != TrackState::Empty {
+            return Err(format!(
+                "\"{name}\" holds a loop - the loop type changes only while the track is empty. \
+                 Clear it first."
+            ));
+        }
+        self.cmd.send(Command::SetLoopKind { track, midi })?;
+        self.update_instrument(track, |i| {
+            i.loop_kind = midi.then(|| "midi".to_string());
+        });
+        self.message = Some(if midi {
+            format!("\"{name}\" loops MIDI: takes store the notes and play them through the instrument.")
+        } else {
+            format!("\"{name}\" loops audio: takes store the instrument's sound.")
+        });
+        Ok(())
+    }
+
     fn service(&mut self, app: &AppHandle) {
         if let Some(mut status) = self.status_rx.latest() {
             // Meters hold their peaks until the next event shows them (`Status::hold_meters`).
@@ -2358,6 +2467,7 @@ impl Session {
 
         // The only place layer buffers are allocated, zeroed and dropped.
         self.pool.service(self.last.as_ref().map(|(s, _)| s));
+        self.service_clips();
 
         let takes = self.last.is_some_and(|(s, _)| {
             s.tracks()
@@ -2441,6 +2551,7 @@ impl Session {
                     }
                     let lead = sched.lead(i, status.pos);
                     let mut event = track_event(i, &ui.name, &ts, &ui.gains, rate, lead);
+                    event.grid = self.clips.grid(i).as_str().to_string();
                     let timeline = &self.scheduler.timeline;
                     let bar = timeline.samples_per_beat() * timeline.beats_per_bar() as f64;
                     if bar > 0.0 {
@@ -2574,6 +2685,15 @@ impl Session {
                 if let Some(info) = self.info.tracks.get_mut(i) {
                     info.instrument = Some(input.clone());
                 }
+                if let Some(slot) = self.grids.get_mut(i) {
+                    *slot = input.note_grid();
+                }
+                // What a take stores: the tracks are empty after the load's clear, so the engine
+                // takes it; if not, it refuses and says so.
+                let _ = self.cmd.send(Command::SetLoopKind {
+                    track: i,
+                    midi: input.midi_loop(),
+                });
                 if let Some(config) = self.config.tracks.get_mut(i) {
                     config.instrument = Some(input);
                 }
@@ -3066,6 +3186,24 @@ impl Session {
 
         match action {
             Action::Transport { run } => self.set_transport(run),
+            Action::SetLoopKind { track, midi } => self.set_loop_kind(track, midi),
+            Action::SetNoteGrid { track, grid } => {
+                let name = self.tracks[track].name.clone();
+                if let Some(slot) = self.grids.get_mut(track) {
+                    *slot = grid;
+                }
+                self.update_instrument(track, |i| {
+                    i.grid = (grid != NoteGrid::None).then(|| grid.as_str().to_string());
+                });
+                self.message = Some(match grid {
+                    NoteGrid::None => format!("\"{name}\": notes play as they were played."),
+                    g => format!(
+                        "\"{name}\": notes play on a {} grid - the recording itself is unchanged.",
+                        g.as_str()
+                    ),
+                });
+                Ok(())
+            }
             Action::Panic { track } => {
                 let msg = match track {
                     Some(track) => FeedMsg::Panic { track },

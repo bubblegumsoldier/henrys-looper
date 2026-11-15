@@ -138,6 +138,9 @@ struct Reader {
 }
 
 impl Reader {
+    /// Something written correctly that the engine cannot do yet. Nothing is in that state at the
+    /// moment (`loop: midi` and `grid:` were the last); the channel stays for the next one.
+    #[allow(dead_code)]
     fn note(&mut self, pos: Option<Pos>, message: impl Into<String>) {
         self.notes.push(ScoreIssue::new(pos, message));
     }
@@ -736,8 +739,7 @@ impl Reader {
         }
     }
 
-    /// `loop: audio|midi`. `midi` is reserved: it needs an instrument track, and until the engine
-    /// stores notes it is a note, not an error.
+    /// `loop: audio|midi`. `midi` needs an instrument track.
     fn read_loop_kind(&mut self, name: &str, node: &Node<'_>, audio_input: bool) -> Option<LoopKind> {
         let what = format!("'loop' of Track '{name}'");
         let text = self.as_str(node, &what)?;
@@ -762,18 +764,11 @@ impl Reader {
                 );
                 return None;
             }
-            self.note(
-                Some(node.pos),
-                format!(
-                    "Track '{name}': 'loop: midi' is not supported yet - the track records its \
-                     sound (audio) for now."
-                ),
-            );
         }
         Some(kind)
     }
 
-    /// `grid: 1/16` - reserved for the quantisation of MIDI takes; checked, noted, no effect.
+    /// `grid: 1/16` - the note grid of a MIDI loop, for a track or for one clip of a section.
     fn read_grid(&mut self, what: &str, node: &Node<'_>) -> Option<String> {
         let text = match &node.kind {
             NodeKind::Str(text) => text.to_string(),
@@ -794,10 +789,6 @@ impl Reader {
             );
             return None;
         }
-        self.note(
-            Some(node.pos),
-            format!("{what} is not supported yet - notes are not quantised for now."),
-        );
         Some(text)
     }
 

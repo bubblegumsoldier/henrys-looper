@@ -121,6 +121,7 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
                         (track.name.clone(), assigned)
                     })
                     .collect(),
+                grids: section_grids(section, &by_id),
                 source_line: section.source_line,
             }
         })
@@ -206,4 +207,23 @@ fn resolve_time_signature(source: &ScoreSource) -> (u32, u32) {
         source.beats_per_bar.unwrap_or(DEFAULT_BEATS_PER_BAR),
         DEFAULT_BEAT_UNIT,
     )
+}
+
+/// The per-clip grids of a section: its own, or - for a `repeat:` without any - those of the
+/// section it repeats, followed as far as the chain goes.
+fn section_grids(
+    section: &SectionSource,
+    by_id: &HashMap<&str, &SectionSource>,
+) -> OrderedMap<String> {
+    let mut at = section;
+    for _ in 0..by_id.len() + 1 {
+        if !at.grids.is_empty() {
+            return at.grids.clone();
+        }
+        match at.repeat.as_deref().and_then(|id| by_id.get(id)) {
+            Some(next) => at = next,
+            None => break,
+        }
+    }
+    OrderedMap::new()
 }

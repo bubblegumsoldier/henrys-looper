@@ -173,10 +173,10 @@ fn mistakes_around_instruments_are_reported_on_their_line() {
     assert!(message.contains("has no 'plugin'"), "{message}");
 }
 
-/// `loop: midi` and `grid:` are part of the format already, before the engine has them: they
-/// compile, and they come back as notes ("not supported yet"), never as errors.
+/// `loop: midi` and `grid:` compile - for the track, and per clip in a section - and the engine has
+/// them, so they are no notes any more.
 #[test]
-fn the_reserved_fields_compile_and_come_back_as_notes() {
+fn loop_and_grid_compile_without_notes() {
     let text = "bpm: 100\ntracks:\n  keys: {input: instrument, loop: midi, grid: 1/16}\n\
                 sections:\n  - id: a\n    bars: 1\n    tracks:\n      keys: {state: record, grid: 1/8t}\n";
     let score = compile_score(text).expect("reserved fields are no errors");
@@ -186,15 +186,15 @@ fn the_reserved_fields_compile_and_come_back_as_notes() {
         score.sections[0].tracks.get("keys"),
         Some(&super::TrackState::Record)
     );
-    let notes = score_notes(text);
-    assert_eq!(notes.len(), 3, "{notes:?}");
-    assert!(notes.iter().all(|n| n.message.contains("not supported yet")));
-    assert_eq!(notes[0].line, Some(3));
-    assert_eq!(notes[2].line, Some(8));
-    // The document carries them, mapped to their elements.
+    assert_eq!(
+        score.sections[0].grids.get("keys").map(String::as_str),
+        Some("1/8t"),
+        "die Raster-Ueberschreibung des Clips"
+    );
+    assert!(score_notes(text).is_empty());
     let outcome = parse_doc_outcome(text);
     assert!(outcome.ok);
-    assert_eq!(outcome.notes.len(), 3);
+    assert!(outcome.notes.is_empty());
     // A score without them has none.
     assert!(score_notes(KEYS).is_empty());
     // `quantize:` of a section is something else entirely and stays what it was.

@@ -34,6 +34,7 @@ use looper_engine::engine::bus::{
     BUS_COUNT, Bus, BusOutput, BusRouting, BusSend, MAX_BUS_GAIN,
 };
 use looper_engine::engine::command::{Status, TrackStatus};
+use looper_engine::engine::midiloop::NoteGrid;
 use looper_engine::engine::fx::{
     BandKind, DelayNote, EQ_BANDS, FxParam, FxPreset, FxSlot, FxStatus,
 };
@@ -172,6 +173,14 @@ pub struct InstrumentInput {
     /// is played, whatever the takes and sections do.
     #[serde(default = "instrument_heard")]
     pub monitor: bool,
+    /// What a take of this track stores: `audio` (the default - the instrument's sound) or `midi`
+    /// (the notes, played back through the instrument). Changeable while the track is empty.
+    #[serde(default, rename = "loop", skip_serializing_if = "Option::is_none")]
+    pub loop_kind: Option<String>,
+    /// The note grid the track's MIDI layers are played on: `none` (the default), `1/4`, `1/8`,
+    /// `1/16`, `1/8t`, `1/16t`. Never changes what was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<String>,
 }
 
 fn instrument_heard() -> bool {
@@ -179,8 +188,36 @@ fn instrument_heard() -> bool {
 }
 
 impl InstrumentInput {
+    /// Whether the takes of this track store notes.
+    pub fn midi_loop(&self) -> bool {
+        self.loop_kind.as_deref() == Some("midi")
+    }
+
+    /// The note grid, `none` when absent or unreadable.
+    pub fn note_grid(&self) -> NoteGrid {
+        self.grid
+            .as_deref()
+            .and_then(NoteGrid::parse)
+            .unwrap_or(NoteGrid::None)
+    }
+
     /// Check what a hand-written or stale setup may get wrong, in words.
     pub fn check(&self, track: &str) -> Result<(), String> {
+        if let Some(kind) = self.loop_kind.as_deref()
+            && kind != "audio"
+            && kind != "midi"
+        {
+            return Err(format!(
+                "Track \"{track}\": the loop is 'audio' or 'midi', not '{kind}'."
+            ));
+        }
+        if let Some(grid) = self.grid.as_deref()
+            && NoteGrid::parse(grid).is_none()
+        {
+            return Err(format!(
+                "Track \"{track}\": '{grid}' is not a note grid (none, 1/4, 1/8, 1/16, 1/8t, 1/16t)."
+            ));
+        }
         if let Some(c) = self.channel
             && !(1..=16).contains(&c)
         {
@@ -638,8 +675,12 @@ pub struct LayerStatus {
     pub number: u32,
     pub muted: bool,
     /// 0.0 to 4.0. Mirrored on the control side, because the engine's status snapshot does not
-    /// carry it - it only ever changes by command, so the mirror cannot go stale.
+    /// carry it - it only ever changes by command, so the mirror cannot go stale. On a MIDI layer
+    /// it scales the velocity.
     pub gain: f32,
+    /// On a MIDI loop: how many notes the layer holds; absent on an audio layer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<u32>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -684,6 +725,10 @@ pub struct TrackStatusEvent {
     pub notes: u32,
     /// Keys held down right now.
     pub held_notes: u8,
+    /// The takes of this track store notes (a MIDI loop), not the instrument's sound.
+    pub midi_loop: bool,
+    /// The note grid its MIDI layers are played on (`none`, `1/4`, ...). Filled in by the host.
+    pub grid: String,
 
     // --- output buses -------------------------------------------------------------------------
     // Two switches per source rather than one word, because that is how they are operated: "geht
@@ -983,6 +1028,7 @@ pub fn track_event(
             number: i as u32 + 1,
             muted: ts.muted_mask & (1 << i) != 0,
             gain: gains.get(i).copied().unwrap_or(1.0),
+            notes: ts.midi_loop.then(|| u32::from(ts.layer_notes.get(i).copied().unwrap_or(0))),
         })
         .collect();
     let rate = sample_rate.max(1) as f64;
@@ -1010,6 +1056,8 @@ pub fn track_event(
         instrument_loaded: ts.instrument_loaded,
         notes: ts.notes,
         held_notes: ts.held_notes,
+        midi_loop: ts.midi_loop,
+        grid: "none".to_string(),
         bus_main: ts.loop_send.on(Bus::Main),
         bus_monitor: ts.loop_send.on(Bus::Monitor),
         monitor_bus_main: ts.monitor_send.on(Bus::Main),
@@ -2052,6 +2100,7 @@ mod tests {
                 "fx",
                 "gain",
                 "gain_db",
+                "grid",
                 "held_notes",
                 "index",
                 "input_channel",
@@ -2071,6 +2120,7 @@ mod tests {
                 "loop_bars",
                 "loop_samples",
                 "loop_seconds",
+                "midi_loop",
                 "monitor",
                 "monitor_bus_main",
                 "monitor_bus_monitor",
