@@ -13,10 +13,11 @@
 //! While a score plays the arrangement is locked: the runner holds the text that was loaded, and an
 //! edit now would only make the picture disagree with what is sounding.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MOD_LABEL } from "../platform";
 import type { ModelIssue, ScoreDoc } from "../types";
-import { Grid } from "./Grid";
+import { Grid, type GridZoomApi } from "./Grid";
+import { ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, snapZoom } from "./zoom";
 import { Inspector } from "./Inspector";
 import { STATE_BY_KEY, duration, plural } from "./labels";
 import * as ops from "./ops";
@@ -60,6 +61,8 @@ function store(key: string, value: unknown) {
 function typing(target: EventTarget | null): boolean {
   const el = target as HTMLElement | null;
   if (!el) return false;
+  // A slider keeps the focus after a drag (the zoom), but nobody types into it.
+  if (el.tagName === "INPUT" && (el as HTMLInputElement).type === "range") return false;
   return el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable || el.closest(".cm-editor") !== null;
 }
 
@@ -159,7 +162,8 @@ export function Arrangement({ onGoto, actions }: Props) {
   const run = useRun();
   const engineTracks = useEngineTracks();
   const [view, setViewRaw] = useState<View>(() => stored("arr.view", "grid"));
-  const [zoom, setZoomRaw] = useState<number>(() => stored("arr.zoom", 20));
+  const [zoom, setZoomRaw] = useState<number>(() => snapZoom(Number(stored("arr.zoom", 20)), window.devicePixelRatio || 1));
+  const gridZoom = useRef<GridZoomApi | null>(null);
   const [inspector, setInspectorRaw] = useState<boolean>(() => stored("arr.insp", true));
   const [selRaw, setSel] = useState<Selection>(NONE);
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
@@ -169,8 +173,9 @@ export function Arrangement({ onGoto, actions }: Props) {
     setViewRaw(v);
     store("arr.view", v);
   };
+  // Whole device pixels per bar (half a CSS pixel on Retina) keep the bar lines sharp.
   const setZoom = (z: number) => {
-    const v = Math.max(6, Math.min(80, Math.round(z)));
+    const v = snapZoom(z, window.devicePixelRatio || 1);
     setZoomRaw(v);
     store("arr.zoom", v);
   };
@@ -266,9 +271,14 @@ export function Arrangement({ onGoto, actions }: Props) {
         if (editable) duplicate();
         return;
       }
+      // Zoom: +/- alone or with Cmd/Ctrl, Cmd/Ctrl+0 fits the whole score. Never the page zoom.
+      if (!e.altKey && (key === "+" || key === "=" || key === "-" || (mod && key === "0"))) {
+        e.preventDefault();
+        if (key === "0") gridZoom.current?.fit();
+        else setZoom(key === "-" ? zoom / ZOOM_STEP : zoom * ZOOM_STEP);
+        return;
+      }
       if (mod || e.altKey) return;
-      if (key === "+" || key === "=") return setZoom(zoom * 1.25);
-      if (key === "-") return setZoom(zoom / 1.25);
       if (key === "escape") return setSel(NONE);
       const arrows: Record<string, [number, number]> = { arrowleft: [-1, 0], arrowright: [1, 0], arrowup: [0, -1], arrowdown: [0, 1] };
       if (arrows[key]) {
@@ -379,19 +389,20 @@ export function Arrangement({ onGoto, actions }: Props) {
               {banner}
               <div className="grow" />
               <span className="lbl">Zoom</span>
-              <button className="btn s sq ghost" onClick={() => setZoom(zoom / 1.25)} title="Zoom out (−)">
+              <button className="btn s sq ghost" onClick={() => setZoom(zoom / ZOOM_STEP)} title={`Zoom out (− or ${MOD_LABEL}+−)`}>
                 <i className="ic ic-minus" />
               </button>
               <input
                 className="zoom"
                 type="range"
-                min={6}
-                max={80}
+                min={ZOOM_MIN}
+                max={ZOOM_MAX}
+                step={0.5}
                 value={zoom}
                 onChange={(e) => setZoom(Number(e.target.value))}
-                title={`${zoom} px per bar`}
+                title={`${zoom} px per bar\nZoom: + / − (also with ${MOD_LABEL}), ${MOD_LABEL}+scroll or pinch over the grid\nFit the whole score: ${MOD_LABEL}+0`}
               />
-              <button className="btn s sq ghost" onClick={() => setZoom(zoom * 1.25)} title="Zoom in (+)">
+              <button className="btn s sq ghost" onClick={() => setZoom(zoom * ZOOM_STEP)} title={`Zoom in (+ or ${MOD_LABEL}++)`}>
                 <i className="ic ic-plus" />
               </button>
               <div className="sep" />
@@ -435,6 +446,8 @@ export function Arrangement({ onGoto, actions }: Props) {
                   sel={sel}
                   setSel={setSel}
                   zoom={zoom}
+                  setZoom={setZoom}
+                  zoomApi={gridZoom}
                   edit={edit}
                   onGoto={onGoto}
                   engineTracks={engineTracks}

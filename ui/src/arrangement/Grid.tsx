@@ -11,7 +11,7 @@
 //! zoom), a clip's `--s`/`--n` are its start and length in bars - the same variables the mockup
 //! (design/arrangement.html) uses, so its stylesheet applies unchanged.
 
-import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type PointerEvent as ReactPointerEvent } from "react";
 import { gotoAddress } from "../midi/addresses";
 import { useStatusEffect } from "../status";
 import type { DocTrack, ModelIssue, ScoreDoc } from "../types";
@@ -21,6 +21,7 @@ import * as ops from "./ops";
 import { beatsPerBar, deriveLayers, resolveSection, type SectionSpan } from "./resolve";
 import { cellKey, clickCell, selectedSections, type Selection } from "./selection";
 import type { Run } from "./useDoc";
+import { anchoredScroll, clampZoom, fitZoom, snapZoom, wheelZoomFactor } from "./zoom";
 
 /** Left offset of bar 1 inside the lanes, as in the mockup. */
 const X0 = 14;
@@ -34,6 +35,10 @@ interface Props {
   setSel: (s: Selection) => void;
   /** Pixels per bar. */
   zoom: number;
+  /** Asks for a new zoom; the owner clamps and snaps it. The grid keeps a bar in place. */
+  setZoom: (z: number) => void;
+  /** Filled in by the grid: what the owner's keys need from it. */
+  zoomApi?: MutableRefObject<GridZoomApi | null>;
   edit: (op: (d: ScoreDoc) => ScoreDoc) => void;
   onGoto: (section: number) => void;
   engineTracks: Record<string, { state: string; layers: number; channels: number }>;
@@ -68,12 +73,20 @@ export function errorIndex(errors: ModelIssue[]) {
   return { sections, tracks, cells };
 }
 
+export interface GridZoomApi {
+  /** Zoom so the whole score fits the visible width, and scroll to its start. */
+  fit: () => void;
+}
+
+/** WebKit's pinch event (not in the DOM typings). */
+type GestureEvent = UIEvent & { scale: number; clientX: number; clientY: number };
+
 type Drag =
   | { kind: "move"; from: number; startX: number; to: number; active: boolean }
   | { kind: "bars"; index: number; startX: number; startBars: number; bars: number }
   | { kind: "track"; from: number; startY: number; to: number; active: boolean };
 
-export function Grid({ doc, errors, editable, run, sel, setSel, zoom, edit, onGoto, engineTracks }: Props) {
+export function Grid({ doc, errors, editable, run, sel, setSel, zoom, setZoom, zoomApi, edit, onGoto, engineTracks }: Props) {
   const [drag, setDrag] = useState<Drag | null>(null);
   const [renaming, setRenaming] = useState<{ kind: "section" | "track"; index: number } | null>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
@@ -97,6 +110,136 @@ export function Grid({ doc, errors, editable, run, sel, setSel, zoom, edit, onGo
   const picked = selectedSections(sel);
   const cellSel = new Set(sel.kind === "cells" ? sel.cells.map(cellKey) : []);
   const rowh = 96;
+
+  // --- zoom: wheel/pinch around the pointer, keys and slider around the selection or the middle --
+  const arrRef = useRef<HTMLDivElement>(null);
+  /** Scroll position and zoom as last laid out - the frame a zoom change is measured from. */
+  const laid = useRef({ left: 0, zoom });
+  /** Where the next zoom change is anchored: px from the container's left edge, or its start. */
+  const anchor = useRef<number | "start" | null>(null);
+  /** The unrounded zoom of a wheel/pinch, so small trackpad deltas add up instead of rounding away. */
+  const want = useRef(zoom);
+  /** The (snapped) zoom a wheel asked for and that is not rendered yet. */
+  const asked = useRef<number | null>(null);
+  const live = useRef({ zoom, setZoom, spans, picked, total });
+  live.current = { zoom, setZoom, spans, picked, total };
+
+  useLayoutEffect(() => {
+    const el = arrRef.current;
+    const prev = laid.current;
+    asked.current = null;
+    if (!el || prev.zoom === zoom) {
+      laid.current = { left: el?.scrollLeft ?? 0, zoom };
+      return;
+    }
+    const a = anchor.current;
+    anchor.current = null;
+    const headW = headsRef.current?.offsetWidth ?? 0;
+    let left = 0;
+    if (a !== "start") {
+      let x = a;
+      if (x === null) {
+        // The selected sections' middle if it is in view, else the middle of the lanes.
+        const sp = [...live.current.picked].map((i) => live.current.spans[i]).filter(Boolean);
+        x = (headW + el.clientWidth) / 2;
+        if (sp.length) {
+          const s0 = Math.min(...sp.map((s) => s.start));
+          const s1 = Math.max(...sp.map((s) => s.start + s.bars));
+          const sx = headW + X0 + ((s0 + s1) / 2) * prev.zoom - prev.left;
+          if (sx >= headW && sx <= el.clientWidth) x = sx;
+        }
+      }
+      left = anchoredScroll(prev.left, x, headW + X0, prev.zoom, zoom);
+    }
+    el.scrollLeft = left;
+    laid.current = { left: el.scrollLeft, zoom };
+  }, [zoom]);
+
+  useEffect(() => {
+    const el = arrRef.current;
+    if (!el) return;
+    const dpr = () => window.devicePixelRatio || 1;
+    const zoomTo = (next: number, x: number) => {
+      const { zoom: cur, setZoom: set } = live.current;
+      want.current = clampZoom(next);
+      const snapped = snapZoom(want.current, dpr());
+      if (snapped === (asked.current ?? cur)) return;
+      asked.current = snapped;
+      anchor.current = x;
+      set(want.current);
+    };
+    // Continue from the unrounded value unless the zoom was changed some other way since.
+    const base = () => {
+      const cur = asked.current ?? live.current.zoom;
+      return snapZoom(want.current, dpr()) === cur ? want.current : cur;
+    };
+    const xOf = (clientX: number) => clientX - el.getBoundingClientRect().left - el.clientLeft;
+    let pinch: number | null = null; // zoom at the start of a WebKit pinch gesture
+
+    const onScroll = () => {
+      laid.current.left = el.scrollLeft;
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        // Cmd/Ctrl + wheel, and a trackpad pinch (a wheel with ctrlKey). Never the page zoom.
+        e.preventDefault();
+        if (pinch !== null || e.deltaY === 0) return;
+        zoomTo(base() * wheelZoomFactor(e.deltaY, e.deltaMode), xOf(e.clientX));
+      } else if (e.shiftKey && e.deltaX === 0 && e.deltaY !== 0) {
+        // Shift + a plain mouse wheel scrolls sideways (macOS usually does this already).
+        e.preventDefault();
+        el.scrollLeft += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+      }
+    };
+    // WebKit may report a pinch as gesture events instead (scale relative to the start).
+    const onGestureStart = (e: Event) => {
+      e.preventDefault();
+      pinch = base();
+    };
+    const onGestureChange = (e: Event) => {
+      e.preventDefault();
+      const g = e as GestureEvent;
+      if (pinch !== null && g.scale > 0) zoomTo(pinch * g.scale, xOf(g.clientX));
+    };
+    const onGestureEnd = (e: Event) => {
+      e.preventDefault();
+      pinch = null;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("gesturestart", onGestureStart);
+    el.addEventListener("gesturechange", onGestureChange);
+    el.addEventListener("gestureend", onGestureEnd);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("gesturestart", onGestureStart);
+      el.removeEventListener("gesturechange", onGestureChange);
+      el.removeEventListener("gestureend", onGestureEnd);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!zoomApi) return;
+    zoomApi.current = {
+      fit: () => {
+        const el = arrRef.current;
+        if (!el) return;
+        const lanes = el.clientWidth - (headsRef.current?.offsetWidth ?? 0) - X0 - 16;
+        const z = fitZoom(lanes, live.current.total);
+        want.current = z;
+        if (snapZoom(z, window.devicePixelRatio || 1) === live.current.zoom) {
+          el.scrollLeft = 0;
+          return;
+        }
+        anchor.current = "start";
+        live.current.setZoom(z);
+      },
+    };
+    return () => {
+      zoomApi.current = null;
+    };
+  }, [zoomApi]);
 
   // --- the runner's position, in bars from the start ------------------------------------------
   const pos = (() => {
@@ -206,6 +349,7 @@ export function Grid({ doc, errors, editable, run, sel, setSel, zoom, edit, onGo
 
   return (
     <div
+      ref={arrRef}
       className={`arr${editable ? "" : " readonly"}${drag ? " dragging" : ""}`}
       style={{ "--b": `${zoom}px`, "--x0": `${X0}px`, "--rowh": `${rowh}px`, "--bpb": bpb, "--w": `${width}px` } as React.CSSProperties}
     >

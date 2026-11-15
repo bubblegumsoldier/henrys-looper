@@ -1178,6 +1178,8 @@ function GeneralPage({ info }: { info: AppInfo | null }) {
     ["Space / N", "start the score · Release"],
     ["Shift+S", "stop all (end the run)"],
     [`${IS_MAC ? "⌘" : "Ctrl"}+Enter · ${IS_MAC ? "⌘" : "Ctrl"}+S`, "compile · load the score (Arrangement)"],
+    [`+ · − · ${IS_MAC ? "⌘" : "Ctrl"}+scroll · pinch`, `zoom the arrangement grid (+ and − also with ${IS_MAC ? "⌘" : "Ctrl"})`],
+    [`${IS_MAC ? "⌘" : "Ctrl"}+0`, "fit the whole score into the arrangement grid"],
     [`${IS_MAC ? "⌘" : "Ctrl"}+click`, "MIDI-learn a control without the switch"],
     ["Esc", "cancel learn / close details"],
   ];
