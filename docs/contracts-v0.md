@@ -127,7 +127,7 @@ def add_layer(engine: Engine, track: Track) -> tuple[str, int, list[str]]   # ge
 Track-States: `record | overdub | play | stop | hear_through`.
 Bei einem Gruppen-Track: `record`/`overdub` gehen in die nächste freie Layer-Kindspur (Slot 0; eine Layer-Spur trägt genau einen Clip, dadurch spielen alle Layer gleichzeitig), `play` lässt alle belegten Layer weiterlaufen, `stop` stoppt alle Layer der Gruppe, `hear_through` stoppt die Layer und lässt nur die Monitor-Kindspur (`Monitoring In`) hörbar. `repeat: <id>` ist im kompilierten JSON bereits aufgelöst (Sektion vollständig kopiert, neue `id`/`index`). Jede Sektion enthält **alle** Tracks (fehlende → `stop`, Compiler ergänzt).
 
-`ScoreError.errors` ist eine Liste von `{"line": int|null, "column": int|null, "message": str, "suggestion": str|null}` (deutsch, z. B. „Sektion 'bridge' referenziert Track 'bss' — meintest du 'bass'?").
+`ScoreError.errors` ist eine Liste von `{"line": int|null, "column": int|null, "message": str, "suggestion": str|null}` (Python-Prototyp: deutsch. Der Rust-Compiler der App meldet englisch, z. B. "Section 'bridge' refers to Track 'bss', which does not exist." mit dem Vorschlag "did you mean 'bass'?").
 
 ## YAML v0 (Beispiel — M2 definiert das Schema, M3 nutzt es als Default im Editor)
 

@@ -4,6 +4,8 @@ Zentrales Nachschlagewerk. Wer neu auf dieses Projekt schaut — Mensch oder Age
 **dieses Dokument zuerst**. Es sammelt die Entscheidungen, die getroffen wurden, samt
 Begründung und den Messwerten, auf denen sie beruhen. Stand 2026-09-06.
 
+> **Hinweis (Stand 15.11.2026):** Alle Meldungen, die die App oder `looper-engine` ausgeben, sind inzwischen **englisch**. Wo dieses Dokument von einem „deutschen Satz“ spricht, ist derselbe Satz auf Englisch gemeint; die Begründungen gelten unverändert.
+
 ## Wo was steht
 
 | Dokument | Inhalt |
