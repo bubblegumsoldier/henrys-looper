@@ -231,6 +231,7 @@ export function ClockBar({ clock, free }: { clock: Clock; free: boolean }) {
             <option value="other">other…</option>
           </select>
         )}
+        <span className="cb-secs">{num(clock.loopSeconds, 1)} s</span>
       </div>
 
       <button className="cb-btn danger clear" data-midi={GLOBAL.clearAll} onClick={clearAllAsked} title="Delete every layer of every track · Shift+Backspace">

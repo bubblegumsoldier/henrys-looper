@@ -6,6 +6,7 @@
 
 import type { CSSProperties } from "react";
 import { Icon } from "../shell/Icon";
+import { ClockBar } from "./ClockBar";
 import { GLOBAL } from "../midi/addresses";
 import type { ScoreView } from "../shell/scoreTransport";
 import { PHASE, T, bars, num } from "../shell/terms";
@@ -147,10 +148,14 @@ export function PositionPanel({ clock, score, compiled }: Props) {
             return <i key={i} className={cls} />;
           })}
         </div>
-        <div className="secbar-l">
-          <span>{facts}</span>
-          <span>{where}</span>
-        </div>
+        {score.loaded ? (
+          <div className="secbar-l">
+            <span>{facts}</span>
+            <span>{where}</span>
+          </div>
+        ) : (
+          <ClockBar clock={clock} free />
+        )}
       </div>
     </section>
   );

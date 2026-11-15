@@ -432,8 +432,8 @@ table.tt .tn2 input.name-in { height: 24px; }
 .tb.hear.mute.on .ic { color: var(--warn); }
 
 /* ---- Tempo, metre and loop length on the Live page (ClockBar) ------------------------------- */
-.clockbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 12px; border-radius: var(--r-4, 10px);
-  background: linear-gradient(to bottom, #1d2027, #171a1f); border: 1px solid var(--line-3); }
+.clockbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; }
+.clockbar .cb-secs { font-size: 14px; color: var(--tx-3); font-variant-numeric: var(--num); white-space: nowrap; }
 .clockbar .cb-group { display: flex; align-items: center; gap: 6px; }
 .clockbar .cb-btn { height: 44px; min-width: 44px; padding: 0 12px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   background: linear-gradient(to bottom, #262a32, #1e2128); border: 1px solid var(--line-3); color: var(--tx-1); font-size: 15px; font-weight: var(--fw-semibold); }
