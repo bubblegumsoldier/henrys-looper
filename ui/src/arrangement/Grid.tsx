@@ -55,6 +55,11 @@ const RUNTIME: Record<string, { cls: string; icon: string; word: string }> = {
 };
 
 export function inputLabel(t: DocTrack): string {
+  if (t.instrument) {
+    const m = t.midi ?? {};
+    const parts = [m.device, m.channel ? `Ch ${m.channel}` : null, m.note_low !== undefined ? `${m.note_low}-${m.note_high}` : null].filter(Boolean);
+    return parts.length > 0 ? `MIDI ${parts.join(" · ")}` : "MIDI";
+  }
   return t.input_right ? `In ${t.input}–${t.input_right}` : `In ${t.input}`;
 }
 
@@ -664,7 +669,8 @@ function TrackHead(p: HeadProps) {
           ) : (
             <b onDoubleClick={p.onStartRename}>{t.name}</b>
           )}
-          <span className="ch">{t.input_right ? "stereo" : "mono"}</span>
+          {t.instrument && <i className="ic ic-keys" title="Instrument track: an instrument plugin played over MIDI" style={{ "--ic": "12px" } as React.CSSProperties} />}
+          <span className="ch">{t.instrument || t.input_right ? "stereo" : "mono"}</span>
           {p.error && <i className="ic ic-warn" style={{ "--ic": "12px", color: "var(--err)" } as React.CSSProperties} />}
           <div className="grow" />
           {rt && (
@@ -676,14 +682,22 @@ function TrackHead(p: HeadProps) {
           )}
         </div>
         <div className="ctl">
-          <span className="chip in" title="Interface input">
-            <i className="ic ic-input" />
+          <span className="chip in" title={t.instrument ? "Instrument played over MIDI: device, channel, keys" : "Interface input"}>
+            <i className={`ic ${t.instrument ? "ic-midi" : "ic-input"}`} />
             {inputLabel(t)}
           </span>
           <button
             className={`chip hear${monitor ? " on" : ""}`}
             disabled={!p.editable}
-            title={monitor ? "Monitoring allowed: you can hear this input live (needed for Record, Overdub and Monitor)" : "Monitoring off for this track"}
+            title={
+              t.instrument
+                ? monitor
+                  ? "Heard whenever it is played, in every section"
+                  : "This instrument is never heard live (monitor: false)"
+                : monitor
+                  ? "Monitoring allowed: you can hear this input live (needed for Record, Overdub and Monitor)"
+                  : "Monitoring off for this track"
+            }
             onClick={() => p.edit((d) => ops.patchTrack(d, p.index, { monitor: monitor ? false : undefined }))}
           >
             <i className="ic ic-hear" />

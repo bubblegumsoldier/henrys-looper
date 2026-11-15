@@ -132,7 +132,21 @@ export function InstrumentSlot({ track }: { track: string }) {
 }
 
 /** A searchable list of the playable instruments the scan found. */
-export function InstrumentPicker({ track, anchor, onClose }: { track: string; anchor: HTMLElement; onClose: () => void }) {
+/**
+ * The list of playable instruments. Picking one puts it on `track` at once - or, with `onPick`,
+ * only hands its id over (the arrangement writes it into the score).
+ */
+export function InstrumentPicker({
+  track,
+  anchor,
+  onClose,
+  onPick,
+}: {
+  track: string;
+  anchor: HTMLElement;
+  onClose: () => void;
+  onPick?: (id: string) => void;
+}) {
   const { catalog, scanning } = usePlugins();
   const [query, setQuery] = useState("");
   const instruments = useMemo(
@@ -162,7 +176,8 @@ export function InstrumentPicker({ track, anchor, onClose }: { track: string; an
             <button
               onClick={() => {
                 onClose();
-                void attempt(async () => setInstruments(await instrumentApi.set(track, p.id)));
+                if (onPick) onPick(p.id);
+                else void attempt(async () => setInstruments(await instrumentApi.set(track, p.id)));
               }}
               title={`${p.category}${p.latency ? ` · ${p.latency} frames latency` : ""}`}
             >

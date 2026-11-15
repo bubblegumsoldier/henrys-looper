@@ -607,6 +607,8 @@ export interface CompiledTrack {
   /** Measured latency compensation in frames; absent means the engine's default. */
   latency?: number;
   latency_trim: number;
+  /** Present on an instrument track. */
+  instrument?: TrackMidi;
 }
 
 /** A fully resolved section: `repeat:` unrolled, defaults filled in, **every** track named. */
@@ -689,8 +691,12 @@ export interface DocComments {
 
 export interface DocTrack {
   name: string;
-  /** One-based input; the left one of a stereo pair. */
+  /** One-based input; the left one of a stereo pair. 0 on an instrument track. */
   input: number;
+  /** `input: instrument`: played by an instrument plugin over MIDI. */
+  instrument?: boolean;
+  /** `midi:` of an instrument track: which device, channel and keys play it. */
+  midi?: TrackMidi;
   /** One-based right input of a stereo track; absent = mono. */
   input_right?: number;
   /** -1..1; absent = centre. */
@@ -703,10 +709,23 @@ export interface DocTrack {
   latency_trim?: number;
   /** `main` | `monitor` | `main+monitor` | `none`; absent = `main+monitor`. */
   bus?: string;
-  /** Same words; absent = `monitor`. */
+  /** Same words; absent = `monitor` (`main+monitor` on an instrument track). */
   monitor_bus?: string;
+  /** Reserved: `audio` | `midi` (what a take stores). Not offered in the UI yet. */
+  loop?: string;
+  /** Reserved: note grid for a later quantisation (`none`, `1/4`, ...). Not offered yet. */
+  grid?: string;
   comments?: DocComments;
   line?: number;
+}
+
+/** `midi:` of an instrument track. Absent fields: every device, every channel, all keys. */
+export interface TrackMidi {
+  device?: string;
+  /** 1..16. */
+  channel?: number;
+  note_low?: number;
+  note_high?: number;
 }
 
 /** One entry of `midi:`. Exactly one of `note` / `cc`. */
@@ -731,6 +750,8 @@ export interface DocMidiBinding {
 export interface DocSectionTrack {
   track: string;
   state: ScoreState;
+  /** Reserved: the clip's own note grid. */
+  grid?: string;
   comments?: DocComments;
   line?: number;
 }
@@ -801,6 +822,15 @@ export interface TrackMix {
   comp?: { on?: boolean; threshold?: number; ratio?: number; attack?: number; release?: number; knee?: number; makeup?: number };
   delay?: { on?: boolean; note?: string; feedback?: number; mix?: number };
   reverb?: { on?: boolean; size?: number; damping?: number; mix?: number };
+  /** Instrument plugin id of an instrument track; absent = keep what the track has. */
+  instrument?: string;
+  /** Effect plugins in slot order, by id; absent = keep, `[]` = empty the slots. */
+  inserts?: MixInsert[];
+}
+
+export interface MixInsert {
+  plugin: string;
+  bypass?: boolean;
 }
 
 export interface MixBand {
@@ -815,6 +845,11 @@ export interface MixerSource {
   buses?: MixerBusLevels;
   /** By track name, in order. */
   tracks?: Record<string, TrackMix>;
+}
+
+/** What `mixer_take` answers: the changed entries, plus changed pans (kept under `tracks:`). */
+export interface MixerTake extends MixerSource {
+  pan?: Record<string, number>;
 }
 
 /** One entry of `mixer.tracks` in the document: the mix fields flat, plus comments. */
@@ -884,6 +919,8 @@ export interface ParseOutcome {
   score: CompiledScore | null;
   locations: ScoreLocation[];
   errors: ModelIssue[];
+  /** Not errors: written correctly, not supported yet (`loop: midi`, `grid`). */
+  notes?: ModelIssue[];
 }
 
 /** Answer of `score_render`. `yaml` always; positions in `errors` refer to it. */
@@ -895,6 +932,7 @@ export interface RenderOutcome {
   score: CompiledScore | null;
   locations: ScoreLocation[];
   errors: ModelIssue[];
+  notes?: ModelIssue[];
 }
 
 /** What the runner is doing. */
@@ -1013,6 +1051,8 @@ export interface TemplateTrack {
   name: string;
   input: number;
   input_right?: number;
+  /** An instrument track, as the setup has it. */
+  instrument?: StartInstrument | null;
 }
 
 /** Pushed as `looper://notice`: something the program says on its own - the runner at a section

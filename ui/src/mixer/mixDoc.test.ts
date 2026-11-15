@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { deleteTrack, renameTrack } from "../arrangement/ops";
 import type { ScoreDoc } from "../types";
-import { mergeMixer, sourceOf, withoutMixer } from "./mixDoc";
+import { isEmpty, mergeMixer, pansOf, sourceOf, withoutMixer } from "./mixDoc";
 
 function doc(mixer?: ScoreDoc["mixer"]): ScoreDoc {
   return {
@@ -86,5 +86,41 @@ describe("the section and the rest of the score", () => {
     expect(renamed.mixer?.tracks.map((t) => t.track)).toEqual(["vocals", "guitar"]);
     const deleted = deleteTrack(before, 1);
     expect(deleted.mixer?.tracks).toEqual([{ track: "voice", gain: -2 }]);
+  });
+});
+
+describe("pan and plugins", () => {
+  it("writes a changed pan under tracks, centre as nothing, without creating a mixer section", () => {
+    const before = doc();
+    const out = mergeMixer(before, { pan: { voice: -0.3, guitar: 0 } });
+    expect(out.tracks[0]).toEqual({ name: "voice", input: 1, pan: -0.3 });
+    expect(out.tracks[1]).toBe(before.tracks[1]);
+    expect(out.mixer).toBeUndefined();
+    const back = mergeMixer(out, { pan: { voice: 0 } });
+    expect(back.tracks[0]).toEqual({ name: "voice", input: 1 });
+    expect(mergeMixer(out, { pan: { voice: -0.3 } })).toBe(out);
+    expect(pansOf(out)).toEqual({ voice: -0.3, guitar: 0 });
+    expect(isEmpty({ pan: { voice: 1 } })).toBe(false);
+  });
+
+  it("keeps instrument and inserts of an entry, and writes them when they change", () => {
+    const before = doc({
+      tracks: [{ track: "voice", gain: -2, instrument: "au:aumu:dls :appl", inserts: [{ plugin: "au:aufx:dely:appl" }] }],
+    });
+    // A fader move reports the whole entry, plugins included: nothing is lost.
+    const moved = mergeMixer(before, {
+      tracks: { voice: { gain: -4, instrument: "au:aumu:dls :appl", inserts: [{ plugin: "au:aufx:dely:appl" }] } },
+    });
+    expect(moved.mixer?.tracks[0]).toEqual({
+      track: "voice",
+      gain: -4,
+      instrument: "au:aumu:dls :appl",
+      inserts: [{ plugin: "au:aufx:dely:appl" }],
+    });
+    const bypassed = mergeMixer(moved, {
+      tracks: { voice: { gain: -4, instrument: "au:aumu:dls :appl", inserts: [{ plugin: "au:aufx:dely:appl", bypass: true }] } },
+    });
+    expect(bypassed.mixer?.tracks[0].inserts).toEqual([{ plugin: "au:aufx:dely:appl", bypass: true }]);
+    expect(sourceOf(bypassed.mixer).tracks?.voice.instrument).toBe("au:aumu:dls :appl");
   });
 });

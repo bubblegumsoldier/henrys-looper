@@ -26,8 +26,8 @@ import { mixerApi } from "../api";
 import { docStore, startDoc } from "../arrangement/useDoc";
 import { setConfig } from "../setup/config";
 import { currentStatus, subscribe } from "../status";
-import type { DocMixer, LooperStatus, MixerBusLevels, MixerSource, ScoreDoc } from "../types";
-import { canonical, isEmpty, mergeMixer, sourceOf } from "./mixDoc";
+import type { LooperStatus, MixerBusLevels, MixerTake, ScoreDoc } from "../types";
+import { canonical, isEmpty, mergeMixer, pansOf, sourceOf } from "./mixDoc";
 
 export { withoutMixer } from "./mixDoc";
 
@@ -64,24 +64,27 @@ export function isLive(doc: ScoreDoc | null, docId: number, status: LooperStatus
 export function markLoaded(): void {
   const s = docStore.get();
   liveDoc = s.docId;
-  synced = keyOf(s.doc?.mixer);
+  synced = keyOf(s.doc);
 }
 
 /** Changes that could not be written yet; `take` has already forgotten them. */
-let pending: MixerSource = {};
+let pending: MixerTake = {};
 
-function mergeSources(a: MixerSource, b: MixerSource): MixerSource {
+function mergeSources(a: MixerTake, b: MixerTake): MixerTake {
   return {
     ...(a.buses || b.buses ? { buses: { ...(a.buses ?? {}), ...(b.buses ?? {}) } as MixerBusLevels } : {}),
     tracks: { ...(a.tracks ?? {}), ...(b.tracks ?? {}) },
+    ...(a.pan || b.pan ? { pan: { ...(a.pan ?? {}), ...(b.pan ?? {}) } } : {}),
   };
 }
 
-const keyOf = (mixer: DocMixer | undefined) => JSON.stringify(canonical(sourceOf(mixer)));
+/** The part of a song the engine follows: its `mixer:` section and the tracks' pans. */
+const keyOf = (doc: ScoreDoc | null | undefined) =>
+  JSON.stringify(canonical({ mixer: sourceOf(doc?.mixer), pan: pansOf(doc ?? null) }));
 
 async function flush(): Promise<void> {
   timer = null;
-  let changes: MixerSource;
+  let changes: MixerTake;
   try {
     changes = mergeSources(pending, await mixerApi.take());
   } catch {
@@ -116,8 +119,9 @@ async function flush(): Promise<void> {
     schedule();
     return;
   }
-  let full: MixerSource | null = null;
-  if (!state.doc.mixer) {
+  let full: Awaited<ReturnType<typeof mixerApi.state>> | null = null;
+  const mixerChanged = !!changes.buses || Object.keys(changes.tracks ?? {}).length > 0;
+  if (!state.doc.mixer && mixerChanged) {
     try {
       full = await mixerApi.state();
     } catch {
@@ -130,7 +134,7 @@ async function flush(): Promise<void> {
   if (next === doc) return;
   const before = synced;
   // Set first: the store announces the edit synchronously, and that is no edit to send back.
-  synced = keyOf(next.mixer);
+  synced = keyOf(next);
   if (!docStore.edit(() => next)) {
     synced = before;
     pending = changes;
@@ -149,12 +153,12 @@ function onDoc(): void {
   if (!s.inSync || !s.doc) return;
   const status = currentStatus();
   if (!isLive(s.doc, s.docId, status)) return;
-  const source = sourceOf(s.doc.mixer);
-  const key = keyOf(s.doc.mixer);
+  const key = keyOf(s.doc);
   if (key === synced) return;
   synced = key;
-  if (!s.doc.mixer) return; // undoing the very first write: the engine keeps what it has
-  void mixerApi.apply(source).catch(() => undefined);
+  // Undoing the very first write of the section: the engine keeps its mix (the pans still follow).
+  const source = s.doc.mixer ? sourceOf(s.doc.mixer) : {};
+  void mixerApi.apply(source, pansOf(s.doc)).catch(() => undefined);
 }
 
 /** Start keeping the mix and the open song in step. Idempotent. */
@@ -167,7 +171,7 @@ export function startScoreMix(): void {
     if (s.docId !== lastDocId) {
       // Another document: it is not playing until "Load" says so.
       lastDocId = s.docId;
-      synced = keyOf(s.doc?.mixer);
+      synced = keyOf(s.doc);
       return;
     }
     onDoc();

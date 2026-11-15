@@ -39,6 +39,8 @@ interface Props {
   onRedo: () => void;
   readOnly: boolean;
   errors: ModelIssue[];
+  /** Not errors: what does nothing yet (`loop: midi`, `grid`). */
+  notes?: ModelIssue[];
   /** Model to preview: the text's, or the last one that parsed. */
   doc: ScoreDoc | null;
   inSync: boolean;
@@ -205,7 +207,9 @@ export function TextView(p: Props) {
     const v = view.current;
     if (!v) return;
     const doc = v.state.doc;
-    const diags: Diagnostic[] = p.errors.map((e) => {
+    const notes = p.notes ?? [];
+    const all = [...p.errors.map((e) => ({ e, severity: "error" as const })), ...notes.map((e) => ({ e, severity: "warning" as const }))];
+    const diags: Diagnostic[] = all.map(({ e, severity }) => {
       const lineNo = Math.min(Math.max(e.line ?? 1, 1), doc.lines);
       const line = doc.line(lineNo);
       let from = line.from;
@@ -217,12 +221,12 @@ export function TextView(p: Props) {
       return {
         from: from === to && line.length === 0 ? line.from : from,
         to,
-        severity: "error",
+        severity,
         message: e.suggestion ? `${e.message}\n${e.suggestion}` : e.message,
       };
     });
     v.dispatch(setDiagnostics(v.state, diags));
-  }, [p.errors, p.text]);
+  }, [p.errors, p.notes, p.text]);
 
   useEffect(() => {
     const v = view.current;
@@ -268,6 +272,15 @@ export function TextView(p: Props) {
                 {e.line ? <b>Line {e.line}: </b> : null}
                 {e.message}
                 {e.suggestion && <div className="sugg">{e.suggestion}</div>}
+              </div>
+            </button>
+          ))}
+          {(p.notes ?? []).map((e, i) => (
+            <button key={`n${i}`} className="diag" onClick={() => e.line && p.onJump(e.line)} title="Go to the line">
+              <i className="ic ic-info" />
+              <div>
+                {e.line ? <b>Line {e.line}: </b> : null}
+                {e.message}
               </div>
             </button>
           ))}
@@ -335,7 +348,12 @@ function Notes({ doc }: { doc: ScoreDoc }) {
     if (what) notes.push({ line: s.line, text: `${s.id} inherits ${what} from ${s.repeat}.` });
   });
   doc.tracks.forEach((t) => {
-    if (t.input_right) notes.push({ line: t.line, text: `${t.name} is stereo (inputs ${t.input} and ${t.input_right}).` });
+    if (t.instrument)
+      notes.push({
+        line: t.line,
+        text: `${t.name} is an instrument track: played over MIDI, always stereo, heard whenever it is played${t.monitor === false ? " (here: never, monitor: false)" : ""}.`,
+      });
+    else if (t.input_right) notes.push({ line: t.line, text: `${t.name} is stereo (inputs ${t.input} and ${t.input_right}).` });
   });
   if (doc.mixer) {
     const n = doc.mixer.tracks.length;

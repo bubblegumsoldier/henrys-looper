@@ -2958,16 +2958,12 @@ impl Session {
             Action::SetBusGain { .. } | Action::SetClickGain { .. } | Action::SetMonitorGain { .. } => {
                 Some(None)
             }
-            // Pan is not a mixer field but the track's own (`tracks:`), and the score keeps it
-            // the same way.
-            Action::SetPan { track, .. } => {
-                if let Some(name) = self.tracks.get(track).map(|ui| ui.name.clone())
-                    && !self.pan_changed.contains(&name)
-                {
-                    self.pan_changed.push(name);
-                }
-                Some(Some(track))
-            }
+            _ => None,
+        };
+        // Pan is not a mixer field but the track's own (`tracks:`); the score keeps it the same
+        // way, without touching the track's `mixer:` entry.
+        let pan_track = match action {
+            Action::SetPan { track, .. } => self.tracks.get(track).map(|ui| ui.name.clone()),
             _ => None,
         };
         let result = self.apply_action(action);
@@ -2975,6 +2971,14 @@ impl Session {
             && let Some(track) = mix_track
         {
             self.mix_touched(track);
+        }
+        if result.is_ok()
+            && let Some(name) = pan_track
+        {
+            self.mix_rev += 1;
+            if !self.pan_changed.contains(&name) {
+                self.pan_changed.push(name);
+            }
         }
         result
     }

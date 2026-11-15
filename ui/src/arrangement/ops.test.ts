@@ -196,3 +196,23 @@ describe("head and names", () => {
     expect(ops.uniqueName("voice_3", ["voice_3", "voice_4"])).toBe("voice_2");
   });
 });
+
+describe("instrument tracks", () => {
+  it("turns a track into an instrument track and back, dropping what only the other kind has", () => {
+    const doc = henry();
+    doc.tracks[1].latency = 300;
+    const inst = ops.setTrackInstrument(doc, 1, true);
+    expect(inst.tracks[1]).toMatchObject({ name: "voice", instrument: true, input: 0 });
+    expect(inst.tracks[1].latency).toBeUndefined();
+    const named = ops.setTrackInstrumentPlugin(inst, "voice", "au:aumu:dls :appl");
+    expect(named.mixer?.tracks).toEqual([{ track: "voice", instrument: "au:aumu:dls :appl" }]);
+    const midi = ops.patchTrack(named, 1, { midi: { device: "Testkeys", channel: 2 } });
+    const back = ops.setTrackInstrument(midi, 1, false);
+    expect(back.tracks[1].instrument).toBeUndefined();
+    expect(back.tracks[1].midi).toBeUndefined();
+    expect(back.tracks[1].input).toBe(1);
+    // An audio track cannot name an instrument: the entry loses it.
+    expect(back.mixer?.tracks).toEqual([{ track: "voice" }]);
+    expect(ops.setTrackInstrument(back, 1, false)).toBe(back);
+  });
+});

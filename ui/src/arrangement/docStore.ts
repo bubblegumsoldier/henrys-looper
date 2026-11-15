@@ -36,6 +36,8 @@ export interface Snapshot {
   inSync: boolean;
   /** The compiler's issues with `text`; empty means the score is valid. */
   errors: ModelIssue[];
+  /** Not errors: written correctly, not supported yet (`loop: midi`, `grid`). */
+  notes?: ModelIssue[];
   score: CompiledScore | null;
 }
 
@@ -147,8 +149,8 @@ export class DocStore {
     this.pending++;
     try {
       const out = await this.backend.parse(text);
-      if (out.ok && out.doc) return { text, doc: out.doc, inSync: true, errors: [], score: out.score };
-      return { text, doc: fallback, inSync: false, errors: out.errors, score: null };
+      if (out.ok && out.doc) return { text, doc: out.doc, inSync: true, errors: [], notes: out.notes ?? [], score: out.score };
+      return { text, doc: fallback, inSync: false, errors: out.errors, notes: out.notes ?? [], score: null };
     } catch (e) {
       this.set({ failure: (e as Error).message });
       return null;
@@ -216,6 +218,7 @@ export class DocStore {
           doc: out.doc,
           inSync: true,
           errors: out.ok ? [] : out.errors,
+          notes: out.notes ?? [],
           score: out.score,
         };
         this.push(snap);

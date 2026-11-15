@@ -5,7 +5,12 @@
 //! clips (shown as their section, with the clip's track highlighted, as in the mockup), a track.
 
 import { useEffect, useState, type ReactNode } from "react";
-import type { ModelIssue, ScoreDoc, ScoreState } from "../types";
+import { midiApi } from "../api";
+import { InstrumentPicker } from "../mixer/InstrumentSlot";
+import { noteName } from "../plugins/instruments";
+import { usePlugins } from "../plugins/store";
+import { T } from "../shell/terms";
+import type { DocTrack, ModelIssue, ScoreDoc, ScoreState, TrackMidi } from "../types";
 import { inputLabel } from "./Grid";
 import { STATES, STATE_LOOK, busHas, busWord, duration, plural } from "./labels";
 import * as ops from "./ops";
@@ -15,6 +20,8 @@ import type { Selection } from "./selection";
 interface Props {
   doc: ScoreDoc;
   errors: ModelIssue[];
+  /** Not errors: what is written correctly and does nothing yet. */
+  notes?: ModelIssue[];
   editable: boolean;
   sel: Selection;
   setSel: (s: Selection) => void;
@@ -509,10 +516,14 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
       what = <>{name} is silent. Its loop is kept for later sections.</>;
       break;
     case "hear_through":
-      what = <>You hear {name}’s input live; nothing is recorded.</>;
+      what = t.instrument ? (
+        <>{name} is an instrument track: it is heard whenever it is played, so Monitor changes nothing here.</>
+      ) : (
+        <>You hear {name}’s input live; nothing is recorded.</>
+      );
       break;
   }
-  const needsMonitor = st.state === "record" || st.state === "overdub" || st.state === "hear_through";
+  const needsMonitor = !t.instrument && (st.state === "record" || st.state === "overdub" || st.state === "hear_through");
   const own = st.from.kind === "own";
   return (
     <div className="insp-s">
@@ -543,7 +554,7 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
 // A track
 // ---------------------------------------------------------------------------------------------
 
-function TrackPanel({ doc, errors, editable, setSel, edit, onIssue, index }: Props & { index: number }) {
+function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, index }: Props & { index: number }) {
   const t = doc.tracks[index];
   const monitor = t.monitor !== false;
   const loopMain = busHas(t.bus, "main+monitor", "main");
@@ -574,42 +585,82 @@ function TrackPanel({ doc, errors, editable, setSel, edit, onIssue, index }: Pro
           />
         </h2>
         <div className="sub">
-          {t.input_right ? "stereo" : "mono"} · {inputLabel(t)} · active in {plural(used, "section")}
+          {t.instrument ? `${T.instrument} · stereo` : `${t.input_right ? "stereo" : "mono"} · ${inputLabel(t)}`} · active in {plural(used, "section")}
         </div>
       </div>
       <Problems errors={errors} onIssue={onIssue} filter={(e) => e.at?.kind === "track" && e.at.index === index} />
+      {(notes ?? [])
+        .filter((e) => e.at?.kind === "track" && e.at.index === index)
+        .map((e, i) => (
+          <div key={i} className="insp-s">
+            <div className="diag">
+              <i className="ic ic-info" />
+              <div>{e.message}</div>
+            </div>
+          </div>
+        ))}
       <div className="insp-s">
         <span className="caps">Input</span>
         <div className="frow">
-          <label>Input</label>
+          <label>Source</label>
           <div>
-            <Field value={String(t.input)} width={64} disabled={!editable} check={inputCheck} onCommit={(v) => patch({ input: Number(v) })} />
-            <Toggle
-              on={t.input_right !== undefined}
+            <select
+              className="field sel"
+              value={t.instrument ? "instrument" : "audio"}
               disabled={!editable}
-              label="Stereo"
-              onChange={(on) => patch({ input_right: on ? t.input + 1 : undefined })}
+              title="An input of the interface, or an instrument plugin played over MIDI"
+              onChange={(e) => edit((d) => ops.setTrackInstrument(d, index, e.target.value === "instrument"))}
+            >
+              <option value="audio">Audio input</option>
+              <option value="instrument">{T.instrument} (MIDI)</option>
+            </select>
+          </div>
+        </div>
+        {t.instrument ? (
+          <InstrumentRows doc={doc} track={t} editable={editable} edit={edit} patch={patch} />
+        ) : (
+          <>
+            <div className="frow">
+              <label>Input</label>
+              <div>
+                <Field value={String(t.input)} width={64} disabled={!editable} check={inputCheck} onCommit={(v) => patch({ input: Number(v) })} />
+                <Toggle
+                  on={t.input_right !== undefined}
+                  disabled={!editable}
+                  label="Stereo"
+                  onChange={(on) => patch({ input_right: on ? t.input + 1 : undefined })}
+                />
+              </div>
+            </div>
+            {t.input_right !== undefined && (
+              <div className="frow">
+                <label>Right input</label>
+                <div>
+                  <Field value={String(t.input_right)} width={64} disabled={!editable} check={inputCheck} onCommit={(v) => patch({ input_right: Number(v) })} />
+                </div>
+              </div>
+            )}
+          </>
+        )}
+        <div className="frow">
+          <label>{t.instrument ? "Heard" : "Monitoring"}</label>
+          <div>
+            <Toggle
+              on={monitor}
+              disabled={!editable}
+              label={t.instrument ? (monitor ? "Always" : "Never") : monitor ? "Allowed" : "Off"}
+              onChange={(on) => patch({ monitor: on ? undefined : false })}
             />
           </div>
         </div>
-        {t.input_right !== undefined && (
-          <div className="frow">
-            <label>Right input</label>
-            <div>
-              <Field value={String(t.input_right)} width={64} disabled={!editable} check={inputCheck} onCommit={(v) => patch({ input_right: Number(v) })} />
-            </div>
-          </div>
-        )}
-        <div className="frow">
-          <label>Monitoring</label>
-          <div>
-            <Toggle on={monitor} disabled={!editable} label={monitor ? "Allowed" : "Off"} onChange={(on) => patch({ monitor: on ? undefined : false })} />
-          </div>
-        </div>
         <div className="hint">
-          {monitor
-            ? "You can hear this input live through the engine — Record, Overdub and Monitor need that."
-            : "This input is never heard live. Record, Overdub and Monitor still work, but without hearing yourself."}
+          {t.instrument
+            ? monitor
+              ? "An instrument track is heard whenever it is played — in every section, whatever its clips say."
+              : "This instrument is never heard live; its takes are still recorded and play back."
+            : monitor
+              ? "You can hear this input live through the engine — Record, Overdub and Monitor need that."
+              : "This input is never heard live. Record, Overdub and Monitor still work, but without hearing yourself."}
         </div>
       </div>
       <div className="insp-s">
@@ -658,6 +709,7 @@ function TrackPanel({ doc, errors, editable, setSel, edit, onIssue, index }: Pro
       </div>
       <div className="insp-s">
         <span className="caps">Latency</span>
+        {!t.instrument && (
         <div className="frow">
           <label>Measured</label>
           <div>
@@ -672,6 +724,7 @@ function TrackPanel({ doc, errors, editable, setSel, edit, onIssue, index }: Pro
             />
           </div>
         </div>
+        )}
         <div className="frow">
           <label>Trim</label>
           <div>
@@ -685,7 +738,11 @@ function TrackPanel({ doc, errors, editable, setSel, edit, onIssue, index }: Pro
             />
           </div>
         </div>
-        <div className="hint">What a recording on this input is shifted back by. Empty uses the engine’s measured default; trim adds to it.</div>
+        <div className="hint">
+          {t.instrument
+            ? "Automatic for an instrument: output latency + one block + the instrument’s own latency. Trim shifts the takes by ear."
+            : "What a recording on this input is shifted back by. Empty uses the engine’s measured default; trim adds to it."}
+        </div>
       </div>
       <div className="insp-f">
         <button className="btn s sq" title="Move up" disabled={!editable || index === 0} onClick={() => { edit((d) => ops.moveTrack(d, index, index - 1)); setSel({ kind: "track", index: index - 1 }); }}>
@@ -707,6 +764,138 @@ function TrackPanel({ doc, errors, editable, setSel, edit, onIssue, index }: Pro
 function panWord(v: number): string {
   if (Math.abs(v) < 0.001) return "C";
   return v < 0 ? `L ${Math.round(-v * 100)}` : `R ${Math.round(v * 100)}`;
+}
+
+/** `36-51` as two note numbers, or null when it is not a range of MIDI notes. */
+function noteRange(text: string): [number, number] | null {
+  const m = /^\s*(\d{1,3})\s*-\s*(\d{1,3})\s*$/.exec(text);
+  if (!m) return null;
+  const [low, high] = [Number(m[1]), Number(m[2])];
+  return low <= high && high <= 127 ? [low, high] : null;
+}
+
+/** The MIDI side of an instrument track: plugin (in `mixer:`), device, channel, keys. */
+function InstrumentRows({
+  doc,
+  track,
+  editable,
+  edit,
+  patch,
+}: {
+  doc: ScoreDoc;
+  track: DocTrack;
+  editable: boolean;
+  edit: Props["edit"];
+  patch: (p: ops.TrackPatch) => void;
+}) {
+  const { catalog } = usePlugins();
+  const [ports, setPorts] = useState<string[]>([]);
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    midiApi.ports().then((list) => setPorts(list.map((p) => p.name)), () => setPorts([]));
+  }, []);
+  const midi = track.midi ?? {};
+  const setMidi = (next: TrackMidi) => {
+    const clean = Object.fromEntries(Object.entries(next).filter(([, v]) => v !== undefined && v !== null)) as TrackMidi;
+    patch({ midi: Object.keys(clean).length > 0 ? clean : undefined });
+  };
+  const id = doc.mixer?.tracks.find((m) => m.track === track.name)?.instrument;
+  const plugin = id ? catalog?.plugins.find((p) => p.id === id) : undefined;
+  const pluginLabel = id ? (plugin ? plugin.name : catalog ? `${id} (not installed)` : id) : "Keep the local one";
+  const devices = [
+    { value: "", label: T.allDevices },
+    ...ports.map((p) => ({ value: p, label: p })),
+    ...(midi.device && !ports.includes(midi.device) ? [{ value: midi.device, label: `${midi.device} (not connected)` }] : []),
+  ];
+  const range = midi.note_low !== undefined && midi.note_high !== undefined ? `${midi.note_low}-${midi.note_high}` : "";
+  return (
+    <>
+      <div className="frow">
+        <label>{T.instrument}</label>
+        <div>
+          <button
+            className="btn s"
+            style={{ maxWidth: 170, overflow: "hidden", justifyContent: "flex-start" }}
+            disabled={!editable}
+            title={id ? `${id} - click to choose another` : "No instrument named in the score: the track plays what it has on this computer. Click to choose one."}
+            onClick={(e) => setAnchor(anchor ? null : e.currentTarget)}
+          >
+            <i className="ic ic-keys" />
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{pluginLabel}</span>
+          </button>
+          {id && (
+            <button className="btn s sq ghost" disabled={!editable} title="Name no instrument in the score" onClick={() => edit((d) => ops.setTrackInstrumentPlugin(d, track.name, undefined))}>
+              <i className="ic ic-x" />
+            </button>
+          )}
+          {anchor && (
+            <InstrumentPicker
+              track={track.name}
+              anchor={anchor}
+              onClose={() => setAnchor(null)}
+              onPick={(pick) => edit((d) => ops.setTrackInstrumentPlugin(d, track.name, pick))}
+            />
+          )}
+        </div>
+      </div>
+      <div className="frow">
+        <label>Device</label>
+        <div>
+          <select className="field sel" value={midi.device ?? ""} disabled={!editable} title="Which MIDI keyboard plays this track" onChange={(e) => setMidi({ ...midi, device: e.target.value || undefined })}>
+            {devices.map((d) => (
+              <option key={d.value} value={d.value}>
+                {d.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="frow">
+        <label>Channel</label>
+        <div>
+          <select
+            className="field sel"
+            value={midi.channel ?? 0}
+            disabled={!editable}
+            title="Which MIDI channel plays this track. Notes on other channels stay with the MIDI bindings."
+            onChange={(e) => setMidi({ ...midi, channel: Number(e.target.value) || undefined })}
+          >
+            <option value={0}>{T.allChannels}</option>
+            {Array.from({ length: 16 }, (_, c) => (
+              <option key={c + 1} value={c + 1}>
+                {T.channelShort} {c + 1}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="frow">
+        <label>Keys</label>
+        <div>
+          <Field
+            value={range}
+            width={90}
+            mono
+            placeholder="all"
+            disabled={!editable}
+            check={(v) => (v.trim() === "" || noteRange(v) ? null : "Lowest-highest, MIDI notes 0 to 127, e.g. 36-51")}
+            onCommit={(v) => {
+              const r = noteRange(v);
+              setMidi({ ...midi, note_low: r?.[0], note_high: r?.[1] });
+            }}
+          />
+          {range && (
+            <span className="dim">
+              {noteName(midi.note_low as number)}–{noteName(midi.note_high as number)}
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="hint">
+        Only the plugin’s id goes into the score; its sound stays on this computer. Keys outside the range stay with the MIDI bindings.
+      </div>
+    </>
+  );
 }
 
 function BusPair({ main, mon, onChange, disabled }: { main: boolean; mon: boolean; onChange: (main: boolean, mon: boolean) => void; disabled?: boolean }) {

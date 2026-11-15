@@ -335,6 +335,63 @@ export function patchTrack(doc: ScoreDoc, index: number, patch: TrackPatch): Sco
   return done(d);
 }
 
+/**
+ * Make a track an instrument track (`input: instrument`) or an audio track again (`input: <n>`).
+ * What only the one kind has goes: an audio track's measured latency and stereo pair, an
+ * instrument track's `midi:`, reserved `loop:` and its instrument in `mixer:`.
+ */
+export function setTrackInstrument(doc: ScoreDoc, index: number, instrument: boolean): ScoreDoc {
+  const t = doc.tracks[index];
+  if (!t || !!t.instrument === instrument) return doc;
+  const d = draft(doc);
+  const n = d.tracks[index];
+  if (instrument) {
+    n.instrument = true;
+    n.input = 0;
+    delete n.input_right;
+    delete n.latency;
+  } else {
+    delete n.instrument;
+    delete n.midi;
+    delete n.loop;
+    const used = new Set(d.tracks.flatMap((x) => (x.instrument ? [] : x.input_right ? [x.input, x.input_right] : [x.input])));
+    let input = 1;
+    while (used.has(input)) input++;
+    n.input = input;
+    if (d.mixer) {
+      d.mixer.tracks = d.mixer.tracks.map((m) => {
+        if (m.track !== n.name || m.instrument === undefined) return m;
+        const copy = { ...m };
+        delete copy.instrument;
+        return copy;
+      });
+    }
+  }
+  return done(d);
+}
+
+/**
+ * The instrument plugin of an instrument track, by id, in its `mixer:` entry (created when the
+ * score has none). `undefined` removes the field: the track keeps whatever it plays locally.
+ */
+export function setTrackInstrumentPlugin(doc: ScoreDoc, track: string, id: string | undefined): ScoreDoc {
+  const d = draft(doc);
+  const mixer = d.mixer ?? { tracks: [] };
+  const at = mixer.tracks.findIndex((m) => m.track === track);
+  if (at >= 0) {
+    const entry = { ...mixer.tracks[at] };
+    if (id === undefined) delete entry.instrument;
+    else entry.instrument = id;
+    mixer.tracks[at] = entry;
+  } else if (id !== undefined) {
+    mixer.tracks.push({ track, instrument: id });
+    const order = new Map(d.tracks.map((t, i) => [t.name, i]));
+    mixer.tracks.sort((a, b) => (order.get(a.track) ?? 99) - (order.get(b.track) ?? 99));
+  }
+  d.mixer = mixer;
+  return done(d);
+}
+
 /** Rename a track, its states in every section, its mixer entry and the bindings that name it. */
 export function renameTrack(doc: ScoreDoc, index: number, name: string): ScoreDoc {
   const d = draft(doc);

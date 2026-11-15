@@ -20,6 +20,7 @@ import type {
   FilesInfo,
   FxSlotName,
   MixerSource,
+  MixerTake,
   OpenedFile,
   OverdubMode,
   RecentFile,
@@ -297,9 +298,9 @@ export const mixerApi = {
   /** Every track of the engine and the buses. */
   state: () => call<MixerSource>("mixer_state"),
   /** Only what a human changed since the last call; `LooperStatus.mixer_rev` says when to ask. */
-  take: () => call<MixerSource>("mixer_take"),
-  /** Put the engine into this mix, tracks by name (undo/redo in the arrangement). */
-  apply: (mixer: MixerSource) => call<void>("mixer_apply", { mixer }),
+  take: () => call<MixerTake>("mixer_take"),
+  /** Put the engine into this mix and these pans, tracks by name (undo/redo in the arrangement). */
+  apply: (mixer: MixerSource, pan?: Record<string, number>) => call<void>("mixer_apply", { mixer, pan: pan ?? null }),
 };
 
 // ---------------------------------------------------------------------------------------------

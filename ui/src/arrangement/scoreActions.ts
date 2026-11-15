@@ -17,6 +17,7 @@ import { IS_MAC } from "../platform";
 import { isDirty, scoreFile, updateScoreFile } from "../scoreFile";
 import { fail, note, say } from "../shell/notes";
 import { setLoadedScore } from "../shell/scoreModel";
+import { useEngine } from "../shell/engine";
 import { currentStatus, useStatusSlice } from "../status";
 import type { RecentFile } from "../types";
 import { docStore } from "./useDoc";
@@ -45,6 +46,7 @@ export function useScoreActions(): ScoreActions {
   const [recent, setRecent] = useState<RecentFile[]>([]);
   const [defaultDir, setDefaultDir] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const engineInfo = useEngine().info;
   const [countIn, setCountInRaw] = useState(1);
   const [, setLoadedRev] = useState(0);
   const runnerCountIn = useStatusSlice((s) => s.score?.count_in ?? null);
@@ -129,10 +131,12 @@ export function useScoreActions(): ScoreActions {
   const newScore = useCallback(async () => {
     if (!(await mayDiscard())) return;
     // The running engine's tracks, so a new score loads without rebuilding anything.
+    // An instrument track goes in as one, with the keyboard that plays it and its instrument.
     const tracks = currentStatus().tracks.map((t) => ({
       name: t.name,
       input: t.input_channels[0] ?? t.input_channel,
       input_right: t.input_channels.length > 1 ? t.input_channels[1] : undefined,
+      instrument: t.instrument ? (engineInfo?.tracks.find((c) => c.name === t.name)?.instrument ?? { device: null, channel: null, monitor: true }) : undefined,
     }));
     try {
       const text = await filesApi.template(tracks.length > 0 ? tracks : undefined);
@@ -140,7 +144,7 @@ export function useScoreActions(): ScoreActions {
     } catch (e) {
       fail((e as Error).message);
     }
-  }, [mayDiscard]);
+  }, [mayDiscard, engineInfo]);
 
   // ⌘N / ⌘O / ⌘S / ⌘⇧S (Ctrl on Windows). Captured before the editor sees them.
   useEffect(() => {

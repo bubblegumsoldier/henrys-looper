@@ -233,12 +233,21 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         <button
           className={`tb hear${track.monitor ? " on" : ""}`}
           data-midi={trackAddress(i, "monitor")}
+          // An instrument track is heard whenever it is played; only its setup or the score's
+          // `monitor: false` silences it.
+          disabled={track.instrument}
           onClick={(e) => {
             e.stopPropagation();
             onSelect(i);
             actions.monitor(i, !track.monitor);
           }}
-          title={`${T.monitor} · key M`}
+          title={
+            track.instrument
+              ? track.monitor
+                ? "Instrument track: heard whenever it is played. Mute it to silence it."
+                : "Instrument track set up as never heard (monitor: false)"
+              : `${T.monitor} · key M`
+          }
         >
           <Icon name="hear" />
           <span>{T.monitor}</span>

@@ -149,6 +149,22 @@ export function LatencyRows({
 
   return (
     <>
+      {track.instrument ? (
+        // An instrument track has no cable to measure: what it is shifted back by is known exactly.
+        <div className="frow">
+          <label>Compensation</label>
+          <div>
+            <span className="num">{track.latency_frames - track.latency_trim}</span>
+            <span className="unit dim">frames</span>
+            <span
+              className="inh-tag"
+              title="Instrument track: output latency + one block + the instrument's own latency, worked out by the engine. Only the trim below is yours."
+            >
+              <Icon name="link" /> automatic
+            </span>
+          </div>
+        </div>
+      ) : (
       <div className="frow">
         <label>Measured</label>
         <div>
@@ -183,6 +199,7 @@ export function LatencyRows({
           )}
         </div>
       </div>
+      )}
       <div className="frow" data-midi={trackAddress(i, "latency_trim")}>
         <label>{T.trim}</label>
         <div>

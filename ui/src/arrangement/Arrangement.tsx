@@ -478,7 +478,7 @@ export function Arrangement({ onGoto, actions }: Props) {
             </div>
             {inspector && mixer.open && <ChannelPanel />}
             {inspector && !mixer.open && doc && (
-              <Inspector doc={doc} errors={state.inSync ? errors : []} editable={editable} sel={sel} setSel={setSel} edit={edit} onIssue={showIssue} />
+              <Inspector doc={doc} errors={state.inSync ? errors : []} notes={state.notes ?? []} editable={editable} sel={sel} setSel={setSel} edit={edit} onIssue={showIssue} />
             )}
           </div>
         ) : (
@@ -490,6 +490,7 @@ export function Arrangement({ onGoto, actions }: Props) {
             onRedo={() => !locked && docStore.redo()}
             readOnly={locked}
             errors={errors}
+            notes={state.notes ?? []}
             doc={doc}
             inSync={state.inSync}
             score={state.score}

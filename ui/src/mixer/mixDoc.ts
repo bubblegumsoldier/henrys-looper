@@ -2,7 +2,7 @@
 //! are written into a document, and the section without comments. No engine, no store - the
 //! wiring is `scoreMix.ts`.
 
-import type { DocMixer, DocMixerTrack, MixerSource, ScoreDoc, TrackMix } from "../types";
+import type { DocMixer, DocMixerTrack, MixerSource, MixerTake, ScoreDoc, TrackMix } from "../types";
 
 /** The fields of a mixer entry, in the order the file writes them. */
 export const MIX_FIELDS = [
@@ -18,6 +18,8 @@ export const MIX_FIELDS = [
   "comp",
   "delay",
   "reverb",
+  "instrument",
+  "inserts",
 ] as const satisfies readonly (keyof TrackMix)[];
 
 /** Only the mix fields of an entry (no name, comments, line). */
@@ -51,13 +53,37 @@ export function sourceOf(mixer: DocMixer | undefined): MixerSource {
   return { ...(mixer.buses ? { buses: { ...mixer.buses } } : {}), tracks };
 }
 
+/** Every track's pan as the score has it (absent = centre). */
+export function pansOf(doc: ScoreDoc | null): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const t of doc?.tracks ?? []) out[t.name] = t.pan ?? 0;
+  return out;
+}
+
+/** Write changed pans into the score's `tracks:` (centre is written as nothing, like the Inspector). */
+function mergePans(doc: ScoreDoc, pans: Record<string, number> | undefined): ScoreDoc {
+  if (!pans) return doc;
+  let changed = false;
+  const tracks = doc.tracks.map((t) => {
+    const pan = pans[t.name];
+    if (pan === undefined || pan === (t.pan ?? 0)) return t;
+    changed = true;
+    const next: ScoreDoc["tracks"][number] = { ...t, pan };
+    if (pan === 0) delete next.pan;
+    return next;
+  });
+  return changed ? { ...doc, tracks } : doc;
+}
+
 /**
- * Write what changed into the document. `changes` are the entries the engine reports as changed;
- * `full` the whole mix, used when the document has no section yet. Entries for tracks the score
- * does not have are ignored; an entry that already says the same is left alone (comments and all).
- * Returns the same object when nothing changes.
+ * Write what changed into the document. `changes` are the entries the engine reports as changed
+ * (and the pans, which go under `tracks:`); `full` the whole mix, used when the document has no
+ * section yet. Entries for tracks the score does not have are ignored; an entry that already says
+ * the same is left alone (comments and all). Returns the same object when nothing changes.
  */
-export function mergeMixer(doc: ScoreDoc, changes: MixerSource, full: MixerSource | null = null): ScoreDoc {
+export function mergeMixer(doc: ScoreDoc, changes: MixerTake, full: MixerSource | null = null): ScoreDoc {
+  doc = mergePans(doc, changes.pan);
+  if (!changes.buses && Object.keys(changes.tracks ?? {}).length === 0) return doc;
   const names = new Set(doc.tracks.map((t) => t.name));
   const base: DocMixer = doc.mixer
     ? { ...doc.mixer, tracks: doc.mixer.tracks.slice() }
@@ -96,8 +122,8 @@ export function mergeMixer(doc: ScoreDoc, changes: MixerSource, full: MixerSourc
 }
 
 /** True when `changes` says nothing. */
-export function isEmpty(changes: MixerSource): boolean {
-  return !changes.buses && Object.keys(changes.tracks ?? {}).length === 0;
+export function isEmpty(changes: MixerTake): boolean {
+  return !changes.buses && Object.keys(changes.tracks ?? {}).length === 0 && Object.keys(changes.pan ?? {}).length === 0;
 }
 
 /**

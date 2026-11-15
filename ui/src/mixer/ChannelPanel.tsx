@@ -59,7 +59,7 @@ export function ChannelPanel() {
         </h2>
         <div className="sub">
           {track.instrument ? T.instrument : `${T.input} ${track.input_channels.join("–")}`} · {track.channels === 2 ? T.stereo : T.mono} · {T.latency}{" "}
-          {ms(measured).toFixed(1)} ms {track.latency_inherited ? "default" : "measured"} + {ms(track.latency_trim).toFixed(1)} ms
+          {ms(measured).toFixed(1)} ms {track.instrument ? "automatic" : track.latency_inherited ? "default" : "measured"} + {ms(track.latency_trim).toFixed(1)} ms
         </div>
       </div>
 
@@ -69,7 +69,7 @@ export function ChannelPanel() {
         <LayerList track={track} actions={channelActions} />
 
         <div className="fxd">
-          <span className="caps">Input · {T.latency}</span>
+          <span className="caps">{track.instrument ? T.instrument : "Input"} · {T.latency}</span>
           <div className="frow">
             <label>{T.input}</label>
             <div>
