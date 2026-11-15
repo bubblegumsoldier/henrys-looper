@@ -123,6 +123,9 @@ input.range:disabled { opacity: .4; }
   color: var(--tx-3); background: var(--bg-2); border: 1px dashed var(--tx-4);
   text-decoration: line-through; text-decoration-color: rgba(255,255,255,.35);
 }
+/* On stage a struck-through badge is only noise: a binding that does nothing right now (device
+   unplugged, track not in this session) is shown while learning, where it can be fixed. */
+.window:not(.learn-on) [data-midi-state="inactive"]::after { display: none; }
 [data-midi-key].midi-from-score::after { color: #ffe3a8; border-color: rgba(245,185,66,.6); background: #2a2210; }
 .frow[data-midi-key]::after, .gain[data-midi-key]::after, .layer[data-midi-key]::after { top: -4px; right: 0; }
 .midi-learnable { outline: 1.5px dashed var(--learn-line); outline-offset: 2px; cursor: crosshair !important; }

@@ -331,7 +331,7 @@ impl Scheduler {
         let end = self.timeline.position_of(bar + bars as u64, 0);
         Scheduled {
             commands: self.take_commands(track, start, end, true),
-            message: format!("\"{name}\": new loop from bar {} over {bars} bars.", bar + 1),
+            message: format!("\"{name}\": Record armed - a new loop over {bars} bars."),
         }
     }
 
@@ -344,10 +344,9 @@ impl Scheduler {
         end: u64,
         layers: u8,
     ) -> Scheduled {
-        let bar = self.timeline.bar_index_at(start);
         Scheduled {
             commands: self.take_commands(track, start, end, false),
-            message: format!("\"{name}\": layer {} from bar {}.", layers as usize + 1, bar + 1),
+            message: format!("\"{name}\": Overdub armed - layer {}.", layers as usize + 1),
         }
     }
 
@@ -356,10 +355,7 @@ impl Scheduler {
         self.arm(track, PendingKind::Play, at);
         Scheduled {
             commands: vec![Command::StartPlay { track, at }],
-            message: format!(
-                "\"{name}\": Play from bar {}.",
-                self.timeline.bar_index_at(at) + 1
-            ),
+            message: format!("\"{name}\": Play armed."),
         }
     }
 
@@ -369,10 +365,7 @@ impl Scheduler {
         self.arm(track, PendingKind::Stop, at);
         Scheduled {
             commands: vec![Command::StopPlay { track, at }],
-            message: format!(
-                "\"{name}\": silent from bar {}.",
-                self.timeline.bar_index_at(at) + 1
-            ),
+            message: format!("\"{name}\": Stop armed."),
         }
     }
 
@@ -431,7 +424,7 @@ impl Scheduler {
                         Command::StopRecord { track, at: end },
                         Command::StartPlay { track, at: end },
                     ],
-                    message: format!("Recording ends with bar {}.", self.timeline.bar_index_at(end)),
+                    message: "Recording ends at the next bar line.".to_string(),
                 }
             }
             _ => {
@@ -530,7 +523,6 @@ mod tests {
                 Command::StartPlay { track: 0, at: 2 * BAR + 8 * BAR },
             ]
         );
-        assert!(plan.message.contains("bar 3"), "{}", plan.message);
         assert!(plan.message.contains("8 bars"), "{}", plan.message);
 
         // Exactly on a boundary the *next* one is taken, because the head start has to fit.
