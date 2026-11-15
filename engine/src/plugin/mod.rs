@@ -170,6 +170,21 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
     }
 }
 
+/// Take down the plugin libraries no instance uses any more - VST3 modules get their factory
+/// released and `bundleExit`; the code itself is never unmapped. Call it on the way out, **after**
+/// every instance is dropped (editors closed, audio stopped). Returns how many modules are still
+/// in use and were left alone.
+pub fn shutdown() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        vst3::shutdown()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
+}
+
 /// Said by every plugin call on a platform without a plugin host.
 pub const UNSUPPORTED: &str = "Plugin hosting is available on macOS only for now.";
 

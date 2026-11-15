@@ -936,3 +936,75 @@ fn a_vst3_instruments_latency_and_state() {
     let out = fresh.render(&[]).to_vec();
     assert!((peak(&out) - 0.125).abs() < 1e-3, "Zustand gilt im Prozessor: {}", peak(&out));
 }
+
+/// Kontakt 8, if installed: loaded, started, a few blocks with a note, state saved and back, torn
+/// down - and the **process has to end cleanly** afterwards. Only on request (`--ignored`): it
+/// loads a big commercial plugin into the test process. Skips itself when Kontakt is missing.
+#[cfg(target_os = "macos")]
+fn kontakt_round_trip(info: PluginInfo) {
+    use crate::engine::source::{BlockEvent, StereoOut};
+    let started = std::time::Instant::now();
+    let mut plugin = super::load(&info).expect("Kontakt laedt");
+    eprintln!(
+        "{}: geladen in {:?}, {} Parameter",
+        info.id,
+        started.elapsed(),
+        plugin.params().len()
+    );
+    let state = plugin.save_state().expect("Zustand");
+    eprintln!("Zustand: {} Bytes", state.len());
+    let mut synth = plugin.activate_instrument(48_000.0, 512).expect("startet");
+    let mut l = vec![0.0f32; 512];
+    let mut r = vec![0.0f32; 512];
+    for i in 0..50 {
+        let on = [BlockEvent {
+            offset: 0,
+            msg: [0x90, 60, 100],
+        }];
+        let events: &[BlockEvent] = if i == 0 { &on } else { &[] };
+        synth.render(events, &mut [StereoOut { l: &mut l, r: &mut r }]);
+        assert!(l.iter().chain(r.iter()).all(|s| s.is_finite()));
+    }
+    drop(synth);
+    plugin.deactivate();
+    plugin.load_state(&state).expect("Zustand zurueck");
+    drop(plugin);
+    let left = super::shutdown();
+    eprintln!("{}: abgebaut nach {:?}, {left} Module noch in Gebrauch", info.id, started.elapsed());
+}
+
+#[cfg(target_os = "macos")]
+const KONTAKT_VST3: &str = "/Library/Audio/Plug-Ins/VST3/Kontakt 8.vst3";
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "laedt Kontakt 8 (installiertes Fremd-Plugin); cargo test -- --ignored kontakt"]
+fn kontakt_vst3_loads_plays_and_the_process_ends_cleanly() {
+    let path = std::path::Path::new(KONTAKT_VST3);
+    if !path.exists() {
+        eprintln!("uebersprungen: Kontakt 8 (VST3) ist nicht installiert");
+        return;
+    }
+    let info = super::vst3::enumerate(path)
+        .expect("Kontakt laesst sich aufzaehlen")
+        .into_iter()
+        .find(|i| i.kind == Kind::Instrument)
+        .expect("Kontakt ist ein Instrument");
+    kontakt_round_trip(info.clone());
+    // After bundleExit the module comes back with a fresh bundleEntry.
+    kontakt_round_trip(info);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "laedt Kontakt 8 (installiertes Fremd-Plugin); cargo test -- --ignored kontakt"]
+fn kontakt_au_loads_plays_and_the_process_ends_cleanly() {
+    let Some(info) = super::au::enumerate()
+        .into_iter()
+        .find(|i| i.id == "au:aumu:NiK8:-NI-")
+    else {
+        eprintln!("uebersprungen: Kontakt 8 (AU) ist nicht installiert");
+        return;
+    };
+    kontakt_round_trip(info);
+}

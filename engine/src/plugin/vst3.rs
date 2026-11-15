@@ -15,7 +15,9 @@
 //! go into the same queue and reach the processor as `IParameterChanges` at the start of the next
 //! block - the VST3 way of telling the audio half what the edit half did.
 //!
-//! The module is never unloaded once loaded (see [`super::cf::Bundle`]).
+//! The module's code is never unmapped once loaded (see [`super::cf::Bundle`]). Its global state
+//! is taken down on the way out ([`shutdown`]: factory released, `bundleExit`), once no instance is
+//! left - the order the VST3 module protocol promises the plugin.
 
 #![allow(non_upper_case_globals, non_snake_case)]
 
@@ -48,8 +50,49 @@ const CHANGES_PER_BLOCK: usize = 64;
 // ---------------------------------------------------------------------------------------------
 
 struct Module {
-    _bundle: Bundle,
-    factory: ComPtr<IPluginFactory>,
+    bundle: Bundle,
+    /// Always `Some` until the module is dropped; an `Option` so `Drop` can release it **before**
+    /// `bundleExit`.
+    factory: Option<ComPtr<IPluginFactory>>,
+}
+
+impl Module {
+    fn factory(&self) -> &ComPtr<IPluginFactory> {
+        self.factory.as_ref().expect("factory lives as long as the module")
+    }
+}
+
+/// The module protocol's other half: factory released, then `bundleExit`. The code itself stays
+/// mapped (see [`Bundle`]) - only the plugin's own global state is taken down, in the order the
+/// plugin expects instead of from a static destructor inside `exit()`.
+impl Drop for Module {
+    fn drop(&mut self) {
+        drop(self.factory.take());
+        if let Some(exit) = self.bundle.symbol("bundleExit") {
+            let exit: unsafe extern "C" fn() -> bool = unsafe { std::mem::transmute(exit) };
+            unsafe { exit() };
+        }
+    }
+}
+
+/// Take down every module no instance uses any more (factory released, `bundleExit`). Returns how
+/// many are still in use. Called on the way out of the program, after all instances are gone:
+/// some plugins (Kontakt 8) otherwise run a "forced shutdown" of their GUI framework from a static
+/// destructor during `exit()` and crash there. Loading the same bundle again afterwards works - it
+/// gets a fresh `bundleEntry`.
+pub fn shutdown() -> usize {
+    let unused: Vec<Arc<Module>> = {
+        let mut map = modules().lock().unwrap();
+        let paths: Vec<PathBuf> = map
+            .iter()
+            .filter(|(_, m)| Arc::strong_count(m) == 1)
+            .map(|(p, _)| p.clone())
+            .collect();
+        paths.iter().filter_map(|p| map.remove(p)).collect()
+    };
+    // Dropped outside the lock: bundleExit may take a while and must not block a loader.
+    drop(unused);
+    modules().lock().unwrap().len()
 }
 
 // The factory is only used from the thread that loads plugins; the map just keeps it alive.
@@ -79,8 +122,8 @@ fn module(path: &Path) -> Result<Arc<Module>, String> {
     let factory = unsafe { ComPtr::from_raw(get()) }
         .ok_or_else(|| format!("The plugin returned no factory: {}", path.display()))?;
     let module = Arc::new(Module {
-        _bundle: bundle,
-        factory,
+        bundle,
+        factory: Some(factory),
     });
     modules()
         .lock()
@@ -121,7 +164,7 @@ const AUDIO_EFFECT_CLASS: &str = "Audio Module Class";
 /// child, not in the program.
 pub fn enumerate(path: &Path) -> Result<Vec<PluginInfo>, String> {
     let module = module(path)?;
-    let factory = &module.factory;
+    let factory = module.factory();
     let mut vendor = String::new();
     let mut finfo: PFactoryInfo = unsafe { std::mem::zeroed() };
     if unsafe { factory.getFactoryInfo(&mut finfo) } == kResultOk {
@@ -805,7 +848,7 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
 
     let component: ComPtr<IComponent> = unsafe {
         let mut obj: *mut c_void = std::ptr::null_mut();
-        let r = module.factory.createInstance(
+        let r = module.factory().createInstance(
             cid.as_ptr(),
             IComponent::IID.as_ptr() as FIDString,
             &mut obj,
@@ -827,7 +870,7 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
             let mut ccid: TUID = [0; 16];
             if component.getControllerClassId(&mut ccid) == kResultOk {
                 let mut obj: *mut c_void = std::ptr::null_mut();
-                let r = module.factory.createInstance(
+                let r = module.factory().createInstance(
                     ccid.as_ptr(),
                     IEditController::IID.as_ptr() as FIDString,
                     &mut obj,
