@@ -19,7 +19,9 @@ mod files;
 mod devshot;
 mod host;
 mod logfile;
+mod layout;
 mod midi;
+mod mixstore;
 mod plugins;
 mod proto;
 mod schedule;
@@ -33,6 +35,7 @@ use looper_engine::engine::bus::{Bus, TrackSource};
 use looper_engine::engine::fx::{EQ_BANDS as MAX_EQ_BANDS, FxParam as EngineFxParam};
 use looper_engine::engine::track::TrackLatency as EngineTrackLatency;
 use looper_engine::score::ScoreDoc;
+use looper_engine::score::mixer::MixerSource;
 use looper_engine::score::doc::{ParseOutcome, RenderOutcome};
 use proto::{
     AppInfo, BandKindName, BusOutConfig, CalibrateConfig, CalibrateOutcome, CompileOutcome,
@@ -663,6 +666,27 @@ async fn score_template(tracks: Option<Vec<TemplateTrack>>) -> Result<String, St
 ///
 /// `count_in` is the number of bars of click before the first section; absent means one bar, which
 /// is the shortest lead that is still a bar of the metre about to be played.
+/// The mix as a score's `mixer:` section would hold it: every track of the engine and the buses.
+#[tauri::command]
+async fn mixer_state(engine: State<'_, EngineHandle>) -> Result<MixerSource, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.mixer_state()).await
+}
+
+/// The mixer entries a human changed since the last call - see `StatusEvent::mixer_rev`.
+#[tauri::command]
+async fn mixer_take(engine: State<'_, EngineHandle>) -> Result<MixerSource, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.mixer_take()).await
+}
+
+/// Put the engine into a mix, tracks by name (an undo in the arrangement).
+#[tauri::command(rename_all = "snake_case")]
+async fn mixer_apply(mixer: MixerSource, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.mixer_apply(mixer)).await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn score_load(
     yaml: String,
@@ -945,6 +969,9 @@ fn main() {
             fx_band_kind,
             fx_delay_note,
             score_compile,
+            mixer_state,
+            mixer_take,
+            mixer_apply,
             score_parse,
             score_render,
             score_files_info,

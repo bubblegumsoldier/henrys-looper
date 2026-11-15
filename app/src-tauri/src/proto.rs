@@ -760,6 +760,10 @@ pub struct StatusEvent {
     /// The newest German sentence about what happened - a confirmation or a refusal. `null` when
     /// there is nothing to say.
     pub message: Option<String>,
+    /// Goes up whenever a human changes a fader, a mute, an effect or a bus level (mouse, key or
+    /// MIDI). The arrangement asks `mixer_take` for what changed when it moves, and writes it into
+    /// the open score's `mixer:` section.
+    pub mixer_rev: u64,
 }
 
 impl StatusEvent {
@@ -804,6 +808,7 @@ impl StatusEvent {
             ignored_commands: 0,
             spares: 0,
             message: None,
+            mixer_rev: 0,
         }
     }
 }
@@ -1876,6 +1881,7 @@ mod tests {
                 "loop_seconds",
                 "max_callback_ms",
                 "message",
+                "mixer_rev",
                 "monitor_gain",
                 "other_errors",
                 "output_channels",

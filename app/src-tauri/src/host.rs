@@ -25,6 +25,7 @@
 //! This thread is *not* the real-time thread. cpal's callbacks run on driver threads; what happens
 //! here is the control side of the picture in `docs/architektur.md` section 5.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -62,9 +63,12 @@ use looper_engine::midi::{
     Context, FxKnob, MidiAction, ParamState, Resolution, SessionShape, Target, TrackLayout,
     TrackRef,
 };
-use looper_engine::score::{CompiledScore, ScoreError, compile_score};
+use looper_engine::score::mixer::{BusLevels, MixerSource, TrackMixSource, mixer_commands};
+use looper_engine::score::{CompiledScore, OrderedMap, ScoreError, compile_score};
 
 use crate::logfile::{self, log};
+use crate::layout::{self, LayoutTrack};
+use crate::mixstore;
 use crate::midi::{BindingOptions, MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView, ProfileAction};
 use crate::proto::{
     AppInfo, BusOutConfig, CalibrateConfig, NoticeEvent, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
@@ -102,6 +106,12 @@ const SPARE_SLOTS: usize = 3;
 const RUNNING_TICK: Duration = Duration::from_millis(4);
 /// The same while nothing runs - then there is nothing to service and only requests matter.
 const IDLE_TICK: Duration = Duration::from_millis(200);
+/// Most commands of a mix restore sent per round of the host thread. The command queue holds 256;
+/// a whole mix of eight tracks with every knob off its preset is about as many, and the audio
+/// thread empties the queue once per callback, so a few rounds are always enough.
+const MIX_BATCH: usize = 48;
+/// How long the free-mode mix waits after the last change before it is written to `mixer.json`.
+const MIX_SAVE_DELAY: Duration = Duration::from_secs(1);
 /// The one sentence for "there is nothing to talk to yet", so every command says it the same way.
 const NO_ENGINE: &str = "The engine is not running. Start it first.";
 
@@ -277,6 +287,13 @@ enum Request {
     ScoreAct(ScoreAction, Sender<Result<String, String>>),
     Calibrate(Box<CalibrateConfig>, Sender<Result<CalibrateOutcome, String>>),
 
+    /// The mix as the score's `mixer:` section would write it: every track and the buses.
+    MixerState(Sender<Result<MixerSource, String>>),
+    /// The entries changed by a fader, a knob or a pad since the last call, and only those.
+    MixerTake(Sender<Result<MixerSource, String>>),
+    /// Put the engine into a mix (an undo in the arrangement). Tracks by name.
+    MixerApply(Box<MixerSource>, Sender<Result<(), String>>),
+
     // --- MIDI. Handled on this thread because that is where the session is, and because a MIDI
     // connection belongs to the thread that opened it.
     MidiPorts(Sender<Result<Vec<MidiPortView>, String>>),
@@ -352,6 +369,18 @@ impl EngineHandle {
 
     pub fn calibrate(&self, config: CalibrateConfig) -> Result<CalibrateOutcome, String> {
         self.call(|reply| Request::Calibrate(Box::new(config), reply))
+    }
+
+    pub fn mixer_state(&self) -> Result<MixerSource, String> {
+        self.call(Request::MixerState)
+    }
+
+    pub fn mixer_take(&self) -> Result<MixerSource, String> {
+        self.call(Request::MixerTake)
+    }
+
+    pub fn mixer_apply(&self, mixer: MixerSource) -> Result<(), String> {
+        self.call(|reply| Request::MixerApply(Box::new(mixer), reply))
     }
 
     // ---- MIDI ------------------------------------------------------------------------------
@@ -567,6 +596,27 @@ fn handle(
         }
         Request::Calibrate(config, reply) => {
             let _ = reply.send(run_calibration(*config, session.is_some()));
+        }
+        Request::MixerState(reply) => {
+            let _ = reply.send(match session.as_ref() {
+                Some(active) => Ok(active.mixer_state(None)),
+                None => Err(NO_ENGINE.to_string()),
+            });
+        }
+        Request::MixerTake(reply) => {
+            let _ = reply.send(match session.as_mut() {
+                Some(active) => Ok(active.mixer_take()),
+                None => Err(NO_ENGINE.to_string()),
+            });
+        }
+        Request::MixerApply(mixer, reply) => {
+            let _ = reply.send(match session.as_mut() {
+                Some(active) => {
+                    active.queue_mix(&mixer);
+                    Ok(())
+                }
+                None => Err(NO_ENGINE.to_string()),
+            });
         }
 
         // --- MIDI -------------------------------------------------------------------------
@@ -1063,7 +1113,8 @@ fn load_score_onto(
     log!("Rebuilding the engine for the score: {mismatch}");
     // Not `stop_session`: that would tell the frontend "stopped" and the live view would flip to
     // the setup screen for the moment the rebuild takes.
-    if let Some(old) = session.take() {
+    if let Some(mut old) = session.take() {
+        old.save_free_mix(true);
         old.shutdown();
     }
     match Session::start(config) {
@@ -1133,6 +1184,8 @@ fn rebuilt_config(
     config.quantize = quantize.into();
     if let Some(status) = status {
         config.click = status.click;
+        config.click_gain = status.click_gain;
+        config.monitor_gain = status.monitor_gain;
         config.bus_gain_main = Some(status.bus_gain(Bus::Main));
         config.bus_gain_monitor = Some(status.bus_gain(Bus::Monitor));
         for (bus, slot) in [
@@ -1161,7 +1214,8 @@ fn check_level(what: &str, gain: f32) -> Result<(), String> {
 
 /// Shut the engine down and tell the frontend, in that order.
 fn stop_session(session: &mut Option<Session>, app: &AppHandle) {
-    if let Some(active) = session.take() {
+    if let Some(mut active) = session.take() {
+        active.save_free_mix(true);
         active.shutdown();
         let _ = app.emit(STATUS_EVENT, StatusEvent::idle());
     }
@@ -1481,6 +1535,19 @@ struct Session {
     /// Whether the transport runs, as this thread last told the engine. Mirrored rather than read
     /// from the snapshot because a Record pressed right after Stop must already know it stands.
     transport: bool,
+    /// Commands restoring a mix (the stored free-mode one, a score's `mixer:` section, an undo),
+    /// sent [`MIX_BATCH`] at a time so a whole mix never overruns the command queue.
+    mix_backlog: VecDeque<Command>,
+    /// Tracks (by name) and buses a human changed since the arrangement last asked
+    /// ([`Session::mixer_take`]). Restores do not count - they are not news to anybody.
+    mix_changed: Vec<String>,
+    mix_buses_changed: bool,
+    /// Goes up with every human change of the mix; the status event carries it, so the arrangement
+    /// knows when to ask.
+    mix_rev: u64,
+    /// Tracks of the free mode whose mix changed and is not on disk yet, and since when.
+    free_mix_dirty: Vec<String>,
+    free_mix_since: Option<Instant>,
 }
 
 impl Session {
@@ -1666,7 +1733,31 @@ impl Session {
         output
             .play()
             .map_err(|e| format!("The output stream does not start: {e}"))?;
-        crate::plugins::engine_started(inserts, rate);
+        // Plugins and the free-mode mix are kept by track name. A track renamed since the last
+        // start takes both along (`crate::layout` says when a change counts as a rename).
+        let layout: Vec<LayoutTrack> = defs
+            .iter()
+            .map(|d| {
+                let right = match d.input {
+                    TrackInput::Stereo { right, .. } => Some(right as u32 + 1),
+                    TrackInput::Mono(_) => None,
+                };
+                LayoutTrack::new(d.name.clone(), d.input.first() as u32 + 1, right)
+            })
+            .collect();
+        let renamed = layout::replace(&layout);
+        for (from, to) in &renamed {
+            log!("Track \"{from}\" is now \"{to}\" - its plugins and mix go along.");
+        }
+        if let Err(e) = mixstore::rename(&renamed) {
+            log!("Mix of renamed tracks not carried over: {e}");
+        }
+        crate::plugins::engine_started(
+            inserts,
+            rate,
+            defs.iter().map(|d| d.name.clone()).collect(),
+            renamed,
+        );
 
         let loop_samples = timeline.span_bars(0, config.bars);
         let info = EngineInfo {
@@ -1714,7 +1805,7 @@ impl Session {
                 .collect(),
         };
 
-        Ok(Session {
+        let mut session = Session {
             input,
             output,
             cmd: cmd_tx,
@@ -1748,7 +1839,23 @@ impl Session {
             reapply_at: None,
             config: started_with,
             transport: false,
-        })
+            mix_backlog: VecDeque::new(),
+            mix_changed: Vec::new(),
+            mix_buses_changed: false,
+            mix_rev: 0,
+            free_mix_dirty: Vec::new(),
+            free_mix_since: None,
+        };
+        // The free mode's faders and chains, by track name - before anything is played, so the
+        // first note already sounds the way the last session ended.
+        let stored = mixstore::load();
+        if !stored.tracks.is_empty() {
+            session.queue_mix(&MixerSource {
+                buses: None,
+                tracks: stored.tracks,
+            });
+        }
+        Ok(session)
     }
 
     /// Stop the streams and give every buffer back.
@@ -1836,6 +1943,14 @@ impl Session {
             {
                 self.message = Some(e);
             }
+        }
+
+        self.drain_mix();
+        if self
+            .free_mix_since
+            .is_some_and(|since| since.elapsed() >= MIX_SAVE_DELAY)
+        {
+            self.save_free_mix(false);
         }
 
         // The only place layer buffers are allocated, zeroed and dropped.
@@ -1935,6 +2050,7 @@ impl Session {
             ignored_commands: status.ignored_commands,
             spares: status.spares_total(),
             message: self.message.clone(),
+            mixer_rev: self.mix_rev,
         }
     }
 
@@ -2022,6 +2138,10 @@ impl Session {
         // picture starts at "everything off"; a track started with monitoring on would otherwise
         // stay on for the whole score, because the runner would never see a difference to send.
         self.apply_score_setup(&score)?;
+        // The score's mix, for the tracks it names. What it leaves out keeps what it has.
+        if let Some(mixer) = &score.mixer {
+            self.queue_mix(mixer);
+        }
 
         let title = score.title.clone();
         let sections = score.sections.len();
@@ -2245,6 +2365,28 @@ impl Session {
     }
 
     fn apply(&mut self, action: Action) -> Result<(), String> {
+        let mix_track = match action {
+            Action::SetTrackGain { track, .. }
+            | Action::SetTrackMute { track, .. }
+            | Action::FxBypass { track, .. }
+            | Action::FxEnable { track, .. }
+            | Action::FxParam { track, .. }
+            | Action::FxPreset { track, .. } => Some(Some(track)),
+            Action::SetBusGain { .. } | Action::SetClickGain { .. } | Action::SetMonitorGain { .. } => {
+                Some(None)
+            }
+            _ => None,
+        };
+        let result = self.apply_action(action);
+        if result.is_ok()
+            && let Some(track) = mix_track
+        {
+            self.mix_touched(track);
+        }
+        result
+    }
+
+    fn apply_action(&mut self, action: Action) -> Result<(), String> {
         if let Some(track) = action.track() {
             self.check_track(track)?;
         }
@@ -2564,6 +2706,112 @@ impl Session {
                 ));
                 Ok(())
             }
+        }
+    }
+
+    // ---- the mix ---------------------------------------------------------------------------
+    //
+    // Fader, mute and effect chain of every track and the bus levels survive what used to reset
+    // them: a score keeps them in its `mixer:` section, the free mode in `mixer.json`
+    // (`crate::mixstore`). See `looper_engine::score::mixer` for the model.
+
+    /// A human changed the mix of `track` (or the bus levels, `None`).
+    fn mix_touched(&mut self, track: Option<usize>) {
+        self.mix_rev += 1;
+        match track.and_then(|t| self.tracks.get(t)).map(|ui| ui.name.clone()) {
+            Some(name) => {
+                if !self.mix_changed.contains(&name) {
+                    self.mix_changed.push(name.clone());
+                }
+                // The free mode keeps tracks on disk; with a score loaded, the score does.
+                if self.runner.is_none() {
+                    if !self.free_mix_dirty.contains(&name) {
+                        self.free_mix_dirty.push(name);
+                    }
+                    self.free_mix_since = Some(Instant::now());
+                }
+            }
+            None => self.mix_buses_changed = true,
+        }
+    }
+
+    /// The mix as a `mixer:` section: every track the engine has (or only `only`), and the buses.
+    fn mixer_state(&self, only: Option<&[String]>) -> MixerSource {
+        let mut tracks = OrderedMap::new();
+        let Some((status, _)) = self.last else {
+            return MixerSource::default();
+        };
+        for (i, ui) in self.tracks.iter().enumerate() {
+            if only.is_some_and(|names| !names.contains(&ui.name)) {
+                continue;
+            }
+            if let Some(ts) = status.tracks().get(i) {
+                tracks.insert(ui.name.clone(), TrackMixSource::from_status(ts));
+            }
+        }
+        let buses = (only.is_none() || self.mix_buses_changed).then(|| BusLevels::from_status(&status));
+        MixerSource { buses, tracks }
+    }
+
+    /// What changed since the last call, and forget it.
+    ///
+    /// Answered from the newest snapshot, which the arrangement asks for a moment after the
+    /// revision moved - by then the engine has reported the change.
+    fn mixer_take(&mut self) -> MixerSource {
+        let names = std::mem::take(&mut self.mix_changed);
+        let mut out = self.mixer_state(Some(&names));
+        if !self.mix_buses_changed {
+            out.buses = None;
+        }
+        self.mix_buses_changed = false;
+        out
+    }
+
+    /// Queue the commands that put the engine into `mixer`, tracks matched by name.
+    fn queue_mix(&mut self, mixer: &MixerSource) {
+        let names: Vec<String> = self.tracks.iter().map(|ui| ui.name.clone()).collect();
+        let current: Vec<TrackStatus> = self
+            .last
+            .map(|(s, _)| s.tracks().to_vec())
+            .unwrap_or_default();
+        self.mix_backlog
+            .extend(mixer_commands(mixer, &names, &current));
+        self.drain_mix();
+    }
+
+    fn drain_mix(&mut self) {
+        for _ in 0..MIX_BATCH {
+            let Some(command) = self.mix_backlog.pop_front() else {
+                return;
+            };
+            if let Err(e) = self.cmd.send(command) {
+                log!("Mix not fully restored: {e}");
+                self.mix_backlog.clear();
+                return;
+            }
+        }
+    }
+
+    /// Write the free-mode mix of the tracks changed since the last write. `force` writes at once
+    /// (the engine is going down) instead of after [`MIX_SAVE_DELAY`] of quiet.
+    fn save_free_mix(&mut self, force: bool) {
+        if self.free_mix_dirty.is_empty() {
+            self.free_mix_since = None;
+            return;
+        }
+        if !force && self.free_mix_since.is_some_and(|t| t.elapsed() < MIX_SAVE_DELAY) {
+            return;
+        }
+        let names = std::mem::take(&mut self.free_mix_dirty);
+        self.free_mix_since = None;
+        let state = self.mixer_state(Some(&names));
+        let entries: Vec<(String, TrackMixSource)> = state
+            .tracks
+            .iter()
+            .map(|(name, entry)| (name.to_string(), entry.clone()))
+            .collect();
+        if let Err(e) = mixstore::merge_and_save(entries) {
+            log!("Mix not saved to {}: {e}", mixstore::path().display());
         }
     }
 
@@ -3210,8 +3458,12 @@ mod tests {
         status.click = false;
         status.bus_gain = [0.8, 0.25];
         status.bus_out = BusRouting::new(BusOutput::pair(0), BusOutput::pair(2));
+        status.click_gain = 0.3;
+        status.monitor_gain = 1.5;
         let config = rebuilt_config(&previous, &score, Some(&status), Quantize::Loop);
         assert!(!config.click);
+        assert_eq!(config.click_gain, 0.3, "the click level turned down live stays down");
+        assert_eq!(config.monitor_gain, 1.5);
         assert_eq!(config.bus_gain_main, Some(0.8));
         assert_eq!(config.bus_gain_monitor, Some(0.25));
         assert_eq!(config.bus_out_monitor, Some(BusOutConfig { channel: 3, width: 2 }));

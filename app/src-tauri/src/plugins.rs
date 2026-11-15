@@ -33,9 +33,28 @@
 //! written while that happens: if a plugin takes the program down while it is being restored, the
 //! next start finds the marker and does **not** restore again, so a broken plugin cannot lock the
 //! user out of his own program.
+//!
+//! # Owned by track *name*
+//!
+//! A slot belongs to a track by its name (buses by `main` / `monitor`), not by its position. A
+//! score that lists its tracks in another order than the setup - or has fewer of them - would
+//! otherwise put the singer's de-esser on the guitar. Every engine start hands over the new track
+//! list ([`engine_started`]); a slot whose track is in it is installed at that track's position,
+//! one whose track is not is **parked**: it stays loaded and in the file, and goes back in as soon
+//! as a track of that name exists again. A rename the host recognises (`crate::layout`) moves the
+//! slots along.
+//!
+//! The file of the version before this was keyed by position (`track.1`). It is read as well: a
+//! position is turned into the name the track had then where the last layout is known, and is
+//! otherwise kept as a position and bound once, to the track at that position in the first engine
+//! that starts. Nothing is dropped on the way.
+//!
+//! The commands and the UI still say `track.1` - the position in the running engine, which is
+//! what a strip is. The MIDI addresses of a slot are spelled with the name
+//! (`track.stimme.insert.1.bypass`), so a learned knob follows the plugin when the tracks move.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
@@ -54,6 +73,7 @@ use looper_engine::midi::MidiAction;
 use looper_engine::plugin::scan::{self, Scanned};
 use looper_engine::plugin::{self, PluginInstance};
 
+use crate::layout;
 use crate::logfile::log;
 
 /// Event for everything this module reports: the rack, parameter changes made in a plugin's own
@@ -84,16 +104,24 @@ pub fn engine_channel() -> (InsertSender, InsertEndpoint) {
     insert_channel(64)
 }
 
-/// Called by the host thread once a new engine runs. Its plugins are (re)installed on the main
-/// thread right after.
-pub fn engine_started(sender: InsertSender, sample_rate: u32) {
+/// Called by the host thread once a new engine runs, with its track names in order and the
+/// renames since the last start. Its plugins are (re)installed on the main thread right after.
+pub fn engine_started(
+    sender: InsertSender,
+    sample_rate: u32,
+    tracks: Vec<String>,
+    renamed: Vec<(String, String)>,
+) {
     let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
     *LINK.lock().unwrap() = Some(Link {
         sender,
         sample_rate: f64::from(sample_rate),
         generation,
     });
-    schedule(|m| m.reconcile());
+    schedule(move |m| {
+        m.set_layout(tracks, &renamed);
+        m.reconcile();
+    });
 }
 
 /// Called by the host thread after the engine's streams are gone - and with them every processor
@@ -146,7 +174,9 @@ pub fn apply_midi(action: &MidiAction) -> Result<(), String> {
                 entry.bypass = on;
             }
             schedule(move |m| {
-                let _ = m.bypass(target, slot, on);
+                if let Ok(owner) = m.owner(target) {
+                    let _ = m.bypass(&owner, slot, on);
+                }
             });
             Ok(())
         }
@@ -164,7 +194,9 @@ pub fn apply_midi(action: &MidiAction) -> Result<(), String> {
                 entry.params.insert(param, f64::from(value));
             }
             schedule(move |m| {
-                let _ = m.set_param(target, slot, param, f64::from(value), true);
+                if let Ok(owner) = m.owner(target) {
+                    let _ = m.set_param(&owner, slot, param, f64::from(value), true);
+                }
             });
             Ok(())
         }
@@ -178,6 +210,10 @@ fn empty_slot(target: InsertTarget, slot: usize) -> String {
         slot + 1,
         target_label(target)
     )
+}
+
+fn empty_owned_slot(owner: &Owner, slot: usize) -> String {
+    format!("Plugin slot {} of {} is empty.", slot + 1, owner.label())
 }
 
 fn target_label(target: InsertTarget) -> String {
@@ -278,8 +314,21 @@ pub struct SlotView {
     pub cpu_us: f32,
     /// What went wrong when the plugin was started, if anything.
     pub error: Option<String>,
-    /// MIDI address of the slot's bypass, e.g. `track.1.insert.2.bypass`.
+    /// MIDI address of the slot's bypass, e.g. `track.stimme.insert.2.bypass`.
     pub bypass_address: String,
+    /// Name of the track the slot belongs to; `None` on a bus.
+    pub track: Option<String>,
+}
+
+/// A slot whose track is not in the running engine: kept, and back when the track is.
+#[derive(Clone, Debug, Serialize)]
+pub struct ParkedView {
+    /// The track's name - or `track 3` for a slot from an old rack file that has not met an engine
+    /// yet.
+    pub track: String,
+    pub slot: usize,
+    pub plugin_id: String,
+    pub name: String,
 }
 
 /// Every occupied slot, plus whether plugins can run at all.
@@ -290,6 +339,7 @@ pub struct RackView {
     pub sample_rate: Option<f64>,
     pub max_slots: usize,
     pub slots: Vec<SlotView>,
+    pub parked: Vec<ParkedView>,
 }
 
 /// The plugins this machine has, from the scan.
@@ -315,7 +365,7 @@ pub struct ParamView {
     pub automatable: bool,
     pub read_only: bool,
     pub is_bypass: bool,
-    /// MIDI address, e.g. `track.1.insert.1.param.42`.
+    /// MIDI address, e.g. `track.stimme.insert.1.param.42`.
     pub address: String,
 }
 
@@ -373,11 +423,43 @@ pub fn parse_target(text: &str) -> Result<InsertTarget, String> {
     }
 }
 
-/// The MIDI owner prefix: `track.1` or `global.bus.main`.
-fn midi_owner(target: InsertTarget) -> String {
-    match target {
-        InsertTarget::Track(t) => format!("track.{}", t + 1),
-        InsertTarget::Bus(b) => format!("global.bus.{}", b.name()),
+/// The MIDI owner prefix: `track.stimme` or `global.bus.main`. A name that cannot stand in an
+/// address (digits only, a dot, a space) is spelled by position, `track.1`.
+fn midi_owner(owner: &Owner, target: Option<InsertTarget>) -> String {
+    match (owner, target) {
+        (Owner::Track(name), _) if addressable(name) => format!("track.{name}"),
+        (Owner::Bus(b), _) => format!("global.bus.{}", b.name()),
+        (_, Some(InsertTarget::Track(t))) => format!("track.{}", t + 1),
+        (Owner::Track(name), _) => format!("track.{name}"),
+        (Owner::Position(p), _) => format!("track.{}", p + 1),
+    }
+}
+
+fn addressable(name: &str) -> bool {
+    !name.is_empty()
+        && !name.bytes().all(|b| b.is_ascii_digit())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Whom a slot belongs to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Owner {
+    Track(String),
+    Bus(Bus),
+    /// From a rack file of the old, position-keyed format, until the first engine says which track
+    /// stands there. 0-based.
+    Position(usize),
+}
+
+impl Owner {
+    fn label(&self) -> String {
+        match self {
+            Owner::Track(name) => format!("track \"{name}\""),
+            Owner::Bus(b) => format!("the {} bus", b.name()),
+            Owner::Position(p) => format!("track {}", p + 1),
+        }
     }
 }
 
@@ -386,7 +468,7 @@ fn midi_owner(target: InsertTarget) -> String {
 // ---------------------------------------------------------------------------------------------
 
 struct Slot {
-    target: InsertTarget,
+    owner: Owner,
     index: usize,
     info: Scanned,
     plugin: Box<dyn PluginInstance>,
@@ -402,6 +484,10 @@ struct Slot {
 #[derive(Default)]
 struct Manager {
     slots: Vec<Slot>,
+    /// Slots of the file that could not be loaded this time - written back unchanged.
+    lost: Vec<(Owner, SavedSlot)>,
+    /// Track names of the running engine, in order - or of the last one, while none runs.
+    layout: Vec<String>,
     catalog: Vec<Scanned>,
     /// The rack changed since it was last written to disk.
     dirty: bool,
@@ -409,20 +495,138 @@ struct Manager {
     last_meter: Option<Instant>,
 }
 
-#[derive(Serialize, Deserialize)]
+/// `plugin-rack.json` as written since slots belong to names.
+#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 struct SavedRack {
-    slots: Vec<SavedSlot>,
+    version: u32,
+    /// Slots of tracks, by track name - including tracks the running engine does not have.
+    #[serde(default)]
+    tracks: BTreeMap<String, Vec<SavedSlot>>,
+    /// Slots of the two buses, by `main` / `monitor`.
+    #[serde(default)]
+    buses: BTreeMap<String, Vec<SavedSlot>>,
+    /// Slots of an old file whose track name could not be told yet, by 1-based position.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    positions: BTreeMap<String, Vec<SavedSlot>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct SavedSlot {
-    target: String,
     slot: usize,
     plugin_id: String,
     name: String,
     bypass: bool,
     /// The plugin's state chunk, base64.
     state: Option<String>,
+}
+
+/// The file of the version before: one list, keyed by `track.<n>` / `bus.<name>`.
+#[derive(Deserialize)]
+struct OldRack {
+    slots: Vec<OldSlot>,
+}
+
+#[derive(Deserialize)]
+struct OldSlot {
+    target: String,
+    slot: usize,
+    plugin_id: String,
+    name: String,
+    bypass: bool,
+    state: Option<String>,
+}
+
+const RACK_VERSION: u32 = 2;
+
+/// Read a rack file of either format. An old one is converted: `track.<n>` becomes the name the
+/// `n`th track has in `layout` (the last one the engine ran with), or stays a position when that is
+/// not known. Nothing is dropped.
+fn read_rack(text: &str, layout: &[String]) -> Option<SavedRack> {
+    if let Ok(rack) = serde_json::from_str::<SavedRack>(text)
+        && rack.version >= RACK_VERSION
+    {
+        return Some(rack);
+    }
+    let old = serde_json::from_str::<OldRack>(text).ok()?;
+    let mut rack = SavedRack {
+        version: RACK_VERSION,
+        ..SavedRack::default()
+    };
+    for o in old.slots {
+        let saved = SavedSlot {
+            slot: o.slot,
+            plugin_id: o.plugin_id,
+            name: o.name,
+            bypass: o.bypass,
+            state: o.state,
+        };
+        let list = match parse_target(&o.target) {
+            Ok(InsertTarget::Track(t)) => match layout.get(t) {
+                Some(name) => rack.tracks.entry(name.clone()).or_default(),
+                None => rack.positions.entry((t + 1).to_string()).or_default(),
+            },
+            Ok(InsertTarget::Bus(b)) => rack.buses.entry(b.name().to_string()).or_default(),
+            // Not an owner either format knows: kept under its own spelling rather than lost.
+            Err(_) => rack.tracks.entry(o.target.clone()).or_default(),
+        };
+        list.push(saved);
+    }
+    Some(rack)
+}
+
+impl SavedRack {
+    /// Every slot with its owner, in a fixed order.
+    fn entries(self) -> Vec<(Owner, SavedSlot)> {
+        let mut out = Vec::new();
+        for (bus, slots) in self.buses {
+            if let Some(b) = Bus::parse(&bus) {
+                out.extend(slots.into_iter().map(|s| (Owner::Bus(b), s)));
+            }
+        }
+        for (name, slots) in self.tracks {
+            out.extend(slots.into_iter().map(|s| (Owner::Track(name.clone()), s)));
+        }
+        for (position, slots) in self.positions {
+            if let Some(p) = position.parse::<usize>().ok().and_then(|p| p.checked_sub(1)) {
+                out.extend(slots.into_iter().map(|s| (Owner::Position(p), s)));
+            }
+        }
+        out
+    }
+
+    fn add(&mut self, owner: &Owner, slot: SavedSlot) {
+        let list = match owner {
+            Owner::Track(name) => self.tracks.entry(name.clone()).or_default(),
+            Owner::Bus(b) => self.buses.entry(b.name().to_string()).or_default(),
+            Owner::Position(p) => self.positions.entry((p + 1).to_string()).or_default(),
+        };
+        list.push(slot);
+        list.sort_by_key(|s| s.slot);
+    }
+}
+
+/// Where the slots of `owners` go when the track list changes from `old` to `new`, with the
+/// renames found by the host. Pure, so it can be tested without a plugin in sight.
+///
+/// * a renamed track takes its slots along - unless the new name already has slots of its own;
+/// * a position from an old file is bound to the track standing there now;
+/// * everything else keeps its owner (and is parked while its track is missing).
+fn rehome(owners: &[Owner], new: &[String], renamed: &[(String, String)]) -> Vec<Owner> {
+    let occupied = |name: &str| owners.iter().any(|o| *o == Owner::Track(name.to_string()));
+    owners
+        .iter()
+        .map(|owner| match owner {
+            Owner::Track(name) => match renamed.iter().find(|(from, _)| from == name) {
+                Some((_, to)) if !occupied(to) => Owner::Track(to.clone()),
+                _ => owner.clone(),
+            },
+            Owner::Position(p) => match new.get(*p) {
+                Some(name) if !occupied(name) => Owner::Track(name.clone()),
+                _ => owner.clone(),
+            },
+            Owner::Bus(_) => owner.clone(),
+        })
+        .collect()
 }
 
 fn rack_path() -> PathBuf {
@@ -434,32 +638,97 @@ fn restore_marker() -> PathBuf {
 }
 
 impl Manager {
-    fn position(&self, target: InsertTarget, index: usize) -> Option<usize> {
+    /// The owner a command's `track.<n>` / `bus.<name>` means in the current layout.
+    fn owner(&self, target: InsertTarget) -> Result<Owner, String> {
+        match target {
+            InsertTarget::Bus(b) => Ok(Owner::Bus(b)),
+            InsertTarget::Track(t) => self.layout.get(t).cloned().map(Owner::Track).ok_or_else(|| {
+                format!(
+                    "There is no track {} - the engine has {} track(s).",
+                    t + 1,
+                    self.layout.len()
+                )
+            }),
+        }
+    }
+
+    /// Where an owner sits in the running engine, if it does.
+    fn target_of(&self, owner: &Owner) -> Option<InsertTarget> {
+        match owner {
+            Owner::Bus(b) => Some(InsertTarget::Bus(*b)),
+            Owner::Track(name) => self
+                .layout
+                .iter()
+                .position(|n| n == name)
+                .map(InsertTarget::Track),
+            Owner::Position(_) => None,
+        }
+    }
+
+    /// A new track list. Renamed tracks take their slots along, old positions are bound.
+    fn set_layout(&mut self, tracks: Vec<String>, renamed: &[(String, String)]) {
+        let owners: Vec<Owner> = self.slots.iter().map(|s| s.owner.clone()).collect();
+        let homes = rehome(&owners, &tracks, renamed);
+        let mut moved = false;
+        for (slot, home) in self.slots.iter_mut().zip(homes) {
+            if slot.owner != home {
+                log!(
+                    "Plugin {} slot {}: {} -> {}.",
+                    slot.info.info.name,
+                    slot.index + 1,
+                    slot.owner.label(),
+                    home.label()
+                );
+                slot.owner = home;
+                moved = true;
+            }
+        }
+        self.layout = tracks;
+        if moved {
+            self.dirty = true;
+            self.last_change = Some(Instant::now());
+        }
+        self.refresh_snapshot();
+    }
+
+    fn position(&self, owner: &Owner, index: usize) -> Option<usize> {
         self.slots
             .iter()
-            .position(|s| s.target == target && s.index == index)
+            .position(|s| s.owner == *owner && s.index == index)
     }
 
-    fn slot(&self, target: InsertTarget, index: usize) -> Result<&Slot, String> {
-        self.position(target, index)
+    fn slot(&self, owner: &Owner, index: usize) -> Result<&Slot, String> {
+        self.position(owner, index)
             .map(|p| &self.slots[p])
-            .ok_or_else(|| empty_slot(target, index))
+            .ok_or_else(|| empty_owned_slot(owner, index))
     }
 
-    fn slot_mut(&mut self, target: InsertTarget, index: usize) -> Result<&mut Slot, String> {
+    fn slot_mut(&mut self, owner: &Owner, index: usize) -> Result<&mut Slot, String> {
         let p = self
-            .position(target, index)
-            .ok_or_else(|| empty_slot(target, index))?;
+            .position(owner, index)
+            .ok_or_else(|| empty_owned_slot(owner, index))?;
         Ok(&mut self.slots[p])
     }
 
     fn view(&self) -> RackView {
         let link = LINK.lock().unwrap();
-        let mut slots: Vec<SlotView> = self
-            .slots
-            .iter()
-            .map(|s| SlotView {
-                target: s.target.address(),
+        let mut slots = Vec::new();
+        let mut parked = Vec::new();
+        for s in &self.slots {
+            let Some(target) = self.target_of(&s.owner) else {
+                parked.push(ParkedView {
+                    track: match &s.owner {
+                        Owner::Track(name) => name.clone(),
+                        other => other.label(),
+                    },
+                    slot: s.index,
+                    plugin_id: s.info.info.id.clone(),
+                    name: s.info.info.name.clone(),
+                });
+                continue;
+            };
+            slots.push(SlotView {
+                target: target.address(),
                 slot: s.index,
                 plugin_id: s.info.info.id.clone(),
                 name: s.info.info.name.clone(),
@@ -475,16 +744,26 @@ impl Manager {
                 peak: s.shared.take_peak(),
                 cpu_us: s.shared.take_peak_us(),
                 error: s.error.clone(),
-                bypass_address: format!("{}.insert.{}.bypass", midi_owner(s.target), s.index + 1),
-            })
-            .collect();
+                bypass_address: format!(
+                    "{}.insert.{}.bypass",
+                    midi_owner(&s.owner, Some(target)),
+                    s.index + 1
+                ),
+                track: match &s.owner {
+                    Owner::Track(name) => Some(name.clone()),
+                    _ => None,
+                },
+            });
+        }
         slots.sort_by(|a, b| (a.target.clone(), a.slot).cmp(&(b.target.clone(), b.slot)));
+        parked.sort_by(|a, b| (a.track.clone(), a.slot).cmp(&(b.track.clone(), b.slot)));
         RackView {
             supported: plugin::SUPPORTED,
             engine_running: link.is_some(),
             sample_rate: link.as_ref().map(|l| l.sample_rate),
             max_slots: MAX_INSERTS,
             slots,
+            parked,
         }
     }
 
@@ -499,6 +778,9 @@ impl Manager {
         let mut snap = snapshot().lock().unwrap();
         snap.clear();
         for s in &self.slots {
+            let Some(target) = self.target_of(&s.owner) else {
+                continue;
+            };
             let params = s
                 .plugin
                 .params()
@@ -506,7 +788,7 @@ impl Manager {
                 .map(|p| (p.id, s.plugin.param(p.id)))
                 .collect();
             snap.insert(
-                (s.target, s.index),
+                (target, s.index),
                 SlotSnapshot {
                     bypass: s.shared.bypass(),
                     params,
@@ -548,6 +830,7 @@ impl Manager {
         };
         let (sample_rate, generation) = (link.sample_rate, link.generation);
         drop(link_guard);
+        let target = self.target_of(&self.slots[p].owner);
         let slot = &mut self.slots[p];
         if slot.active_gen == Some(generation) {
             return;
@@ -555,11 +838,15 @@ impl Manager {
         if slot.active_gen.take().is_some() {
             slot.plugin.deactivate();
         }
+        // Parked: its track is not in this engine. Loaded, not running.
+        let Some(target) = target else {
+            return;
+        };
         match slot.plugin.activate(sample_rate, MAX_BLOCK) {
             Ok(processor) => {
                 slot.shared.set_latency(slot.plugin.latency());
                 let msg = InsertMsg::Install {
-                    target: slot.target,
+                    target,
                     slot: slot.index,
                     insert: Insert::new(processor, slot.shared.clone()),
                 };
@@ -574,7 +861,7 @@ impl Manager {
                                 log!(
                                     "Plugin {} in {} slot {} started: {} Hz, latency {} frames.",
                                     slot.info.info.name,
-                                    slot.target.address(),
+                                    slot.owner.label(),
                                     slot.index + 1,
                                     sample_rate,
                                     slot.shared.latency()
@@ -618,7 +905,7 @@ impl Manager {
 
     fn load(
         &mut self,
-        target: InsertTarget,
+        owner: &Owner,
         index: Option<usize>,
         plugin_id: &str,
     ) -> Result<RackView, String> {
@@ -634,28 +921,28 @@ impl Manager {
                 ));
             }
             None => (0..MAX_INSERTS)
-                .find(|i| self.position(target, *i).is_none())
+                .find(|i| self.position(owner, *i).is_none())
                 .ok_or_else(|| {
                     format!(
                         "All {MAX_INSERTS} plugin slots of {} are taken.",
-                        target_label(target)
+                        owner.label()
                     )
                 })?,
         };
         let entry = self.catalog_entry(plugin_id)?;
-        if self.position(target, index).is_some() {
-            self.remove_slot(target, index)?;
+        if self.position(owner, index).is_some() {
+            self.remove_slot(owner, index)?;
         }
         let instance = plugin::load(&entry.info)?;
         log!(
             "Plugin loaded: {} ({}) in {} slot {}",
             entry.info.name,
             entry.info.format.label(),
-            target.address(),
+            owner.label(),
             index + 1
         );
         self.slots.push(Slot {
-            target,
+            owner: owner.clone(),
             index,
             info: entry,
             plugin: instance,
@@ -672,12 +959,15 @@ impl Manager {
     }
 
     /// Take a slot out of the engine and unload its plugin.
-    fn remove_slot(&mut self, target: InsertTarget, index: usize) -> Result<(), String> {
+    fn remove_slot(&mut self, owner: &Owner, index: usize) -> Result<(), String> {
         let p = self
-            .position(target, index)
-            .ok_or_else(|| empty_slot(target, index))?;
+            .position(owner, index)
+            .ok_or_else(|| empty_owned_slot(owner, index))?;
+        let target = self.target_of(owner);
         let mut slot = self.slots.remove(p);
-        if slot.active_gen.is_some() {
+        if slot.active_gen.is_some()
+            && let Some(target) = target
+        {
             let sent = LINK
                 .lock()
                 .unwrap()
@@ -707,12 +997,16 @@ impl Manager {
                 self.changed();
                 return Ok(());
             }
+            slot.active_gen = None;
+            slot.plugin.deactivate();
+        }
+        if slot.active_gen.take().is_some() {
             slot.plugin.deactivate();
         }
         log!(
             "Plugin removed: {} from {} slot {}",
             slot.info.info.name,
-            target.address(),
+            owner.label(),
             index + 1
         );
         drop(slot);
@@ -720,19 +1014,21 @@ impl Manager {
         Ok(())
     }
 
-    fn move_slot(&mut self, target: InsertTarget, from: usize, to: usize) -> Result<RackView, String> {
+    fn move_slot(&mut self, owner: &Owner, from: usize, to: usize) -> Result<RackView, String> {
         if from >= MAX_INSERTS || to >= MAX_INSERTS {
             return Err(format!("There are slots 1 to {MAX_INSERTS}."));
         }
         if from == to {
             return Ok(self.view());
         }
-        self.slot(target, from)?;
-        if let Some(link) = LINK.lock().unwrap().as_mut() {
+        self.slot(owner, from)?;
+        if let Some(target) = self.target_of(owner)
+            && let Some(link) = LINK.lock().unwrap().as_mut()
+        {
             link.sender.send(InsertMsg::Move { target, from, to })?;
         }
         // The same rotation the rack does.
-        for s in self.slots.iter_mut().filter(|s| s.target == target) {
+        for s in self.slots.iter_mut().filter(|s| s.owner == *owner) {
             s.index = if s.index == from {
                 to
             } else if from < to && s.index > from && s.index <= to {
@@ -747,15 +1043,15 @@ impl Manager {
         Ok(self.view())
     }
 
-    fn bypass(&mut self, target: InsertTarget, index: usize, on: bool) -> Result<RackView, String> {
-        self.slot(target, index)?.shared.set_bypass(on);
+    fn bypass(&mut self, owner: &Owner, index: usize, on: bool) -> Result<RackView, String> {
+        self.slot(owner, index)?.shared.set_bypass(on);
         self.changed();
         Ok(self.view())
     }
 
-    fn params(&self, target: InsertTarget, index: usize) -> Result<Vec<ParamView>, String> {
-        let slot = self.slot(target, index)?;
-        let owner = midi_owner(target);
+    fn params(&self, owner: &Owner, index: usize) -> Result<Vec<ParamView>, String> {
+        let slot = self.slot(owner, index)?;
+        let owner = midi_owner(owner, self.target_of(owner));
         Ok(slot
             .plugin
             .params()
@@ -781,13 +1077,14 @@ impl Manager {
 
     fn set_param(
         &mut self,
-        target: InsertTarget,
+        owner: &Owner,
         index: usize,
         id: u32,
         value: f64,
         announce: bool,
     ) -> Result<ParamValue, String> {
-        let slot = self.slot_mut(target, index)?;
+        let target = self.target_of(owner);
+        let slot = self.slot_mut(owner, index)?;
         slot.plugin.set_param(id, value.clamp(0.0, 1.0));
         let now = slot.plugin.param(id);
         let out = ParamValue {
@@ -795,12 +1092,14 @@ impl Manager {
             value: now,
             text: slot.plugin.param_text(id, now),
         };
-        if let Some(s) = snapshot().lock().unwrap().get_mut(&(target, index)) {
+        if let Some(target) = target
+            && let Some(s) = snapshot().lock().unwrap().get_mut(&(target, index))
+        {
             s.params.insert(id, now);
         }
         self.dirty = true;
         self.last_change = Some(Instant::now());
-        if announce {
+        if announce && let Some(target) = target {
             emit(PluginEvent::Params {
                 target: target.address(),
                 slot: index,
@@ -810,20 +1109,21 @@ impl Manager {
         Ok(out)
     }
 
-    fn editor(&mut self, target: InsertTarget, index: usize, open: bool) -> Result<RackView, String> {
+    fn editor(&mut self, owner: &Owner, index: usize, open: bool) -> Result<RackView, String> {
         let title = {
-            let slot = self.slot(target, index)?;
+            let slot = self.slot(owner, index)?;
             format!(
                 "{} - {} slot {}",
                 slot.info.info.name,
-                match target {
-                    InsertTarget::Track(t) => format!("Track {}", t + 1),
-                    InsertTarget::Bus(b) => format!("{} bus", b.label()),
+                match owner {
+                    Owner::Track(name) => format!("Track {name}"),
+                    Owner::Bus(b) => format!("{} bus", b.label()),
+                    Owner::Position(p) => format!("Track {}", p + 1),
                 },
                 index + 1
             )
         };
-        let slot = self.slot_mut(target, index)?;
+        let slot = self.slot_mut(owner, index)?;
         if open {
             slot.plugin.open_editor(&title)?;
         } else {
@@ -834,13 +1134,13 @@ impl Manager {
         Ok(self.view())
     }
 
-    fn state_get(&self, target: InsertTarget, index: usize) -> Result<String, String> {
-        Ok(base64_encode(&self.slot(target, index)?.plugin.save_state()?))
+    fn state_get(&self, owner: &Owner, index: usize) -> Result<String, String> {
+        Ok(base64_encode(&self.slot(owner, index)?.plugin.save_state()?))
     }
 
-    fn state_set(&mut self, target: InsertTarget, index: usize, data: &str) -> Result<RackView, String> {
+    fn state_set(&mut self, owner: &Owner, index: usize, data: &str) -> Result<RackView, String> {
         let bytes = base64_decode(data).ok_or_else(|| "The state is not valid base64.".to_string())?;
-        self.slot_mut(target, index)?.plugin.load_state(&bytes)?;
+        self.slot_mut(owner, index)?.plugin.load_state(&bytes)?;
         self.changed();
         Ok(self.view())
     }
@@ -851,7 +1151,9 @@ impl Manager {
             link.sender.drain_retired();
         }
         let mut rack_changed = false;
-        for s in self.slots.iter_mut() {
+        let targets: Vec<Option<InsertTarget>> =
+            self.slots.iter().map(|s| self.target_of(&s.owner)).collect();
+        for (s, target) in self.slots.iter_mut().zip(targets) {
             let changed = s.plugin.take_changed();
             if !changed.is_empty() {
                 let values: Vec<ParamValue> = changed
@@ -865,16 +1167,18 @@ impl Manager {
                         }
                     })
                     .collect();
-                if let Some(snap) = snapshot().lock().unwrap().get_mut(&(s.target, s.index)) {
-                    for v in &values {
-                        snap.params.insert(v.id, v.value);
+                if let Some(target) = target {
+                    if let Some(snap) = snapshot().lock().unwrap().get_mut(&(target, s.index)) {
+                        for v in &values {
+                            snap.params.insert(v.id, v.value);
+                        }
                     }
+                    emit(PluginEvent::Params {
+                        target: target.address(),
+                        slot: s.index,
+                        values,
+                    });
                 }
-                emit(PluginEvent::Params {
-                    target: s.target.address(),
-                    slot: s.index,
-                    values,
-                });
                 self.dirty = true;
                 self.last_change = Some(Instant::now());
             }
@@ -883,7 +1187,7 @@ impl Manager {
                 log!(
                     "Plugin {} in {} slot {}: audio is passing through ({} blocks).",
                     s.info.info.name,
-                    s.target.address(),
+                    s.owner.label(),
                     s.index + 1,
                     s.shared.blocks()
                 );
@@ -919,20 +1223,27 @@ impl Manager {
 
     fn save(&mut self) {
         self.dirty = false;
-        let rack = SavedRack {
-            slots: self
-                .slots
-                .iter()
-                .map(|s| SavedSlot {
-                    target: s.target.address(),
+        let mut rack = SavedRack {
+            version: RACK_VERSION,
+            ..SavedRack::default()
+        };
+        for s in &self.slots {
+            rack.add(
+                &s.owner,
+                SavedSlot {
                     slot: s.index,
                     plugin_id: s.info.info.id.clone(),
                     name: s.info.info.name.clone(),
                     bypass: s.shared.bypass(),
                     state: s.plugin.save_state().ok().map(|b| base64_encode(&b)),
-                })
-                .collect(),
-        };
+                },
+            );
+        }
+        for (owner, saved) in &self.lost {
+            if !self.slots.iter().any(|s| s.owner == *owner && s.index == saved.slot) {
+                rack.add(owner, saved.clone());
+            }
+        }
         let path = rack_path();
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -959,30 +1270,40 @@ impl Manager {
             emit(PluginEvent::Notice { message });
             return;
         }
+        // The track list the engine last ran with: what an old, position-keyed file is read against,
+        // and what `track.<n>` means until an engine runs.
+        if self.layout.is_empty() {
+            self.layout = layout::load_at(&layout::path())
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+        }
         let Ok(text) = std::fs::read_to_string(rack_path()) else {
             return;
         };
-        let Ok(rack) = serde_json::from_str::<SavedRack>(&text) else {
+        let Some(rack) = read_rack(&text, &self.layout) else {
             return;
         };
-        if rack.slots.is_empty() {
+        let migrated = !text.contains("\"version\"");
+        let entries = rack.entries();
+        if entries.is_empty() {
             return;
         }
         let _ = std::fs::write(&marker, "restoring");
-        for saved in rack.slots {
-            let Ok(target) = parse_target(&saved.target) else {
-                continue;
-            };
-            match self.load(target, Some(saved.slot), &saved.plugin_id) {
+        // Slots that do not come back keep their place in the file, so a plugin missing today
+        // (uninstalled, not scanned yet) is not forgotten by the next save.
+        let mut lost = Vec::new();
+        for (owner, saved) in entries {
+            match self.load(&owner, Some(saved.slot), &saved.plugin_id) {
                 Ok(_) => {
                     if let Some(state) = saved.state.as_deref().and_then(base64_decode)
-                        && let Ok(slot) = self.slot_mut(target, saved.slot)
+                        && let Ok(slot) = self.slot_mut(&owner, saved.slot)
                         && let Err(e) = slot.plugin.load_state(&state)
                     {
                         log!("State of {} not loaded: {e}", saved.name);
                     }
                     if saved.bypass
-                        && let Ok(slot) = self.slot(target, saved.slot)
+                        && let Ok(slot) = self.slot(&owner, saved.slot)
                     {
                         slot.shared.set_bypass(true);
                     }
@@ -992,11 +1313,20 @@ impl Manager {
                     emit(PluginEvent::Notice {
                         message: format!("\"{}\" was not loaded again: {e}", saved.name),
                     });
+                    lost.push((owner, saved));
                 }
             }
         }
         let _ = std::fs::remove_file(&marker);
+        self.lost = lost;
         self.dirty = false;
+        if migrated {
+            // Written once in the new format, the old file kept beside it.
+            let path = rack_path();
+            let _ = std::fs::copy(&path, path.with_extension("json.v1"));
+            self.save();
+            log!("plugin-rack.json converted to slots by track name (the old file is plugin-rack.json.v1).");
+        }
         self.refresh_snapshot();
         emit(PluginEvent::Rack { rack: self.view() });
     }
@@ -1124,7 +1454,7 @@ pub async fn plugin_load(
     plugin_id: String,
 ) -> Result<RackView, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.load(target, slot, &plugin_id))).await
+    blocking(move || on_main(move |m| m.load(&m.owner(target)?, slot, &plugin_id))).await
 }
 
 /// Empty a slot.
@@ -1133,7 +1463,7 @@ pub async fn plugin_remove(target: String, slot: usize) -> Result<RackView, Stri
     let target = parse_target(&target)?;
     blocking(move || {
         on_main(move |m| {
-            m.remove_slot(target, slot)?;
+            m.remove_slot(&m.owner(target)?, slot)?;
             Ok(m.view())
         })
     })
@@ -1144,21 +1474,21 @@ pub async fn plugin_remove(target: String, slot: usize) -> Result<RackView, Stri
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_move(target: String, from: usize, to: usize) -> Result<RackView, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.move_slot(target, from, to))).await
+    blocking(move || on_main(move |m| m.move_slot(&m.owner(target)?, from, to))).await
 }
 
 /// The host's bypass of a slot: the plugin is not called, the signal passes unchanged.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_bypass(target: String, slot: usize, on: bool) -> Result<RackView, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.bypass(target, slot, on))).await
+    blocking(move || on_main(move |m| m.bypass(&m.owner(target)?, slot, on))).await
 }
 
 /// Every parameter of the plugin in a slot, with value and display text.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_params(target: String, slot: usize) -> Result<Vec<ParamView>, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.params(target, slot))).await
+    blocking(move || on_main(move |m| m.params(&m.owner(target)?, slot))).await
 }
 
 /// Set one parameter, normalised 0..1. Answers with the value the plugin actually took.
@@ -1170,28 +1500,28 @@ pub async fn plugin_set_param(
     value: f64,
 ) -> Result<ParamValue, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.set_param(target, slot, id, value, false))).await
+    blocking(move || on_main(move |m| m.set_param(&m.owner(target)?, slot, id, value, false))).await
 }
 
 /// Open or close the plugin's own window.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_editor(target: String, slot: usize, open: bool) -> Result<RackView, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.editor(target, slot, open))).await
+    blocking(move || on_main(move |m| m.editor(&m.owner(target)?, slot, open))).await
 }
 
 /// The plugin's complete state, base64 - a preset to keep.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_state_get(target: String, slot: usize) -> Result<String, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.state_get(target, slot))).await
+    blocking(move || on_main(move |m| m.state_get(&m.owner(target)?, slot))).await
 }
 
 /// Put a state from [`plugin_state_get`] back.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_state_set(target: String, slot: usize, data: String) -> Result<RackView, String> {
     let target = parse_target(&target)?;
-    blocking(move || on_main(move |m| m.state_set(target, slot, &data))).await
+    blocking(move || on_main(move |m| m.state_set(&m.owner(target)?, slot, &data))).await
 }
 
 #[cfg(test)]
@@ -1220,6 +1550,113 @@ mod tests {
         assert!(parse_target("track.9").is_err());
         assert!(parse_target("bus.nowhere").is_err());
         assert_eq!(InsertTarget::Track(2).address(), "track.3");
-        assert_eq!(midi_owner(InsertTarget::Bus(Bus::Main)), "global.bus.main");
+        assert_eq!(midi_owner(&Owner::Bus(Bus::Main), None), "global.bus.main");
+    }
+
+    /// A slot's MIDI address follows the plugin, not the position: it names the track.
+    #[test]
+    fn midi_addresses_name_the_track_where_a_name_can_stand() {
+        let at = Some(InsertTarget::Track(1));
+        assert_eq!(midi_owner(&Owner::Track("stimme".into()), at), "track.stimme");
+        assert_eq!(midi_owner(&Owner::Track("e-git_2".into()), at), "track.e-git_2");
+        // Digits only would read as a position, a dot or a space would break the address.
+        assert_eq!(midi_owner(&Owner::Track("42".into()), at), "track.2");
+        assert_eq!(midi_owner(&Owner::Track("a.b".into()), at), "track.2");
+        assert_eq!(midi_owner(&Owner::Track("lead vox".into()), at), "track.2");
+    }
+
+    fn saved(slot: usize, id: &str) -> SavedSlot {
+        SavedSlot {
+            slot,
+            plugin_id: id.into(),
+            name: id.to_uppercase(),
+            bypass: slot == 1,
+            state: Some("AAEC".into()),
+        }
+    }
+
+    const OLD_FILE: &str = r#"{"slots": [
+        {"target": "track.1", "slot": 0, "plugin_id": "vst3:deess", "name": "DEESS", "bypass": false, "state": "AAEC"},
+        {"target": "track.2", "slot": 1, "plugin_id": "au:comp", "name": "COMP", "bypass": true, "state": null},
+        {"target": "track.5", "slot": 0, "plugin_id": "vst3:far", "name": "FAR", "bypass": false, "state": null},
+        {"target": "bus.main", "slot": 0, "plugin_id": "vst3:limit", "name": "LIMIT", "bypass": false, "state": null}
+    ]}"#;
+
+    #[test]
+    fn an_old_rack_file_is_converted_to_names_without_losing_a_slot() {
+        let layout = vec!["stimme".to_string(), "gitarre".to_string()];
+        let rack = read_rack(OLD_FILE, &layout).expect("liest sich");
+        assert_eq!(rack.version, RACK_VERSION);
+        assert_eq!(rack.tracks["stimme"][0].plugin_id, "vst3:deess");
+        assert_eq!(rack.tracks["stimme"][0].state.as_deref(), Some("AAEC"));
+        assert_eq!(rack.tracks["gitarre"][0].plugin_id, "au:comp");
+        assert!(rack.tracks["gitarre"][0].bypass);
+        // Track 5 did not exist in the last layout: kept as a position, not dropped.
+        assert_eq!(rack.positions["5"][0].plugin_id, "vst3:far");
+        assert_eq!(rack.buses["main"][0].plugin_id, "vst3:limit");
+        assert_eq!(rack.entries().len(), 4);
+
+        // Without any known layout every track slot waits for the first engine.
+        let rack = read_rack(OLD_FILE, &[]).expect("liest sich");
+        assert!(rack.tracks.is_empty());
+        assert_eq!(rack.positions.len(), 3);
+        let owners: Vec<Owner> = rack.entries().into_iter().map(|(o, _)| o).collect();
+        assert!(owners.contains(&Owner::Position(0)) && owners.contains(&Owner::Bus(Bus::Main)));
+    }
+
+    #[test]
+    fn the_new_file_reads_back_as_written() {
+        let mut rack = SavedRack {
+            version: RACK_VERSION,
+            ..SavedRack::default()
+        };
+        rack.add(&Owner::Track("voice".into()), saved(1, "b"));
+        rack.add(&Owner::Track("voice".into()), saved(0, "a"));
+        rack.add(&Owner::Bus(Bus::Monitor), saved(0, "c"));
+        rack.add(&Owner::Position(2), saved(0, "d"));
+        let text = serde_json::to_string_pretty(&rack).unwrap();
+        assert!(text.contains("\"voice\""), "{text}");
+        let back = read_rack(&text, &[]).expect("liest sich");
+        assert_eq!(back, rack);
+        assert_eq!(back.tracks["voice"][0].slot, 0, "sorted by slot");
+    }
+
+    #[test]
+    fn slots_follow_their_track_by_name_when_the_order_changes() {
+        // Setup stimme, gitarre; the score has gitarre, voice. The host recognised voice as the
+        // renamed stimme (same input).
+        let owners = vec![
+            Owner::Track("stimme".into()),
+            Owner::Track("gitarre".into()),
+            Owner::Bus(Bus::Main),
+        ];
+        let new = vec!["gitarre".to_string(), "voice".to_string()];
+        let homes = rehome(&owners, &new, &[("stimme".into(), "voice".into())]);
+        assert_eq!(
+            homes,
+            vec![Owner::Track("voice".into()), Owner::Track("gitarre".into()), Owner::Bus(Bus::Main)]
+        );
+        // Without a recognised rename, stimme's slot is parked - kept, not moved onto the guitar.
+        let homes = rehome(&owners, &new, &[]);
+        assert_eq!(homes[0], Owner::Track("stimme".into()));
+        assert_eq!(homes[1], Owner::Track("gitarre".into()));
+    }
+
+    #[test]
+    fn a_rename_does_not_overwrite_the_new_names_own_slots() {
+        let owners = vec![Owner::Track("stimme".into()), Owner::Track("voice".into())];
+        let homes = rehome(&owners, &["voice".to_string()], &[("stimme".into(), "voice".into())]);
+        assert_eq!(homes, owners);
+    }
+
+    #[test]
+    fn old_positions_are_bound_to_the_first_engines_tracks() {
+        let owners = vec![Owner::Position(0), Owner::Position(1), Owner::Position(4)];
+        let homes = rehome(&owners, &["stimme".to_string(), "gitarre".to_string()], &[]);
+        assert_eq!(
+            homes,
+            vec![Owner::Track("stimme".into()), Owner::Track("gitarre".into()), Owner::Position(4)]
+        );
     }
 }
+
