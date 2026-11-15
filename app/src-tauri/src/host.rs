@@ -59,7 +59,7 @@ use looper_engine::engine::process::{
     spare_slots_for, total_channels,
 };
 use looper_engine::engine::runner::{
-    DEFAULT_COUNT_IN_BARS, MAX_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
+    CLOSED_CLICK_GATE, DEFAULT_COUNT_IN_BARS, MAX_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
 };
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
@@ -2743,6 +2743,10 @@ impl Session {
             let at = self.scheduler.soon(self.estimated_pos());
             self.start_transport_at(at)?;
         }
+        // ... but nothing of that clock may be heard until Start: the click window closes now and
+        // only the runner opens it, on the first bar of the count-in (and closes it again at the
+        // end or on "Stop all"). See "Nothing is heard of the clock" in the runner's module comment.
+        self.cmd.send(CLOSED_CLICK_GATE)?;
         let runner = Runner::new(score.clone(), self.scheduler.timeline, self.info.buffer_frames)?
             .with_count_in(count_in.unwrap_or(DEFAULT_COUNT_IN_BARS));
         // What the runner really uses: a requested 0 is one bar, and the sentence says so.

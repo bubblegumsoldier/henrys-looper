@@ -256,6 +256,11 @@ pub struct EngineCore {
     /// End of a running count-in (`Command::CountIn`): until then the click sounds whatever its
     /// switch says, and the loops stay held.
     count_in: Option<u64>,
+    /// The score's window (`Command::ClickGate`): closed, the click is silent and the plugins are
+    /// told nothing plays. Open unless a score closed it.
+    gate: bool,
+    /// Bar 1 for the plugins while the score's window is open: the first bar of the first section.
+    gate_bar1: Option<u64>,
     /// The MIDI-loop stage (`super::midiloop`), if the host attached it.
     midi: Option<Box<midiproc::MidiLoops>>,
 }
@@ -312,6 +317,8 @@ impl EngineCore {
             instrument_delay: None,
             latch: Latches::default(),
             count_in: None,
+            gate: true,
+            gate_bar1: None,
             midi: None,
         }
     }
@@ -658,8 +665,11 @@ impl EngineCore {
     /// count-in the position counts towards the end of the count-in, which becomes bar 1.
     #[inline]
     fn plugin_transport(&self, pos: u64) -> PluginTransport {
-        let (playing, position) = if self.transport {
-            let origin = self.count_in.unwrap_or(self.timeline.zero());
+        let (playing, position) = if self.transport && self.gate {
+            let origin = self
+                .count_in
+                .or(self.gate_bar1)
+                .unwrap_or(self.timeline.zero());
             (true, pos as i64 - origin as i64)
         } else {
             (false, 0)
@@ -818,7 +828,7 @@ impl EngineCore {
         let channels = self.input_channels;
         let monitor_gain = self.monitor_gain;
         // A standing transport has no beat to click on.
-        let click = (self.click || self.count_in.is_some()) && self.transport;
+        let click = self.clicking();
         let click_gain = self.click_gain;
         let bus_gain = self.bus_gain;
         // One way out is one mix. See `Track::render` and `super::bus::BusRouting::collapsed`.
@@ -983,8 +993,9 @@ impl EngineCore {
             }
         }
         let click_bus = if collapsed { Bus::Main } else { Bus::Monitor }.index();
+        let clicking = (self.click || self.count_in.is_some()) && self.transport && self.gate;
         for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
-            let click = if (self.click || self.count_in.is_some()) && self.transport {
+            let click = if clicking {
                 self.metro.sample_at(&self.timeline, start + i as u64) * self.click_gain
             } else {
                 0.0
@@ -1379,6 +1390,10 @@ impl EngineCore {
                 }
                 self.count_in = Some(end);
             }
+            Command::ClickGate { open, bar1, .. } => {
+                self.gate = open;
+                self.gate_bar1 = open.then_some(bar1);
+            }
             Command::TransportStop => self.stop_transport(),
             Command::Stop => {
                 self.latch.all_off();
@@ -1390,6 +1405,13 @@ impl EngineCore {
                 self.stopped = true;
             }
         }
+    }
+
+    /// Whether the click sounds: switched on (or a free count-in runs), the clock runs, and no score
+    /// holds its window closed.
+    #[inline]
+    fn clicking(&self) -> bool {
+        (self.click || self.count_in.is_some()) && self.transport && self.gate
     }
 
     /// The transport starts at `at`, which becomes bar 1.

@@ -126,8 +126,8 @@ impl Drive {
 // The count-in
 // ---------------------------------------------------------------------------------------------
 
-/// It runs before the first section, it is one whole bar, and it happens exactly once - no later
-/// section gets one.
+/// It runs before the first section, it is the default number of whole bars (two), and it happens
+/// exactly once - no later section gets one.
 #[test]
 fn the_count_in_runs_once_before_the_first_section() {
     let mut drive = Drive::new(HENRY);
@@ -139,13 +139,19 @@ fn the_count_in_runs_once_before_the_first_section() {
     assert!(armed.count_in, "der Einzaehler ist als solcher erkennbar");
     assert!(armed.text().contains("Count-in"), "{}", armed.text());
 
-    // Definition: the count-in occupies the first bar the command queue can still be told about in
-    // time, and the section starts one bar after that. So the lead is a full bar plus the rest of
-    // the bar the button was pressed in - never less than a bar.
+    // Definition: the count-in begins on the first bar the command queue can still be told about in
+    // time, and the section starts `DEFAULT_COUNT_IN_BARS` bars after that. So the lead is that many
+    // full bars plus the rest of the bar the button was pressed in - never less.
+    assert_eq!(drive.runner.count_in_bars(), DEFAULT_COUNT_IN_BARS);
+    assert_eq!(DEFAULT_COUNT_IN_BARS, 2, "zwei Takte - die Vorgabe des Besitzers");
+    let bars = u64::from(DEFAULT_COUNT_IN_BARS);
     let anchor = timeline.bar_start_at_or_after(guard);
     let start = drive.at_bar(0);
-    assert_eq!(start, timeline.bar_start(timeline.bar_index_at(anchor) + 1));
-    assert!(start - 0 >= timeline.span_bars(0, 1), "mindestens ein ganzer Takt");
+    assert_eq!(start, timeline.bar_start(timeline.bar_index_at(anchor) + bars));
+    assert!(
+        start - 0 >= timeline.span_bars(0, DEFAULT_COUNT_IN_BARS),
+        "mindestens zwei ganze Takte"
+    );
 
     // The first take starts with the section, not before it.
     let first_record = drive
@@ -497,9 +503,12 @@ fn stop_all_silences_everything_and_ends_the_run() {
     assert!(
         drive.commands[before..].iter().all(|c| matches!(
             c,
-            Command::StopPlay { .. } | Command::StopRecord { .. } | Command::SetMonitor { on: false, .. }
+            Command::StopPlay { .. }
+                | Command::StopRecord { .. }
+                | Command::SetMonitor { on: false, .. }
+                | Command::ClickGate { open: false, .. }
         )),
-        "nur Stopps und Mithoeren aus: {:?}",
+        "nur Stopps, Mithoeren aus und der Klick aus: {:?}",
         &drive.commands[before..]
     );
     assert!(drive.release().contains("has ended"));
@@ -1253,4 +1262,178 @@ fn release_in_a_looping_overdub_section_lands_at_the_end_of_the_first_pass() {
             "start {start_bar}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The click window: nothing of the clock is heard while the score does not play
+// ---------------------------------------------------------------------------------------------
+
+/// Two bars that end the score on their own - the shortest run that reaches "End of the score".
+const SHORT: &str = "\
+bpm: 120
+time_signature: 4/4
+tracks:
+  a: {input: 1}
+sections:
+  - id: rec
+    bars: 2
+    autorelease: true
+    tracks:
+      a: record
+";
+
+/// A loaded score on the real engine with the click **switched on**, the way the app loads it:
+/// the click window closed at once. Silence on the input, so whatever the Monitor bus carries is
+/// the click.
+fn loaded_with_click(yaml: &str, count_in: u32) -> (Sim, Runner) {
+    let score = compile_score(yaml).expect("uebersetzt");
+    let timeline = Timeline::new(RATE, score.bpm, score.signature());
+    let max_bars = score.sections.iter().map(|s| s.bars).max().unwrap();
+    let mut sim = Sim::new(
+        SimSpec {
+            bpm: score.bpm,
+            signature: score.signature(),
+            bars: max_bars,
+            block: BLOCK as usize,
+            tracks: vec![TrackSpec::on(0)],
+            input_channels: 1,
+            loopback_channel: None,
+            layer_frames: Some(loop_capacity(&timeline, max_bars)),
+            click: true,
+            ..Default::default()
+        },
+        crate::engine::sim::silence(),
+    );
+    sim.send(CLOSED_CLICK_GATE);
+    let runner = Runner::new(score, timeline, BLOCK)
+        .expect("Runner")
+        .with_count_in(count_in);
+    (sim, runner)
+}
+
+/// Engine and runner together up to `pos`, the runner ticked once per block.
+fn advance(sim: &mut Sim, runner: &mut Runner, pos: u64) {
+    while sim.pos() < pos {
+        runner.tick(sim.pos());
+        for cmd in runner.take_commands() {
+            sim.send(cmd);
+        }
+        sim.run_blocks(1);
+    }
+}
+
+/// Loudest sample of both buses in `[from, to)` - the click lives on Monitor, or on Main when the
+/// two share a socket. Nothing else sounds here: the input is silent.
+fn click_peak(sim: &Sim, from: u64, to: u64) -> f32 {
+    use crate::engine::bus::Bus;
+    (from..to)
+        .flat_map(|p| [sim.bus(Bus::Monitor, p), sim.bus(Bus::Main, p)])
+        .map(|f| f.l.abs().max(f.r.abs()))
+        .fold(0.0, f32::max)
+}
+
+/// Loaded, not started: the clock runs underneath (the runner plans on it), but not one click is
+/// heard - however long the musician waits.
+#[test]
+fn no_click_while_a_loaded_score_waits_for_its_start() {
+    let (mut sim, mut runner) = loaded_with_click(ONE_TAKE, 2);
+    let bar = runner.scheduler().timeline.span_bars(0, 1);
+    advance(&mut sim, &mut runner, 6 * bar);
+    assert_eq!(runner.phase(), Phase::Idle);
+    assert_eq!(click_peak(&sim, 0, sim.pos()), 0.0, "kein Klick vor dem Start");
+}
+
+/// The click begins exactly on the first bar of the count-in, counts both bars of it and goes on
+/// into the first section.
+#[test]
+fn the_click_begins_with_the_count_in() {
+    let (mut sim, mut runner) = loaded_with_click(ONE_TAKE, 2);
+    let timeline = runner.scheduler().timeline;
+    let bar = timeline.span_bars(0, 1);
+    advance(&mut sim, &mut runner, 3 * bar + 1_000);
+    let est = sim.pos();
+    runner.start(est);
+    let (first, first_bar) = runner.armed_at().expect("armiert");
+    let anchor = timeline.bar_start(first_bar - 2);
+    assert_eq!(anchor, timeline.bar_start_at_or_after(est + runner.scheduler().guard));
+    advance(&mut sim, &mut runner, first + 2 * bar);
+
+    assert_eq!(click_peak(&sim, 0, anchor), 0.0, "nichts vor dem Einzaehler");
+    for beat in 0..8u64 {
+        let at = timeline.beat_start(timeline.beat_index_at(anchor) + beat);
+        assert!(click_peak(&sim, at, at + 200) > 0.0, "Schlag {beat} des Einzaehlers");
+    }
+    assert!(click_peak(&sim, first, first + 200) > 0.0, "und weiter in die Sektion");
+    assert_eq!(runner.phase(), Phase::Running);
+}
+
+/// "Stop all" silences the click with the loops; after "Back to start" it stays silent until the
+/// next Start, which counts in again and records exactly like the first run.
+#[test]
+fn stop_all_silences_the_click_and_a_second_start_counts_in_again() {
+    let (mut sim, mut runner) = loaded_with_click(ONE_TAKE, 2);
+    let timeline = runner.scheduler().timeline;
+    let bar = timeline.span_bars(0, 1);
+    runner.start(sim.pos());
+    let (first, _) = runner.armed_at().expect("armiert");
+    advance(&mut sim, &mut runner, first + bar + 1_000);
+
+    let est = sim.pos();
+    runner.stop_all(est);
+    let quiet = runner.scheduler().soon(est) + BLOCK as u64;
+    advance(&mut sim, &mut runner, quiet + 4 * bar);
+    assert_eq!(runner.phase(), Phase::Stopped);
+    assert_eq!(click_peak(&sim, quiet, sim.pos()), 0.0, "nach Stop all: still");
+
+    let (_, commands) = runner.rewind(sim.pos()).expect("zurueck");
+    for cmd in commands {
+        sim.send(cmd);
+    }
+    let rewound = sim.pos();
+    advance(&mut sim, &mut runner, rewound + 3 * bar);
+    assert_eq!(click_peak(&sim, rewound, sim.pos()), 0.0, "nach Back to start: still");
+
+    // The second run.
+    runner.start(sim.pos());
+    let (start, first_bar) = runner.armed_at().expect("wieder armiert");
+    let anchor = timeline.bar_start(first_bar - 2);
+    advance(&mut sim, &mut runner, timeline.bar_start(first_bar + 4) + 4 * BLOCK as u64);
+    assert_eq!(click_peak(&sim, rewound, anchor), 0.0);
+    assert!(click_peak(&sim, anchor, anchor + 200) > 0.0, "der zweite Einzaehler klickt");
+    let track = sim.latest_status().expect("Status").tracks()[0];
+    assert_eq!(track.layers, 1);
+    assert_eq!(track.origin, start);
+    assert_eq!(track.loop_len, timeline.bar_start(first_bar + 4) - start);
+    assert_eq!(sim.latest_status().unwrap().refusal, Refusal::None);
+}
+
+/// "Stop all" pressed during the count-in, before the opening of the window has even reached the
+/// engine: the close still lands after it, so the click does not start anyway.
+#[test]
+fn stop_all_right_after_start_keeps_the_click_silent() {
+    let (mut sim, mut runner) = loaded_with_click(ONE_TAKE, 2);
+    let bar = runner.scheduler().timeline.span_bars(0, 1);
+    advance(&mut sim, &mut runner, bar / 2);
+    runner.start(sim.pos());
+    runner.stop_all(sim.pos());
+    let later = sim.pos() + 4 * bar;
+    advance(&mut sim, &mut runner, later);
+    assert_eq!(click_peak(&sim, 0, sim.pos()), 0.0);
+}
+
+/// At the end of the score the click stops on the very sample the score ends - the downbeat that
+/// would follow is not clicked any more.
+#[test]
+fn the_click_ends_with_the_score() {
+    let (mut sim, mut runner) = loaded_with_click(SHORT, 2);
+    let timeline = runner.scheduler().timeline;
+    let bar = timeline.span_bars(0, 1);
+    runner.start(sim.pos());
+    let (first, first_bar) = runner.armed_at().expect("armiert");
+    let end = timeline.bar_start(first_bar + 2);
+    advance(&mut sim, &mut runner, end + 4 * bar);
+    assert_eq!(runner.phase(), Phase::Finished);
+    assert!(click_peak(&sim, end - bar, end) > 0.0, "der letzte Takt klickt");
+    assert!(click_peak(&sim, first, first + 200) > 0.0);
+    assert_eq!(click_peak(&sim, end, sim.pos()), 0.0, "nach dem Ende: still");
 }

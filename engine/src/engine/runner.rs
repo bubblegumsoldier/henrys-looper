@@ -47,6 +47,19 @@
 //! the end of the running take before it is quantised, and the runner says so. The take is finished
 //! cleanly and the section changes on the boundary right after it.
 //!
+//! # Nothing is heard of the clock while the score does not play
+//!
+//! The runner plans on a clock that runs from the moment the score is loaded - it needs a grid to
+//! put the count-in on. But a loaded score that has not been started, one that was stopped and one
+//! that has ended must be **silent**: no click, no loop. The loops take care of themselves (every
+//! track is empty before the start, and "Stop all" and the end stop every one of them). The click
+//! does not: it follows the clock. So the engine's click window ([`Command::ClickGate`]) is held
+//! closed while a score is loaded (the front end closes it on load, see [`CLOSED_CLICK_GATE`]),
+//! the runner opens it on the first bar of the count-in and closes it again on the sample the score ends or "Stop all" takes effect. The
+//! window is timed like everything else here, so the first click of the count-in and the last
+//! click of the score are exact to the sample - and the clock underneath, which every plan in this
+//! file is made on, never moves.
+//!
 //! # Monitoring is the one thing that cannot be timestamped
 //!
 //! [`Command::SetMonitor`] carries no position (see `command.rs`), so it cannot be sent five bars
@@ -64,17 +77,27 @@ use super::live::TrackDef;
 use super::schedule::{Quantize, Scheduled, Scheduler};
 use super::timeline::Timeline;
 
-/// Bars of count-in before the first section, unless the caller says otherwise.
+/// Bars of count-in before the first section, unless the score or the caller says otherwise.
 ///
-/// One bar, the way a band is counted in. It is the shortest lead that is still a *bar* - the
-/// musician hears a complete bar of the metre he is about to play in, which is what makes the entry
-/// hittable; in 3/4 at 141 BPM that is 1.28 seconds. Two bars would be waiting, half a bar would not
-/// establish the metre. The lead is never shorter than this: the count-in starts on the next bar
-/// line the command queue can still be told about in time, so what the musician gets is the rest of
-/// the bar he pressed in *plus* the full count-in.
-pub const DEFAULT_COUNT_IN_BARS: u32 = 1;
+/// Two bars - the owner's choice from playing with it. One bar (the shortest lead that is still a
+/// *bar*) proved too short in practice: the first bar is spent recognising the tempo, the second
+/// one is where the musician gets ready to come in, so the entry is hittable even at a fast tempo
+/// or an odd metre. A score that wants something else says so with `count_in:` (1 to 8). The lead
+/// is never shorter than this: the count-in starts on the next bar line the command queue can still
+/// be told about in time, so what the musician gets is the rest of the bar he pressed in *plus* the
+/// full count-in.
+pub const DEFAULT_COUNT_IN_BARS: u32 = 2;
 /// Longest count-in that can be set. More than eight bars of click is waiting, not counting in.
 pub const MAX_COUNT_IN_BARS: u32 = 8;
+
+/// What a front end sends the moment it loads a score: the click window closed, at once (timestamp
+/// 0 is long past, so the engine acts on it in its next block). A loaded score is silent until it
+/// is started - see the module comment.
+pub const CLOSED_CLICK_GATE: Command = Command::ClickGate {
+    at: 0,
+    open: false,
+    bar1: 0,
+};
 
 /// The refusal every by-hand transport action gets while a score is playing.
 ///
@@ -265,6 +288,9 @@ pub struct Runner {
     /// Sentences the runner produced on its own, at a section boundary - nobody pressed anything,
     /// so no command reply carries them. Collected until the caller takes them.
     notices: Vec<String>,
+    /// Where the click window opens for the run that was started last (the first bar of the
+    /// count-in); 0 before any start. A close must never land before it - see [`Runner::stop_all`].
+    gate_open_at: u64,
 }
 
 impl Runner {
@@ -335,9 +361,10 @@ impl Runner {
             tracks,
             current: None,
             armed: None,
-            out: Vec::new(),
             message: String::new(),
+            out: Vec::new(),
             notices: Vec::new(),
+            gate_open_at: 0,
         })
     }
 
@@ -438,6 +465,13 @@ impl Runner {
         let first_bar = anchor_bar + self.count_in_bars as u64;
         let first = self.sched.timeline.bar_start(first_bar);
         self.phase = Phase::CountIn;
+        // The click is heard from the first bar of the count-in on - not a sample earlier.
+        self.out.push(Command::ClickGate {
+            at: anchor,
+            open: true,
+            bar1: first,
+        });
+        self.gate_open_at = anchor;
         self.arm(Target::Section(0), first, first_bar);
         self.message = format!(
             "Count-in: {} bar{} of click, then \"{}\".",
@@ -560,6 +594,14 @@ impl Runner {
             }
             None => String::new(),
         };
+        // The click falls silent with the loops. Never before the window opened: pressed within the
+        // head start of a Start, the opening is still waiting in the engine and would otherwise act
+        // after the close (commands at one position run in the order they were sent).
+        self.out.push(Command::ClickGate {
+            at: soon.max(self.gate_open_at),
+            open: false,
+            bar1: 0,
+        });
         self.phase = Phase::Stopped;
         self.current = None;
         self.message = format!(
@@ -589,8 +631,14 @@ impl Runner {
                     .to_string(),
             );
         }
-        let clear = Command::ClearAll {
-            at: self.sched.soon(est),
+        let soon = self.sched.soon(est);
+        let clear = Command::ClearAll { at: soon };
+        // The clear drops whatever was still waiting - a close of the window among it, if "Stop
+        // all" was pressed a moment ago. So the window is closed again behind it.
+        let gate = Command::ClickGate {
+            at: soon,
+            open: false,
+            bar1: 0,
         };
         for track in self.tracks.iter_mut() {
             track.target = ScoreState::Stop;
@@ -614,7 +662,7 @@ impl Runner {
             "Back to start: all tracks cleared, \"{}\" is ready to play again.",
             self.score.title
         );
-        Ok((self.message.clone(), vec![clear]))
+        Ok((self.message.clone(), vec![clear, gate]))
     }
 
     // ---- the clock ---------------------------------------------------------------------------
@@ -1004,8 +1052,13 @@ impl Runner {
         takes
     }
 
-    /// Everything silent at `at` - the end of the score.
+    /// Everything silent at `at` - the end of the score, the click included.
     fn schedule_silence(&mut self, at: u64) {
+        self.out.push(Command::ClickGate {
+            at,
+            open: false,
+            bar1: 0,
+        });
         for track in 0..self.tracks.len() {
             if self.tracks[track].sounding {
                 let name = self.tracks[track].name.clone();

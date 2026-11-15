@@ -184,6 +184,15 @@ pub enum Command {
     /// every loop stays silent. A `TransportStart { at: end }` sent behind it ends it: bar 1 is
     /// `end`, and that is where the take begins. `TransportStop` cancels it like any start.
     CountIn { at: u64, end: u64 },
+    /// The score's window: open from `at` on, closed from `at` on. While it is closed the click is
+    /// silent and a hosted plugin is told that nothing plays (position 0), whatever the clock does
+    /// underneath - a loaded score keeps the engine's clock running so the runner can plan on it,
+    /// but nothing may be heard of that clock before the start or after the end. Open, the click
+    /// sounds as its switch says and a plugin counts from `bar1` (the first bar of the first
+    /// section; negative during the count-in). Open by default, so everything that never sends it
+    /// - free looping, the CLI, the tests - runs exactly as before. Timed, so the count-in's first
+    /// click and the end of the score are exact to the sample.
+    ClickGate { at: u64, open: bool, bar1: u64 },
     /// Stop the transport: the clock stands at bar 1, the click and the loops are silent, the
     /// monitored inputs stay audible. Layers and play states are kept. A take that has not reached
     /// its end is dealt with so nothing half-made is left behind - see
@@ -206,7 +215,8 @@ impl Command {
             | Command::ClearTrack { at, .. }
             | Command::ClearAll { at }
             | Command::TransportStart { at }
-            | Command::CountIn { at, .. } => Some(*at),
+            | Command::CountIn { at, .. }
+            | Command::ClickGate { at, .. } => Some(*at),
             Command::LatchOverdub { .. }
             | Command::SetMonitor { .. }
             | Command::SetPan { .. }
@@ -274,6 +284,7 @@ impl Command {
             | Command::SetTempo { .. }
             | Command::TransportStart { .. }
             | Command::CountIn { .. }
+            | Command::ClickGate { .. }
             | Command::TransportStop
             | Command::Stop => None,
         }

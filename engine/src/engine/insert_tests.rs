@@ -586,6 +586,45 @@ mod clock {
         assert!(all.iter().any(|(t, _)| t.continuous == end && t.position == 0));
     }
 
+    /// A loaded score keeps the clock running but its window closed: the plugins are told nothing
+    /// plays (position 0) until the count-in opens it, then they count towards the first bar of the
+    /// first section - and after the close they stand again.
+    #[test]
+    fn a_closed_score_window_tells_the_plugins_nothing_plays() {
+        let (mut sim, mut tx) = with_rack(three_four(), silence());
+        let (watch, log) = Watch::new();
+        install(&mut tx, InsertTarget::Track(0), 0, watch, 0);
+        let (open, bar1, close) = (20_000, 116_000, 300_000);
+        sim.send(crate::engine::runner::CLOSED_CLICK_GATE);
+        sim.send(Command::ClickGate {
+            at: open,
+            open: true,
+            bar1,
+        });
+        sim.send(Command::ClickGate {
+            at: close,
+            open: false,
+            bar1: 0,
+        });
+        sim.run_to(close + 20_000);
+        let all = calls(&log);
+        assert_gapless(&all);
+        let mut saw = [false; 3];
+        for (t, _) in &all {
+            if t.continuous < open || t.continuous >= close {
+                assert!(!t.playing, "{t:?}");
+                assert_eq!(t.position, 0, "{t:?}");
+                saw[if t.continuous < open { 0 } else { 2 }] = true;
+            } else {
+                assert!(t.playing, "{t:?}");
+                assert_eq!(t.position, t.continuous as i64 - bar1 as i64, "{t:?}");
+                saw[1] = true;
+            }
+        }
+        assert_eq!(saw, [true; 3]);
+        assert!(all.iter().any(|(t, _)| t.continuous == open && t.position < 0));
+    }
+
     /// A tempo change (or a score loaded with its own tempo, which arrives as the same command)
     /// reaches the plugins with the next block.
     #[test]
