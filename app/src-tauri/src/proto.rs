@@ -583,8 +583,10 @@ fn default_beats_per_bar() -> u32 {
 fn default_beat_unit() -> u32 {
     4
 }
+/// Two bars, like a score's count-in - the owner's choice. A setting saved before keeps its value;
+/// only a configuration without the field gets this.
 fn default_free_count_in() -> u32 {
-    1
+    2
 }
 
 fn default_bars() -> u32 {

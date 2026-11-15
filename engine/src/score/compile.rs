@@ -133,6 +133,7 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
         time_signature: format!("{beats_per_bar}/{beat_unit}"),
         beats_per_bar,
         beat_unit,
+        count_in: source.count_in,
         tracks,
         midi,
         sections,

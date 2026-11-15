@@ -342,6 +342,10 @@ pub struct ScoreSource {
     pub time_signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub beats_per_bar: Option<u32>,
+    /// `count_in: 2` - bars of click before the first section, 1 to 8. Optional; absent means the
+    /// app's default (`engine::runner::DEFAULT_COUNT_IN_BARS`, two bars).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_in: Option<u32>,
     pub tracks: OrderedMap<TrackSource>,
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub midi: OrderedMap<MidiBindingSource>,
@@ -494,6 +498,10 @@ pub struct CompiledScore {
     pub beats_per_bar: u32,
     /// Denominator: the note value that gets one beat (4 = quarter, 8 = eighth).
     pub beat_unit: u32,
+    /// Bars of count-in the score asks for, 1 to 8; `None` when it does not say (the runner then
+    /// uses its default). A count-in set on the command line or in the window for one run wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_in: Option<u32>,
     pub tracks: Vec<CompiledTrack>,
     #[serde(default)]
     pub midi: OrderedMap<CompiledMidiBinding>,

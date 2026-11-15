@@ -449,3 +449,40 @@ fn a_mixer_entry_for_an_unknown_track_names_its_element() {
         Some(ScoreRef::MixerTrack { index: 0, track: "stimme".into(), field: Some("gain".into()) })
     );
 }
+
+/// `count_in:` survives the round trip with its comment, and an edit to it is checked like any
+/// other head field.
+#[test]
+fn count_in_round_trips_with_its_comment_and_is_checked_on_edit() {
+    let text = "bpm: 120\ntime_signature: 4/4\ncount_in: 2   # zwei Takte\n\ntracks:\n  a: {input: 1}\n\nsections:\n  - id: x\n    bars: 2\n";
+    let doc = parse_doc(text).expect("liest sich");
+    assert_eq!(doc.count_in, Some(2));
+    let once = render_doc(&doc);
+    assert!(once.contains("count_in: 2  # zwei Takte"), "{once}");
+    assert_eq!(once, round_trip(&once));
+
+    let mut edited = doc.clone();
+    edited.count_in = Some(4);
+    let outcome = render_doc_outcome(&edited);
+    assert!(outcome.ok, "{:?}", outcome.errors);
+    assert_eq!(compile_score(&outcome.yaml).unwrap().count_in, Some(4));
+
+    edited.count_in = None;
+    let outcome = render_doc_outcome(&edited);
+    assert!(!outcome.yaml.contains("count_in"), "{}", outcome.yaml);
+
+    edited.count_in = Some(0);
+    let outcome = render_doc_outcome(&edited);
+    let issue = only_issue(&outcome);
+    assert!(issue.message.contains("count_in"), "{}", issue.message);
+    assert_eq!(issue.at, Some(ScoreRef::Score { field: Some("count_in".into()) }));
+}
+
+/// A new score says its count-in out loud, so the field is there to be found.
+#[test]
+fn a_new_score_counts_in_two_bars() {
+    let text = template(&[("stimme".to_string(), 1, None)]);
+    let score = compile_score(&text).expect("die Vorlage uebersetzt");
+    assert_eq!(score.count_in, Some(2), "{text}");
+    assert!(text.contains("count_in: 2"), "{text}");
+}

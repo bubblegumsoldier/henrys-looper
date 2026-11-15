@@ -59,7 +59,7 @@ use looper_engine::engine::process::{
     spare_slots_for, total_channels,
 };
 use looper_engine::engine::runner::{
-    CLOSED_CLICK_GATE, DEFAULT_COUNT_IN_BARS, MAX_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
+    CLOSED_CLICK_GATE, MAX_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
 };
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
@@ -2747,8 +2747,13 @@ impl Session {
         // only the runner opens it, on the first bar of the count-in (and closes it again at the
         // end or on "Stop all"). See "Nothing is heard of the clock" in the runner's module comment.
         self.cmd.send(CLOSED_CLICK_GATE)?;
-        let runner = Runner::new(score.clone(), self.scheduler.timeline, self.info.buffer_frames)?
-            .with_count_in(count_in.unwrap_or(DEFAULT_COUNT_IN_BARS));
+        let mut runner =
+            Runner::new(score.clone(), self.scheduler.timeline, self.info.buffer_frames)?;
+        // A count-in asked for with the load (the window, for this run) wins over the score's own
+        // `count_in:`, which wins over the default - the runner already took that one.
+        if let Some(bars) = count_in {
+            runner = runner.with_count_in(bars);
+        }
         // What the runner really uses: a requested 0 is one bar, and the sentence says so.
         let count_in = runner.count_in_bars();
         // A free-play recording ends here: from now on the score's runs are recorded.

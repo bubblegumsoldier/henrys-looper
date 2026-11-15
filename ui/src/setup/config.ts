@@ -66,7 +66,8 @@ export const DEFAULT_SETUP: StartConfig = {
   bars: 8,
   quantize: "loop",
   overdub_mode: "latch",
-  count_in_bars: 1,
+  // Two bars, like a score's count-in; a saved setting keeps its own value.
+  count_in_bars: 2,
   latency_frames: DEFAULT_LATENCY,
   monitor_gain: 1,
   click_gain: 1,

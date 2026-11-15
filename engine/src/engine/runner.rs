@@ -350,13 +350,18 @@ impl Runner {
             })
             .collect();
         let bars = plans.iter().map(|p| p.bars).max().unwrap_or(1);
+        // The score's own `count_in:` if it has one; the reader has checked the range already.
+        let count_in_bars = score
+            .count_in
+            .unwrap_or(DEFAULT_COUNT_IN_BARS)
+            .clamp(1, MAX_COUNT_IN_BARS);
         Ok(Self {
             score,
             plans,
             // The quantisation of the scheduler itself is never used by the runner - every section
             // brings its own - so the default is only what the shared display strings read.
             sched: Scheduler::new(timeline, bars, buffer_frames, Quantize::Loop),
-            count_in_bars: DEFAULT_COUNT_IN_BARS,
+            count_in_bars,
             phase: Phase::Idle,
             tracks,
             current: None,
@@ -368,7 +373,8 @@ impl Runner {
         })
     }
 
-    /// Bars of count-in before the first section. See [`DEFAULT_COUNT_IN_BARS`].
+    /// Bars of count-in before the first section, overriding the score's `count_in:` for this
+    /// runner. See [`DEFAULT_COUNT_IN_BARS`].
     #[must_use]
     pub fn with_count_in(mut self, bars: u32) -> Self {
         self.count_in_bars = bars.clamp(1, MAX_COUNT_IN_BARS);

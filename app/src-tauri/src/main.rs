@@ -773,8 +773,8 @@ async fn score_template(tracks: Option<Vec<TemplateTrack>>) -> Result<String, St
 /// track's pan, bus assignment (`bus`, `monitor_bus`) and latency compensation (`latency`,
 /// `latency_trim`).
 ///
-/// `count_in` is the number of bars of click before the first section; absent means one bar, which
-/// is the shortest lead that is still a bar of the metre about to be played.
+/// `count_in` is the number of bars of click before the first section, for this run; absent means
+/// what the score's `count_in:` says, and without that two bars.
 /// The mix as a score's `mixer:` section would hold it: every track of the engine and the buses.
 #[tauri::command]
 async fn mixer_state(engine: State<'_, EngineHandle>) -> Result<MixerSource, String> {

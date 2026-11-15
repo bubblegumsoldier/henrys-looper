@@ -25,11 +25,12 @@ use crate::midi::{Binding, ButtonMode, Control, Takeover, Target, TrackRef};
 
 mod mixer;
 
-const ROOT_FIELDS: [&str; 8] = [
+const ROOT_FIELDS: [&str; 9] = [
     "title",
     "bpm",
     "time_signature",
     "beats_per_bar",
+    "count_in",
     "tracks",
     "midi",
     "sections",
@@ -381,6 +382,9 @@ impl Reader {
         });
 
         let (time_signature, beats_per_bar) = self.read_time_signature(&fields);
+        let count_in = fields
+            .get("count_in")
+            .and_then(|node| self.read_count_in(node));
         let tracks = fields
             .get("tracks")
             .and_then(|node| self.read_tracks(node))
@@ -411,11 +415,34 @@ impl Reader {
             bpm: bpm?,
             time_signature,
             beats_per_bar,
+            count_in,
             tracks,
             midi,
             sections,
             mixer,
         })
+    }
+
+    /// `count_in: 2` - bars of click before the first section. Zero is refused with the reason: the
+    /// runner always counts in, because without it the first take would start on the very next bar
+    /// line, with nothing to play along to.
+    fn read_count_in(&mut self, node: &Node<'_>) -> Option<u32> {
+        let max = crate::engine::runner::MAX_COUNT_IN_BARS;
+        let bars = self.as_int(node, "'count_in'", 0, max)?;
+        if bars == 0 {
+            self.error_with(
+                Some(node.pos),
+                "'count_in' must be at least 1 bar, found: 0.".to_string(),
+                format!(
+                    "A score always counts in: without it the first take would start on the very \
+                     next bar line, with nothing to play along to. Write 1 to {max} bars, or leave \
+                     the field out for the default of {} bars.",
+                    crate::engine::runner::DEFAULT_COUNT_IN_BARS
+                ),
+            );
+            return None;
+        }
+        Some(bars)
     }
 
     /// `time_signature: "3/4"` and the older alias `beats_per_bar: 3`. Both may appear, but they

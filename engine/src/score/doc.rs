@@ -313,6 +313,9 @@ pub struct ScoreDoc {
     /// musician's back; a new document uses `time_signature`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub beats_per_bar: Option<u32>,
+    /// `count_in: 2` - bars of click before the first section; `None` when the file does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_in: Option<u32>,
     #[serde(default)]
     pub tracks: Vec<DocTrack>,
     #[serde(default)]
@@ -329,7 +332,7 @@ pub struct ScoreDoc {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footer: Vec<String>,
     /// Comments of the top-level keys (`title`, `bpm`, `time_signature`, `beats_per_bar`,
-    /// `tracks`, `midi`, `sections`, `mixer`).
+    /// `count_in`, `tracks`, `midi`, `sections`, `mixer`).
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub field_comments: OrderedMap<Comments>,
 }
@@ -522,6 +525,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
         bpm: 0.0,
         time_signature: None,
         beats_per_bar: None,
+        count_in: None,
         tracks: Vec::new(),
         midi: Vec::new(),
         sections: Vec::new(),
@@ -542,6 +546,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
             "bpm" => doc.bpm = number(value).unwrap_or(0.0),
             "time_signature" => doc.time_signature = text_of(value),
             "beats_per_bar" => doc.beats_per_bar = int(value).map(|v| v as u32),
+            "count_in" => doc.count_in = int(value).map(|v| v as u32),
             "tracks" => {
                 if let NodeKind::Map(entries) = &value.kind {
                     for track in entries {
@@ -1320,7 +1325,7 @@ fn resolve_section(doc: &ScoreDoc, index: usize) -> ResolvedSection {
 ///   relative to their element - so they move with it when sections are reordered, and they go
 ///   when their element is deleted.
 /// * The layout is fixed: two spaces of indentation, keys in a fixed order (`title`, `bpm`,
-///   `time_signature`, `beats_per_bar`, `tracks`, `midi`, `sections`; inside a section `id`,
+///   `time_signature`, `beats_per_bar`, `count_in`, `tracks`, `midi`, `sections`; inside a section `id`,
 ///   `repeat`, `bars`, `autorelease`, `quantize`, `tracks`), tracks and MIDI bindings as one
 ///   `{...}` line each, sections as blocks, one blank line between top-level blocks and between
 ///   sections, strings quoted only where YAML needs it, numbers in shortest form.
@@ -1351,6 +1356,9 @@ pub fn render_doc(doc: &ScoreDoc) -> String {
     }
     if let Some(beats) = doc.beats_per_bar {
         w.line(0, &format!("beats_per_bar: {beats}"), &root("beats_per_bar"));
+    }
+    if let Some(bars) = doc.count_in {
+        w.line(0, &format!("count_in: {bars}"), &root("count_in"));
     }
 
     w.blank();
@@ -1898,6 +1906,7 @@ pub fn template_with(tracks: Vec<DocTrack>, instruments: Vec<(String, String)>) 
         bpm: 100.0,
         time_signature: Some("4/4".to_string()),
         beats_per_bar: None,
+        count_in: Some(crate::engine::runner::DEFAULT_COUNT_IN_BARS),
         tracks,
         midi: Vec::new(),
         sections: vec![intro, layer, outro],
@@ -1909,6 +1918,13 @@ pub fn template_with(tracks: Vec<DocTrack>, instruments: Vec<(String, String)>) 
         footer: Vec::new(),
         field_comments: OrderedMap::new(),
     };
+    doc.field_comments.insert(
+        "count_in",
+        Comments {
+            before: Vec::new(),
+            after: Some("bars of click before the first section (1 to 8)".to_string()),
+        },
+    );
     doc.field_comments.insert(
         "tracks",
         Comments {

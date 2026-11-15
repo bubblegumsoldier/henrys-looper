@@ -30,7 +30,7 @@ use super::live::{
     resolve_routing, send_text, spawn_keyboard, start_engine, stats_report,
 };
 use super::process::{check_loop, loop_capacity, max_latency};
-use super::runner::{DEFAULT_COUNT_IN_BARS, Phase, Runner, check_tracks};
+use super::runner::{Phase, Runner, check_tracks};
 use super::timeline::Timeline;
 use super::track::TrackState;
 
@@ -50,9 +50,10 @@ pub struct ScoreOpts {
     #[arg(long = "track-latency", value_name = "NAME:FRAMES[+TRIM]")]
     pub track_latencies: Vec<String>,
 
-    /// Count-in bars before the first section
-    #[arg(long = "count-in", default_value_t = DEFAULT_COUNT_IN_BARS)]
-    pub count_in: u32,
+    /// Count-in bars before the first section (1-8). Overrides the score's `count_in:`; without
+    /// either it is 2 bars
+    #[arg(long = "count-in", value_name = "BARS")]
+    pub count_in: Option<u32>,
 
     /// Gain of the monitored input signal
     #[arg(long, default_value_t = 1.0)]
@@ -425,7 +426,10 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
         }
     }
 
-    let mut runner = Runner::new(score, timeline, buffer_frames)?.with_count_in(opts.count_in);
+    let mut runner = Runner::new(score, timeline, buffer_frames)?;
+    if let Some(bars) = opts.count_in {
+        runner = runner.with_count_in(bars);
+    }
 
     println!(
         "\nKeys (confirm each with Enter):\n\

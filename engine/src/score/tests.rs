@@ -939,3 +939,54 @@ fn messages_have_no_stray_whitespace_and_no_terminal_key_hints() {
     }
     assert_eq!(Refusal::Tempo.cli_hint(), Some("(a)"), "das Terminal behaelt seinen Hinweis");
 }
+
+// ---------------------------------------------------------------------------------------------
+// count_in
+// ---------------------------------------------------------------------------------------------
+
+const COUNT_IN: &str = "\
+bpm: 120
+count_in: 3
+tracks:
+  a: {input: 1}
+sections:
+  - id: x
+    bars: 2
+";
+
+/// `count_in:` is optional, reaches the compiled score, and the runner counts in that many bars
+/// unless the caller overrides it for one run.
+#[test]
+fn count_in_is_read_and_reaches_the_runner() {
+    use crate::engine::runner::{DEFAULT_COUNT_IN_BARS, Runner};
+    use crate::engine::timeline::Timeline;
+    let score = compiled(COUNT_IN);
+    assert_eq!(score.count_in, Some(3));
+    let timeline = Timeline::new(48_000, score.bpm, score.signature());
+    let runner = Runner::new(score.clone(), timeline, 128).expect("Runner");
+    assert_eq!(runner.count_in_bars(), 3, "die Partitur bestimmt den Einzaehler");
+    let runner = Runner::new(score, timeline, 128).expect("Runner").with_count_in(1);
+    assert_eq!(runner.count_in_bars(), 1, "ein Wert fuer diesen Lauf gewinnt");
+
+    let without = compiled(&COUNT_IN.replace("count_in: 3\n", ""));
+    assert_eq!(without.count_in, None);
+    let runner = Runner::new(without, timeline, 128).expect("Runner");
+    assert_eq!(runner.count_in_bars(), DEFAULT_COUNT_IN_BARS);
+    assert_eq!(DEFAULT_COUNT_IN_BARS, 2);
+}
+
+/// Zero and more than eight are refused where they stand, and zero says why.
+#[test]
+fn count_in_out_of_range_is_refused_with_its_line() {
+    let err = errors(&COUNT_IN.replace("count_in: 3", "count_in: 0"));
+    let issue = &err.issues[0];
+    assert_eq!(issue.line, Some(2));
+    assert!(issue.message.contains("at least 1 bar"), "{}", issue.message);
+    let hint = issue.suggestion.as_deref().unwrap_or("");
+    assert!(hint.contains("always counts in") && hint.contains("1 to 8"), "{hint}");
+
+    let err = errors(&COUNT_IN.replace("count_in: 3", "count_in: 9"));
+    assert!(err.issues[0].message.contains("between 0 and 8"), "{}", err.issues[0].message);
+    let err = errors(&COUNT_IN.replace("count_in: 3", "count_in: two"));
+    assert!(err.issues[0].message.contains("whole number"), "{}", err.issues[0].message);
+}
