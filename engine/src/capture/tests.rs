@@ -57,6 +57,8 @@ fn info(dir: &Path, names: &[&str], channels: &[Channels], start: u64, timeline:
         score_yaml: None,
         score_path: None,
         min_seconds: MIN_SECONDS,
+        // The simulation runs many times faster than real time; the writer must not fall behind.
+        queue_seconds: 60.0,
     }
 }
 
@@ -264,6 +266,7 @@ fn a_full_queue_is_filled_with_silence_and_every_file_stays_in_step() {
         sample_rate: SLOW_RATE,
         max_block: 64,
         max_latency: 0,
+        queue_seconds: QUEUE_SECONDS,
     });
     session.install(0);
     let value = |pos: u64| ((pos % 997) as f32 + 1.0) / 2_000.0;

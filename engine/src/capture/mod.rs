@@ -206,6 +206,10 @@ pub struct CaptureSpec {
     pub max_block: usize,
     /// The largest compensation of any track, in frames - sizes the collecting ring.
     pub max_latency: u64,
+    /// Seconds of audio the queue to the writer holds - [`QUEUE_SECONDS`] in the app. A test that
+    /// runs the engine far faster than real time asks for more, so a busy machine cannot turn a
+    /// test of something else into an overflow.
+    pub queue_seconds: f64,
 }
 
 /// Which stem slots one track writes to, precomputed so the audio thread does no arithmetic on the
@@ -268,7 +272,8 @@ pub fn capture_pair(spec: &CaptureSpec) -> (Box<CaptureSession>, CaptureReader) 
     let ring_frames = (spec.max_latency + LAG_MARGIN + 4 * max_block)
         .next_power_of_two()
         .max(1024);
-    let queue = ((spec.sample_rate as f64 * QUEUE_SECONDS) as usize).max(4 * max_block as usize);
+    let queue =
+        ((spec.sample_rate as f64 * spec.queue_seconds) as usize).max(4 * max_block as usize);
     let (data_tx, data_rx) = rtrb::RingBuffer::<f32>::new(queue * width);
     let (gap_tx, gap_rx) = rtrb::RingBuffer::<Gap>::new(256);
     let shared = Arc::new(Shared::new());

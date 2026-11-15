@@ -65,6 +65,8 @@ pub struct RunInfo {
     pub score_path: Option<String>,
     /// Runs shorter than this are thrown away.
     pub min_seconds: f64,
+    /// Seconds the queue to the writer holds; [`super::QUEUE_SECONDS`] in the app.
+    pub queue_seconds: f64,
 }
 
 /// What the control thread adds while the run goes on.
@@ -139,6 +141,7 @@ impl Recording {
             sample_rate: info.sample_rate,
             max_block: info.max_block,
             max_latency,
+            queue_seconds: info.queue_seconds,
         });
         let shared = Arc::clone(capture.shared());
         if let Err(e) = port.install(capture) {

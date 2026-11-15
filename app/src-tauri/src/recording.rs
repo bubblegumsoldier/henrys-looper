@@ -433,6 +433,7 @@ impl Recorder {
             score_yaml,
             score_path: None,
             min_seconds: MIN_SECONDS,
+            queue_seconds: looper_engine::capture::QUEUE_SECONDS,
         };
         match Recording::start(info, &mut self.port) {
             Ok(rec) => {
