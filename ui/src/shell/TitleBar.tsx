@@ -2,8 +2,8 @@
 //! that has to be reachable from every view.
 //!
 //! ```text
-//!  ● ● ●  Title       [▶][■][▶| Release]  [SECTION|BAR|BEAT|TEMPO|TIME SIG] [♪]   Arrangement|Live   MIDI Learn  (status)  ⚙
-//!         file state   ^ Arrangement only (Live has the same controls full size)
+//!  ● ● ●  Title       [▶][■][▶| Release]  [SECTION|BAR|BEAT|TEMPO|TIME SIG]   [♪ Click ▾] Arrangement|Live   MIDI Learn  (status)  ⚙
+//!         file state   ^ Arrangement only (Live has the same controls full size)   ^ every view
 //! ```
 //!
 //! The bar itself is the window's drag region (`data-tauri-drag-region`); the controls inside are
@@ -11,17 +11,16 @@
 
 import type { ReactNode } from "react";
 import { midiApi } from "../api";
-import { FREE_TRANSPORT, GLOBAL, TRANSPORT } from "../midi/addresses";
+import { FREE_TRANSPORT, TRANSPORT } from "../midi/addresses";
 import { setLearnMode, setMidiView, sayMidi, useLearnMode, useMidiView } from "../midi/store";
 import { IS_MAC } from "../platform";
 import { useStatusSlice } from "../status";
 import { Icon } from "./Icon";
 import { useEngine } from "./engine";
 import { Ticker } from "./Toasts";
+import { ClickSwitch } from "./ClickSwitch";
 import { RecordingBadge } from "../recording/RecordingBadge";
 import { isDirty, useScoreFile } from "../scoreFile";
-import { run } from "./notes";
-import { api } from "../api";
 import {
   freeTransport,
   scoreCanStart,
@@ -129,21 +128,13 @@ export function TitleBar({ mode, setupOpen, onMode, onSetup, enginePanelOpen, on
           <span className="sep" />
           {score.loaded ? <Transport score={score} /> : <FreeTransport facts={facts} />}
           <Lcd facts={facts} score={score} />
-          <button
-            className={`btn sq tb-click${facts.click ? " on" : ""}`}
-            data-midi={GLOBAL.click}
-            disabled={!facts.running}
-            onClick={() => run(() => api.setClick(!facts.click))}
-            title={`${facts.click ? T.clickOn : T.clickOff} · key K`}
-          >
-            <Icon name="metro" />
-          </button>
         </>
       )}
       <div className="grow ticker-slot" data-tauri-drag-region>
         <Ticker />
       </div>
       <RecordingBadge />
+      <ClickSwitch variant="bar" />
       <div className="seg mode" role="tablist">
         <button
           role="tab"
@@ -171,7 +162,7 @@ export function TitleBar({ mode, setupOpen, onMode, onSetup, enginePanelOpen, on
         title={`While on, clicking a control assigns it instead of using it; then press the pad or key. ${IS_MAC ? "⌘" : "Ctrl"}+click works without the switch.`}
       >
         <Icon name="midi" />
-        {T.midiLearn}
+        <span className="tb-word">{T.midiLearn}</span>
       </button>
       {locked && (
         <button

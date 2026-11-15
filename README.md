@@ -49,13 +49,13 @@ Stoppstelle.
 | Live | `I` | Spur-Detail auf/zu |
 | Live | `F` | Effekte der Spur umgehen (Bypass) |
 | Live | `X` / `V` / `D` + Ziffer | Effekt an/aus · Preset laden · Delay-Notenwert |
-| Live | `K` | Klick an/aus |
+| überall (außer im Textfeld) | `K` | Klick an/aus (auch der große *Click*-Schalter in der Kopfleiste; Rechtsklick: Lautstärke) |
 | Live/Arrangement | Leertaste oder `N` | Partitur starten bzw. *Release* |
 | Live/Arrangement, ohne Partitur | Leertaste | Uhr starten/stoppen (*Start*/*Stop*, MIDI `transport.toggle`) |
 | Live/Arrangement | `⇧S` | *Stop all* |
 | Arrangement | `⌘N` `⌘O` `⌘S` `⇧⌘S` | New · Open · Save · Save as |
 | Arrangement | `⌘Z` / `⇧⌘Z` · `⌘D` · `+`/`-` · `⌫` · `Esc` | Undo/Redo · Sektion duplizieren · Zoom · zurücksetzen · Auswahl aufheben |
-| Arrangement | Clip gewählt: `R` `O` `P` `S` `M` | Zielzustand setzen |
+| Arrangement | Clip gewählt: `R` `O` `A` `P` `S` `M` | Zielzustand setzen (`A` = Stack) |
 | überall | `⌘`-Klick | Element per MIDI lernen |
 
 Beispielpartituren im aktuellen Format: `examples/henry-3-4.rust.yaml`,
@@ -181,7 +181,7 @@ bleiben am Element), Getipptes erscheint nach einer kurzen Pause im Raster. ⌘Z
 beide Sichten gemeinsam. Ist der Text fehlerhaft, zeigt das Raster den letzten gültigen Stand
 schreibgeschützt.
 
-- Clip anklicken (⇧ = Rechteck, ⌘ = einzeln dazu), dann `R` Record · `O` Overdub · `K` Stack ·
+- Clip anklicken (⇧ = Rechteck, ⌘ = einzeln dazu), dann `R` Record · `O` Overdub · `A` Stack ·
   `P` Play · `S` Stop · `M` Monitor; Pfeiltasten wandern, `⌫` setzt auf die Vorlage zurück.
   **Stack** (`stack` im YAML) legt in jedem Durchlauf eine neue Ebene an, bis die Sektion endet —
   mit `autorelease: false` also bis Release; leere Durchläufe bleiben nicht liegen.
@@ -189,6 +189,16 @@ schreibgeschützt.
   (`repeat:` zieht mit, `transport.goto.<n>` wird beim Verschieben umnummeriert); ⌘D dupliziert.
 - Spurkopf: ziehen = umsortieren, Doppelklick = umbenennen (Zustände und `track.<name>.*`
   ziehen mit), Mithören/Busse als Schalter, Pan am Knopf.
+- Rechts bei gewählter Spur zwei Reiter: **Track** (die Partitur-Einstellungen der Spur, bei
+  Instrument-Spuren mit eigenem Abschnitt *MIDI loop*: Loop-Typ, Notenraster, Transpose) und
+  **Channel** (Geräteliste, Ebenen, Latenz des Mixer-Kanals). Der zuletzt gewählte Reiter bleibt;
+  ein Klick auf einen Kanalzug im Mixer öffnet *Channel*. Sektion und Clip zeigen immer den
+  Inspektor, auch bei offenem Mixer. Loop-Typ wirkt nach *Load*; Raster und Transpose gehen sofort
+  an die Engine, wenn der Editor genau die geladene Partitur hält.
+- **Click** (Metronom) sitzt groß in der Kopfleiste jeder Ansicht und im Live-Modus als Kachel neben
+  Start; `K` schaltet ihn überall, Rechtsklick oder der Pfeil daneben öffnet die Lautstärke. An,
+  aber gestrichelt = an, doch still, bis die geladene Partitur mit dem Einzähler beginnt. Der Zustand
+  bleibt über einen Neustart erhalten.
 - **File** (Neu, Öffnen, Zuletzt, Sichern) und **Load** in der Werkzeugleiste. Das Feld
   **Count-in** daneben ist das Partiturfeld `count_in:` (Takte Klick vor der ersten Sektion, 1–8;
   fehlt es, sind es 2 Takte) und wird mit dem Stück gespeichert. Im Live-Modus steht der Einzähler

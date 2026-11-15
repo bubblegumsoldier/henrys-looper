@@ -237,8 +237,10 @@ describe("instrument tracks", () => {
 describe("stack", () => {
   it("is a pickable state with its own key and the stack symbol in overdub orange", () => {
     expect(STATES).toContain("stack");
-    expect(STATE_BY_KEY.k).toBe("stack");
-    expect(STATE_LOOK.stack).toMatchObject({ cls: "dub", icon: "ic-layers", word: "Stack", key: "K" });
+    expect(STATE_BY_KEY.a).toBe("stack");
+    // K is the click, in every view.
+    expect(STATE_BY_KEY.k).toBeUndefined();
+    expect(STATE_LOOK.stack).toMatchObject({ cls: "dub", icon: "ic-layers", word: "Stack", key: "A" });
     expect(STATE_LOOK.overdub.icon).not.toBe(STATE_LOOK.stack.icon);
   });
 

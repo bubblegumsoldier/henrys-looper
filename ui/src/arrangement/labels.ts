@@ -17,7 +17,7 @@ export interface StateLook {
   key: string;
 }
 
-const KEY: Record<ScoreState, string> = { record: "R", overdub: "O", stack: "K", play: "P", stop: "S", hear_through: "M" };
+const KEY: Record<ScoreState, string> = { record: "R", overdub: "O", stack: "A", play: "P", stop: "S", hear_through: "M" };
 
 /** A state whose icon is not its kind's: `stack` is overdub orange with a stack-of-layers symbol. */
 const ICON: Partial<Record<ScoreState, string>> = { stack: "ic-layers" };

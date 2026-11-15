@@ -75,7 +75,51 @@ kbd {
 .chip:not(.on):hover { color: var(--tx-1); border-color: var(--line-3); }
 .toggle { border: 0; padding: 0; }
 .toggle:disabled { opacity: .4; }
-.tb-click.on { color: var(--st-play); border-color: var(--st-play-line); }
+
+/* --- The click switch (shell/ClickSwitch.tsx): title bar and Live tile -------------------------- */
+.click-sw { position: relative; display: inline-flex; align-items: stretch; flex: none; }
+.click-sw .metro { position: relative; display: inline-flex; }
+.click-sw .metro.struck::after {
+  content: ""; position: absolute; left: -2px; right: -2px; top: 50%; height: 2px; border-radius: 1px;
+  background: currentColor; transform: rotate(-45deg);
+}
+.click-sw .click-btn.off { color: var(--tx-3); }
+.click-sw .click-btn.on { color: var(--st-play); border-color: var(--st-play-line); background: linear-gradient(to bottom, rgba(46,213,140,.24), rgba(46,213,140,.10)); }
+.click-sw .click-btn.on .ic { color: var(--st-play); }
+/* On, but silent until the score plays: the same colour, a quieter fill, a dashed edge. */
+.click-sw .click-btn.on.waiting { border-style: dashed; background: rgba(46,213,140,.06); }
+.click-sw.bar .click-btn { height: 34px; padding: 0 14px; gap: 8px; font: var(--fw-semibold) 15px/1 var(--font-display); border-radius: var(--r-2) 0 0 var(--r-2); }
+.click-sw.bar .click-btn .ic { --ic: 18px; }
+.click-sw.bar .click-more { height: 34px; width: 22px; padding: 0; border-radius: 0 var(--r-2) var(--r-2) 0; border-left: 0;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--tx-3); }
+.click-sw.bar .click-more { background: linear-gradient(to bottom, #20252c, #1a1e24); border: 1px solid var(--line-3); border-left: 0; cursor: pointer; }
+.click-sw.bar .click-more:hover:not(:disabled) { color: var(--tx-1); }
+.click-sw.bar .click-more:disabled { opacity: .4; cursor: default; }
+.click-sw.stage { display: flex; min-width: 0; }
+.click-sw.stage .click-btn { flex: 1; min-width: 0; }
+.click-vol {
+  position: absolute; top: calc(100% + 6px); right: 0; z-index: 30; display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; background: var(--bg-3); border: 1px solid var(--line-3); border-radius: var(--r-3); box-shadow: var(--sh-pop, 0 8px 24px rgba(0,0,0,.5));
+  white-space: nowrap;
+}
+.click-vol .range { width: 140px; }
+.click-vol .num { min-width: 56px; text-align: right; color: var(--tx-2); font-size: var(--fs-11); }
+.click-sw.stage .click-vol { top: auto; bottom: calc(100% + 6px); }
+/* Live: the score row holds four tiles - Start, Stop all, Count-in, Click - all the same width;
+   the free row three, with the click as wide as Start. */
+.lv-row.three { grid-template-columns: 1.25fr 1fr 1.25fr; }
+/* The big click switch takes room in the title bar: below 1500 px the bar closes up a little and
+   MIDI Learn keeps only its symbol (its tooltip and the learn outline still say what it is). */
+@media (max-width: 1500px) {
+  .titlebar { gap: var(--sp-3); }
+  .titlebar .learn-btn .tb-word { display: none; }
+  .titlebar .doc { max-width: 160px; }
+}
+.lv-row.three.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.lv-row.four .bigbtn { font-size: 16px; gap: 8px; padding: 0 8px; }
+.lv-row.four .bigbtn .ic { --ic: 18px; }
+.lv-row.four .bigbtn { white-space: normal; line-height: 1.1; text-align: center; }
+@media (max-width: 1200px) { .lv-row.four .bigbtn:not(.click-btn) > .ic { display: none; } }
 
 /* --- Fields as real inputs --------------------------------------------------------------------- */
 input.field, select.field { border: 0; outline: 0; font-size: var(--fs-12); }

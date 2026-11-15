@@ -9,7 +9,7 @@
 import { setConfig } from "../setup/config";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { FREE_TRANSPORT, GLOBAL, TRANSPORT, quantizeAddress } from "../midi/addresses";
+import { FREE_TRANSPORT, TRANSPORT, quantizeAddress } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
 import { run } from "../shell/notes";
 import {
@@ -26,6 +26,7 @@ import { STATE_WORD, T, bars, countdown, countInWord, num, PENDING } from "../sh
 import { nextCountIn, setRunCountIn } from "../arrangement/countIn";
 import type { CompiledScore, LooperTrackStatus } from "../types";
 import type { Clock } from "./PositionPanel";
+import { ClickSwitch } from "../shell/ClickSwitch";
 
 
 function Countdown({ barsLeft }: { barsLeft: number }) {
@@ -218,7 +219,7 @@ export function ReleasePanel({ score, compiled, clock, tracks }: Props) {
         <div className="when">{when}</div>
         {meter ?? <div className="countdown placeholder" />}
       </button>
-      <div className="lv-row three">
+      <div className="lv-row three four">
         <button
           className={`bigbtn${runs ? " running" : scoreCanStart(score) ? " ready" : ""}`}
           data-midi={TRANSPORT.start}
@@ -253,6 +254,7 @@ export function ReleasePanel({ score, compiled, clock, tracks }: Props) {
           <Icon name="metro" />
           {T.countIn} {countInWord(score.countInBars)}
         </button>
+        <ClickSwitch variant="tile" />
       </div>
     </div>
   );
@@ -385,15 +387,7 @@ function FreePanel({ clock, tracks }: { clock: Clock; tracks: LooperTrackStatus[
           <Icon name={clock.quantize === "loop" ? "loop" : "bar"} />
           {clock.quantize === "loop" ? T.quantizeLoop : T.quantizeBar}
         </button>
-        <button
-          className={`bigbtn${clock.click ? " on" : ""}`}
-          data-midi={GLOBAL.click}
-          onClick={() => run(() => api.setClick(!clock.click))}
-          title="Key K. The click is on the monitor bus and never reaches Main."
-        >
-          <Icon name="metro" />
-          {clock.click ? T.clickOn : T.clickOff}
-        </button>
+        <ClickSwitch variant="tile" />
       </div>
     </div>
   );

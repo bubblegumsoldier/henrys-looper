@@ -62,6 +62,8 @@ export const T = {
   click: "Click",
   clickOn: "Click on",
   clickOff: "Click off",
+  clickVolume: "Click volume",
+  clickWaiting: "Click is on - it starts with the count-in",
   countIn: "Count-in",
   switchArmed: "Switch armed",
   loopsUntilRelease: "Loops until Release",

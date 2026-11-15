@@ -23,7 +23,7 @@
 //! standing clock starts it too, with the take on bar 1.
 //!
 //! Keyboard: a digit picks a track, then R O S P M act on it, Q mutes it (at once, the loop runs on
-//! in time - unlike S, which stops it), K toggles the click, F takes the
+//! in time - unlike S, which stops it), K toggles the click (in every view, `shell/ClickSwitch`), F takes the
 //! selected track's effect chain in or out, I opens its details. X, V and D wait for one more digit
 //! - `X 3` switches the compressor, `V 1` loads "Voice", `D 2` sets the delay to a dotted eighth,
 //! exactly as in the CLI. Space/N and Shift+S belong to the score transport (see `scoreTransport`).
@@ -247,8 +247,8 @@ function Stage({ onOpenArrangement }: Props) {
   });
 
   // --- keyboard --------------------------------------------------------------------------------
-  const state = useRef({ tracks, selected, click: clock.click });
-  state.current = { tracks, selected, click: clock.click };
+  const state = useRef({ tracks, selected });
+  state.current = { tracks, selected };
   const chord = useRef<Chord | null>(null);
   const chordTimer = useRef<number | undefined>(undefined);
   const [chordShown, setChordShown] = useState<Chord | null>(null);
@@ -295,7 +295,7 @@ function Stage({ onOpenArrangement }: Props) {
         run(() => api.undoLast());
         return;
       }
-      const { tracks: list, selected: current, click } = state.current;
+      const { tracks: list, selected: current } = state.current;
 
       if (e.key === "Escape" && chord.current) {
         e.preventDefault();
@@ -322,11 +322,8 @@ function Stage({ onOpenArrangement }: Props) {
         return;
       }
       const key = e.key.toLowerCase();
-      if (key === "k") {
-        e.preventDefault();
-        run(() => api.setClick(!click));
-        return;
-      }
+      // K (the click) is the shell's, in every view: `useClickKey`.
+      if (key === "k") return;
       if (key === "t") {
         e.preventDefault();
         run(() => api.tapTempo());

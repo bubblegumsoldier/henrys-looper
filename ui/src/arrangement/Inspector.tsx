@@ -208,7 +208,8 @@ function ScorePanel({ doc, errors, editable, edit, setSel, onIssue }: Props) {
       <div className="insp-s">
         <span className="caps">Keys</span>
         <div className="hint keys">
-          <span><kbd>R</kbd> <kbd>O</kbd> <kbd>P</kbd> <kbd>S</kbd> <kbd>M</kbd> set the selected clips</span>
+          <span><kbd>R</kbd> <kbd>O</kbd> <kbd>A</kbd> <kbd>P</kbd> <kbd>S</kbd> <kbd>M</kbd> set the selected clips (<kbd>A</kbd> = Stack)</span>
+          <span><kbd>K</kbd> click on/off, in every view</span>
           <span><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd> move, with <kbd>⇧</kbd> select a range</span>
           <span><kbd>⌫</kbd> reset clips to the template, or delete a section/track</span>
           <span><kbd>⌘D</kbd> duplicate section · <kbd>⌘Z</kbd> undo · <kbd>⇧⌘Z</kbd> redo</span>

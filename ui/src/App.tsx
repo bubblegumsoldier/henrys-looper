@@ -30,6 +30,7 @@ import { EnginePanel } from "./shell/EnginePanel";
 import { Alarm } from "./shell/Toasts";
 import { fail } from "./shell/notes";
 import { useScoreKeys } from "./shell/scoreTransport";
+import { useClickKey, useRememberClick } from "./shell/ClickSwitch";
 import { useScoreModelSync } from "./shell/scoreModel";
 import { useWindowTitle } from "./shell/windowTitle";
 import { IS_MAC } from "./platform";
@@ -62,6 +63,9 @@ export default function App() {
   // Space / N start or release, Shift+S stops - in every mode: the arrangement has no transport of
   // its own any more, the title bar is the transport.
   useScoreKeys(true);
+  // K toggles the click in every view; its state is kept for the next start.
+  useClickKey();
+  useRememberClick();
 
   useEffect(() => {
     if (error) fail(error);
