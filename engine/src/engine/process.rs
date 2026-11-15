@@ -1711,6 +1711,7 @@ impl EngineCore {
             buffers_taken: self.buffers_taken,
             stopped: self.stopped,
             transport: self.transport,
+            click_gate: self.gate,
             instrument_delay: self.instrument_delay.unwrap_or(0).min(u64::from(u32::MAX)) as u32,
             late_events: self.late_events().min(u64::from(u32::MAX)) as u32,
         };

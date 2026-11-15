@@ -2547,6 +2547,7 @@ impl Session {
             latency_frames: self.info.latency_frames,
             click: status.click,
             click_gain: status.click_gain,
+            click_open: status.click_gate,
             monitor_gain: status.monitor_gain,
             output_peak: status.output_peak_max(),
             output_dbfs: dbfs(status.output_peak_max()),

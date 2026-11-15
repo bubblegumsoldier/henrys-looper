@@ -519,6 +519,9 @@ pub struct Status {
     /// and nothing but the monitored inputs is heard; `pos` keeps counting, because it is the
     /// sample axis every command is stamped on, not the musical clock.
     pub transport: bool,
+    /// Whether the click window is open (`Command::ClickGate`): true unless a loaded score holds it
+    /// closed because it is not playing.
+    pub click_gate: bool,
     /// `C`, the fixed delay between a key and its instrument's sound, in frames; 0 until known
     /// (`super::source`).
     pub instrument_delay: u32,

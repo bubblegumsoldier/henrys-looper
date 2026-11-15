@@ -1421,6 +1421,41 @@ fn stop_all_right_after_start_keeps_the_click_silent() {
     assert_eq!(click_peak(&sim, 0, sim.pos()), 0.0);
 }
 
+/// The run from the app, step by step: two sections that move on by themselves, "Stop all" while
+/// the second one is already armed, "Back to start", Start again - the second count-in clicks.
+#[test]
+fn a_second_start_after_stop_all_with_an_armed_switch_clicks_again() {
+    let two = SHORT.replace(
+        "      a: record\n",
+        "      a: stop\n  - id: zwei\n    bars: 2\n    autorelease: true\n    tracks:\n      a: stop\n",
+    );
+    let (mut sim, mut runner) = loaded_with_click(&two, 2);
+    let timeline = runner.scheduler().timeline;
+    let bar = timeline.span_bars(0, 1);
+    advance(&mut sim, &mut runner, 2 * bar + 500);
+    runner.start(sim.pos());
+    let (first, _) = runner.armed_at().expect("armiert");
+    advance(&mut sim, &mut runner, first + bar / 2);
+    assert!(runner.armed_at().is_some(), "zwei ist schon armiert");
+    runner.stop_all(sim.pos());
+    let later = sim.pos() + bar;
+    advance(&mut sim, &mut runner, later);
+    let (_, commands) = runner.rewind(sim.pos()).expect("zurueck");
+    for cmd in commands {
+        sim.send(cmd);
+    }
+    let later = sim.pos() + bar;
+    advance(&mut sim, &mut runner, later);
+    let quiet_from = sim.pos();
+    runner.start(sim.pos());
+    let (start, first_bar) = runner.armed_at().expect("wieder armiert");
+    let anchor = timeline.bar_start(first_bar - 2);
+    advance(&mut sim, &mut runner, start + 3 * bar);
+    assert_eq!(click_peak(&sim, quiet_from, anchor), 0.0);
+    assert!(click_peak(&sim, anchor, anchor + 200) > 0.0, "der zweite Einzaehler klickt");
+    assert!(click_peak(&sim, start, start + 200) > 0.0, "und die Sektion");
+}
+
 /// At the end of the score the click stops on the very sample the score ends - the downbeat that
 /// would follow is not clicked any more.
 #[test]

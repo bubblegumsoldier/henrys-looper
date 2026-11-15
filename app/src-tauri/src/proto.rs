@@ -872,6 +872,9 @@ pub struct StatusEvent {
     pub click: bool,
     /// Volume of the click, linear 0..4. Changeable at runtime with `click_gain`.
     pub click_gain: f32,
+    /// Whether the click can be heard at all right now: false while a loaded score is not playing
+    /// (before Start, after the end, after "Stop all") - its click window is closed.
+    pub click_open: bool,
     /// Volume of every monitored live input, linear 0..4. Changeable with `monitor_gain`; it never
     /// reaches a recording.
     pub monitor_gain: f32,
@@ -953,6 +956,7 @@ impl StatusEvent {
             latency_frames: 0,
             click: false,
             click_gain: 0.0,
+            click_open: false,
             monitor_gain: 0.0,
             output_peak: 0.0,
             output_dbfs: None,
@@ -2046,6 +2050,7 @@ mod tests {
                 "buses_collapsed",
                 "click",
                 "click_gain",
+                "click_open",
                 "count_in_bars",
                 "counting_in",
                 "fifo_overruns",

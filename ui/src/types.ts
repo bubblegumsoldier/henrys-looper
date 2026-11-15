@@ -314,6 +314,8 @@ export interface LooperStatus {
   click: boolean;
   /** Click volume, linear 0..4 (`api.clickGain`). */
   click_gain: number;
+  /** The click can be heard at all: false while a loaded score is not playing (its click window is closed). */
+  click_open: boolean;
   /** Volume of all monitored live inputs, linear 0..4 (`api.monitorGain`). Never reaches a recording. */
   monitor_gain: number;
   /** Louder side of the main bus, i.e. of what goes to the room. */
@@ -379,6 +381,7 @@ export const IDLE_STATUS: LooperStatus = {
   latency_frames: 0,
   click: false,
   click_gain: 0,
+  click_open: false,
   monitor_gain: 0,
   output_peak: 0,
   output_dbfs: null,
