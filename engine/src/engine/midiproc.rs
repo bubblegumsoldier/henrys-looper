@@ -118,8 +118,8 @@ impl EngineCore {
             let Some(mut list) = midi.endpoint.next_list() else {
                 break;
             };
-            let mut found = false;
-            'tracks: for track in self.tracks.iter_mut() {
+            let mut rack = self.sources.as_deref_mut();
+            'tracks: for (t, track) in self.tracks.iter_mut().enumerate() {
                 if !track.midi_loop() {
                     continue;
                 }
@@ -127,13 +127,16 @@ impl EngineCore {
                     if let Some(clip) = layer.clip_mut()
                         && clip.id() == list.clip
                     {
+                        // What the old list started ends now: a note it played early would
+                        // otherwise sound twice when the new list plays it later in the pass.
+                        if let Some(rack) = rack.as_deref_mut() {
+                            clip.tracker.release_own(|msg| rack.push_now(t, msg));
+                        }
                         clip.install_list(&mut list.list);
-                        found = true;
                         break 'tracks;
                     }
                 }
             }
-            let _ = found;
             midi.endpoint.list_back(list.list);
         }
     }
