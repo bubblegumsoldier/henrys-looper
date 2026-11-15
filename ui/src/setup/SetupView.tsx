@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { api } from "../api";
 import { MidiPanel } from "../midi/MidiPanel";
+import { PluginsPage } from "../plugins/PluginsPage";
 import { busGainAddress, GLOBAL, quantizeAddress, trackAddress } from "../midi/addresses";
 import { useMidiView } from "../midi/store";
 import { IS_MAC } from "../platform";
@@ -47,7 +48,7 @@ import type {
   StartTrack,
 } from "../types";
 
-export type SetupPage = "audio" | "tracks" | "tempo" | "midi" | "general";
+export type SetupPage = "audio" | "tracks" | "tempo" | "midi" | "plugins" | "general";
 
 const BUFFERS = [32, 64, 128, 256, 512, 1024];
 
@@ -298,6 +299,7 @@ export function SetupView({ info, page, onPage, onStarted }: Props) {
     { id: "tracks", icon: "input", label: "Tracks & Inputs", badge: String(config.tracks.length) },
     { id: "tempo", icon: "metro", label: "Tempo & Loop" },
     { id: "midi", icon: "midi", label: "MIDI", badge: midi.connected ? "connected" : "—" },
+    { id: "plugins", icon: "gear", label: "Plugins" },
     { id: "general", icon: "gear", label: "General" },
   ];
 
@@ -370,6 +372,7 @@ export function SetupView({ info, page, onPage, onStarted }: Props) {
             </section>
           </>
         )}
+        {page === "plugins" && <PluginsPage />}
         {page === "general" && <GeneralPage info={info} />}
       </main>
     </div>

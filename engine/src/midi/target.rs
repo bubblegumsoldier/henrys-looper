@@ -65,6 +65,7 @@ use crate::engine::command::MAX_LEVEL_GAIN;
 use crate::engine::track::MAX_TRACK_GAIN;
 use crate::engine::fx::{EQ_BANDS, FxParam, FxPreset, FxSlot};
 use crate::engine::fx::{BandKind, DelayNote};
+use crate::engine::insert::MAX_INSERTS;
 use crate::engine::schedule::Quantize;
 
 /// Which track an address means.
@@ -418,6 +419,31 @@ impl FxKnob {
 /// per step and never find the spot. A binding may widen it with `min:`/`max:`.
 pub const LATENCY_TRIM_SWEEP: f32 = 4_800.0;
 
+/// Whose insert rack a plugin address names: a track's or a bus's.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InsertOwner {
+    Track(TrackRef),
+    Bus(Bus),
+}
+
+impl fmt::Display for InsertOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InsertOwner::Track(t) => write!(f, "track.{t}"),
+            InsertOwner::Bus(b) => write!(f, "global.bus.{}", b.name()),
+        }
+    }
+}
+
+impl InsertOwner {
+    fn label(&self) -> String {
+        match self {
+            InsertOwner::Track(t) => format!("Track {t}"),
+            InsertOwner::Bus(b) => format!("Bus {}", b.label()),
+        }
+    }
+}
+
 /// Everything that can be bound to a MIDI control.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
@@ -477,6 +503,13 @@ pub enum Target {
     FxDelayNote(TrackRef, DelayNote),
     FxBandKind(TrackRef, usize, BandKind),
     FxKnob(TrackRef, FxKnob),
+
+    // ---- plugin inserts (`engine::insert`) ------------------------------------------------------
+    /// The host's bypass of one insert slot, 0-based inside, 1-based in the address.
+    InsertBypass(InsertOwner, usize),
+    /// One parameter of the plugin in a slot, by the plugin's own parameter id, normalised 0..1.
+    /// The id is what the plugin calls it - stable across sessions, unlike a list position.
+    InsertParam(InsertOwner, usize, u32),
 }
 
 impl Target {
@@ -506,7 +539,11 @@ impl Target {
             | Target::LayerMute(..)
             | Target::Send(..)
             | Target::FxBypass(_)
-            | Target::FxEnabled(..) => Control::Switch,
+            | Target::FxEnabled(..)
+            | Target::InsertBypass(..) => Control::Switch,
+
+            // Every plugin parameter travels normalised (`plugin::ParamInfo`).
+            Target::InsertParam(..) => Control::Range(Range::linear(0.0, 1.0)),
 
             // The pan law: -1 hard left, 0 centre, +1 hard right (`engine::frame`).
             Target::Pan(_) => Control::Range(Range::linear(-1.0, 1.0)),
@@ -551,7 +588,11 @@ impl Target {
             | Target::FxPreset(t, _)
             | Target::FxDelayNote(t, _)
             | Target::FxBandKind(t, ..)
-            | Target::FxKnob(t, _) => Some(t),
+            | Target::FxKnob(t, _)
+            | Target::InsertBypass(InsertOwner::Track(t), _)
+            | Target::InsertParam(InsertOwner::Track(t), ..) => Some(t),
+            Target::InsertBypass(InsertOwner::Bus(_), _)
+            | Target::InsertParam(InsertOwner::Bus(_), ..) => None,
             Target::ScoreStart
             | Target::ScoreNext
             | Target::ScoreStopAll
@@ -595,6 +636,12 @@ impl Target {
             Target::FxDelayNote(_, note) => Target::FxDelayNote(t, note),
             Target::FxBandKind(_, band, kind) => Target::FxBandKind(t, band, kind),
             Target::FxKnob(_, knob) => Target::FxKnob(t, knob),
+            Target::InsertBypass(InsertOwner::Track(_), slot) => {
+                Target::InsertBypass(InsertOwner::Track(t), slot)
+            }
+            Target::InsertParam(InsertOwner::Track(_), slot, id) => {
+                Target::InsertParam(InsertOwner::Track(t), slot, id)
+            }
             other => other,
         }
     }
@@ -690,6 +737,12 @@ impl Target {
                 )
             }
             Target::FxKnob(t, knob) => format!("{}: {}", track(t), knob.label()),
+            Target::InsertBypass(owner, slot) => {
+                format!("{}: plugin slot {} bypass", owner.label(), slot + 1)
+            }
+            Target::InsertParam(owner, slot, id) => {
+                format!("{}: plugin slot {}, parameter {id}", owner.label(), slot + 1)
+            }
         }
     }
 
@@ -719,6 +772,10 @@ impl Target {
             ["global", "quantize", "loop"] => Ok(Target::Quantize(Quantize::Loop)),
             ["global", "bus", name, "gain"] => match Bus::parse(name) {
                 Some(bus) => Ok(Target::BusGain(bus)),
+                None => Err(bus_unknown(address, name)),
+            },
+            ["global", "bus", name, "insert", rest @ ..] => match Bus::parse(name) {
+                Some(bus) => parse_insert(InsertOwner::Bus(bus), rest, address),
                 None => Err(bus_unknown(address, name)),
             },
             ["track", track, rest @ ..] => {
@@ -763,7 +820,33 @@ fn parse_track(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, 
             }
         }
         ["fx", rest @ ..] => parse_fx(track, rest, address),
+        ["insert", rest @ ..] => parse_insert(InsertOwner::Track(track), rest, address),
         _ => Err(unknown(address)),
+    }
+}
+
+/// `insert.<n>.bypass` and `insert.<n>.param.<id>`, after the owner.
+fn parse_insert(owner: InsertOwner, rest: &[&str], address: &str) -> Result<Target, String> {
+    let slot_of = |n: &str| -> Result<usize, String> {
+        let slot = one_based(n, "Slot")?;
+        if slot >= MAX_INSERTS {
+            return Err(format!(
+                "'{address}': there are plugin slots 1 to {MAX_INSERTS}."
+            ));
+        }
+        Ok(slot)
+    };
+    match rest {
+        [n, "bypass"] => Ok(Target::InsertBypass(owner, slot_of(n)?)),
+        [n, "param", id] => {
+            let id: u32 = id
+                .parse()
+                .map_err(|_| format!("'{address}': '{id}' is not a parameter id."))?;
+            Ok(Target::InsertParam(owner, slot_of(n)?, id))
+        }
+        _ => Err(format!(
+            "'{address}': a plugin slot has 'bypass' and 'param.<id>'."
+        )),
     }
 }
 
@@ -898,6 +981,10 @@ impl fmt::Display for Target {
                 write!(f, "track.{t}.fx.eq.{}.{}", band + 1, band_kind_name(*kind))
             }
             Target::FxKnob(t, knob) => write!(f, "track.{t}.fx.{}", knob.address()),
+            Target::InsertBypass(owner, slot) => write!(f, "{owner}.insert.{}.bypass", slot + 1),
+            Target::InsertParam(owner, slot, id) => {
+                write!(f, "{owner}.insert.{}.param.{id}", slot + 1)
+            }
         }
     }
 }
@@ -1011,6 +1098,10 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
             }
         }
         out.extend(FxKnob::all().into_iter().map(|k| Target::FxKnob(t(), k)));
+        out.extend((0..MAX_INSERTS).map(|s| Target::InsertBypass(InsertOwner::Track(t()), s)));
+    }
+    for bus in Bus::ALL {
+        out.extend((0..MAX_INSERTS).map(|s| Target::InsertBypass(InsertOwner::Bus(bus), s)));
     }
     out
 }

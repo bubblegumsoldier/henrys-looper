@@ -50,6 +50,8 @@ pub mod target;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod insert_tests;
 
 pub use binding::{Binding, ButtonMode, MidiMap, Takeover};
 pub use event::{MidiDecoder, MidiEvent, MidiId, MidiIdKind};
@@ -60,7 +62,7 @@ pub use store::{ProfileStore, Saved, StoreChange, StoredProfile};
 pub use router::{
     Context, MidiAction, ParamState, Resolution, Router, StaticState, TrackLayout,
 };
-pub use target::{Control, Curve, FxKnob, Range, Target, TrackRef, catalogue};
+pub use target::{Control, Curve, FxKnob, InsertOwner, Range, Target, TrackRef, catalogue};
 
 use crate::score::CompiledScore;
 

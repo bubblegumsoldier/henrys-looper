@@ -20,6 +20,7 @@ mod devshot;
 mod host;
 mod logfile;
 mod midi;
+mod plugins;
 mod proto;
 mod schedule;
 
@@ -837,6 +838,12 @@ async fn dev_snapshot(window: tauri::WebviewWindow, path: String) -> Result<Stri
 }
 
 fn main() {
+    // The plugin scan starts this executable as a child to load one plugin at a time, so a plugin
+    // that crashes takes the child down and not the program (`looper_engine::plugin::scan`).
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(code) = looper_engine::plugin::scan::probe_main(&args) {
+        std::process::exit(code);
+    }
     tauri::Builder::default()
         // Native open/save dialogs and the "are you sure" questions. File contents never go
         // through the plugin: reading and writing a score are commands of our own (`files.rs`).
@@ -853,6 +860,8 @@ fn main() {
             // Spawn the audio thread from the Tauri main thread, after WebView2 has initialised
             // COM here. Apartments are per thread; the spike verified they do not collide.
             app.manage(EngineHandle::spawn(app.handle().clone()));
+            // Plugin slots live on this (the main) thread; see `plugins.rs`.
+            plugins::init(app.handle());
 
             let info = host::app_info();
             log!(
@@ -925,6 +934,18 @@ fn main() {
             midi_save,
             midi_state,
             midi_profile,
+            plugins::plugin_catalog,
+            plugins::plugin_scan,
+            plugins::plugin_rack,
+            plugins::plugin_load,
+            plugins::plugin_remove,
+            plugins::plugin_move,
+            plugins::plugin_bypass,
+            plugins::plugin_params,
+            plugins::plugin_set_param,
+            plugins::plugin_editor,
+            plugins::plugin_state_get,
+            plugins::plugin_state_set,
             dev_snapshot
         ])
         .run(tauri::generate_context!())

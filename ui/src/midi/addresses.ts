@@ -168,3 +168,24 @@ export function fxBandKindAddress(track: number, band: number, kind: "peak" | "l
 export function fxBandAddress(track: number, band: number, part: "hz" | "q" | "gain"): string {
   return fxAddress(track, `eq.${band + 1}.${part}`);
 }
+
+/**
+ * Plugin insert slots (`engine::insert`). `owner` is a slot owner as the plugin host spells it -
+ * `track.1` … `track.8`, `bus.main`, `bus.monitor` - and `slot` is 0-based. Addresses:
+ *
+ * * `track.<n>.insert.<slot>.bypass`, `global.bus.<main|monitor>.insert.<slot>.bypass` - switch
+ * * `….insert.<slot>.param.<id>` - value 0..1, `id` being the plugin's own parameter id
+ *
+ * The backend also hands both out ready-made (`SlotView.bypass_address`, `ParamView.address`).
+ */
+export function insertOwnerAddress(owner: string): string {
+  return owner.startsWith("bus.") ? `global.${owner}` : owner;
+}
+
+export function insertBypassAddress(owner: string, slot: number): string {
+  return `${insertOwnerAddress(owner)}.insert.${slot + 1}.bypass`;
+}
+
+export function insertParamAddress(owner: string, slot: number, id: number): string {
+  return `${insertOwnerAddress(owner)}.insert.${slot + 1}.param.${id}`;
+}

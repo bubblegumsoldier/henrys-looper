@@ -624,6 +624,8 @@ fn handle(
 enum MidiIntent {
     Session(Action),
     Score(ScoreAction),
+    /// A plugin slot: bypass or parameter. Handled by the plugin manager (`crate::plugins`).
+    Plugin(MidiAction),
 }
 
 /// A resolved MIDI action as the action a click produces.
@@ -710,6 +712,9 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
         }
         MidiAction::FxParam { track, param } => {
             MidiIntent::Session(Action::FxParam { track, param })
+        }
+        MidiAction::InsertBypass { .. } | MidiAction::InsertParam { .. } => {
+            MidiIntent::Plugin(action)
         }
     }
 }
@@ -811,6 +816,7 @@ fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHand
                 let outcome = match intent_of(action, signature, measured) {
                     MidiIntent::Session(what) => active.apply(what).map(|()| None),
                     MidiIntent::Score(what) => active.score_act(what).map(Some),
+                    MidiIntent::Plugin(what) => crate::plugins::apply_midi(&what).map(|()| None),
                 };
                 match outcome {
                     Ok(message) => {
@@ -859,6 +865,19 @@ impl SessionState<'_> {
         status.tracks().get(index).map(|track| track.fx)
     }
 
+    /// The rack a plugin address names, with the track resolved.
+    fn insert_target(
+        &self,
+        owner: &looper_engine::midi::InsertOwner,
+    ) -> Option<looper_engine::engine::insert::InsertTarget> {
+        use looper_engine::engine::insert::InsertTarget;
+        use looper_engine::midi::InsertOwner;
+        match owner {
+            InsertOwner::Track(track) => self.index(track).map(InsertTarget::Track),
+            InsertOwner::Bus(bus) => Some(InsertTarget::Bus(*bus)),
+        }
+    }
+
     /// The whole bus assignment of one source of a track, as the engine last reported it.
     fn send_of(&self, index: usize, source: TrackSource) -> BusSend {
         let status = self.session.status_of(index);
@@ -899,6 +918,9 @@ impl ParamState for SessionState<'_> {
                 let (status, _) = self.session.last?;
                 Some(status.bus_gain(*bus))
             }
+            Target::InsertParam(owner, slot, id) => {
+                crate::plugins::snapshot_param(self.insert_target(owner)?, *slot, *id)
+            }
             _ => None,
         }
     }
@@ -934,6 +956,9 @@ impl ParamState for SessionState<'_> {
             Target::Send(track, source, bus) => {
                 let index = self.index(track)?;
                 Some(self.send_of(index, *source).on(*bus))
+            }
+            Target::InsertBypass(owner, slot) => {
+                crate::plugins::snapshot_bypass(self.insert_target(owner)?, *slot)
             }
             _ => None,
         }
@@ -1526,6 +1551,10 @@ impl Session {
             output_channels: out_channels,
             status_interval: (rate / STATUS_HZ).max(1) as u64,
         });
+        // Plugin insert slots: the engine end of the rack's queue goes into the core, the other end
+        // to the plugin manager once the streams run (`crate::plugins`).
+        let (inserts, insert_endpoint) = crate::plugins::engine_channel();
+        core.attach_inserts(insert_endpoint);
 
         // ---- input stream: whole frames into the FIFO, nothing else ------------------------
         let stats_in = Arc::clone(&stats);
@@ -1615,6 +1644,7 @@ impl Session {
         output
             .play()
             .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+        crate::plugins::engine_started(inserts, rate);
 
         let loop_samples = timeline.span_bars(0, config.bars);
         let info = EngineInfo {
@@ -1707,6 +1737,8 @@ impl Session {
     fn shutdown(mut self) {
         drop(self.input);
         drop(self.output);
+        // Every installed plugin processor went down with the engine core just now.
+        crate::plugins::engine_stopped();
         self.pool.drain();
     }
 
@@ -2920,6 +2952,8 @@ mod tests {
                 MidiIntent::Score(_) => {
                     panic!("keine dieser Absichten gehoert dem Runner: {action:?}")
                 }
+                // Plugin slots are mix, never transport.
+                MidiIntent::Plugin(what) => assert!(!what.moves_transport()),
             }
         }
     }

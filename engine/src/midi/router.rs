@@ -22,13 +22,14 @@
 use crate::engine::bus::{Bus, BusSend, TrackSource};
 use crate::engine::command::Command;
 use crate::engine::fx::{FxParam, FxPreset, FxSlot};
+use crate::engine::insert::InsertTarget;
 use crate::engine::runner::TRANSPORT_BELONGS_TO_SCORE;
 use crate::engine::schedule::Quantize;
 use crate::engine::track::TrackLatency;
 
 use super::binding::{Binding, ButtonMode, MidiMap, Takeover};
 use super::event::{MidiEvent, MidiId};
-use super::target::{Control, Target, TrackRef};
+use super::target::{Control, InsertOwner, Target, TrackRef};
 
 /// How close a knob has to come to the current value before it takes over, in controller steps.
 ///
@@ -101,6 +102,22 @@ pub enum MidiAction {
     FxEnable { track: usize, slot: FxSlot, on: bool },
     FxPreset { track: usize, preset: FxPreset },
     FxParam { track: usize, param: FxParam },
+
+    // ---- plugin inserts ----------------------------------------------------------------------
+    /// The host's bypass of one insert slot. Not an engine command: the slot belongs to the
+    /// plugin manager of the app, which flips an atomic the engine reads.
+    InsertBypass {
+        target: InsertTarget,
+        slot: usize,
+        on: bool,
+    },
+    /// One plugin parameter, normalised 0..1, by the plugin's own id.
+    InsertParam {
+        target: InsertTarget,
+        slot: usize,
+        param: u32,
+        value: f32,
+    },
 }
 
 impl MidiAction {
@@ -550,6 +567,11 @@ impl Router {
                 slot: *slot,
                 on,
             },
+            Target::InsertBypass(owner, slot) => MidiAction::InsertBypass {
+                target: insert_target(owner, track),
+                slot: *slot,
+                on,
+            },
             other => return Resolution::Absorbed(format!("\"{other}\" is not a switch.")),
         })
     }
@@ -625,6 +647,12 @@ impl Router {
                 track,
                 param: knob.to_param(value),
             },
+            Target::InsertParam(owner, slot, param) => MidiAction::InsertParam {
+                target: insert_target(owner, track),
+                slot: *slot,
+                param: *param,
+                value,
+            },
             other => return Resolution::Absorbed(format!("\"{other}\" is not a value.")),
         })
     }
@@ -640,6 +668,14 @@ impl Router {
         let was = state.high;
         state.high = high;
         (high && !was, !high && was)
+    }
+}
+
+/// The rack an insert address names, with the track already resolved by the caller.
+fn insert_target(owner: &InsertOwner, track: usize) -> InsertTarget {
+    match owner {
+        InsertOwner::Track(_) => InsertTarget::Track(track),
+        InsertOwner::Bus(bus) => InsertTarget::Bus(*bus),
     }
 }
 

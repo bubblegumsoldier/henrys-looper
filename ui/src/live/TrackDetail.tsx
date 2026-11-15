@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FxRow, type FxActions } from "./FxRow";
+import { PluginSlots } from "../plugins/PluginSlots";
 import { HMeter } from "./HMeter";
 import { layerAddress, sendAddress, trackAddress } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
@@ -402,6 +403,10 @@ export function TrackDetail({ track, color, actions, defaultLatency, onClose }: 
             </div>
           </section>
         )}
+
+        <section className="insp-s">
+          <PluginSlots target={`track.${i + 1}`} />
+        </section>
 
         <section className="insp-s">
           <div className="caps">
