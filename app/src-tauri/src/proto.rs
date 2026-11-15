@@ -145,6 +145,57 @@ pub struct TrackConfig {
     /// channel, and hearing him twice is worse than not hearing him through the looper at all.
     #[serde(default)]
     pub monitor_bus: Option<String>,
+    /// Present: the track is played by an instrument plugin over MIDI instead of listening to an
+    /// input channel (`input_channel` is then ignored). Always stereo. Which plugin it is lives
+    /// with the plugins, by track name (`crate::instruments`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instrument: Option<InstrumentInput>,
+}
+
+/// What plays an instrument track: which MIDI device, which channel, which keys.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct InstrumentInput {
+    /// MIDI input port, by name or a unique part of it. Absent: every connected device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    /// 1..=16. Absent: every channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u8>,
+    /// Lowest and highest key that plays the instrument (MIDI note numbers). The keys outside
+    /// stay with the MIDI bindings - pads below a keyboard, say. Absent: all 128.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_low: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_high: Option<u8>,
+    /// Whether the instrument is heard. Default `true`: an instrument track is heard whenever it
+    /// is played, whatever the takes and sections do.
+    #[serde(default = "instrument_heard")]
+    pub monitor: bool,
+}
+
+fn instrument_heard() -> bool {
+    true
+}
+
+impl InstrumentInput {
+    /// Check what a hand-written or stale setup may get wrong, in words.
+    pub fn check(&self, track: &str) -> Result<(), String> {
+        if let Some(c) = self.channel
+            && !(1..=16).contains(&c)
+        {
+            return Err(format!(
+                "Track \"{track}\": MIDI channels are 1 to 16, not {c}."
+            ));
+        }
+        let (low, high) = (self.note_low.unwrap_or(0), self.note_high.unwrap_or(127));
+        if low > 127 || high > 127 || low > high {
+            return Err(format!(
+                "Track \"{track}\": the key range {low} to {high} is not a range of MIDI notes."
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl TrackConfig {
@@ -160,6 +211,7 @@ impl TrackConfig {
             latency_trim: 0,
             bus: None,
             monitor_bus: None,
+            instrument: None,
         }
     }
 
@@ -179,9 +231,13 @@ impl TrackConfig {
         )
     }
 
-    /// 1 for a mono track, 2 for a stereo one.
+    /// 1 for a mono track, 2 for a stereo one (which every instrument track is).
     pub fn channels(&self) -> u32 {
-        if self.input_channel_right.is_some() { 2 } else { 1 }
+        if self.input_channel_right.is_some() || self.instrument.is_some() {
+            2
+        } else {
+            1
+        }
     }
 
     /// The compensation in the form the engine wants it.
@@ -594,6 +650,17 @@ pub struct TrackStatusEvent {
     /// Left and right of that, always two entries.
     pub strip_peaks: Vec<f32>,
 
+    // --- instrument tracks (`looper_engine::engine::source`) -----------------------------------
+    /// Played by an instrument over MIDI rather than listening to an input channel.
+    pub instrument: bool,
+    /// An instrument sits in the track's slot and runs.
+    pub instrument_loaded: bool,
+    /// Note ons that reached the track, a wrapping counter: the activity light blinks when it
+    /// moves - also without an instrument, so the routing can be checked on its own.
+    pub notes: u32,
+    /// Keys held down right now.
+    pub held_notes: u8,
+
     // --- output buses -------------------------------------------------------------------------
     // Two switches per source rather than one word, because that is how they are operated: "geht
     // dieser Track in den Saal" is a question with a yes and a no, and a select with four entries
@@ -903,6 +970,10 @@ pub fn track_event(
         soloed: ts.soloed,
         strip_peak: ts.strip_peak[0].max(ts.strip_peak[1]),
         strip_peaks: ts.strip_peak.to_vec(),
+        instrument: ts.instrument,
+        instrument_loaded: ts.instrument_loaded,
+        notes: ts.notes,
+        held_notes: ts.held_notes,
         bus_main: ts.loop_send.on(Bus::Main),
         bus_monitor: ts.loop_send.on(Bus::Monitor),
         monitor_bus_main: ts.monitor_send.on(Bus::Main),
@@ -1941,12 +2012,15 @@ mod tests {
                 "fx",
                 "gain",
                 "gain_db",
+                "held_notes",
                 "index",
                 "input_channel",
                 "input_channels",
                 "input_dbfs",
                 "input_peak",
                 "input_peaks",
+                "instrument",
+                "instrument_loaded",
                 "latency_frames",
                 "latency_inherited",
                 "latency_measured",
@@ -1961,6 +2035,7 @@ mod tests {
                 "monitor_bus_monitor",
                 "muted",
                 "name",
+                "notes",
                 "output_dbfs",
                 "output_peak",
                 "output_peaks",

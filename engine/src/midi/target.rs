@@ -471,6 +471,8 @@ pub enum Target {
     ClickGain,
     /// Volume of every monitored live input, linear `0..=MAX_LEVEL_GAIN`. Output side only.
     MonitorGain,
+    /// "All notes off" on every instrument (`global.panic`).
+    Panic,
 
     // ---- per track -------------------------------------------------------------------------
     Record(TrackRef),
@@ -493,6 +495,8 @@ pub enum Target {
     /// measured half belongs to `calibrate` and is never overwritten from here; see
     /// `docs/architektur.md` section 4.
     LatencyTrim(TrackRef),
+    /// "All notes off" on this track's instrument (`track.<n>.instrument.panic`).
+    InstrumentPanic(TrackRef),
 
     // ---- per layer -------------------------------------------------------------------------
     LayerMute(TrackRef, usize),
@@ -531,6 +535,8 @@ impl Target {
             | Target::Play(_)
             | Target::StopTrack(_)
             | Target::ClearTrack(_)
+            | Target::Panic
+            | Target::InstrumentPanic(_)
             | Target::LayerRemove(..)
             | Target::FxPreset(..)
             | Target::FxDelayNote(..)
@@ -584,6 +590,7 @@ impl Target {
             | Target::Solo(t)
             | Target::Send(t, ..)
             | Target::LatencyTrim(t)
+            | Target::InstrumentPanic(t)
             | Target::LayerMute(t, _)
             | Target::LayerRemove(t, _)
             | Target::LayerGain(t, _)
@@ -608,6 +615,7 @@ impl Target {
             | Target::BusGain(_)
             | Target::ClickGain
             | Target::MonitorGain
+            | Target::Panic
             | Target::Quantize(_) => None,
         }
     }
@@ -632,6 +640,7 @@ impl Target {
             Target::Solo(_) => Target::Solo(t),
             Target::Send(_, source, bus) => Target::Send(t, source, bus),
             Target::LatencyTrim(_) => Target::LatencyTrim(t),
+            Target::InstrumentPanic(_) => Target::InstrumentPanic(t),
             Target::LayerMute(_, l) => Target::LayerMute(t, l),
             Target::LayerRemove(_, l) => Target::LayerRemove(t, l),
             Target::LayerGain(_, l) => Target::LayerGain(t, l),
@@ -717,6 +726,8 @@ impl Target {
             Target::Solo(t) => format!("{}: Solo", track(t)),
             Target::ClickGain => "Click volume".to_string(),
             Target::MonitorGain => "Monitoring volume".to_string(),
+            Target::Panic => "All notes off".to_string(),
+            Target::InstrumentPanic(t) => format!("{}: All notes off", track(t)),
             Target::Send(t, source, bus) => format!(
                 "{}: {} to {}",
                 track(t),
@@ -776,6 +787,7 @@ impl Target {
             ["global", "tempo"] => Ok(Target::Tempo),
             ["global", "click_gain"] => Ok(Target::ClickGain),
             ["global", "monitor_gain"] => Ok(Target::MonitorGain),
+            ["global", "panic"] => Ok(Target::Panic),
             ["global", "quantize", "bar"] => Ok(Target::Quantize(Quantize::Bar)),
             ["global", "quantize", "loop"] => Ok(Target::Quantize(Quantize::Loop)),
             ["global", "bus", name, "gain"] => match Bus::parse(name) {
@@ -816,6 +828,7 @@ fn parse_track(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, 
             None => Err(bus_unknown(address, name)),
         },
         ["latency_trim"] => Ok(Target::LatencyTrim(track)),
+        ["instrument", "panic"] => Ok(Target::InstrumentPanic(track)),
         ["layer", n, what] => {
             let layer = one_based(n, "layer")?;
             match *what {
@@ -985,11 +998,13 @@ impl fmt::Display for Target {
             Target::Solo(t) => write!(f, "track.{t}.solo"),
             Target::ClickGain => f.write_str("global.click_gain"),
             Target::MonitorGain => f.write_str("global.monitor_gain"),
+            Target::Panic => f.write_str("global.panic"),
             Target::Send(t, TrackSource::Loop, bus) => write!(f, "track.{t}.bus.{}", bus.name()),
             Target::Send(t, TrackSource::Monitor, bus) => {
                 write!(f, "track.{t}.monitor_bus.{}", bus.name())
             }
             Target::LatencyTrim(t) => write!(f, "track.{t}.latency_trim"),
+            Target::InstrumentPanic(t) => write!(f, "track.{t}.instrument.panic"),
             Target::LayerMute(t, l) => write!(f, "track.{t}.layer.{}.mute", l + 1),
             Target::LayerRemove(t, l) => write!(f, "track.{t}.layer.{}.remove", l + 1),
             Target::LayerGain(t, l) => write!(f, "track.{t}.layer.{}.gain", l + 1),
@@ -1077,7 +1092,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
         Target::Quantize(Quantize::Loop),
     ]);
     out.extend(Bus::ALL.into_iter().map(Target::BusGain));
-    out.extend([Target::ClickGain, Target::MonitorGain]);
+    out.extend([Target::ClickGain, Target::MonitorGain, Target::Panic]);
     for track in 0..tracks {
         let t = || TrackRef::Index(track);
         out.extend([
@@ -1092,6 +1107,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
             Target::Mute(t()),
             Target::Solo(t()),
             Target::LatencyTrim(t()),
+            Target::InstrumentPanic(t()),
         ]);
         for source in TrackSource::ALL {
             out.extend(Bus::ALL.into_iter().map(|bus| Target::Send(t(), source, bus)));

@@ -523,6 +523,8 @@ pub enum FeedMsg {
     Route { track: usize, route: TrackRoute },
     /// End every note on every instrument - the global "all notes off".
     PanicAll,
+    /// End every note of one track's instrument.
+    Panic { track: usize },
 }
 
 /// Control side of the instrument queue.
@@ -888,6 +890,11 @@ impl SourceRack {
                     }
                 }
                 FeedMsg::PanicAll => self.panic_all = true,
+                FeedMsg::Panic { track } => {
+                    if let Some(instrument) = self.slots.get(track).and_then(Option::as_ref) {
+                        instrument.shared.panic.store(true, Ordering::Relaxed);
+                    }
+                }
             }
         }
     }

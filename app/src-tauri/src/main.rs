@@ -22,6 +22,7 @@ mod logfile;
 mod layout;
 mod midi;
 mod mixstore;
+mod instruments;
 mod plugins;
 mod proto;
 mod recording;
@@ -964,6 +965,7 @@ fn main() {
             app.manage(EngineHandle::spawn(app.handle().clone()));
             // Plugin slots live on this (the main) thread; see `plugins.rs`.
             plugins::init(app.handle());
+            instruments::init(app.handle());
             // Recording to disk: settings from the config folder, recordings under Documents.
             recording::init(config_dir(app.handle()), app.path().document_dir().ok());
 
@@ -1055,6 +1057,10 @@ fn main() {
             plugins::plugin_editor,
             plugins::plugin_state_get,
             plugins::plugin_state_set,
+            instruments::instrument_rack,
+            instruments::instrument_set,
+            instruments::instrument_editor,
+            instruments::instrument_panic,
             recording_settings,
             recording_set,
             recording_list,

@@ -452,6 +452,11 @@ pub struct Status {
     /// and nothing but the monitored inputs is heard; `pos` keeps counting, because it is the
     /// sample axis every command is stamped on, not the musical clock.
     pub transport: bool,
+    /// `C`, the fixed delay between a key and its instrument's sound, in frames; 0 until known
+    /// (`super::source`).
+    pub instrument_delay: u32,
+    /// MIDI events that arrived too late for their fixed position and sounded late, in total.
+    pub late_events: u32,
 }
 
 impl Status {

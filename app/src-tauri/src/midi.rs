@@ -48,10 +48,12 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use looper_engine::engine::source::{FeedHandle, MAX_PORTS, PortRoute};
 use looper_engine::midi::input::{self, MidiIn};
 use looper_engine::midi::{
     Binding, BindingState, ButtonMode, Context, Control, Learn, MidiEvent, MidiId, MidiIdKind,
@@ -95,6 +97,11 @@ pub trait MidiPort {
     fn try_recv(&mut self) -> Option<MidiEvent>;
     /// Events lost between the driver callback and the host thread.
     fn dropped(&self) -> u64;
+    /// The instrument side of the port: the mask its driver callback reads and its fast queue into
+    /// the audio thread (`looper_engine::engine::source`). `None` for a port without one.
+    fn instrument(&self) -> Option<(Arc<PortRoute>, FeedHandle)> {
+        None
+    }
 }
 
 /// The real thing: midir.
@@ -121,6 +128,10 @@ impl MidiPort for MidiIn {
 
     fn dropped(&self) -> u64 {
         MidiIn::dropped(self)
+    }
+
+    fn instrument(&self) -> Option<(Arc<PortRoute>, FeedHandle)> {
+        Some((Arc::clone(self.route()), self.feed().clone()))
     }
 }
 
@@ -368,6 +379,20 @@ struct Link {
     router: Router,
     /// Controls of this device the score took over.
     notes: Vec<String>,
+    /// The port's number for the instrument stage, `0..MAX_PORTS`, or `MAX_PORTS` when all are
+    /// taken. Stable while the port stays open.
+    slot: usize,
+    /// Unique per opening, so the engine can tell a replugged device from the one before it.
+    serial: u64,
+}
+
+/// One open port as the instrument routing sees it.
+pub struct InstrumentPort {
+    pub slot: usize,
+    pub serial: u64,
+    pub name: String,
+    pub route: Arc<PortRoute>,
+    pub feed: FeedHandle,
 }
 
 /// Every connected controller, every known profile, and the learn mode.
@@ -398,6 +423,7 @@ pub struct MidiBridge {
     /// Mirrors `devices.json`.
     meta: BTreeMap<String, DeviceMeta>,
     last_persist: Option<Instant>,
+    serials: u64,
 }
 
 impl Default for MidiBridge {
@@ -436,6 +462,7 @@ impl MidiBridge {
             last_shape: None,
             meta,
             last_persist: None,
+            serials: 0,
         }
     }
 
@@ -446,6 +473,64 @@ impl MidiBridge {
 
     pub fn is_learning(&self) -> bool {
         self.learn.is_armed()
+    }
+
+    // ---- instruments -------------------------------------------------------------------------
+
+    /// Every open port that can feed an instrument.
+    pub fn instrument_ports(&self) -> Vec<InstrumentPort> {
+        self.links
+            .iter()
+            .filter(|l| l.slot < MAX_PORTS)
+            .filter_map(|l| {
+                let (route, feed) = l.port.instrument()?;
+                Some(InstrumentPort {
+                    slot: l.slot,
+                    serial: l.serial,
+                    name: l.port.name().to_string(),
+                    route,
+                    feed,
+                })
+            })
+            .collect()
+    }
+
+    /// Make sure the device an instrument track names is connected: open the first port that
+    /// matches it, if none is open yet and it is plugged in. Answers with a line for the log when it
+    /// opened one. A port disconnected by hand stays disconnected.
+    pub fn connect_for_instrument(&mut self, device: &str) -> Option<String> {
+        if self.links.iter().any(|l| device_matches(device, l.port.name())) {
+            return None;
+        }
+        let port = self
+            .available
+            .iter()
+            .find(|p| device_matches(device, p) && !self.suppressed.contains(p))?
+            .clone();
+        if self.failures.iter().any(|(n, _)| *n == port) {
+            return None;
+        }
+        match self.open(&port) {
+            Ok(_) => Some(format!("MIDI device \"{port}\" connected for an instrument track.")),
+            Err(e) => {
+                self.failures.push((port.clone(), e.clone()));
+                Some(format!("MIDI device \"{port}\" could not be opened for an instrument: {e}"))
+            }
+        }
+    }
+
+    /// Whether this event, arriving while learn is armed, is a key an instrument plays - it is
+    /// then refused instead of learned, because it would never reach the binding.
+    pub fn played_by_instrument(&self, link: usize, event: &MidiEvent) -> bool {
+        let (MidiEvent::NoteOn { channel, note, .. } | MidiEvent::NoteOff { channel, note, .. }) =
+            *event
+        else {
+            return false;
+        };
+        self.links
+            .get(link)
+            .and_then(|l| l.port.instrument())
+            .is_some_and(|(route, _)| route.covers(usize::from(channel.saturating_sub(1)), note))
     }
 
     // ---- connecting by itself ----------------------------------------------------------------
@@ -570,11 +655,17 @@ impl MidiBridge {
     /// Open a port for a profile and put it into service.
     fn connect(&mut self, port: &str, path: &Path) -> Result<String, String> {
         let opened = self.system.open(port)?;
+        let slot = (0..MAX_PORTS)
+            .find(|s| !self.links.iter().any(|l| l.slot == *s))
+            .unwrap_or(MAX_PORTS);
+        self.serials += 1;
         self.links.push(Link {
             port: opened,
             profile: path.to_path_buf(),
             router: Router::new(MidiMap::new()),
             notes: Vec::new(),
+            slot,
+            serial: self.serials,
         });
         self.touch_seen(path);
         self.persist_meta();
@@ -1460,7 +1551,7 @@ impl MidiBridge {
 }
 
 /// The same loose comparison a profile uses for its port.
-fn device_matches(device: &str, port: &str) -> bool {
+pub(crate) fn device_matches(device: &str, port: &str) -> bool {
     looper_engine::midi::Profile::new(device).matches(port)
 }
 

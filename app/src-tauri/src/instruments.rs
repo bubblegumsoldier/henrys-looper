@@ -1,0 +1,772 @@
+//! Instrument plugins in the app: which instrument plays which track, its window, its state, and
+//! getting it into the running engine's source slots (`looper_engine::engine::source`).
+//!
+//! ```text
+//!  Tauri-Kommando ─► spawn_blocking ─► run_on_main_thread ─► Manager (Hauptthread)
+//!                                                             │  laden, Zustand, Fenster
+//!                                                             │  activate_instrument() ─► Prozessor
+//!                                                             ▼
+//!  Host-Thread: Session::start ─► engine_started(Sender) ──► LINK ─► InstrumentMsg ─► Audio-Thread
+//!               Session::shutdown ─► engine_stopped()        ◄── Retire-Queue ◄──┘
+//! ```
+//!
+//! The same shape as the insert slots in `crate::plugins`, one slot per track instead of eight, and
+//! for the same reasons: every plugin lives on the main thread, and a rebuilt engine (device
+//! change, score loaded) gets its instruments installed again by [`Manager::reconcile`].
+//!
+//! # Kept by track name
+//!
+//! Which instrument a track plays and the instrument's state are written to `instruments.json`
+//! next to `plugin-rack.json`, keyed by **track name** like the insert rack: a score that orders
+//! its tracks differently still finds the piano on "piano". A track that is not an instrument
+//! track in the running engine keeps its entry; the instrument comes back when the track does.
+//! What MIDI device and channel play the track is part of the track's setup (`TrackConfig`), not
+//! of this file.
+
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant};
+
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
+
+use looper_engine::engine::insert::MAX_BLOCK;
+use looper_engine::engine::source::{
+    Instrument, InstrumentMsg, InstrumentSender, SourceShared, TrackRoute,
+};
+use looper_engine::plugin::scan::{self, Scanned};
+use looper_engine::plugin::{self, Kind, PluginInstance};
+
+use crate::logfile::log;
+use crate::proto::InstrumentInput;
+
+/// Event for everything this module reports: see [`InstrumentEvent`].
+pub const INSTRUMENTS_EVENT: &str = "looper://instruments";
+
+/// How often the main thread looks after the instruments: latency, editor, meters, autosave.
+const TICK: Duration = Duration::from_millis(250);
+/// How long removing an instrument waits for the audio thread to hand its processor back.
+const RETIRE_WAIT: Duration = Duration::from_millis(750);
+
+// ---------------------------------------------------------------------------------------------
+// The link to the running engine
+// ---------------------------------------------------------------------------------------------
+
+struct Link {
+    sender: InstrumentSender,
+    sample_rate: f64,
+    generation: u64,
+}
+
+static LINK: Mutex<Option<Link>> = Mutex::new(None);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+static APP: OnceLock<AppHandle> = OnceLock::new();
+
+/// One track of the running engine as this module needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackSlot {
+    pub name: String,
+    /// Whether the track is played by an instrument (`input: instrument`).
+    pub instrument: bool,
+}
+
+/// Called by the host thread once a new engine runs, with its tracks in order and the renames since
+/// the last start. The instruments are (re)installed on the main thread right after.
+pub fn engine_started(
+    sender: InstrumentSender,
+    sample_rate: u32,
+    tracks: Vec<TrackSlot>,
+    renamed: Vec<(String, String)>,
+) {
+    let generation = GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    *LINK.lock().unwrap() = Some(Link {
+        sender,
+        sample_rate: f64::from(sample_rate),
+        generation,
+    });
+    schedule(move |m| {
+        m.set_layout(tracks, &renamed);
+        m.reconcile();
+    });
+}
+
+/// Called by the host thread after the engine's streams are gone, and with them every instrument
+/// processor that was installed.
+pub fn engine_stopped() {
+    LINK.lock().unwrap().take();
+    schedule(|m| m.reconcile());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Running things on the main thread
+// ---------------------------------------------------------------------------------------------
+
+thread_local! {
+    static MANAGER: RefCell<Manager> = RefCell::new(Manager::default());
+}
+
+fn on_main<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Manager) -> Result<T, String> + Send + 'static,
+{
+    let app = APP
+        .get()
+        .ok_or_else(|| "The instrument host is not ready yet.".to_string())?;
+    let (tx, rx) = mpsc::channel();
+    app.run_on_main_thread(move || {
+        let result = MANAGER.with(|m| match m.try_borrow_mut() {
+            Ok(mut m) => work(&mut m),
+            Err(_) => Err("The instrument host is busy. Try again.".to_string()),
+        });
+        let _ = tx.send(result);
+    })
+    .map_err(|e| format!("The instrument host is not reachable: {e}"))?;
+    rx.recv()
+        .map_err(|_| "The instrument host did not answer.".to_string())?
+}
+
+fn schedule(work: impl FnOnce(&mut Manager) + Send + 'static) {
+    if let Some(app) = APP.get() {
+        let _ = app.run_on_main_thread(move || {
+            MANAGER.with(|m| {
+                if let Ok(mut m) = m.try_borrow_mut() {
+                    work(&mut m);
+                }
+            });
+        });
+    }
+}
+
+/// Start the instrument host. Call from Tauri's `setup` (on the main thread).
+pub fn init(app: &AppHandle) {
+    let _ = APP.set(app.clone());
+    schedule(|m| m.restore());
+    std::thread::Builder::new()
+        .name("instrument-tick".into())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(TICK);
+                schedule(|m| m.tick());
+            }
+        })
+        .ok();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Wire format
+// ---------------------------------------------------------------------------------------------
+
+/// One track's instrument as the UI sees it.
+#[derive(Clone, Debug, Serialize)]
+pub struct InstrumentView {
+    /// Track name - the key.
+    pub track: String,
+    /// 0-based index in the running engine, if the track exists there as an instrument track.
+    pub index: Option<usize>,
+    pub plugin_id: String,
+    pub name: String,
+    pub vendor: String,
+    pub format: plugin::Format,
+    /// Latency the instrument reports, in frames.
+    pub latency: u32,
+    pub has_editor: bool,
+    pub editor_open: bool,
+    /// Installed in the running engine.
+    pub active: bool,
+    pub blocks: u64,
+    pub peak: f32,
+    pub cpu_us: f32,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InstrumentRack {
+    pub supported: bool,
+    pub engine_running: bool,
+    pub instruments: Vec<InstrumentView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InstrumentEvent {
+    Rack { rack: InstrumentRack },
+    Notice { message: String },
+}
+
+fn emit(event: InstrumentEvent) {
+    if let Some(app) = APP.get() {
+        let _ = app.emit(INSTRUMENTS_EVENT, event);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The manager
+// ---------------------------------------------------------------------------------------------
+
+struct Slot {
+    track: String,
+    info: Scanned,
+    plugin: Box<dyn PluginInstance>,
+    shared: Arc<SourceShared>,
+    /// Engine generation and track index the processor was installed into.
+    active: Option<(u64, usize)>,
+    error: Option<String>,
+    editor_was_open: bool,
+    heard: bool,
+}
+
+#[derive(Default)]
+struct Manager {
+    slots: Vec<Slot>,
+    layout: Vec<TrackSlot>,
+    dirty: bool,
+    last_change: Option<Instant>,
+    last_meter: Option<Instant>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct SavedInstruments {
+    tracks: Vec<SavedInstrument>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedInstrument {
+    track: String,
+    plugin_id: String,
+    name: String,
+    /// The plugin's state chunk, base64.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
+}
+
+fn store_path() -> PathBuf {
+    scan::cache_path().with_file_name("instruments.json")
+}
+
+fn restore_marker() -> PathBuf {
+    scan::cache_path().with_file_name("instruments.restoring")
+}
+
+impl Manager {
+    fn index_of(&self, track: &str) -> Option<usize> {
+        self.layout
+            .iter()
+            .position(|t| t.name == track && t.instrument)
+    }
+
+    fn position(&self, track: &str) -> Option<usize> {
+        self.slots.iter().position(|s| s.track == track)
+    }
+
+    fn set_layout(&mut self, tracks: Vec<TrackSlot>, renamed: &[(String, String)]) {
+        for (from, to) in renamed {
+            // A renamed track takes its instrument along - unless the new name already has one.
+            if self.position(to).is_none()
+                && let Some(p) = self.position(from)
+            {
+                self.slots[p].track = to.clone();
+                self.dirty = true;
+            }
+        }
+        self.layout = tracks;
+    }
+
+    fn view(&self) -> InstrumentRack {
+        let link = LINK.lock().unwrap();
+        let generation = link.as_ref().map(|l| l.generation);
+        let instruments = self
+            .slots
+            .iter()
+            .map(|s| InstrumentView {
+                track: s.track.clone(),
+                index: self.index_of(&s.track),
+                plugin_id: s.info.info.id.clone(),
+                name: s.info.info.name.clone(),
+                vendor: s.info.info.vendor.clone(),
+                format: s.info.info.format,
+                latency: s.shared.latency(),
+                has_editor: s.plugin.has_editor(),
+                editor_open: s.plugin.editor_open(),
+                active: s.active.is_some_and(|(g, _)| Some(g) == generation),
+                blocks: s.shared.blocks(),
+                peak: s.shared.take_peak(),
+                cpu_us: s.shared.take_peak_us(),
+                error: s.error.clone(),
+            })
+            .collect();
+        InstrumentRack {
+            supported: plugin::SUPPORTED,
+            engine_running: link.is_some(),
+            instruments,
+        }
+    }
+
+    fn changed(&mut self) {
+        self.dirty = true;
+        self.last_change = Some(Instant::now());
+        emit(InstrumentEvent::Rack { rack: self.view() });
+    }
+
+    fn catalog_entry(plugin_id: &str) -> Result<Scanned, String> {
+        let entry = scan::cached()
+            .into_iter()
+            .find(|p| p.info.id == plugin_id)
+            .ok_or_else(|| {
+                format!("No plugin with the id '{plugin_id}' is known. Scan for plugins first.")
+            })?;
+        if entry.info.kind != Kind::Instrument {
+            return Err(format!(
+                "\"{}\" is not an instrument. Effects go into the plugin slots of the mixer.",
+                entry.info.name
+            ));
+        }
+        if !entry.loadable() {
+            return Err(format!(
+                "\"{}\" cannot be played: {}",
+                entry.info.name,
+                entry
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "it did not pass the scan.".to_string())
+            ));
+        }
+        Ok(entry)
+    }
+
+    /// Put one slot's instrument into the running engine, if its track is an instrument track
+    /// there and it is not installed yet.
+    fn install(&mut self, p: usize) {
+        let (sample_rate, generation) = {
+            let link = LINK.lock().unwrap();
+            let Some(link) = link.as_ref() else {
+                return;
+            };
+            (link.sample_rate, link.generation)
+        };
+        let index = self.index_of(&self.slots[p].track);
+        let slot = &mut self.slots[p];
+        if slot.active.is_some_and(|a| a == (generation, index.unwrap_or(usize::MAX))) {
+            return;
+        }
+        if slot.active.take().is_some() {
+            // Its processor went down with the previous engine (or is on its way back).
+            slot.plugin.deactivate();
+        }
+        let Some(index) = index else {
+            return;
+        };
+        match slot.plugin.activate_instrument(sample_rate, MAX_BLOCK) {
+            Ok(processor) => {
+                slot.shared.set_latency(slot.plugin.latency());
+                let msg = InstrumentMsg::Install {
+                    track: index,
+                    instrument: Instrument::new(processor, slot.shared.clone()),
+                };
+                let mut link = LINK.lock().unwrap();
+                match link.as_mut() {
+                    Some(link) if link.generation == generation => match link.sender.send(msg) {
+                        Ok(()) => {
+                            slot.active = Some((generation, index));
+                            slot.error = None;
+                            slot.heard = false;
+                            log!(
+                                "Instrument {} on track \"{}\" started: {} Hz, latency {} frames.",
+                                slot.info.info.name,
+                                slot.track,
+                                sample_rate,
+                                slot.shared.latency()
+                            );
+                        }
+                        Err(e) => slot.error = Some(e),
+                    },
+                    _ => {
+                        drop(msg);
+                        slot.plugin.deactivate();
+                    }
+                }
+            }
+            Err(e) => {
+                log!("Instrument {} does not start: {e}", slot.info.info.name);
+                slot.error = Some(e);
+            }
+        }
+    }
+
+    fn reconcile(&mut self) {
+        let running = LINK.lock().unwrap().is_some();
+        for p in 0..self.slots.len() {
+            if running {
+                self.install(p);
+            } else {
+                let slot = &mut self.slots[p];
+                if slot.active.take().is_some() {
+                    slot.plugin.deactivate();
+                }
+            }
+        }
+        emit(InstrumentEvent::Rack { rack: self.view() });
+    }
+
+    /// Take a slot's instrument out of the engine and wait until the audio thread let go of it.
+    /// `false` when it did not come back in time - it must then not be destroyed.
+    fn retire(&mut self, p: usize) -> bool {
+        let Some((generation, index)) = self.slots[p].active.take() else {
+            return true;
+        };
+        let sent = LINK
+            .lock()
+            .unwrap()
+            .as_mut()
+            .filter(|l| l.generation == generation)
+            .map(|l| l.sender.send(InstrumentMsg::Remove { track: index }));
+        if let Some(Err(e)) = sent {
+            log!("Instrument not removed: {e}");
+            self.slots[p].active = Some((generation, index));
+            return false;
+        }
+        let started = Instant::now();
+        while Arc::strong_count(&self.slots[p].shared) > 1 && started.elapsed() < RETIRE_WAIT {
+            if let Some(link) = LINK.lock().unwrap().as_mut() {
+                link.sender.drain_retired();
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        if Arc::strong_count(&self.slots[p].shared) > 1 {
+            return false;
+        }
+        self.slots[p].plugin.deactivate();
+        true
+    }
+
+    fn remove(&mut self, track: &str) -> Result<(), String> {
+        let Some(p) = self.position(track) else {
+            return Ok(());
+        };
+        if !self.retire(p) {
+            let slot = self.slots.remove(p);
+            log!(
+                "Instrument {} did not come back from the engine and stays in memory.",
+                slot.info.info.name
+            );
+            std::mem::forget(slot);
+            self.changed();
+            return Ok(());
+        }
+        let slot = self.slots.remove(p);
+        log!(
+            "Instrument removed: {} from track \"{}\"",
+            slot.info.info.name,
+            slot.track
+        );
+        drop(slot);
+        self.changed();
+        Ok(())
+    }
+
+    fn set(&mut self, track: &str, plugin_id: Option<&str>) -> Result<InstrumentRack, String> {
+        if !plugin::SUPPORTED {
+            return Err(plugin::UNSUPPORTED.to_string());
+        }
+        let Some(plugin_id) = plugin_id else {
+            self.remove(track)?;
+            return Ok(self.view());
+        };
+        let entry = Self::catalog_entry(plugin_id)?;
+        self.remove(track)?;
+        let instance = plugin::load(&entry.info)?;
+        log!(
+            "Instrument loaded: {} ({}) for track \"{track}\"",
+            entry.info.name,
+            entry.info.format.label()
+        );
+        self.slots.push(Slot {
+            track: track.to_string(),
+            info: entry,
+            plugin: instance,
+            shared: SourceShared::new(0),
+            active: None,
+            error: None,
+            editor_was_open: false,
+            heard: false,
+        });
+        let p = self.slots.len() - 1;
+        self.install(p);
+        self.changed();
+        Ok(self.view())
+    }
+
+    fn editor(&mut self, track: &str, open: bool) -> Result<InstrumentRack, String> {
+        let p = self
+            .position(track)
+            .ok_or_else(|| format!("Track \"{track}\" has no instrument."))?;
+        let slot = &mut self.slots[p];
+        if open {
+            let title = format!("{} - {}", slot.info.info.name, slot.track);
+            slot.plugin.open_editor(&title)?;
+        } else {
+            slot.plugin.close_editor();
+        }
+        slot.editor_was_open = open;
+        let view = self.view();
+        emit(InstrumentEvent::Rack { rack: view.clone() });
+        Ok(view)
+    }
+
+    fn panic(&self, track: Option<&str>) {
+        for s in &self.slots {
+            if track.is_none_or(|t| t == s.track) {
+                s.shared.request_panic();
+            }
+        }
+    }
+
+    fn tick(&mut self) {
+        if let Some(link) = LINK.lock().unwrap().as_mut() {
+            link.sender.drain_retired();
+        }
+        let mut changed = false;
+        for s in self.slots.iter_mut() {
+            if s.active.is_some() {
+                let latency = s.plugin.latency();
+                if latency != s.shared.latency() {
+                    s.shared.set_latency(latency);
+                    changed = true;
+                }
+                if !s.heard && s.shared.blocks() > 0 {
+                    s.heard = true;
+                    log!(
+                        "Instrument {} on track \"{}\" is rendering ({} blocks).",
+                        s.info.info.name,
+                        s.track,
+                        s.shared.blocks()
+                    );
+                }
+            }
+            let open = s.plugin.editor_open();
+            if open != s.editor_was_open {
+                s.editor_was_open = open;
+                changed = true;
+            }
+            // A sound chosen in the instrument's own window is state that has to be kept.
+            if !s.plugin.take_changed().is_empty() {
+                self.dirty = true;
+                self.last_change = Some(Instant::now());
+            }
+        }
+        let meter_due = self
+            .last_meter
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+        if changed || (meter_due && !self.slots.is_empty()) {
+            self.last_meter = Some(Instant::now());
+            emit(InstrumentEvent::Rack { rack: self.view() });
+        }
+        if self.dirty
+            && self
+                .last_change
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
+        {
+            self.save();
+        }
+    }
+
+    fn save(&mut self) {
+        self.dirty = false;
+        let saved = SavedInstruments {
+            tracks: self
+                .slots
+                .iter()
+                .map(|s| SavedInstrument {
+                    track: s.track.clone(),
+                    plugin_id: s.info.info.id.clone(),
+                    name: s.info.info.name.clone(),
+                    state: s.plugin.save_state().ok().map(|b| crate::plugins::encode_state(&b)),
+                })
+                .collect(),
+        };
+        let path = store_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(text) = serde_json::to_string_pretty(&saved)
+            && let Err(e) = std::fs::write(&path, text)
+        {
+            log!("Instruments not saved: {e}");
+        }
+    }
+
+    /// Load the instruments of the last session. Guarded by a marker file like the insert rack: an
+    /// instrument that takes the program down while it loads is not loaded the next time.
+    fn restore(&mut self) {
+        let marker = restore_marker();
+        if marker.exists() {
+            let _ = std::fs::remove_file(&marker);
+            let path = store_path();
+            let _ = std::fs::rename(&path, path.with_extension("json.bak"));
+            let message = "The instruments of the last session were not loaded: the program \
+                           stopped while loading them last time. The previous setup was kept as \
+                           instruments.json.bak."
+                .to_string();
+            log!("{message}");
+            emit(InstrumentEvent::Notice { message });
+            return;
+        }
+        let Ok(text) = std::fs::read_to_string(store_path()) else {
+            return;
+        };
+        let Ok(saved) = serde_json::from_str::<SavedInstruments>(&text) else {
+            return;
+        };
+        if saved.tracks.is_empty() {
+            return;
+        }
+        let _ = std::fs::write(&marker, "restoring");
+        for entry in saved.tracks {
+            match self.set(&entry.track, Some(&entry.plugin_id)) {
+                Ok(_) => {
+                    if let Some(state) = entry
+                        .state
+                        .as_deref()
+                        .and_then(crate::plugins::decode_state)
+                        && let Some(p) = self.position(&entry.track)
+                        && let Err(e) = self.slots[p].plugin.load_state(&state)
+                    {
+                        log!("State of {} not loaded: {e}", entry.name);
+                    }
+                }
+                Err(e) => {
+                    log!("Instrument {} not restored: {e}", entry.name);
+                    emit(InstrumentEvent::Notice {
+                        message: format!(
+                            "\"{}\" was not loaded again for track \"{}\": {e}",
+                            entry.name, entry.track
+                        ),
+                    });
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&marker);
+        self.dirty = false;
+        emit(InstrumentEvent::Rack { rack: self.view() });
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Routing: which port, channel and keys play which track
+// ---------------------------------------------------------------------------------------------
+
+/// The engine routing for every track, from what the setup says plays it and the ports that are
+/// open (slot, name). A track that names a device takes the ports that match it; one that names
+/// none takes every open port. A track that is no instrument track gets nothing.
+pub fn track_routes(inputs: &[Option<InstrumentInput>], ports: &[(usize, &str)]) -> Vec<TrackRoute> {
+    inputs
+        .iter()
+        .map(|input| {
+            let Some(input) = input else {
+                return TrackRoute::NONE;
+            };
+            let ports = ports
+                .iter()
+                .filter(|(slot, name)| {
+                    *slot < 32
+                        && input
+                            .device
+                            .as_deref()
+                            .is_none_or(|d| crate::midi::device_matches(d, name))
+                })
+                .fold(0u32, |mask, (slot, _)| mask | (1 << slot));
+            TrackRoute {
+                ports,
+                channels: match input.channel {
+                    Some(c @ 1..=16) => 1 << (c - 1),
+                    _ => TrackRoute::ALL_CHANNELS,
+                },
+                low: input.note_low.unwrap_or(0).min(127),
+                high: input.note_high.unwrap_or(127).min(127),
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Tauri commands
+// ---------------------------------------------------------------------------------------------
+
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("The background work was cancelled: {e}"))?
+}
+
+/// Every track's instrument.
+#[tauri::command]
+pub async fn instrument_rack() -> Result<InstrumentRack, String> {
+    blocking(|| on_main(|m| Ok(m.view()))).await
+}
+
+/// Put an instrument on a track (by name), or take it off with `plugin_id: null`.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn instrument_set(track: String, plugin_id: Option<String>) -> Result<InstrumentRack, String> {
+    blocking(move || on_main(move |m| m.set(&track, plugin_id.as_deref()))).await
+}
+
+/// Open or close the instrument's own window.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn instrument_editor(track: String, open: bool) -> Result<InstrumentRack, String> {
+    blocking(move || on_main(move |m| m.editor(&track, open))).await
+}
+
+/// "All notes off" on one track's instrument, or on all of them.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn instrument_panic(track: Option<String>) -> Result<(), String> {
+    blocking(move || {
+        on_main(move |m| {
+            m.panic(track.as_deref());
+            Ok(())
+        })
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(device: Option<&str>, channel: Option<u8>) -> Option<InstrumentInput> {
+        Some(InstrumentInput {
+            device: device.map(str::to_string),
+            channel,
+            monitor: true,
+            ..InstrumentInput::default()
+        })
+    }
+
+    /// A track names its keyboard; another takes whatever is plugged in; an audio track gets
+    /// nothing. Channels and key ranges travel as masks.
+    #[test]
+    fn every_track_gets_the_ports_channels_and_keys_it_names() {
+        let ports = [(0, "KeyLab 49"), (3, "MPD218 Port A")];
+        let mut pads = input(Some("mpd"), Some(10));
+        if let Some(p) = pads.as_mut() {
+            p.note_low = Some(36);
+            p.note_high = Some(51);
+        }
+        let routes = track_routes(
+            &[input(Some("KeyLab"), Some(1)), None, input(None, None), pads],
+            &ports,
+        );
+        assert_eq!(routes[0].ports, 0b1);
+        assert_eq!(routes[0].channels, 1);
+        assert_eq!(routes[1], TrackRoute::NONE);
+        assert_eq!(routes[2].ports, 0b1001, "kein Geraet genannt: alle offenen");
+        assert_eq!(routes[2].channels, TrackRoute::ALL_CHANNELS);
+        assert_eq!(routes[3].ports, 0b1000);
+        assert_eq!(routes[3].channels, 1 << 9);
+        assert_eq!((routes[3].low, routes[3].high), (36, 51));
+        assert!(track_routes(&[input(Some("Nord"), None)], &ports)[0].ports == 0);
+    }
+}

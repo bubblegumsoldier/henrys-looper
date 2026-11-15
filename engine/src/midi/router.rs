@@ -63,6 +63,8 @@ pub enum MidiAction {
     ClearAll,
     Tempo(f64),
     SetQuantize(Quantize),
+    /// "All notes off": on one track's instrument, or on all of them.
+    Panic { track: Option<usize> },
 
     // ---- per track ---------------------------------------------------------------------------
     Record { track: usize },
@@ -463,6 +465,8 @@ impl Router {
             Target::ScoreGoto(section) => MidiAction::ScoreGoto(*section),
             Target::ClearAll => MidiAction::ClearAll,
             Target::Transport => MidiAction::Transport,
+            Target::Panic => MidiAction::Panic { track: None },
+            Target::InstrumentPanic(_) => MidiAction::Panic { track: Some(track) },
             Target::Quantize(quantize) => MidiAction::SetQuantize(*quantize),
             Target::Record(_) => MidiAction::Record { track },
             Target::Overdub(_) => MidiAction::Overdub { track },

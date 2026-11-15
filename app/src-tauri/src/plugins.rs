@@ -1344,6 +1344,16 @@ impl Manager {
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+/// A plugin state chunk as text for a JSON file - shared with `crate::instruments`.
+pub(crate) fn encode_state(data: &[u8]) -> String {
+    base64_encode(data)
+}
+
+/// The other way round; `None` when the text is not base64.
+pub(crate) fn decode_state(text: &str) -> Option<Vec<u8>> {
+    base64_decode(text)
+}
+
 fn base64_encode(data: &[u8]) -> String {
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {

@@ -80,9 +80,14 @@ pub fn resolve_tracks(
             }
             Ok(number as usize - 1)
         };
-        let left = channel(config.input_channel)?;
+        if let Some(instrument) = &config.instrument {
+            instrument.check(name)?;
+        }
         let input = match config.input_channel_right {
+            // An instrument track has no input channel to check.
+            _ if config.instrument.is_some() => TrackInput::Instrument,
             Some(right) => {
+                let left = channel(config.input_channel)?;
                 let right = channel(right)?;
                 if right == left {
                     return Err(format!(
@@ -93,7 +98,7 @@ pub fn resolve_tracks(
                 }
                 TrackInput::Stereo { left, right }
             }
-            None => TrackInput::Mono(left),
+            None => TrackInput::Mono(channel(config.input_channel)?),
         };
         if !(-1.0..=1.0).contains(&config.pan) {
             return Err(format!(
@@ -267,6 +272,42 @@ mod tests {
                 at: 8 * 96_000
             }
         );
+    }
+
+    /// An instrument track listens to no input channel - so it is not checked against the device -
+    /// and its MIDI routing is checked instead.
+    #[test]
+    fn an_instrument_track_needs_no_input_channel() {
+        use crate::proto::InstrumentInput;
+        let piano = TrackConfig {
+            instrument: Some(InstrumentInput {
+                channel: Some(1),
+                monitor: true,
+                ..InstrumentInput::default()
+            }),
+            ..config("piano", 99)
+        };
+        let ok = resolve_tracks(&[config("stimme", 1), piano.clone()], 2).unwrap();
+        assert_eq!(ok[1].input, TrackInput::Instrument);
+        assert_eq!(ok[1].input.channels(), Channels::Stereo);
+        let wrong = TrackConfig {
+            instrument: Some(InstrumentInput {
+                channel: Some(17),
+                ..InstrumentInput::default()
+            }),
+            ..piano.clone()
+        };
+        let err = resolve_tracks(&[wrong], 2).expect_err("Kanal 17");
+        assert!(err.contains("1 to 16"), "{err}");
+        let range = TrackConfig {
+            instrument: Some(InstrumentInput {
+                note_low: Some(80),
+                note_high: Some(20),
+                ..InstrumentInput::default()
+            }),
+            ..piano
+        };
+        assert!(resolve_tracks(&[range], 2).is_err());
     }
 
     /// The bus assignment travels from the configuration into the track definition, and a word that

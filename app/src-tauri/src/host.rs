@@ -47,6 +47,7 @@ use looper_engine::engine::command::{
     buffer_channel, command_channel, status_channel,
 };
 use looper_engine::engine::frame::{Channels, TrackInput};
+use looper_engine::engine::source::{FeedMsg, FeedSender, HostClock, TrackRoute, source_channel};
 use looper_engine::engine::fx::{FxParam, FxPreset, FxSlot};
 use looper_engine::engine::live::MAX_LATENCY_FRAMES;
 use looper_engine::engine::live::TrackDef;
@@ -74,8 +75,8 @@ use crate::mixstore;
 use crate::midi::{BindingOptions, MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView, ProfileAction};
 use crate::proto::{
     AppInfo, BusOutConfig, CalibrateConfig, NoticeEvent, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
-    DeviceReport, EngineInfo, HostInfo, QuantizeName, ScoreLoaded, StartConfig, StatusEvent,
-    TrackConfig, bus_events, dbfs, score_event, track_event,
+    DeviceReport, EngineInfo, HostInfo, InstrumentInput, QuantizeName, ScoreLoaded, StartConfig,
+    StatusEvent, TrackConfig, bus_events, dbfs, score_event, track_event,
 };
 use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tracks};
 
@@ -179,6 +180,8 @@ pub enum Action {
     /// Switch the grid a take snaps to while the engine runs. Takes that are already armed keep
     /// the position they were given - the engine has those commands already.
     SetQuantize { quantize: Quantize },
+    /// "All notes off" on one track's instrument, or on every instrument.
+    Panic { track: Option<usize> },
 
     // --- effects. They act on playback and monitoring; the recording stays dry. ---------------
     /// Whole chain of one track out of the signal path (bit-identical pass-through) or back in.
@@ -264,8 +267,12 @@ impl Action {
             | Action::FxBypass { track, .. }
             | Action::FxEnable { track, .. }
             | Action::FxParam { track, .. }
-            | Action::FxPreset { track, .. } => Some(track),
-            Action::ClearAll
+            | Action::FxPreset { track, .. }
+            | Action::Panic {
+                track: Some(track),
+            } => Some(track),
+            Action::Panic { track: None }
+            | Action::ClearAll
             | Action::Transport { .. }
             | Action::SetClick { .. }
             | Action::SetClickGain { .. }
@@ -470,6 +477,7 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
             }
         }
 
+        sync_instruments(&mut midi, session.as_mut());
         pump_midi(&mut midi, &mut session, &app);
         // Recordings whose writer has finished - also those of a session that is gone.
         crate::recording::poll(&app);
@@ -727,6 +735,7 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
         MidiAction::Click(on) => MidiIntent::Session(Action::SetClick { on }),
         MidiAction::ClearAll => MidiIntent::Session(Action::ClearAll),
         MidiAction::Transport => MidiIntent::Session(Action::Transport { run: None }),
+        MidiAction::Panic { track } => MidiIntent::Session(Action::Panic { track }),
         MidiAction::Tempo(bpm) => MidiIntent::Session(Action::SetTempo {
             bpm,
             beats_per_bar: signature.beats_per_bar,
@@ -815,6 +824,25 @@ fn midi_shape(session: Option<&Session>) -> SessionShape {
     }
 }
 
+/// Keep the instrument routing in line with the open ports and the running engine: which port
+/// feeds which instrument track, what each port's driver callback sends the fast way, and whether
+/// learn mode currently takes everything. Every turn of the host loop; does nothing unless
+/// something changed.
+fn sync_instruments(midi: &mut MidiBridge, session: Option<&mut Session>) {
+    looper_engine::engine::source::set_learning(midi.is_learning());
+    match session {
+        Some(active) => active.sync_instruments(midi),
+        // No engine, nothing to play: every key goes back to the bindings.
+        None => {
+            for port in midi.instrument_ports() {
+                if port.route.active() {
+                    port.route.clear();
+                }
+            }
+        }
+    }
+}
+
 /// Drain the MIDI queue, apply what it means, and tell the web view.
 ///
 /// Called once per turn of the host loop, which is every four milliseconds while anything is open.
@@ -838,6 +866,17 @@ fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHand
         // The learn mode swallows the stream: while it waits for a control, that control must not
         // also do its old job on the way in.
         if midi.is_learning() {
+            // A key an instrument plays never reaches a binding; learning it would make a binding
+            // that cannot fire.
+            if midi.played_by_instrument(link, &event) {
+                let reason = format!(
+                    "Not learned: {} is played by an instrument track. Use a pad, another \
+                     channel or a key outside the instrument's range.",
+                    event.describe().split_whitespace().collect::<Vec<_>>().join(" ")
+                );
+                midi.report(link, &event, MidiOutcome::Refused, None, Some(reason));
+                continue;
+            }
             if let Some(report) = midi.feed_learn(link, &event) {
                 log!("MIDI learned: {}", report.note.as_deref().unwrap_or(""));
             }
@@ -1192,6 +1231,8 @@ fn rebuilt_config(
             latency_trim: t.latency_trim,
             bus: Some(t.bus.clone()),
             monitor_bus: Some(t.monitor_bus.clone()),
+            // Scores do not name instruments yet.
+            instrument: None,
         })
         .collect();
     config.bpm = score.bpm;
@@ -1571,6 +1612,21 @@ struct Session {
     section_watch: SectionWatch,
     /// The text of the loaded score, for the copy in a recording's folder.
     score_yaml: Option<String>,
+    /// The engine's end of the MIDI routing queue (`looper_engine::engine::source`).
+    feeds: FeedSender,
+    /// Per track, in engine order: what plays it, if it is an instrument track.
+    instrument_inputs: Vec<Option<InstrumentInput>>,
+    /// Port feeds the engine holds, as (slot, serial).
+    attached: Vec<(usize, u64)>,
+    /// The routing last sent, per track.
+    routes: Vec<TrackRoute>,
+    /// What each port's mask was last set to, by the port's serial.
+    masks: Vec<(u64, Vec<TrackRoute>)>,
+    /// When the devices instrument tracks name were last connected.
+    last_connect: Option<Instant>,
+    /// `C` and the late events as last logged.
+    logged_delay: Option<u32>,
+    logged_late: u32,
 }
 
 impl Session {
@@ -1634,10 +1690,18 @@ impl Session {
 
         let routing = config.bus_routing(out_channels)?;
         let bus_gain = config.bus_gain_pair()?;
+        // What plays each instrument track, in engine order. `resolve_tracks` keeps the order of
+        // the configuration, so the two line up.
+        let instrument_inputs: Vec<Option<InstrumentInput>> =
+            config.tracks.iter().map(|t| t.instrument.clone()).collect();
         let tracks: Vec<Track> = defs
             .iter()
-            .map(|d| {
-                Track::new(d.input, config.monitor, d.pan, rate)
+            .zip(instrument_inputs.iter())
+            .map(|(d, instrument)| {
+                // An instrument is heard unless its track says otherwise; the global switch is
+                // about microphones.
+                let monitor = instrument.as_ref().map_or(config.monitor, |i| i.monitor);
+                Track::new(d.input, monitor, d.pan, rate)
                     .with_latency(d.latency)
                     .with_sends(d.loop_send, d.monitor_send)
             })
@@ -1667,6 +1731,10 @@ impl Session {
         // The recorder's slot: recordings are handed in per run (`crate::recording`).
         let (capture_port, capture_endpoint) = capture_channel();
         core.attach_capture(capture_endpoint);
+        // Instrument slots and the MIDI event stage: the instruments come from the main thread
+        // (`crate::instruments`), the routing and the port feeds from this one.
+        let (instrument_tx, feeds, source_endpoint) = source_channel(64);
+        core.attach_sources(source_endpoint, scratch_frames);
         // The app opens with the clock standing: nothing blinks or clicks until the musician
         // presses Start, records something, or loads a score.
         core.hold_transport();
@@ -1707,12 +1775,23 @@ impl Session {
         let output = audio::build_output(
             &setup.output,
             &setup.out_plan,
-            move |data: &mut [f32], _: &OutputCallbackInfo, _offset: usize| {
+            move |data: &mut [f32], info: &OutputCallbackInfo, _offset: usize| {
                 let t0 = Instant::now();
                 let frames = data.len() / out_channels;
+                // When the first frame of this callback is heard, on the clock MIDI is stamped
+                // with - what places a played note (`looper_engine::engine::source`).
+                let stamp = info.timestamp();
+                let playback_ns = stamp.playback.as_nanos() as u64;
+                let callback_ns = stamp.callback.as_nanos() as u64;
                 let mut done = 0usize;
                 while done < frames {
                     let n = (frames - done).min(scratch_frames);
+                    let ahead = done as u64 * 1_000_000_000 / u64::from(rate);
+                    core.set_clock(HostClock {
+                        playback_ns: playback_ns + ahead,
+                        callback_ns: callback_ns + ahead,
+                        block_frames: frames as u32,
+                    });
                     let mut got = 0usize;
                     while got < n && consumer.slots() >= in_channels {
                         for c in 0..in_channels {
@@ -1780,6 +1859,17 @@ impl Session {
         if let Err(e) = mixstore::rename(&renamed) {
             log!("Mix of renamed tracks not carried over: {e}");
         }
+        crate::instruments::engine_started(
+            instrument_tx,
+            rate,
+            defs.iter()
+                .map(|d| crate::instruments::TrackSlot {
+                    name: d.name.clone(),
+                    instrument: d.input.is_instrument(),
+                })
+                .collect(),
+            renamed.clone(),
+        );
         crate::plugins::engine_started(
             inserts,
             rate,
@@ -1820,7 +1910,8 @@ impl Session {
                 / 1_048_576.0,
             tracks: defs
                 .iter()
-                .map(|d| TrackConfig {
+                .zip(instrument_inputs.iter())
+                .map(|(d, instrument)| TrackConfig {
                     input_channel_right: match d.input {
                         TrackInput::Stereo { right, .. } => Some(right as u32 + 1),
                         TrackInput::Mono(_) | TrackInput::Instrument => None,
@@ -1828,6 +1919,7 @@ impl Session {
                     pan: d.pan,
                     latency_frames: d.latency.measured,
                     latency_trim: d.latency.trim,
+                    instrument: instrument.clone(),
                     ..TrackConfig::mono(&d.name, d.input.first() as u32 + 1)
                 })
                 .collect(),
@@ -1876,6 +1968,14 @@ impl Session {
             recorder: crate::recording::Recorder::new(capture_port, scratch_frames),
             section_watch: SectionWatch::default(),
             score_yaml: None,
+            feeds,
+            routes: vec![TrackRoute::NONE; instrument_inputs.len()],
+            instrument_inputs,
+            attached: Vec::new(),
+            masks: Vec::new(),
+            last_connect: None,
+            logged_delay: None,
+            logged_late: 0,
         };
         // The free mode's faders and chains, by track name - before anything is played, so the
         // first note already sounds the way the last session ended.
@@ -1902,7 +2002,85 @@ impl Session {
         drop(self.output);
         // Every installed plugin processor went down with the engine core just now.
         crate::plugins::engine_stopped();
+        crate::instruments::engine_stopped();
         self.pool.drain();
+    }
+
+    /// See [`sync_instruments`].
+    fn sync_instruments(&mut self, midi: &mut MidiBridge) {
+        self.feeds.drain_retired();
+        // The devices instrument tracks name are connected by themselves, at the pace the port
+        // list is scanned.
+        if self
+            .last_connect
+            .is_none_or(|t| t.elapsed() >= crate::midi::SCAN_INTERVAL)
+        {
+            self.last_connect = Some(Instant::now());
+            let devices: Vec<String> = self
+                .instrument_inputs
+                .iter()
+                .flatten()
+                .filter_map(|i| i.device.clone())
+                .collect();
+            for device in devices {
+                if let Some(line) = midi.connect_for_instrument(&device) {
+                    log!("{line}");
+                }
+            }
+        }
+        let ports = midi.instrument_ports();
+        let named: Vec<(usize, &str)> = ports.iter().map(|p| (p.slot, p.name.as_str())).collect();
+        let routes = crate::instruments::track_routes(&self.instrument_inputs, &named);
+        // Feeds: the engine listens to every port some instrument track takes.
+        let wanted: Vec<(usize, u64)> = ports
+            .iter()
+            .filter(|p| routes.iter().any(|r| r.ports & (1 << p.slot) != 0))
+            .map(|p| (p.slot, p.serial))
+            .collect();
+        for &(slot, serial) in &self.attached.clone() {
+            if !wanted.contains(&(slot, serial)) && self.feeds.send(FeedMsg::Detach { port: slot }).is_ok() {
+                self.attached.retain(|a| *a != (slot, serial));
+            }
+        }
+        for port in &ports {
+            let key = (port.slot, port.serial);
+            if !wanted.contains(&key) || self.attached.contains(&key) {
+                continue;
+            }
+            match port.feed.take_feed(port.slot) {
+                Some(feed) => {
+                    if self.feeds.send(FeedMsg::Attach(feed)).is_ok() {
+                        self.attached.push(key);
+                        log!("Instruments listen to MIDI device \"{}\".", port.name);
+                    }
+                }
+                // Still held by an engine that is on its way out; the next turn gets it.
+                None => {}
+            }
+        }
+        for (track, route) in routes.iter().enumerate() {
+            if self.routes.get(track) != Some(route)
+                && self.feeds.send(FeedMsg::Route { track, route: *route }).is_ok()
+            {
+                self.routes[track] = *route;
+            }
+        }
+        // Masks: what each port's driver callback sends the fast way.
+        for port in &ports {
+            let mine: Vec<TrackRoute> = routes
+                .iter()
+                .filter(|r| r.ports & (1 << port.slot) != 0)
+                .copied()
+                .collect();
+            let known = self.masks.iter().find(|(s, _)| *s == port.serial).map(|(_, r)| r);
+            if known == Some(&mine) || (known.is_none() && mine.is_empty() && !port.route.active()) {
+                continue;
+            }
+            port.route.set(&mine);
+            self.masks.retain(|(s, _)| *s != port.serial);
+            self.masks.push((port.serial, mine));
+        }
+        self.masks.retain(|(s, _)| ports.iter().any(|p| p.serial == *s));
     }
 
     /// The engine acknowledged a `Stop` command.
@@ -1916,6 +2094,26 @@ impl Session {
         if let Some(status) = self.status_rx.latest() {
             if status.stopped {
                 self.stopped = true;
+            }
+            // The instrument timing, for the log: `C` once it is known, and late notes when they
+            // happen - a late note sounds (and is recorded) up to a block off its beat.
+            if status.instrument_delay != 0 && self.logged_delay != Some(status.instrument_delay) {
+                self.logged_delay = Some(status.instrument_delay);
+                let rate = f64::from(self.info.sample_rate.max(1));
+                log!(
+                    "Instrument delay C = {} frames ({:.1} ms): output latency plus one block.",
+                    status.instrument_delay,
+                    f64::from(status.instrument_delay) * 1000.0 / rate
+                );
+            }
+            if status.late_events > self.logged_late {
+                log!(
+                    "{} MIDI event(s) reached the engine too late for their fixed position ({} \
+                     in total).",
+                    status.late_events - self.logged_late,
+                    status.late_events
+                );
+                self.logged_late = status.late_events;
             }
             // A refusal is only news when the counter moved or the reason changed.
             if status.ignored_commands > self.last_refusal.0 || status.refusal != self.last_refusal.1
@@ -2516,6 +2714,13 @@ impl Session {
 
         match action {
             Action::Transport { run } => self.set_transport(run),
+            Action::Panic { track } => {
+                let msg = match track {
+                    Some(track) => FeedMsg::Panic { track },
+                    None => FeedMsg::PanicAll,
+                };
+                self.feeds.send(msg)
+            }
             Action::Record { track } => {
                 let name = self.tracks[track].name.clone();
                 // With the clock standing, `soon(est)` is the new bar 1 and therefore the first
