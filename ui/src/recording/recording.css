@@ -1,0 +1,34 @@
+/* Recording to disk: the title-bar badge and the Setup page. */
+
+.rec-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 4px 0 9px;
+  border-radius: 12px;
+  border: 1px solid var(--st-rec-line);
+  background: var(--st-rec-soft);
+  color: var(--tx-1);
+  font-size: var(--fs-11);
+  white-space: nowrap;
+  flex: none;
+}
+.rec-badge b { font-weight: var(--fw-semibold); }
+.rec-badge .btn.s { height: 18px; }
+/* Steady, never blinking: a stage reads blinking as an alarm. */
+.rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--st-rec); flex: none; }
+.rec-badge.tail { border-color: var(--line-3); background: transparent; color: var(--tx-2); }
+.rec-badge.tail .rec-dot { opacity: .55; }
+.rec-badge.done { border-color: var(--line-3); background: var(--bg-2); padding-left: 8px; }
+.rec-badge.done .name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: var(--tx-2); }
+.rec-badge .ic-warn { color: var(--warn); }
+
+.rec-list { width: 100%; border-collapse: collapse; font-size: var(--fs-12); }
+.rec-list td { padding: 6px 16px; border-top: 1px solid var(--line-1); vertical-align: middle; }
+.rec-list td.num { text-align: right; color: var(--tx-2); font-variant-numeric: tabular-nums; width: 70px; }
+.rec-list td.act { text-align: right; white-space: nowrap; width: 1%; }
+.rec-list .t { color: var(--tx-3); font-size: var(--fs-11); }
+.rec-space.low { color: var(--warn); }
+.rec-folder { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rec-folder .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }

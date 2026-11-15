@@ -14,6 +14,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api, insideTauri } from "./api";
 import { pushStatus } from "./status";
 import { pushMidiFeed } from "./midi/store";
+import { pushRecording, type RecordingEvent } from "./recording/store";
 import type { MidiFeed } from "./midi/types";
 import type { AppInfo, LooperStatus } from "./types";
 
@@ -45,13 +46,16 @@ export function useLooperEvents(): Bridge {
         // MIDI has its own event and its own hub: a queue of discrete facts next to a sampling of a
         // continuous state. See `midi/store.ts`.
         const offMidi = await listen<MidiFeed>("looper://midi", (e) => pushMidiFeed(e.payload));
+        // Recording to disk: progress while a run is written, and once when it is finished.
+        const offRecording = await listen<RecordingEvent>("looper://recording", (e) => pushRecording(e.payload));
         if (disposed) {
           offStatus();
           offReady();
           offMidi();
+          offRecording();
           return;
         }
-        unlisten.push(offStatus, offReady, offMidi);
+        unlisten.push(offStatus, offReady, offMidi, offRecording);
         setStatus("open");
       } catch (e) {
         if (disposed) return;

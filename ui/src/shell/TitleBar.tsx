@@ -18,6 +18,7 @@ import { useStatusSlice } from "../status";
 import { Icon } from "./Icon";
 import { useEngine } from "./engine";
 import { Ticker } from "./Toasts";
+import { RecordingBadge } from "../recording/RecordingBadge";
 import { isDirty, useScoreFile } from "../scoreFile";
 import { run } from "./notes";
 import { api } from "../api";
@@ -142,6 +143,7 @@ export function TitleBar({ mode, setupOpen, onMode, onSetup, enginePanelOpen, on
       <div className="grow ticker-slot" data-tauri-drag-region>
         <Ticker />
       </div>
+      <RecordingBadge />
       <div className="seg mode" role="tablist">
         <button
           role="tab"

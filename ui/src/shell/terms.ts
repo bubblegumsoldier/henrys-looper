@@ -10,6 +10,7 @@
 //! arrive; translating those is a separate pass on the Rust side.
 
 import type { LooperTrackState, Phase, ScoreState } from "../types";
+import { IS_MAC } from "../platform";
 
 /** Visual state of a track or a score target. The class suffix of `.st`, `.is`, `.tb`, `.clip`. */
 export type StateKind = "rec" | "dub" | "play" | "stop" | "hear" | "armed" | "empty" | "ready";
@@ -93,6 +94,22 @@ export const T = {
   monitorBus: "Monitor",
   saved: "saved",
   unsaved: "unsaved",
+
+  // --- recording to disk -------------------------------------------------------
+  recording: "Recording",
+  recordingToDisk: "Recording to disk",
+  recordingTail: "Writing the tail",
+  stopRecording: "Stop recording to disk",
+  recordEveryRun: "Record every run to disk",
+  dryStems: "Also write dry stems",
+  recordingsFolder: "Folder",
+  freeSpace: "Free space",
+  lowSpace: "Little space left",
+  showInFinder: IS_MAC ? "Show in Finder" : "Show in folder",
+  recentRecordings: "Recent recordings",
+  deleteRecording: "Delete",
+  recordingSaved: "Recording saved",
+  recordingDiscarded: "Recording discarded",
 } as const;
 
 /** The word for a score target state. */
