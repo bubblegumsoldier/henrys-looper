@@ -288,7 +288,9 @@ function Lcd({ facts, score }: { facts: Facts; score: ScoreView }) {
   const dots = facts.bpb > 0 ? facts.bpb : 4;
   return (
     <div className="lcd">
-      <div className="sec">
+      {/* Not `sec`: that is the Arrangement's section marker (absolutely positioned, 32 px high
+          from top 5 px), and sharing the name pushed this cell out of the bottom of the LCD. */}
+      <div className="lcd-sec">
         <label>
           {withScore ? `${T.section} ${score.section! + 1} / ${score.sectionCount}` : score.loaded ? PHASE[score.phase as keyof typeof PHASE] ?? T.section : T.loop}
         </label>

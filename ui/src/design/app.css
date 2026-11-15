@@ -154,7 +154,7 @@ body {
 .lcd label { font-size: 8.5px; font-weight: var(--fw-semibold); letter-spacing: .09em; text-transform: uppercase; color: var(--tx-3); line-height: 1; margin-bottom: 3px; white-space: nowrap; }
 .lcd b { font: var(--fw-semibold) 17px/1 var(--font-display); color: var(--tx-1); white-space: nowrap; letter-spacing: -0.01em; }
 .lcd b small { font-size: 11px; color: var(--tx-3); font-weight: var(--fw-medium); margin-left: 2px; }
-.lcd .sec b { color: var(--tx-1); font-size: 14px; font-family: var(--font-mono); font-weight: var(--fw-medium); }
+.lcd .lcd-sec b { color: var(--tx-1); font-size: 14px; font-family: var(--font-mono); font-weight: var(--fw-medium); }
 .lcd .state-run { color: var(--st-play); }
 
 .beats { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: 2px; }
