@@ -25,7 +25,7 @@ import { fail, run } from "../shell/notes";
 import { startEngine, stopEngine, useEngine } from "../shell/engine";
 import { T, gainDb, num } from "../shell/terms";
 import { HMeter } from "../live/HMeter";
-import { GRID_CHOICES, TransposeControl } from "../live/MidiLoopRows";
+import { GRID_CHOICES, loopKindBlock, setLoopKind, setNoteGrid, setTranspose, TransposeControl } from "../live/MidiLoopRows";
 import { TapTempo } from "../live/TapTempo";
 import {
   BUS_CHOICES,
@@ -1094,6 +1094,31 @@ function LiveInstrumentCell({ t }: { t: LooperTrackStatus }) {
     <span className="row" style={{ gap: 4 }}>
       <InstrumentChoice track={t.name} />
       <span className="dim" title="Device and channel apply on the next start">{how}</span>
+      {/* Loop type, transposition and note grid act on the running engine, as in the track drawer. */}
+      <Select
+        width={90}
+        value={t.midi_loop ? "midi" : "audio"}
+        options={[
+          { value: "audio", label: `${T.loopKind}: ${T.loopAudio}` },
+          { value: "midi", label: `${T.loopKind}: ${T.loopMidi}` },
+        ]}
+        title={
+          loopKindBlock(t) === null
+            ? "What a take stores: the instrument's sound (Audio) or the notes, played back through the instrument (MIDI)"
+            : "The loop type changes only while the track is empty - clear it first"
+        }
+        onChange={(v) => setLoopKind(t, v === "midi" ? "midi" : "audio")}
+      />
+      <TransposeControl value={t.transpose ?? 0} onChange={(v) => setTranspose(t, v)} />
+      {t.midi_loop && (
+        <Select
+          width={90}
+          value={t.grid ?? "none"}
+          options={GRID_CHOICES.map((g) => ({ value: g.value, label: g.value === "none" ? `${T.noteGrid}: ${T.gridNone}` : g.label }))}
+          title="Note grid of the MIDI loop. Acts on what is recorded too and never changes the recording."
+          onChange={(v) => setNoteGrid(t, v)}
+        />
+      )}
     </span>
   );
 }
