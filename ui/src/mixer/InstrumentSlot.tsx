@@ -86,6 +86,13 @@ export function InstrumentSlot({ track }: { track: string }) {
       </div>
     );
   }
+  if (rack.loading?.includes(track)) {
+    return (
+      <div className="ins plug full inst idle" aria-busy="true" title="The instrument is being loaded with its saved sound">
+        <span className="pname">{T.instrumentLoading}</span>
+      </div>
+    );
+  }
   if (!inst) {
     return (
       <>
@@ -146,7 +153,7 @@ export function InstrumentPicker({ track, anchor, onClose }: { track: string; an
             {catalog === null
               ? "Loading the plugin list…"
               : instruments.length === 0
-                ? "No playable instruments scanned yet. Audio Unit instruments can be played; VST3 instruments not yet."
+                ? "No playable instruments scanned yet. Scan to find Audio Unit and VST3 instruments."
                 : "Nothing matches."}
           </li>
         )}

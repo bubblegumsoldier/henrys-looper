@@ -33,6 +33,8 @@ export interface InstrumentRack {
   supported: boolean;
   engine_running: boolean;
   instruments: InstrumentView[];
+  /** Tracks whose instrument is loading or waits to be restored. Older hosts leave it out. */
+  loading?: string[];
 }
 
 type InstrumentEvent = { kind: "rack"; rack: InstrumentRack } | { kind: "notice"; message: string };

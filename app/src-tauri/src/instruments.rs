@@ -24,6 +24,7 @@
 //! of this file.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
@@ -187,6 +188,9 @@ pub struct InstrumentRack {
     pub supported: bool,
     pub engine_running: bool,
     pub instruments: Vec<InstrumentView>,
+    /// Tracks whose instrument is being loaded right now or waits to be restored. Loading a big
+    /// instrument holds the main thread for a moment; the UI says "Loading instrument…" meanwhile.
+    pub loading: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -225,6 +229,10 @@ struct Manager {
     dirty: bool,
     last_change: Option<Instant>,
     last_meter: Option<Instant>,
+    /// Instruments of the last session still to be loaded, one per turn of the main loop.
+    restoring: VecDeque<SavedInstrument>,
+    /// The track whose instrument is loading in this very call.
+    loading: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -301,6 +309,12 @@ impl Manager {
             supported: plugin::SUPPORTED,
             engine_running: link.is_some(),
             instruments,
+            loading: self
+                .loading
+                .iter()
+                .chain(self.restoring.iter().map(|e| &e.track))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -470,18 +484,48 @@ impl Manager {
         if !plugin::SUPPORTED {
             return Err(plugin::UNSUPPORTED.to_string());
         }
+        // The musician's choice wins over a restore still waiting for this track.
+        self.restoring.retain(|e| e.track != track);
         let Some(plugin_id) = plugin_id else {
             self.remove(track)?;
             return Ok(self.view());
         };
+        self.put(track, plugin_id, None)
+    }
+
+    /// Load `plugin_id` for `track`, give it `state` while it is not running yet, and start it.
+    fn put(
+        &mut self,
+        track: &str,
+        plugin_id: &str,
+        state: Option<&[u8]>,
+    ) -> Result<InstrumentRack, String> {
         let entry = Self::catalog_entry(plugin_id)?;
         self.remove(track)?;
-        let instance = plugin::load(&entry.info)?;
+        self.loading = Some(track.to_string());
+        emit(InstrumentEvent::Rack { rack: self.view() });
+        let started = Instant::now();
+        let loaded = plugin::load(&entry.info).map(|mut instance| {
+            let restored = state.map(|s| instance.load_state(s));
+            (instance, restored)
+        });
+        self.loading = None;
+        let (instance, restored) = loaded?;
         log!(
-            "Instrument loaded: {} ({}) for track \"{track}\"",
+            "Instrument loaded: {} ({}) for track \"{track}\" in {} ms",
             entry.info.name,
-            entry.info.format.label()
+            entry.info.format.label(),
+            started.elapsed().as_millis()
         );
+        if let Some(Err(e)) = restored {
+            log!("State of {} not loaded: {e}", entry.info.name);
+            emit(InstrumentEvent::Notice {
+                message: format!(
+                    "\"{}\" on track \"{track}\" was loaded without its saved sound: {e}",
+                    entry.info.name
+                ),
+            });
+        }
         self.slots.push(Slot {
             track: track.to_string(),
             info: entry,
@@ -524,6 +568,10 @@ impl Manager {
     }
 
     fn tick(&mut self) {
+        // A restore step whose turn was lost (the manager was busy) is picked up here.
+        if !self.restoring.is_empty() {
+            self.restore_next();
+        }
         if let Some(link) = LINK.lock().unwrap().as_mut() {
             link.sender.drain_retired();
         }
@@ -563,7 +611,9 @@ impl Manager {
             self.last_meter = Some(Instant::now());
             emit(InstrumentEvent::Rack { rack: self.view() });
         }
+        // Saving half a restore would forget the instruments that are still to come.
         if self.dirty
+            && self.restoring.is_empty()
             && self
                 .last_change
                 .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))
@@ -623,32 +673,33 @@ impl Manager {
             return;
         }
         let _ = std::fs::write(&marker, "restoring");
-        for entry in saved.tracks {
-            match self.set(&entry.track, Some(&entry.plugin_id)) {
-                Ok(_) => {
-                    if let Some(state) = entry
-                        .state
-                        .as_deref()
-                        .and_then(crate::plugins::decode_state)
-                        && let Some(p) = self.position(&entry.track)
-                        && let Err(e) = self.slots[p].plugin.load_state(&state)
-                    {
-                        log!("State of {} not loaded: {e}", entry.name);
-                    }
-                }
-                Err(e) => {
-                    log!("Instrument {} not restored: {e}", entry.name);
-                    emit(InstrumentEvent::Notice {
-                        message: format!(
-                            "\"{}\" was not loaded again for track \"{}\": {e}",
-                            entry.name, entry.track
-                        ),
-                    });
-                }
-            }
+        self.restoring = saved.tracks.into();
+        emit(InstrumentEvent::Rack { rack: self.view() });
+        schedule(|m| m.restore_next());
+    }
+
+    /// Load the next instrument of the last session, then let the main loop breathe (the window
+    /// draws, the UI shows which instruments are still loading) before the next one.
+    fn restore_next(&mut self) {
+        let Some(entry) = self.restoring.pop_front() else {
+            return;
+        };
+        let state = entry.state.as_deref().and_then(crate::plugins::decode_state);
+        if let Err(e) = self.put(&entry.track, &entry.plugin_id, state.as_deref()) {
+            log!("Instrument {} not restored: {e}", entry.name);
+            emit(InstrumentEvent::Notice {
+                message: format!(
+                    "\"{}\" was not loaded again for track \"{}\": {e}",
+                    entry.name, entry.track
+                ),
+            });
         }
-        let _ = std::fs::remove_file(&marker);
-        self.dirty = false;
+        if self.restoring.is_empty() {
+            let _ = std::fs::remove_file(restore_marker());
+            self.dirty = false;
+        } else {
+            schedule(|m| m.restore_next());
+        }
         emit(InstrumentEvent::Rack { rack: self.view() });
     }
 }

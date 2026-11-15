@@ -105,6 +105,7 @@ export const T = {
   instrumentAdd: "Instrument",
   instrumentNone: "No instrument",
   instrumentPick: "Choose an instrument",
+  instrumentLoading: "Loading instrument…",
   allDevices: "All MIDI devices",
   allChannels: "All channels",
   channelShort: "Ch",
