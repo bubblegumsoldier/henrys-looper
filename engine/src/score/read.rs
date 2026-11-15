@@ -47,7 +47,7 @@ const TRACK_FIELDS: [&str; 10] = [
     "loop",
     "grid",
 ];
-const TRACK_MIDI_FIELDS: [&str; 3] = ["device", "channel", "notes"];
+const TRACK_MIDI_FIELDS: [&str; 4] = ["device", "channel", "notes", "transpose"];
 const CLIP_FIELDS: [&str; 2] = ["state", "grid"];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
 /// Fields one binding may carry. The *keys* of `midi:` are not a closed list any more - any address
@@ -683,6 +683,26 @@ impl Reader {
                         Some(node.pos),
                         format!("'channel' in {what} must be 1 to 16 or 'all', found: {}.", node.describe()),
                         "e.g. 'channel: 1', or 'channel: all' (the same as leaving it out).",
+                    );
+                    ok = false;
+                }
+            }
+        }
+        if let Some(node) = fields.get("transpose") {
+            match &node.kind {
+                NodeKind::Int(v) if (-48..=48).contains(v) => {
+                    if *v != 0 {
+                        out.transpose = Some(*v as i8);
+                    }
+                }
+                _ => {
+                    self.error_with(
+                        Some(node.pos),
+                        format!(
+                            "'transpose' in {what} must be a number of semitones from -48 to 48, found: {}.",
+                            node.describe()
+                        ),
+                        "e.g. 'transpose: 12' for pads that send an octave too low.",
                     );
                     ok = false;
                 }

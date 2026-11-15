@@ -181,6 +181,10 @@ pub struct InstrumentInput {
     /// `1/16`, `1/8t`, `1/16t`. Never changes what was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<String>,
+    /// Semitones the live notes are shifted by before they reach the instrument, -48..=48.
+    /// The key range applies to the note as it comes in, before the shift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transpose: Option<i8>,
 }
 
 fn instrument_heard() -> bool {
@@ -203,6 +207,13 @@ impl InstrumentInput {
 
     /// Check what a hand-written or stale setup may get wrong, in words.
     pub fn check(&self, track: &str) -> Result<(), String> {
+        if let Some(t) = self.transpose
+            && !(-48..=48).contains(&t)
+        {
+            return Err(format!(
+                "Track \"{track}\": transpose goes from -48 to 48 semitones, not {t}."
+            ));
+        }
         if let Some(kind) = self.loop_kind.as_deref()
             && kind != "audio"
             && kind != "midi"
@@ -729,6 +740,8 @@ pub struct TrackStatusEvent {
     pub midi_loop: bool,
     /// The note grid its MIDI layers are played on (`none`, `1/4`, ...). Filled in by the host.
     pub grid: String,
+    /// Semitones its live notes are shifted by. Filled in by the host.
+    pub transpose: i32,
 
     // --- output buses -------------------------------------------------------------------------
     // Two switches per source rather than one word, because that is how they are operated: "geht
@@ -1058,6 +1071,7 @@ pub fn track_event(
         held_notes: ts.held_notes,
         midi_loop: ts.midi_loop,
         grid: "none".to_string(),
+        transpose: 0,
         bus_main: ts.loop_send.on(Bus::Main),
         bus_monitor: ts.loop_send.on(Bus::Monitor),
         monitor_bus_main: ts.monitor_send.on(Bus::Main),
@@ -2142,6 +2156,7 @@ mod tests {
                 "strip_peak",
                 "strip_peaks",
                 "take_bar",
+                "transpose",
             ]
         );
         assert_eq!(

@@ -20,6 +20,43 @@ export const GRID_CHOICES: { value: string; label: string }[] = [
   { value: "1/16t", label: "1/16 T" },
 ];
 
+/** −12 / value / +12: semitones an instrument track's live notes are shifted by. */
+export function TransposeControl({
+  value,
+  disabled,
+  onChange,
+}: {
+  value: number;
+  disabled?: boolean;
+  onChange: (semitones: number) => void;
+}) {
+  const set = (v: number) => {
+    const c = Math.max(-48, Math.min(48, Math.round(v)));
+    if (c !== value) onChange(c);
+  };
+  return (
+    <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+      <button className="btn s" disabled={disabled || value <= -48} onClick={() => set(value - 12)} title="One octave down">
+        −12
+      </button>
+      <input
+        className="field num"
+        style={{ width: 52, textAlign: "center" }}
+        type="number"
+        min={-48}
+        max={48}
+        value={value}
+        disabled={disabled}
+        title="Semitones the notes are shifted by before they reach the instrument (−48 to 48). The key range applies to the notes as they come in."
+        onChange={(e) => set(Number(e.target.value) || 0)}
+      />
+      <button className="btn s" disabled={disabled || value >= 48} onClick={() => set(value + 12)} title="One octave up">
+        +12
+      </button>
+    </span>
+  );
+}
+
 /** Keep the stored setup in step, so the next start opens the track the same way. */
 function remember(name: string, change: Partial<StartInstrument>) {
   setConfig((c: StartConfig) => ({
@@ -37,6 +74,11 @@ export function MidiLoopRows({ track }: { track: LooperTrackStatus }) {
       await api.trackLoopKind(i, kind);
       remember(track.name, { loop: kind === "midi" ? "midi" : null });
     });
+  const setTranspose = (semitones: number) =>
+    run(async () => {
+      await api.trackTranspose(i, semitones);
+      remember(track.name, { transpose: semitones === 0 ? null : semitones });
+    });
   const setGrid = (grid: string) =>
     run(async () => {
       await api.trackGrid(i, grid);
@@ -44,6 +86,12 @@ export function MidiLoopRows({ track }: { track: LooperTrackStatus }) {
     });
   return (
     <>
+      <div className="frow">
+        <label>{T.transpose}</label>
+        <div>
+          <TransposeControl value={track.transpose ?? 0} onChange={setTranspose} />
+        </div>
+      </div>
       <div className="frow">
         <label>{T.loopKind}</label>
         <div>

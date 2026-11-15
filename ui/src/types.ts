@@ -273,6 +273,8 @@ export interface LooperTrackStatus {
   midi_loop?: boolean;
   /** Note grid of the MIDI layers: "none", "1/4", "1/8", "1/16", "1/8t", "1/16t". */
   grid?: string;
+  /** Semitones the live notes are shifted by before they reach the instrument. */
+  transpose?: number;
 }
 
 /** Event `looper://status`, pushed about twenty times a second while the engine runs. */
@@ -488,6 +490,8 @@ export interface StartInstrument {
   loop?: "audio" | "midi" | null;
   /** Note grid of a MIDI loop (default "none"). */
   grid?: string | null;
+  /** Semitones the live notes are shifted by, -48..48 (default 0). The key range applies before. */
+  transpose?: number | null;
 }
 
 /** Where one bus leaves the machine, as the setup writes it. */
@@ -736,6 +740,8 @@ export interface TrackMidi {
   channel?: number;
   note_low?: number;
   note_high?: number;
+  /** Semitones, -48..48; absent = 0. */
+  transpose?: number;
 }
 
 /** One entry of `midi:`. Exactly one of `note` / `cc`. */

@@ -83,6 +83,7 @@ fn an_instrument_track_compiles_with_its_midi_routing() {
             channel: Some(1),
             note_low: None,
             note_high: None,
+            transpose: None,
         })
     );
     // An instrument is heard in the room as well, unless the score says otherwise.
@@ -340,4 +341,23 @@ fn the_piano_example_round_trips() {
     assert_eq!(compiled(&again), compiled(text));
     assert_eq!(render_doc(&parse_doc(&again).unwrap()), again);
     assert!(score_notes(text).is_empty());
+}
+
+/// `midi: {transpose: 12}`: parsed, range-checked, and written back by the document renderer.
+#[test]
+fn transpose_is_part_of_the_midi_field() {
+    let text = "bpm: 100\ntracks:\n  drums: {input: instrument, midi: {channel: 10, notes: 36-51, transpose: 12}}\n\
+                sections:\n  - id: a\n    bars: 1\n";
+    let score = compile_score(text).expect("transpose ist erlaubt");
+    let midi = score.tracks[0].instrument.clone().unwrap();
+    assert_eq!(midi.transpose, Some(12));
+    assert_eq!((midi.note_low, midi.note_high), (Some(36), Some(51)));
+    let wrong = text.replace("transpose: 12", "transpose: 60");
+    assert!(compile_score(&wrong).is_err(), "mehr als 48 Halbtoene");
+    let outcome = parse_doc_outcome(text);
+    assert!(outcome.ok);
+    let doc = outcome.doc.expect("Dokument");
+    assert_eq!(doc.tracks[0].midi.as_ref().unwrap().transpose, Some(12));
+    let rendered = crate::score::doc::render_doc(&doc);
+    assert!(rendered.contains("transpose: 12"), "{rendered}");
 }

@@ -188,6 +188,16 @@ async fn track_grid(track: usize, grid: String, engine: State<'_, EngineHandle>)
     act(engine, Action::SetNoteGrid { track, grid }).await
 }
 
+/// Shift an instrument track's live notes by `semitones` (-48..=48) before they reach the
+/// instrument. Notes held at the moment are ended, so none can hang.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_transpose(track: usize, semitones: i32, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    if !(-48..=48).contains(&semitones) {
+        return Err(format!("Transpose goes from -48 to 48 semitones, not {semitones}."));
+    }
+    act(engine, Action::SetTranspose { track, semitones: semitones as i8 }).await
+}
+
 /// The channel fader of one track, linear: 0.0 is silence, 1.0 is 0 dB, the top is +12 dB
 /// (`MAX_TRACK_GAIN`). After the effect chain and the plugin inserts, before the panner; smoothed
 /// in the engine, so a jump is a short ramp. Never reaches a recording.
@@ -728,6 +738,7 @@ async fn score_template(tracks: Option<Vec<TemplateTrack>>) -> Result<String, St
                             channel: i.channel,
                             note_low: i.note_low.filter(|_| i.note_high.is_some()),
                             note_high: i.note_high.filter(|_| i.note_low.is_some()),
+                            transpose: i.transpose.filter(|t| *t != 0),
                         }),
                     );
                     if !i.monitor {
@@ -1097,6 +1108,7 @@ fn main() {
             track_pan,
             track_loop_kind,
             track_grid,
+            track_transpose,
             track_gain,
             track_mute,
             track_solo,

@@ -25,7 +25,7 @@ import { fail, run } from "../shell/notes";
 import { startEngine, stopEngine, useEngine } from "../shell/engine";
 import { T, gainDb, num } from "../shell/terms";
 import { HMeter } from "../live/HMeter";
-import { GRID_CHOICES } from "../live/MidiLoopRows";
+import { GRID_CHOICES, TransposeControl } from "../live/MidiLoopRows";
 import { TapTempo } from "../live/TapTempo";
 import {
   BUS_CHOICES,
@@ -1032,6 +1032,10 @@ function InstrumentInputFields({
         ]}
         title="What a take stores: the instrument's sound (Audio) or the notes, played back through the instrument (MIDI)"
         onChange={(v) => onChange({ ...value, loop: v === "midi" ? "midi" : null })}
+      />
+      <TransposeControl
+        value={value.transpose ?? 0}
+        onChange={(v) => onChange({ ...value, transpose: v === 0 ? null : v })}
       />
       {value.loop === "midi" && (
         <Select

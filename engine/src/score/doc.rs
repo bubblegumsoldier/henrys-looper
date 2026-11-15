@@ -705,6 +705,9 @@ fn track_midi(node: &Node<'_>) -> InstrumentSource {
         match field.key.as_str().unwrap_or("") {
             "device" => out.device = text_of(v),
             "channel" => out.channel = int(v).map(|c| c as u8),
+            "transpose" => {
+                out.transpose = int(v).filter(|t| *t != 0 && (-48..=48).contains(t)).map(|t| t as i8)
+            }
             "notes" => {
                 if let Some((low, high)) = v.as_str().and_then(|t| t.split_once('-')) {
                     out.note_low = low.trim().parse().ok();
@@ -1677,6 +1680,9 @@ fn track_flow(track: &DocTrack) -> String {
         }
         if let (Some(low), Some(high)) = (midi.note_low, midi.note_high) {
             parts.push(format!("notes: {low}-{high}"));
+        }
+        if let Some(t) = midi.transpose.filter(|t| *t != 0) {
+            parts.push(format!("transpose: {t}"));
         }
         fields.push(format!("midi: {{{}}}", parts.join(", ")));
     }

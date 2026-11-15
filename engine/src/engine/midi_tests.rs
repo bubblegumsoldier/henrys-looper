@@ -770,3 +770,60 @@ fn a_score_records_overdubs_plays_and_stops_a_midi_loop() {
     assert!(sent(&rig, bar(6) + 1_000, bar(7)).is_empty());
     assert!(sounding(&rig).is_empty());
 }
+
+/// Transpose: a pad bank that sends an octave low reaches the drum kit an octave up. The key range
+/// is checked on the note as it comes in; a note pushed out of 0..=127 is dropped; a change of the
+/// shift ends the held notes, so no off goes out with the wrong shift; a MIDI loop stores what the
+/// instrument got.
+#[test]
+fn transpose_shifts_live_notes_after_the_key_range() {
+    let mut rig = rig();
+    rig.feeds
+        .send(FeedMsg::Route {
+            track: 0,
+            route: TrackRoute {
+                ports: 1,
+                channels: TrackRoute::ALL_CHANNELS,
+                low: 36,
+                high: 51,
+            },
+        })
+        .unwrap();
+    rig.feeds
+        .send(FeedMsg::Transpose {
+            track: 0,
+            semitones: 12,
+        })
+        .unwrap();
+    record_first_pass(&mut rig);
+    play(&mut rig, 10_000, [0x99, 36, 100]);
+    play(&mut rig, 11_000, [0x89, 36, 0]);
+    // Outside the range as it comes in: stays with the bindings, even though 54 + 12 would not be.
+    play(&mut rig, 12_000, [0x99, 54, 100]);
+    play(&mut rig, 13_000, [0x99, 40, 100]);
+    rig.sim.run_to(20_000);
+    let got: Vec<[u8; 3]> = sent(&rig, 0, 20_000).into_iter().map(|(_, m)| m).collect();
+    assert_eq!(got, vec![[0x99, 48, 100], [0x89, 48, 0], [0x99, 52, 100]]);
+    // The shift changes while 40 (sounding as 52) is held: 52 is ended right away.
+    rig.feeds
+        .send(FeedMsg::Transpose {
+            track: 0,
+            semitones: -12,
+        })
+        .unwrap();
+    rig.sim.run_to(22_000);
+    play(&mut rig, 25_000, [0x89, 40, 0]);
+    rig.sim.run_to(30_000);
+    assert!(sounding(&rig).is_empty(), "{:?}", sounding(&rig));
+    // A shift past the top of the keyboard drops the note.
+    assert_eq!(super::source::transposed([0x90, 120, 1], 12), None);
+    assert_eq!(super::source::transposed([0xB0, 64, 127], 12), Some([0xB0, 64, 127]));
+    // The loop stored the shifted notes.
+    rig.sim.run_to(L + 3 * C);
+    let notes: Vec<u8> = raw(&rig, 0)
+        .iter()
+        .filter(|e| e.ev.kind == NoteKind::On)
+        .map(|e| e.ev.d1)
+        .collect();
+    assert_eq!(notes, vec![48, 52]);
+}

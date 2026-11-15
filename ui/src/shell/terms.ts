@@ -121,6 +121,7 @@ export const T = {
   noteGrid: "Note grid",
   gridNone: "Off",
   notes: "notes",
+  transpose: "Transpose",
   note1: "note",
   panic: "All notes off",
   panicShort: "Panic",

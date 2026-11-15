@@ -99,6 +99,8 @@ export const api = {
   trackLoopKind: (track: number, kind: "audio" | "midi") => call<void>("track_loop_kind", { track, kind }),
   /** Note grid of a MIDI loop; acts on what is recorded already, never changes the recording. */
   trackGrid: (track: number, grid: string) => call<void>("track_grid", { track, grid }),
+  /** Shift an instrument track's live notes, -48..48 semitones. Held notes are ended. */
+  trackTranspose: (track: number, semitones: number) => call<void>("track_transpose", { track, semitones }),
   /**
    * Which output buses one source of a track is heard on.
    *

@@ -533,6 +533,30 @@ pub enum FeedMsg {
     PanicAll,
     /// End every note of one track's instrument.
     Panic { track: usize },
+    /// Shift the live notes of a track by `semitones` (-48..=48) before they reach its instrument
+    /// - a pad controller that sends an octave below what the drum kit expects. The key range of
+    /// the route applies to the note as it arrives, before the shift. A change ends the notes the
+    /// musician holds, so no note off goes out with a different shift than its note on.
+    Transpose { track: usize, semitones: i8 },
+}
+
+/// The largest transposition, in semitones, either way.
+pub const MAX_TRANSPOSE: i8 = 48;
+
+/// A note message moved by `semitones`, or `None` when the note leaves 0..=127. Everything that is
+/// not a note (controllers, bend, pressure) passes unchanged.
+#[inline]
+pub fn transposed(msg: [u8; 3], semitones: i8) -> Option<[u8; 3]> {
+    if semitones == 0 {
+        return Some(msg);
+    }
+    match msg[0] & 0xF0 {
+        0x80 | 0x90 | 0xA0 => {
+            let n = i16::from(msg[1] & 0x7F) + i16::from(semitones);
+            (0..=127).contains(&n).then_some([msg[0], n as u8, msg[2]])
+        }
+        _ => Some(msg),
+    }
 }
 
 /// Control side of the instrument queue.
@@ -792,6 +816,8 @@ pub struct SourceRack {
     /// position comes from the time stamp, not from the rendering), and every routed event is
     /// also handed to the engine with the position it was heard at.
     midi: [bool; MAX_TRACKS],
+    /// Per track, the semitones its live notes are shifted by ([`FeedMsg::Transpose`]).
+    transpose: [i8; MAX_TRACKS],
     /// Per MIDI-loop track, the events of this call with their heard position, for recording.
     pub(crate) heard: Vec<Vec<(i64, [u8; 3])>>,
     /// Per track, what the instrument was sent in this process call, as (frame in the call, msg) -
@@ -832,6 +858,7 @@ impl SourceRack {
             leaked: 0,
             transport: PluginTransport::standing(48_000.0),
             midi: [false; MAX_TRACKS],
+            transpose: [0; MAX_TRACKS],
             heard: (0..MAX_TRACKS)
                 .map(|_| Vec::with_capacity(PENDING_EVENTS))
                 .collect(),
@@ -1013,6 +1040,13 @@ impl SourceRack {
                         self.flush_live[track] = true;
                     }
                 }
+                FeedMsg::Transpose { track, semitones } => {
+                    let semitones = semitones.clamp(-MAX_TRANSPOSE, MAX_TRANSPOSE);
+                    if track < MAX_TRACKS && self.transpose[track] != semitones {
+                        self.transpose[track] = semitones;
+                        self.flush_live[track] = true;
+                    }
+                }
                 FeedMsg::PanicAll => self.panic_all = true,
                 FeedMsg::Panic { track } => {
                     if let Some(instrument) = self.slots.get(track).and_then(Option::as_ref) {
@@ -1070,11 +1104,17 @@ impl SourceRack {
                     if !self.routes[t].takes(p, event.msg) {
                         continue;
                     }
+                    // The range was checked on the note as it came in; now it is moved.
+                    let Some(msg) = transposed(event.msg, self.transpose[t]) else {
+                        continue;
+                    };
                     let at = if self.midi[t] { start } else { fixed };
+                    // A MIDI loop stores what the instrument got: changing the transposition later
+                    // moves what is played live, not the layers already recorded.
                     if self.midi[t] && self.heard[t].len() < PENDING_EVENTS {
-                        self.heard[t].push((heard(event.host_ns), event.msg));
+                        self.heard[t].push((heard(event.host_ns), msg));
                     }
-                    if event.msg[0] & 0xF0 == 0x90 && event.msg[2] > 0 {
+                    if msg[0] & 0xF0 == 0x90 && msg[2] > 0 {
                         self.notes[t] = self.notes[t].wrapping_add(1);
                     }
                     let list = &mut self.pending[t];
@@ -1086,7 +1126,7 @@ impl SourceRack {
                     let i = list.partition_point(|e| e.at <= at);
                     list.insert(i, Pending {
                         at,
-                        msg: event.msg,
+                        msg,
                         source: SourceId::LIVE,
                         now: false,
                     });

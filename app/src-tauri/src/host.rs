@@ -278,6 +278,8 @@ pub enum Action {
     /// The note grid a track's MIDI layers are played on - the ones already recorded included.
     /// Changes nothing that was recorded and can be set back any time.
     SetNoteGrid { track: usize, grid: NoteGrid },
+    /// Shift an instrument track's live notes by this many semitones (-48..=48).
+    SetTranspose { track: usize, semitones: i8 },
     /// What `O` does in free looping: stay on until pressed again, or one pass.
     SetOverdubMode { mode: OverdubMode },
     /// Bars of count-in before a take that starts the standing clock of free looping (0 = off).
@@ -374,6 +376,7 @@ impl Action {
             | Action::FxPreset { track, .. }
             | Action::SetLoopKind { track, .. }
             | Action::SetNoteGrid { track, .. }
+            | Action::SetTranspose { track, .. }
             | Action::Panic {
                 track: Some(track),
             } => Some(track),
@@ -1395,6 +1398,7 @@ fn instrument_input(track: &CompiledTrack) -> Option<InstrumentInput> {
         loop_kind: (track.loop_kind == looper_engine::score::LoopKind::Midi)
             .then(|| "midi".to_string()),
         grid: track.grid.clone(),
+        transpose: midi.transpose,
     })
 }
 
@@ -1800,6 +1804,8 @@ struct Session {
     /// Per track, the note grid its setup or score gives it; a section of a running score may
     /// override it for one clip (`CompiledSection::grids`).
     grids: [NoteGrid; MAX_TRACKS],
+    /// The transposition last sent, per track.
+    transposes: Vec<i8>,
 }
 
 impl Session {
@@ -2170,6 +2176,7 @@ impl Session {
             logged_late: 0,
             clips,
             grids,
+            transposes: Vec::new(),
         };
         // The free mode's faders and chains, by track name - before anything is played, so the
         // first note already sounds the way the last session ended.
@@ -2257,6 +2264,21 @@ impl Session {
                 && self.feeds.send(FeedMsg::Route { track, route: *route }).is_ok()
             {
                 self.routes[track] = *route;
+            }
+        }
+        // Transposition per track, sent when it changed (the engine ends the held notes then).
+        for track in 0..self.instrument_inputs.len() {
+            let want = self.instrument_inputs[track]
+                .as_ref()
+                .and_then(|i| i.transpose)
+                .unwrap_or(0);
+            if self.transposes.len() <= track {
+                self.transposes.resize(track + 1, 0);
+            }
+            if self.transposes[track] != want
+                && self.feeds.send(FeedMsg::Transpose { track, semitones: want }).is_ok()
+            {
+                self.transposes[track] = want;
             }
         }
         // Masks: what each port's driver callback sends the fast way.
@@ -2552,6 +2574,12 @@ impl Session {
                     let lead = sched.lead(i, status.pos);
                     let mut event = track_event(i, &ui.name, &ts, &ui.gains, rate, lead);
                     event.grid = self.clips.grid(i).as_str().to_string();
+                    event.transpose = self
+                        .instrument_inputs
+                        .get(i)
+                        .and_then(|x| x.as_ref())
+                        .and_then(|x| x.transpose)
+                        .map_or(0, i32::from);
                     let timeline = &self.scheduler.timeline;
                     let bar = timeline.samples_per_beat() * timeline.beats_per_bar() as f64;
                     if bar > 0.0 {
@@ -3187,6 +3215,21 @@ impl Session {
         match action {
             Action::Transport { run } => self.set_transport(run),
             Action::SetLoopKind { track, midi } => self.set_loop_kind(track, midi),
+            Action::SetTranspose { track, semitones } => {
+                let name = self.tracks[track].name.clone();
+                if self.instrument_inputs.get(track).is_none_or(Option::is_none) {
+                    return Err(format!("\"{name}\" is not an instrument track - nothing to transpose."));
+                }
+                let semitones = semitones.clamp(-48, 48);
+                self.update_instrument(track, |i| {
+                    i.transpose = (semitones != 0).then_some(semitones);
+                });
+                self.message = Some(match semitones {
+                    0 => format!("\"{name}\": notes as played."),
+                    s => format!("\"{name}\": notes {s:+} semitones."),
+                });
+                Ok(())
+            }
             Action::SetNoteGrid { track, grid } => {
                 let name = self.tracks[track].name.clone();
                 if let Some(slot) = self.grids.get_mut(track) {

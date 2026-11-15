@@ -200,6 +200,10 @@ pub struct InstrumentSource {
     pub note_low: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_high: Option<u8>,
+    /// Semitones the live notes are shifted by before they reach the instrument (-48..=48) -
+    /// `transpose: 12` for pads that send an octave low. `notes:` applies before the shift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transpose: Option<i8>,
 }
 
 /// What a take stores. See [`TrackSource::loop_kind`].

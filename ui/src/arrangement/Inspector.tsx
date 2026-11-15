@@ -11,7 +11,7 @@ import { noteName } from "../plugins/instruments";
 import { usePlugins } from "../plugins/store";
 import { T } from "../shell/terms";
 import type { DocTrack, ModelIssue, ScoreDoc, ScoreState, TrackMidi } from "../types";
-import { GRID_CHOICES } from "../live/MidiLoopRows";
+import { GRID_CHOICES, TransposeControl } from "../live/MidiLoopRows";
 import { inputLabel } from "./Grid";
 import { STATES, STATE_LOOK, busHas, busWord, duration, plural } from "./labels";
 import * as ops from "./ops";
@@ -951,8 +951,18 @@ function InstrumentRows({
           )}
         </div>
       </div>
+      <div className="frow">
+        <label>{T.transpose}</label>
+        <div>
+          <TransposeControl
+            value={midi.transpose ?? 0}
+            disabled={!editable}
+            onChange={(v) => setMidi({ ...midi, transpose: v === 0 ? undefined : v })}
+          />
+        </div>
+      </div>
       <div className="hint">
-        Only the plugin’s id goes into the score; its sound stays on this computer. Keys outside the range stay with the MIDI bindings.
+        Only the plugin’s id goes into the score; its sound stays on this computer. Keys outside the range stay with the MIDI bindings; the range is checked before the transposition.
       </div>
     </>
   );
