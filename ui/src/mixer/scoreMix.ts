@@ -40,8 +40,17 @@ const SETTLE_MS = 350;
 
 /** The document (by `docId`) the runner was given; null after a reload of the window. */
 let liveDoc: number | null = null;
+/** The document the window started with (restored after a reload); only it may be guessed live. */
+let startDocId: number | null = null;
 /** The section as the engine has it, as far as this side knows - to tell an edit from an echo. */
 let synced = "";
+/**
+ * The mix the engine got from a document, as far as this side knows: set by "Load", by the
+ * write-back of a fader move and by an undo or typing that was sent on. Unlike `synced` it does not
+ * follow the open document to another one - it is what "is this song's mix the one playing?"
+ * compares against. Null: nothing loaded from here (yet).
+ */
+let engineKey: string | null = null;
 let lastRev = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
 let started = false;
@@ -56,7 +65,10 @@ function sameNames(doc: ScoreDoc, status: LooperStatus): boolean {
 export function isLive(doc: ScoreDoc | null, docId: number, status: LooperStatus): doc is ScoreDoc {
   if (!doc || !status.running || status.score === null) return false;
   if (liveDoc !== null) return liveDoc === docId && sameNames(doc, status);
-  // After a reload of the window nobody knows which document was loaded; the names have to do.
+  // After a reload of the window nobody knows which document was loaded; the names have to do -
+  // for the document the window came back with. A file opened since is another document: opening
+  // it must not move the engine, only "Load" does.
+  if (startDocId !== null && docId !== startDocId) return false;
   return sameNames(doc, status);
 }
 
@@ -65,6 +77,18 @@ export function markLoaded(): void {
   const s = docStore.get();
   liveDoc = s.docId;
   synced = keyOf(s.doc);
+  engineKey = synced;
+}
+
+/**
+ * Whether the mix of `doc` (its `mixer:` section and its pans) is the one the engine got from
+ * here. A difference that came from the engine (a fader written back) or went to it (undo,
+ * typing in the loaded song) is no difference; one made elsewhere - the file changed on disk and
+ * opened again, another song - is, and only "Load" closes it. True when nothing was loaded from
+ * here, so a reloaded window does not cry wolf.
+ */
+export function mixIsLoaded(doc: ScoreDoc | null | undefined): boolean {
+  return engineKey === null || keyOf(doc) === engineKey;
 }
 
 /** Changes that could not be written yet; `take` has already forgotten them. */
@@ -133,10 +157,13 @@ async function flush(): Promise<void> {
   const next = mergeMixer(doc, changes, full);
   if (next === doc) return;
   const before = synced;
+  const engineBefore = engineKey;
   // Set first: the store announces the edit synchronously, and that is no edit to send back.
   synced = keyOf(next);
+  engineKey = synced;
   if (!docStore.edit(() => next)) {
     synced = before;
+    engineKey = engineBefore;
     pending = changes;
     schedule();
   }
@@ -147,15 +174,25 @@ function schedule(): void {
   timer = setTimeout(() => void flush(), SETTLE_MS);
 }
 
+/** Whether a text is, apart from its mix, the one "Load" gave the runner (`scoreActions.ts`). */
+let textIsLoaded: (text: string) => boolean = () => false;
+export function setLoadedTextCheck(check: (text: string) => boolean): void {
+  textIsLoaded = check;
+}
+
 /** The document changed (undo, redo, typing): the engine follows its section - only this song's. */
 function onDoc(): void {
   const s = docStore.get();
   if (!s.inSync || !s.doc) return;
   const status = currentStatus();
+  // The loaded song opened again, unchanged (the same file once more, from Open or Recent): it is
+  // still the one playing, so fader moves go on being written into it.
+  if (liveDoc !== null && liveDoc !== s.docId && keyOf(s.doc) === engineKey && textIsLoaded(s.text)) liveDoc = s.docId;
   if (!isLive(s.doc, s.docId, status)) return;
   const key = keyOf(s.doc);
   if (key === synced) return;
   synced = key;
+  engineKey = key;
   // Undoing the very first write of the section: the engine keeps its mix (the pans still follow).
   const source = s.doc.mixer ? sourceOf(s.doc.mixer) : {};
   void mixerApi.apply(source, pansOf(s.doc)).catch(() => undefined);
@@ -167,6 +204,7 @@ export function startScoreMix(): void {
   started = true;
   startDoc();
   let lastDocId = docStore.get().docId;
+  startDocId = lastDocId;
   docStore.subscribe((s) => {
     if (s.docId !== lastDocId) {
       // Another document: it is not playing until "Load" says so.

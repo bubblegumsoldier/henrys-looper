@@ -49,6 +49,14 @@
 }
 .hl-arr .lockpill .ic { --ic: 12px; }
 .hl-arr .lockpill.warn { color: var(--warn); background: rgba(245, 185, 66, .08); border: 1px solid rgba(245, 185, 66, .35); }
+.hl-arr .workspace.with-diskbar { grid-template-rows: var(--toolbar-h) auto 1fr 24px; }
+.hl-arr .diskbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 12px;
+  font-size: var(--fs-11); color: var(--warn); background: rgba(245, 185, 66, .08);
+  border-bottom: 1px solid rgba(245, 185, 66, .35);
+}
+.hl-arr .diskbar .ic { --ic: 13px; }
+.hl-arr .diskbar span { flex: 1 1 auto; min-width: 0; }
 .hl-arr .statusbar .warnlink { border: 0; background: none; padding: 0; color: var(--warn); font-size: var(--fs-11); display: inline-flex; gap: 5px; align-items: center; }
 .hl-arr .statusbar .armedtxt { color: var(--st-armed); }
 

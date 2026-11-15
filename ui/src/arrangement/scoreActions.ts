@@ -23,7 +23,8 @@ import { currentStatus, useStatusSlice } from "../status";
 import type { RecentFile } from "../types";
 import { docStore, useDoc } from "./useDoc";
 import { docCountIn, setDocCountIn, withoutCountIn } from "./countIn";
-import { markLoaded, withoutMixer } from "../mixer/scoreMix";
+import { compareDisk } from "./diskWatch";
+import { markLoaded, mixIsLoaded, setLoadedTextCheck, withoutMixer } from "../mixer/scoreMix";
 
 export interface ScoreActions {
   recent: RecentFile[];
@@ -39,16 +40,36 @@ export interface ScoreActions {
   setCountIn: (bars: number) => void;
   /** The runner holds a score, and it is not the text in the editor. */
   stale: boolean;
+  /** The open file was changed on disk since it was opened or saved here (its name), else null. */
+  diskChanged: string | null;
+  /** Throw away the text here and open the file as it is on disk now. */
+  reloadFromDisk: () => Promise<void>;
+  /** Keep the text here; the next ⌘S writes over the file. */
+  keepMine: () => void;
 }
+
+/** The disk text "Keep mine" was chosen against; forgotten on open and save. */
+let kept: string | null = null;
 
 /** The text the runner was last given from here. */
 let loadedText: string | null = null;
 
 const plain = (t: string) => withoutCountIn(withoutMixer(t));
 
-/** The runner holds a score, and it is exactly the text in the editor. */
+setLoadedTextCheck((text) => loadedText !== null && plain(loadedText) === plain(text));
+
+/**
+ * The runner holds a score, and it is exactly the text in the editor. The `mixer:` block is
+ * compared by what it means, not by its text: a fader written back or an undo sent to the engine
+ * is no difference, a value changed elsewhere (the file on disk, another song) is.
+ */
 export function editorIsLoaded(): boolean {
-  return loadedText !== null && currentStatus().score !== null && plain(loadedText) === plain(scoreFile().text);
+  return (
+    loadedText !== null &&
+    currentStatus().score !== null &&
+    plain(loadedText) === plain(scoreFile().text) &&
+    mixIsLoaded(docStore.get().doc)
+  );
 }
 
 /**
@@ -78,7 +99,8 @@ export function useScoreActions(): ScoreActions {
   const [loading, setLoading] = useState(false);
   const engineInfo = useEngine().info;
   const [, setLoadedRev] = useState(0);
-  const countIn = docCountIn(useDoc().doc);
+  const docNow = useDoc().doc;
+  const countIn = docCountIn(docNow);
   const runnerCountIn = useStatusSlice((s) => s.score?.count_in ?? null);
   const inRunner = useStatusSlice((s) => s.score !== null);
 
@@ -100,9 +122,44 @@ export function useScoreActions(): ScoreActions {
     return confirmAction(`Discard unsaved changes to ${name}?`, "Unsaved changes", "Discard");
   }, []);
 
+  /** The file on disk now, if it differs from what was opened or saved here (and was not kept). */
+  const [diskText, setDiskText] = useState<string | null>(null);
+  const checkDisk = useCallback(async (): Promise<string | null> => {
+    const file = scoreFile();
+    if (!file.path) return null;
+    let disk: string | null;
+    try {
+      disk = await filesApi.peek(file.path);
+    } catch {
+      return null; // no app window
+    }
+    // The file may have been switched while the answer was on its way.
+    if (scoreFile().path !== file.path) return null;
+    const changed = compareDisk(scoreFile().savedText, disk, kept) === "changed" ? disk : null;
+    setDiskText(changed);
+    return changed;
+  }, []);
+
+  // Back in the window (after editing the file elsewhere): has it changed?
+  useEffect(() => {
+    const onFocus = () => void checkDisk();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void checkDisk();
+    };
+    void checkDisk();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [checkDisk]);
+
   const openPath = useCallback(async (path: string) => {
     try {
       const opened = await filesApi.open(path);
+      kept = null;
+      setDiskText(null);
       updateScoreFile({ text: opened.yaml, path: opened.path, name: opened.name, savedText: opened.yaml });
       setRecent(opened.recent);
       note(`Opened ${opened.name}.`);
@@ -132,15 +189,32 @@ export function useScoreActions(): ScoreActions {
     await docStore.flush();
     await docStore.settled();
     const text = scoreFile().text;
+    // Never write silently over a change made elsewhere: the bar asks first.
+    if (path === scoreFile().path && (await checkDisk()) !== null) {
+      fail(`Not saved: ${scoreFile().name ?? "the file"} was changed on disk since it was opened. Choose "Reload from disk" or "Keep mine" first.`);
+      return;
+    }
     try {
       const saved = await filesApi.save(path, text);
+      kept = null;
+      setDiskText(null);
       updateScoreFile({ path: saved.path, name: saved.name, savedText: text });
       setRecent(saved.recent);
       note(`Saved ${saved.name}.`);
     } catch (e) {
       fail((e as Error).message);
     }
-  }, []);
+  }, [checkDisk]);
+
+  const reloadFromDisk = useCallback(async () => {
+    const path = scoreFile().path;
+    if (path) await openPath(path);
+  }, [openPath]);
+
+  const keepMine = useCallback(() => {
+    kept = diskText;
+    setDiskText(null);
+  }, [diskText]);
 
   const saveAs = useCallback(async () => {
     const current = scoreFile();
@@ -169,6 +243,8 @@ export function useScoreActions(): ScoreActions {
     }));
     try {
       const text = await filesApi.template(tracks.length > 0 ? tracks : undefined);
+      kept = null;
+      setDiskText(null);
       updateScoreFile({ text, path: null, name: null, savedText: text });
     } catch (e) {
       fail((e as Error).message);
@@ -213,8 +289,9 @@ export function useScoreActions(): ScoreActions {
     }
   }, []);
 
-  // The mix and the count-in are kept in step with the engine both ways, so they do not make the
-  // loaded score stale - unless the runner's count-in really differs from the document's.
+  // The mix and the count-in are kept in step with the engine both ways, so following them does
+  // not make the loaded score stale - a mix that differs from what the engine got from here does
+  // (the file changed on disk and opened again), and so does a count-in the runner does not have.
   useEffect(() => {
     const l = () => setLoadedRev((n) => n + 1);
     loadedListeners.add(l);
@@ -223,6 +300,24 @@ export function useScoreActions(): ScoreActions {
   const stale =
     inRunner &&
     loadedText !== null &&
-    (plain(loadedText) !== plain(scoreFile().text) || (runnerCountIn !== null && runnerCountIn !== countIn));
-  return { recent, newScore, openFile, openRecent, save, saveAs, load, loading, countIn, setCountIn, stale };
+    (plain(loadedText) !== plain(scoreFile().text) ||
+      !mixIsLoaded(docNow) ||
+      (runnerCountIn !== null && runnerCountIn !== countIn));
+  const diskChanged = diskText !== null ? (scoreFile().name ?? "The score file") : null;
+  return {
+    recent,
+    newScore,
+    openFile,
+    openRecent,
+    save,
+    saveAs,
+    load,
+    loading,
+    countIn,
+    setCountIn,
+    stale,
+    diskChanged,
+    reloadFromDisk,
+    keepMine,
+  };
 }

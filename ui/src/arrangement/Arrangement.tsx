@@ -166,6 +166,24 @@ function LoadControls({ actions, ok, locked }: { actions: ScoreActions; ok: bool
   );
 }
 
+/** The open file was changed elsewhere: reload it or keep the text here - asked, never decided. */
+function DiskBar({ actions }: { actions: ScoreActions }) {
+  return (
+    <div className="diskbar" role="alert">
+      <i className="ic ic-warn" />
+      <span>
+        <b>{actions.diskChanged}</b> was changed on disk since it was opened here.
+      </span>
+      <button className="btn s accent" onClick={() => void actions.reloadFromDisk()} title="Open the file as it is on disk now. Changes made here since are lost.">
+        Reload from disk
+      </button>
+      <button className="btn s" onClick={actions.keepMine} title="Keep the text here. The next save writes over the file on disk.">
+        Keep mine
+      </button>
+    </div>
+  );
+}
+
 export function Arrangement({ onGoto, actions }: Props) {
   const fileName = useScoreFile().name;
   const state = useDoc();
@@ -377,7 +395,7 @@ export function Arrangement({ onGoto, actions }: Props) {
 
   return (
     <div className="hl-arr">
-      <div className="workspace">
+      <div className={`workspace${actions.diskChanged ? " with-diskbar" : ""}`}>
         <div className="toolbar">
           <div className="seg">
             <button className={view === "grid" ? "on" : undefined} onClick={() => setView("grid")}>
@@ -479,6 +497,7 @@ export function Arrangement({ onGoto, actions }: Props) {
             </>
           )}
         </div>
+        {actions.diskChanged && <DiskBar actions={actions} />}
 
         {view === "grid" ? (
           <div className={`main${inspector ? "" : " no-insp"}`}>

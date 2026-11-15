@@ -698,6 +698,13 @@ async fn score_file_save(
     .await
 }
 
+/// The open score's file as it is on disk now, without touching the recent list - to notice that
+/// it was changed elsewhere while it is open. `None` when it is gone or unreadable.
+#[tauri::command(rename_all = "snake_case")]
+async fn score_file_peek(path: String) -> Result<Option<String>, String> {
+    offload(move || Ok(files::read_score_file(std::path::Path::new(&path)).ok())).await
+}
+
 /// Drop one entry from the recent list (a file that has gone).
 #[tauri::command(rename_all = "snake_case")]
 async fn score_file_forget(
@@ -1148,6 +1155,7 @@ fn main() {
             score_files_info,
             score_file_open,
             score_file_save,
+            score_file_peek,
             score_file_forget,
             score_template,
             score_load,

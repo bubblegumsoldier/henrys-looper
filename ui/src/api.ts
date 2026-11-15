@@ -324,6 +324,8 @@ export const filesApi = {
   open: (path: string) => call<OpenedFile>("score_file_open", { path }),
   /** Write atomically. A name without extension gets `.yaml`; the answer has the real path. */
   save: (path: string, yaml: string) => call<SavedFile>("score_file_save", { path, yaml }),
+  /** The file as it is on disk now (null when gone), without touching the recent list. */
+  peek: (path: string) => call<string | null>("score_file_peek", { path }),
   /** Drop a recent entry (a file that has gone). */
   forget: (path: string) => call<RecentFile[]>("score_file_forget", { path }),
   /** Text for "New": the given tracks (normally the engine's) or a default pair. */
