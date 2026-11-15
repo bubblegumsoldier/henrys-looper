@@ -592,7 +592,7 @@ fn pickup_keeps_a_knob_quiet_until_it_reaches_the_value() {
 
     for value in [0u8, 10, 40, 80] {
         match router.resolve(&cc(3, value), &ctx) {
-            Resolution::Absorbed(reason) => assert!(reason.contains("drehen"), "{reason}"),
+            Resolution::Absorbed(reason) => assert!(reason.contains("turn it"), "{reason}"),
             other => panic!("bei {value} haette nichts passieren duerfen: {other:?}"),
         }
     }
@@ -792,7 +792,7 @@ fn a_control_bound_twice_in_a_profile_is_reported() {
         "device: X\nbindings:\n  ch1.note36: {target: track.1.record}\n  ch1.note36: {target: track.1.play}\n",
     )
     .unwrap_err();
-    assert!(issues.iter().any(|i| i.contains("mehrfach")), "{issues:?}");
+    assert!(issues.iter().any(|i| i.contains("more than once")), "{issues:?}");
 }
 
 #[test]
@@ -1024,7 +1024,7 @@ fn learn_takes_the_next_press_and_then_disarms_itself() {
     let mut learn = Learn::new();
     assert!(!learn.is_armed());
     let message = learn.arm(Target::Record(TrackRef::Index(0)));
-    assert!(message.contains("Aufnahme"), "{message}");
+    assert!(message.contains("Record"), "{message}");
     assert!(learn.is_armed());
 
     // A note off is not a press - learning on it would produce the same binding twice.
@@ -1044,7 +1044,7 @@ fn learn_says_what_the_control_did_before() {
     learn.arm(Target::Play(TrackRef::Index(0)));
     let previous = Binding::new(Target::Record(TrackRef::Index(0)));
     let learned = learn.feed(&press(36), Some(&previous)).expect("gelernt");
-    assert!(learned.message.contains("vorher"), "{}", learned.message);
+    assert!(learned.message.contains("(was "), "{}", learned.message);
     assert_eq!(learned.replaced, Some(Target::Record(TrackRef::Index(0))));
 }
 
@@ -1053,7 +1053,7 @@ fn learn_can_be_cancelled() {
     let mut learn = Learn::new();
     learn.arm(Target::ClearAll);
     let message = learn.cancel().expect("Meldung");
-    assert!(message.contains("abgebrochen"), "{message}");
+    assert!(message.contains("cancelled"), "{message}");
     assert!(!learn.is_armed());
     assert!(learn.cancel().is_none());
 }
@@ -1066,7 +1066,7 @@ fn learning_a_pad_onto_a_value_says_what_will_happen() {
     learn.arm(Target::FxKnob(TrackRef::Index(0), FxKnob::ReverbMix));
     let learned = learn.feed(&press(36), None).expect("gelernt");
     assert!(
-        learned.message.contains("Anschlagstaerke"),
+        learned.message.contains("velocity"),
         "{}",
         learned.message
     );
@@ -1184,7 +1184,7 @@ fn the_bus_addresses_name_the_source_and_the_bus() {
     }
 
     let err = Target::parse("track.1.bus.saal_hinten").expect_err("kein Bus");
-    assert!(err.contains("main und monitor"), "{err}");
+    assert!(err.contains("main and monitor"), "{err}");
 }
 
 /// A send switch changes **one bit of a set**. Switching a track off Main must leave it on the

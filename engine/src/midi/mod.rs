@@ -101,7 +101,7 @@ pub fn score_map(score: &CompiledScore) -> Result<MidiMap, Vec<String>> {
         }
         if let Some(previous) = map.insert(id, entry) {
             issues.push(format!(
-                "'{key}': {id} ist schon mit \"{}\" belegt. Eine Taste kann nur eine Sache tun.",
+                "'{key}': {id} is already bound to \"{}\". A control can only do one thing.",
                 previous.target
             ));
         }
@@ -111,7 +111,7 @@ pub fn score_map(score: &CompiledScore) -> Result<MidiMap, Vec<String>> {
 
 /// The mapping a session actually runs on: the controller's profile with the score laid over it.
 ///
-/// The second half of the answer is one German line per control the score took over - not an error,
+/// The second half of the answer is one English line per control the score took over - not an error,
 /// but the thing a musician has to be told before he presses it.
 pub fn session_map(
     profile: Option<&Profile>,

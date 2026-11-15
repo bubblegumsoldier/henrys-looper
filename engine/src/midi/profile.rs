@@ -105,7 +105,7 @@ impl Profile {
         let mut issues: Vec<String> = Vec::new();
         let NodeKind::Map(entries) = &document.kind else {
             return Err(vec![
-                "Ein Controller-Profil ist ein Mapping mit 'device' und 'bindings'.".to_string(),
+                "A controller profile is a mapping with 'device' and 'bindings'.".to_string(),
             ]);
         };
 
@@ -116,36 +116,35 @@ impl Profile {
                 Some("device") => match entry.value.as_str() {
                     Some(name) => device = name.to_string(),
                     None => issues.push(format!(
-                        "{}: 'device' muss der Name des Geraets sein (Text).",
+                        "{}: 'device' must be the name of the device (text).",
                         entry.key.pos
                     )),
                 },
                 Some("bindings") => bindings = Some(&entry.value),
                 Some(other) => issues.push(format!(
-                    "{}: unbekanntes Feld '{other}'. Ein Profil hat 'device' und 'bindings'.",
+                    "{}: unknown field '{other}'. A profile has 'device' and 'bindings'.",
                     entry.key.pos
                 )),
-                None => issues.push(format!("{}: Schluessel muessen Text sein.", entry.key.pos)),
+                None => issues.push(format!("{}: keys must be text.", entry.key.pos)),
             }
         }
         if device.is_empty() {
             issues.push(
-                "Das Feld 'device' fehlt. Es traegt den Namen, unter dem sich der Controller \
-                 meldet - 'looper-engine midi list' zeigt ihn."
+                "The field 'device' is missing. It holds the name the controller announces \
+                 itself with - 'looper-engine midi list' shows it."
                     .to_string(),
             );
         }
 
         let mut map = MidiMap::new();
         match bindings {
-            None => issues.push("Das Feld 'bindings' fehlt.".to_string()),
+            None => issues.push("The field 'bindings' is missing.".to_string()),
             Some(node) => match &node.kind {
                 NodeKind::Map(entries) => {
                     for entry in entries {
                         let Some(key) = entry.key.as_str() else {
                             issues.push(format!(
-                                "{}: ein Schluessel unter 'bindings' ist eine MIDI-Adresse wie \
-                                 ch1.note36.",
+                                "{}: a key under 'bindings' is a MIDI address like ch1.note36.",
                                 entry.key.pos
                             ));
                             continue;
@@ -161,9 +160,9 @@ impl Profile {
                             Ok(binding) => {
                                 if map.insert(id, binding).is_some() {
                                     issues.push(format!(
-                                        "{}: '{id}' kommt mehrfach vor. Eine Taste kann nur eine \
-                                         Sache tun; der zweite Eintrag wuerde den ersten still \
-                                         ueberschreiben.",
+                                        "{}: '{id}' appears more than once. A control can only \
+                                         do one thing; the second entry would silently \
+                                         overwrite the first.",
                                         entry.key.pos
                                     ));
                                 }
@@ -176,7 +175,7 @@ impl Profile {
                 }
                 NodeKind::Null => {}
                 _ => issues.push(format!(
-                    "{}: 'bindings' muss ein Mapping von MIDI-Adresse auf Ziel sein.",
+                    "{}: 'bindings' must be a mapping from MIDI address to target.",
                     node.pos
                 )),
             },
@@ -191,10 +190,10 @@ impl Profile {
 
     pub fn load(path: &Path) -> Result<Profile, String> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("Profil {} laesst sich nicht lesen: {e}", path.display()))?;
+            .map_err(|e| format!("Cannot read profile {}: {e}", path.display()))?;
         Profile::parse(&text).map_err(|issues| {
             let mut out = format!(
-                "Das Profil {} laesst sich nicht lesen ({} Fehler):",
+                "Cannot read profile {} ({} errors):",
                 path.display(),
                 issues.len()
             );
@@ -213,9 +212,9 @@ impl Profile {
     /// is expected to edit deserves a header line saying what it is.
     pub fn to_yaml(&self) -> String {
         let mut out = String::new();
-        out.push_str("# Controller-Profil fuer Henrys Looper.\n");
-        out.push_str("# 'looper-engine midi targets' listet alle Ziele, 'midi monitor' zeigt,\n");
-        out.push_str("# welche Adresse ein Pad oder Regler sendet.\n");
+        out.push_str("# Controller profile for Henrys Looper.\n");
+        out.push_str("# 'looper-engine midi targets' lists every target, 'midi monitor' shows\n");
+        out.push_str("# which address a pad or knob sends.\n");
         out.push_str(&self.body_yaml());
         out
     }
@@ -350,11 +349,11 @@ impl Profile {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                format!("Verzeichnis {} laesst sich nicht anlegen: {e}", parent.display())
+                format!("Cannot create directory {}: {e}", parent.display())
             })?;
         }
         std::fs::write(path, self.to_yaml())
-            .map_err(|e| format!("Profil {} laesst sich nicht schreiben: {e}", path.display()))
+            .map_err(|e| format!("Cannot write profile {}: {e}", path.display()))
     }
 }
 
@@ -434,7 +433,7 @@ fn read_binding(node: &Node<'_>) -> Result<Binding, String> {
     }
     let NodeKind::Map(entries) = &node.kind else {
         return Err(
-            "Eine Bindung ist entweder die Zieladresse oder ein Mapping mit 'target'.".to_string(),
+            "A binding is either the target address or a mapping with 'target'.".to_string(),
         );
     };
 
@@ -451,14 +450,14 @@ fn read_binding(node: &Node<'_>) -> Result<Binding, String> {
                 let address = entry
                     .value
                     .as_str()
-                    .ok_or("'target' muss eine Adresse sein, z. B. track.1.record.")?;
+                    .ok_or("'target' must be an address, e.g. track.1.record.")?;
                 target = Some(Target::parse(address)?);
             }
             "mode" => {
                 let text = entry.value.as_str().unwrap_or_default();
                 button = Some(ButtonMode::parse(text).ok_or_else(|| {
                     format!(
-                        "'{text}' ist kein Tastenverhalten. Erlaubt: {}.",
+                        "'{text}' is not a button mode. Allowed: {}.",
                         ButtonMode::names().join(", ")
                     )
                 })?);
@@ -467,7 +466,7 @@ fn read_binding(node: &Node<'_>) -> Result<Binding, String> {
                 let text = entry.value.as_str().unwrap_or_default();
                 takeover = Some(Takeover::parse(text).ok_or_else(|| {
                     format!(
-                        "'{text}' ist keine Wertuebernahme. Erlaubt: {}.",
+                        "'{text}' is not a takeover mode. Allowed: {}.",
                         Takeover::names().join(", ")
                     )
                 })?);
@@ -476,14 +475,14 @@ fn read_binding(node: &Node<'_>) -> Result<Binding, String> {
             "max" => max = Some(number(&entry.value, "max")?),
             other => {
                 return Err(format!(
-                    "Unbekanntes Feld '{other}' in einer Bindung. Es gibt 'target', 'mode', \
-                     'takeover', 'min' und 'max'."
+                    "Unknown field '{other}' in a binding. There are 'target', 'mode', \
+                     'takeover', 'min' and 'max'."
                 ));
             }
         }
     }
 
-    let target = target.ok_or("Der Bindung fehlt 'target'.")?;
+    let target = target.ok_or("The binding is missing 'target'.")?;
     let mut binding = Binding::new(target);
     if let Some(button) = button {
         binding.button = button;
@@ -501,7 +500,7 @@ fn number(node: &Node<'_>, what: &str) -> Result<f32, String> {
     match node.kind {
         NodeKind::Int(value) => Ok(value as f32),
         NodeKind::Float(value) => Ok(value as f32),
-        _ => Err(format!("'{what}' muss eine Zahl sein.")),
+        _ => Err(format!("'{what}' must be a number.")),
     }
 }
 

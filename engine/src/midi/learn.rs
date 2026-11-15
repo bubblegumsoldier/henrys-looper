@@ -24,7 +24,7 @@ use super::target::{Control, Target};
 pub struct Learned {
     pub id: MidiId,
     pub binding: Binding,
-    /// German sentence, ready to show.
+    /// English sentence, ready to show.
     pub message: String,
     /// What was on this control before, if anything - so the caller can say "Pad 5 war vorher X".
     pub replaced: Option<Target>,
@@ -45,8 +45,7 @@ impl Learn {
     /// while waiting.
     pub fn arm(&mut self, target: Target) -> String {
         let message = format!(
-            "Lernmodus: die naechste Taste oder der naechste Regler wird \"{}\". \
-             Abbruch mit Escape.",
+            "Learn mode: the next key or knob becomes \"{}\". Escape cancels.",
             target.label()
         );
         self.pending = Some(target);
@@ -55,7 +54,7 @@ impl Learn {
 
     pub fn cancel(&mut self) -> Option<String> {
         let target = self.pending.take()?;
-        Some(format!("Lernmodus abgebrochen - \"{}\" bleibt unbelegt.", target.label()))
+        Some(format!("Learn mode cancelled - \"{}\" stays unbound.", target.label()))
     }
 
     pub fn is_armed(&self) -> bool {
@@ -80,17 +79,17 @@ impl Learn {
         let id = event.id();
         let binding = Binding::new(target.clone());
 
-        let mut message = format!("{id} ist jetzt \"{}\"", binding.describe());
+        let mut message = format!("{id} is now \"{}\"", binding.describe());
         if let Some(previous) = previous
             && previous.target != binding.target
         {
-            message.push_str(&format!(" (vorher \"{}\")", previous.target.label()));
+            message.push_str(&format!(" (was \"{}\")", previous.target.label()));
         }
         message.push('.');
         if let (Control::Range(_), MidiEvent::NoteOn { .. }) = (target.control(), event) {
             message.push_str(
-                " Das ist eine Taste auf einem Wert - die Anschlagstaerke wird zum Wert. \
-                 Zum stufenlosen Fahren stattdessen einen Regler bewegen.",
+                " That is a key on a value - the velocity becomes the value. \
+                 Move a knob instead for smooth control.",
             );
         }
         Some(Learned {

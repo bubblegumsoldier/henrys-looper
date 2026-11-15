@@ -175,10 +175,11 @@ pub enum Resolution {
     /// Nothing is bound to this control.
     Unbound,
     /// Bound, and correctly did nothing - the note off of a trigger, a knob that has not caught its
-    /// parameter yet. The string says which, in German.
+    /// parameter yet. The string says which, in English.
     Absorbed(String),
     Action(MidiAction),
-    /// Bound, but cannot be carried out right now. German sentence, ready to show.
+    /// Bound, but cannot be carried out right now. English sentence, ready to show (except
+    /// `TRANSPORT_BELONGS_TO_SCORE`, which is the runner's own sentence).
     Refused(String),
 }
 
@@ -224,17 +225,17 @@ impl TrackLayout {
         &self.names
     }
 
-    /// Address -> index, or a German sentence saying why not.
+    /// Address -> index, or an English sentence saying why not.
     pub fn resolve(&self, reference: &TrackRef) -> Result<usize, String> {
         match reference {
             TrackRef::Index(index) if *index < self.names.len() => Ok(*index),
             TrackRef::Index(index) => Err(format!(
-                "Die Bindung meint Track {}, die Sitzung hat {}.",
+                "The binding means track {}, the session has {}.",
                 index + 1,
                 match self.names.len() {
-                    0 => "keinen".to_string(),
-                    1 => "nur Track 1".to_string(),
-                    n => format!("die Tracks 1 bis {n}"),
+                    0 => "no tracks".to_string(),
+                    1 => "only track 1".to_string(),
+                    n => format!("tracks 1 to {n}"),
                 }
             )),
             TrackRef::Name(name) => self
@@ -243,9 +244,9 @@ impl TrackLayout {
                 .position(|known| known == name)
                 .ok_or_else(|| {
                     format!(
-                        "Die Bindung meint den Track \"{name}\"; in dieser Sitzung gibt es {}.",
+                        "The binding means the track \"{name}\"; this session has {}.",
                         if self.names.is_empty() {
-                            "keinen".to_string()
+                            "no tracks".to_string()
                         } else {
                             self.names.join(", ")
                         }
@@ -410,11 +411,11 @@ impl Router {
         };
         if !fire {
             return Resolution::Absorbed(format!(
-                "\"{}\" loest beim {} aus.",
+                "\"{}\" fires on {}.",
                 binding.target,
                 match binding.button {
-                    ButtonMode::Release => "Loslassen",
-                    _ => "Druecken",
+                    ButtonMode::Release => "release",
+                    _ => "press",
                 }
             ));
         }
@@ -451,7 +452,7 @@ impl Router {
             },
             // Everything else is not a trigger; `Target::control` decided that above.
             other => {
-                return Resolution::Absorbed(format!("\"{other}\" loest nichts aus."));
+                return Resolution::Absorbed(format!("\"{other}\" does not fire."));
             }
         })
     }
@@ -470,7 +471,7 @@ impl Router {
             ButtonMode::Momentary => {
                 if !rising && !falling {
                     return Resolution::Absorbed(format!(
-                        "\"{}\" ist an, solange die Taste gehalten wird.",
+                        "\"{}\" is on while the key is held.",
                         binding.target
                     ));
                 }
@@ -479,7 +480,7 @@ impl Router {
             ButtonMode::Press => {
                 if !rising {
                     return Resolution::Absorbed(format!(
-                        "\"{}\" schaltet beim Druecken ein.",
+                        "\"{}\" switches on when pressed.",
                         binding.target
                     ));
                 }
@@ -488,7 +489,7 @@ impl Router {
             ButtonMode::Release => {
                 if !falling {
                     return Resolution::Absorbed(format!(
-                        "\"{}\" schaltet beim Loslassen aus.",
+                        "\"{}\" switches off when released.",
                         binding.target
                     ));
                 }
@@ -497,7 +498,7 @@ impl Router {
             ButtonMode::Toggle => {
                 if !rising {
                     return Resolution::Absorbed(format!(
-                        "\"{}\" schaltet beim Druecken um.",
+                        "\"{}\" toggles when pressed.",
                         binding.target
                     ));
                 }
@@ -534,7 +535,7 @@ impl Router {
                 slot: *slot,
                 on,
             },
-            other => return Resolution::Absorbed(format!("\"{other}\" ist kein Schalter.")),
+            other => return Resolution::Absorbed(format!("\"{other}\" is not a switch.")),
         })
     }
 
@@ -547,7 +548,7 @@ impl Router {
     ) -> Resolution {
         if matches!(event, MidiEvent::NoteOff { .. }) {
             return Resolution::Absorbed(format!(
-                "\"{}\" ist ein Wert; das Loslassen aendert ihn nicht.",
+                "\"{}\" is a value; releasing does not change it.",
                 binding.target
             ));
         }
@@ -575,10 +576,10 @@ impl Router {
                             state.caught = true;
                         } else {
                             state.last = Some(incoming);
-                            let direction = if incoming > current { "zurueck" } else { "weiter" };
+                            let direction = if incoming > current { "down" } else { "up" };
                             return Resolution::Absorbed(format!(
-                                "\"{}\" steht auf {:.0}, der Regler auf {incoming:.0} - {direction} \
-                                 drehen, bis er den Wert erreicht.",
+                                "\"{}\" is at {:.0}, the knob at {incoming:.0} - turn it {direction} \
+                                 until it reaches the value.",
                                 binding.target, current
                             ));
                         }
@@ -606,7 +607,7 @@ impl Router {
                 track,
                 param: knob.to_param(value),
             },
-            other => return Resolution::Absorbed(format!("\"{other}\" ist kein Wert.")),
+            other => return Resolution::Absorbed(format!("\"{other}\" is not a value.")),
         })
     }
 

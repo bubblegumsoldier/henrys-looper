@@ -170,7 +170,7 @@ impl Binding {
         }
     }
 
-    /// Reject a combination that cannot mean anything, in German, before it is written to a file.
+    /// Reject a combination that cannot mean anything, in English, before it is written to a file.
     ///
     /// The one that matters: a *toggle* or *momentary* on something that only fires. "Aufnahme,
     /// aber umgeschaltet" has no second state to switch to, and silently treating it as a press
@@ -181,8 +181,8 @@ impl Binding {
                 if matches!(self.button, ButtonMode::Toggle | ButtonMode::Momentary) =>
             {
                 Err(format!(
-                    "\"{}\" loest nur aus, es hat keinen Zustand zum Umschalten. Erlaubt sind hier \
-                     'press' und 'release'.",
+                    "\"{}\" only fires, it has no state to toggle. Allowed here are 'press' and \
+                     'release'.",
                     self.target
                 ))
             }
@@ -190,7 +190,7 @@ impl Binding {
                 let range = self.range().expect("Wertebereich");
                 if range.min == range.max {
                     return Err(format!(
-                        "\"{}\": 'min' und 'max' sind gleich ({}), damit laesst sich nichts fahren.",
+                        "\"{}\": 'min' and 'max' are equal ({}), so there is nothing to move.",
                         self.target, range.min
                     ));
                 }
@@ -200,7 +200,7 @@ impl Binding {
         }
     }
 
-    /// German one-liner for a list.
+    /// English one-liner for a list.
     pub fn describe(&self) -> String {
         let mut text = self.target.label();
         match self.target.control() {
@@ -307,7 +307,7 @@ impl MidiMap {
 
     /// Lay another map over this one: the song's additions on top of the controller's profile.
     ///
-    /// Returns one German line per control the score took over, because that is exactly the thing
+    /// Returns one English line per control the score took over, because that is exactly the thing
     /// a musician needs told. It is **not** an error - overriding the profile for one piece is what
     /// the score's `midi:` block is for - but a pad that silently stopped doing what it does in
     /// every other song is how a live set goes wrong.
@@ -318,7 +318,7 @@ impl MidiMap {
                 && previous.target != binding.target
             {
                 notes.push(format!(
-                    "{id}: die Partitur belegt diese Taste mit \"{}\" statt \"{}\" aus dem Profil.",
+                    "{id}: the score binds this control to \"{}\" instead of \"{}\" from the profile.",
                     binding.target, previous.target
                 ));
             }

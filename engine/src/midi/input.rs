@@ -104,7 +104,7 @@ pub fn list_ports() -> Result<Vec<PortInfo>, String> {
             index,
             name: input
                 .port_name(port)
-                .unwrap_or_else(|_| "<Name nicht lesbar>".to_string()),
+                .unwrap_or_else(|_| "<name unreadable>".to_string()),
         })
         .filter(|port| !port.name.trim().is_empty())
         .collect())
@@ -162,13 +162,13 @@ pub fn open(selector: &str) -> Result<MidiIn, String> {
         .map(|port| {
             input
                 .port_name(port)
-                .unwrap_or_else(|_| "<Name nicht lesbar>".to_string())
+                .unwrap_or_else(|_| "<name unreadable>".to_string())
         })
         .collect();
     if ports.is_empty() {
         return Err(
-            "Es ist kein MIDI-Eingang da. Haengt der Controller am Rechner, und hat ihn nicht \
-             schon ein anderes Programm (z. B. Ableton als Control Surface) fuer sich?"
+            "There is no MIDI input. Is the controller plugged in, and is no other program \
+             (e.g. Ableton as a control surface) holding it?"
                 .to_string(),
         );
     }
@@ -235,7 +235,7 @@ fn pick(selector: &str, names: &[String]) -> Result<usize, String> {
             return Ok(0);
         }
         return Err(format!(
-            "Es gibt {} MIDI-Eingaenge. Waehle einen aus:\n{}",
+            "There are {} MIDI inputs. Pick one:\n{}",
             names.len(),
             list(names)
         ));
@@ -243,7 +243,7 @@ fn pick(selector: &str, names: &[String]) -> Result<usize, String> {
     if let Ok(index) = selector.parse::<usize>() {
         return names.get(index).map(|_| index).ok_or_else(|| {
             format!(
-                "Den MIDI-Eingang {index} gibt es nicht. Vorhanden:\n{}",
+                "There is no MIDI input {index}. Available:\n{}",
                 list(names)
             )
         });
@@ -258,11 +258,11 @@ fn pick(selector: &str, names: &[String]) -> Result<usize, String> {
     match hits.as_slice() {
         [only] => Ok(*only),
         [] => Err(format!(
-            "Kein MIDI-Eingang enthaelt \"{selector}\". Vorhanden:\n{}",
+            "No MIDI input contains \"{selector}\". Available:\n{}",
             list(names)
         )),
         many => Err(format!(
-            "\"{selector}\" passt auf {} Eingaenge; bitte genauer oder mit der Nummer:\n{}",
+            "\"{selector}\" matches {} inputs; please be more specific or use the number:\n{}",
             many.len(),
             list(names)
         )),
@@ -279,19 +279,18 @@ fn list(names: &[String]) -> String {
 }
 
 fn init_error(error: midir::InitError) -> String {
-    format!("Das MIDI-System liess sich nicht starten: {error}.")
+    format!("Could not start the MIDI system: {error}.")
 }
 
 /// Turn midir's one-line failure into something that says what to do about it.
 fn connect_error(name: &str, message: &str) -> String {
     if message.contains("MMSYSERR_ALLOCATED") {
         return format!(
-            "Der MIDI-Eingang \"{name}\" ist belegt. Windows gibt ein MIDI-Geraet immer nur an ein \
-             Programm gleichzeitig heraus. Meistens haelt es Ableton Live als Control Surface \
-             fest; auch ein zweites Fenster dieses Programms oder ein MIDI-Monitor im \
-             Infobereich reicht. Das andere Programm schliessen oder dort das Geraet freigeben, \
-             dann erneut versuchen."
+            "The MIDI input \"{name}\" is in use. Windows gives a MIDI device to only one program \
+             at a time. Usually Ableton Live holds it as a control surface; a second window of \
+             this program or a MIDI monitor in the notification area is enough too. Close the \
+             other program or release the device there, then try again."
         );
     }
-    format!("Der MIDI-Eingang \"{name}\" liess sich nicht oeffnen: {message}.")
+    format!("Could not open the MIDI input \"{name}\": {message}.")
 }

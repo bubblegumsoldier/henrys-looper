@@ -76,14 +76,14 @@ impl TrackRef {
     /// A segment made only of digits is a position, anything else is a name.
     pub fn parse(text: &str) -> Result<Self, String> {
         if text.is_empty() {
-            return Err("Der Track fehlt in der Adresse (z. B. track.1.record).".to_string());
+            return Err("The address is missing the track (e.g. track.1.record).".to_string());
         }
         if text.bytes().all(|b| b.is_ascii_digit()) {
             let number: usize = text
                 .parse()
-                .map_err(|_| format!("'{text}' ist keine Tracknummer."))?;
+                .map_err(|_| format!("'{text}' is not a track number."))?;
             if number == 0 {
-                return Err("Tracks werden ab 1 gezaehlt, 'track.0' gibt es nicht.".to_string());
+                return Err("Tracks are counted from 1, there is no 'track.0'.".to_string());
             }
             return Ok(TrackRef::Index(number - 1));
         }
@@ -299,24 +299,24 @@ impl FxKnob {
         }
     }
 
-    /// German name, for a list a human reads.
+    /// English name, for a list a human reads.
     pub fn label(self) -> String {
         match self {
-            FxKnob::HighPassHz => "Hochpass-Frequenz".to_string(),
-            FxKnob::BandHz(b) => format!("EQ-Band {} Frequenz", b + 1),
-            FxKnob::BandQ(b) => format!("EQ-Band {} Guete", b + 1),
-            FxKnob::BandGainDb(b) => format!("EQ-Band {} Verstaerkung", b + 1),
-            FxKnob::CompThresholdDb => "Kompressor-Schwelle".to_string(),
-            FxKnob::CompRatio => "Kompressor-Verhaeltnis".to_string(),
-            FxKnob::CompAttackMs => "Kompressor-Attack".to_string(),
-            FxKnob::CompReleaseMs => "Kompressor-Release".to_string(),
-            FxKnob::CompKneeDb => "Kompressor-Knie".to_string(),
-            FxKnob::CompMakeupDb => "Kompressor-Ausgleich".to_string(),
-            FxKnob::DelayFeedback => "Delay-Rueckkopplung".to_string(),
-            FxKnob::DelayMix => "Delay-Anteil".to_string(),
-            FxKnob::ReverbSize => "Hall-Groesse".to_string(),
-            FxKnob::ReverbDamping => "Hall-Daempfung".to_string(),
-            FxKnob::ReverbMix => "Hall-Anteil".to_string(),
+            FxKnob::HighPassHz => "High-pass frequency".to_string(),
+            FxKnob::BandHz(b) => format!("EQ band {} frequency", b + 1),
+            FxKnob::BandQ(b) => format!("EQ band {} Q", b + 1),
+            FxKnob::BandGainDb(b) => format!("EQ band {} gain", b + 1),
+            FxKnob::CompThresholdDb => "Compressor threshold".to_string(),
+            FxKnob::CompRatio => "Compressor ratio".to_string(),
+            FxKnob::CompAttackMs => "Compressor attack".to_string(),
+            FxKnob::CompReleaseMs => "Compressor release".to_string(),
+            FxKnob::CompKneeDb => "Compressor knee".to_string(),
+            FxKnob::CompMakeupDb => "Compressor makeup".to_string(),
+            FxKnob::DelayFeedback => "Delay feedback".to_string(),
+            FxKnob::DelayMix => "Delay mix".to_string(),
+            FxKnob::ReverbSize => "Reverb size".to_string(),
+            FxKnob::ReverbDamping => "Reverb damping".to_string(),
+            FxKnob::ReverbMix => "Reverb mix".to_string(),
         }
     }
 
@@ -571,52 +571,61 @@ impl Target {
         )
     }
 
-    /// German name, for a list a human reads.
+    /// English name, for a list a human reads.
+    ///
+    /// Deliberately not built from the engine's own `label()`s (`Bus`, `TrackSource`, `FxSlot`,
+    /// `BandKind`, `Quantize`), which are German and belong to the terminal display; the words
+    /// here come from the small private helpers at the end of this file.
     pub fn label(&self) -> String {
         let track = |t: &TrackRef| format!("Track {t}");
         match self {
-            Target::ScoreStart => "Partitur starten".to_string(),
-            Target::ScoreNext => "naechste Sektion (Release)".to_string(),
-            Target::ScoreStopAll => "alles stoppen".to_string(),
-            Target::ScoreGoto(i) => format!("Sprung zu Sektion {}", i + 1),
-            Target::Click => "Klick".to_string(),
-            Target::ClearAll => "alles leeren".to_string(),
+            Target::ScoreStart => "Start score".to_string(),
+            Target::ScoreNext => "Release (next section)".to_string(),
+            Target::ScoreStopAll => "Stop all".to_string(),
+            Target::ScoreGoto(i) => format!("Go to section {}", i + 1),
+            Target::Click => "Click".to_string(),
+            Target::ClearAll => "Clear all".to_string(),
             Target::Tempo => "Tempo".to_string(),
-            Target::Quantize(q) => format!("Raster: {}", q.label()),
-            Target::Record(t) => format!("{}: Aufnahme", track(t)),
+            Target::Quantize(q) => format!("Quantize: {}", quantize_word(*q)),
+            Target::Record(t) => format!("{}: Record", track(t)),
             Target::Overdub(t) => format!("{}: Overdub", track(t)),
-            Target::Play(t) => format!("{}: Wiedergabe", track(t)),
-            Target::StopTrack(t) => format!("{}: Stopp", track(t)),
-            Target::ClearTrack(t) => format!("{}: leeren", track(t)),
-            Target::BusGain(bus) => format!("Lautstaerke {}", bus.label()),
-            Target::Monitor(t) => format!("{}: Mithoeren", track(t)),
-            Target::Pan(t) => format!("{}: Panorama", track(t)),
+            Target::Play(t) => format!("{}: Play", track(t)),
+            Target::StopTrack(t) => format!("{}: Stop", track(t)),
+            Target::ClearTrack(t) => format!("{}: Clear", track(t)),
+            Target::BusGain(bus) => format!("Volume {}", bus_word(*bus)),
+            Target::Monitor(t) => format!("{}: Monitor", track(t)),
+            Target::Pan(t) => format!("{}: Pan", track(t)),
             Target::Send(t, source, bus) => format!(
-                "{}: {} auf {}",
+                "{}: {} to {}",
                 track(t),
-                source.label(),
-                bus.label()
+                source_word(*source),
+                bus_word(*bus)
             ),
-            Target::LatencyTrim(t) => format!("{}: Latenz-Zuschlag", track(t)),
-            Target::LayerMute(t, l) => format!("{}: Ebene {} stumm", track(t), l + 1),
-            Target::LayerRemove(t, l) => format!("{}: Ebene {} entfernen", track(t), l + 1),
-            Target::LayerGain(t, l) => format!("{}: Ebene {} Lautstaerke", track(t), l + 1),
-            Target::FxBypass(t) => format!("{}: Effektkette umgehen", track(t)),
-            Target::FxEnabled(t, slot) => format!("{}: {}", track(t), slot.label()),
+            Target::LatencyTrim(t) => format!("{}: Latency trim", track(t)),
+            Target::LayerMute(t, l) => format!("{}: Layer {} mute", track(t), l + 1),
+            Target::LayerRemove(t, l) => format!("{}: Layer {} remove", track(t), l + 1),
+            Target::LayerGain(t, l) => format!("{}: Layer {} volume", track(t), l + 1),
+            Target::FxBypass(t) => format!("{}: Bypass effects", track(t)),
+            Target::FxEnabled(t, slot) => format!("{}: {}", track(t), slot_word(*slot)),
             Target::FxPreset(t, preset) => {
-                format!("{}: Preset \"{}\" laden", track(t), preset.label())
+                format!("{}: Load preset \"{}\"", track(t), preset.label())
             }
             Target::FxDelayNote(t, note) => {
-                format!("{}: Delay auf {}", track(t), note.label())
+                format!("{}: Delay at {}", track(t), note.label())
             }
             Target::FxBandKind(t, band, kind) => {
-                format!("{}: EQ-Band {} als {}", track(t), band + 1, kind.label())
+                format!(
+                    "{}: EQ band {} as {}",
+                    track(t),
+                    band + 1,
+                    band_kind_word(*kind)
+                )
             }
             Target::FxKnob(t, knob) => format!("{}: {}", track(t), knob.label()),
         }
     }
 
-    /// Parse an address. German errors with a way out, because these are read out of files people
+    /// Parse an address. English errors with a way out, because these are read out of files people
     /// write by hand.
     pub fn parse(address: &str) -> Result<Self, String> {
         let address = address.trim();
@@ -632,7 +641,7 @@ impl Target {
             ["transport", "start"] => Ok(Target::ScoreStart),
             ["transport", "next"] => Ok(Target::ScoreNext),
             ["transport", "stop_all"] => Ok(Target::ScoreStopAll),
-            ["transport", "goto", n] => Ok(Target::ScoreGoto(one_based(n, "Sektion")?)),
+            ["transport", "goto", n] => Ok(Target::ScoreGoto(one_based(n, "section")?)),
             ["global", "click"] => Ok(Target::Click),
             ["global", "clear_all"] => Ok(Target::ClearAll),
             ["global", "tempo"] => Ok(Target::Tempo),
@@ -670,13 +679,13 @@ fn parse_track(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, 
         },
         ["latency_trim"] => Ok(Target::LatencyTrim(track)),
         ["layer", n, what] => {
-            let layer = one_based(n, "Ebene")?;
+            let layer = one_based(n, "layer")?;
             match *what {
                 "mute" => Ok(Target::LayerMute(track, layer)),
                 "remove" => Ok(Target::LayerRemove(track, layer)),
                 "gain" => Ok(Target::LayerGain(track, layer)),
                 _ => Err(format!(
-                    "'{address}': an einer Ebene gibt es 'mute', 'remove' und 'gain', nicht '{what}'."
+                    "'{address}': a layer has 'mute', 'remove' and 'gain', not '{what}'."
                 )),
             }
         }
@@ -690,7 +699,7 @@ fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, Str
         ["bypass"] => Ok(Target::FxBypass(track)),
         ["preset", name] => match FxPreset::parse(name) {
             Some(FxPreset::Custom) | None => Err(format!(
-                "'{address}': das Preset '{name}' gibt es nicht. Es gibt {}.",
+                "'{address}': there is no preset '{name}'. There are {}.",
                 FxPreset::loadable()
                     .iter()
                     .map(|p| p.label())
@@ -700,10 +709,10 @@ fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, Str
             Some(preset) => Ok(Target::FxPreset(track, preset)),
         },
         ["eq", band, what] => {
-            let band = one_based(band, "EQ-Band")?;
+            let band = one_based(band, "EQ band")?;
             if band >= EQ_BANDS {
                 return Err(format!(
-                    "'{address}': es gibt die EQ-Baender 1 bis {EQ_BANDS}."
+                    "'{address}': the EQ bands are 1 to {EQ_BANDS}."
                 ));
             }
             match *what {
@@ -714,7 +723,7 @@ fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, Str
                 "low_shelf" => Ok(Target::FxBandKind(track, band, BandKind::LowShelf)),
                 "high_shelf" => Ok(Target::FxBandKind(track, band, BandKind::HighShelf)),
                 _ => Err(format!(
-                    "'{address}': an einem EQ-Band gibt es 'hz', 'q', 'gain' und die Bandarten \
+                    "'{address}': an EQ band has 'hz', 'q', 'gain' and the band types \
                      'peak', 'low_shelf', 'high_shelf'."
                 )),
             }
@@ -722,7 +731,7 @@ fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, Str
         ["delay", "note", value] => match DelayNote::parse(value) {
             Some(note) => Ok(Target::FxDelayNote(track, note)),
             None => Err(format!(
-                "'{address}': den Notenwert '{value}' gibt es nicht. Es gibt {}.",
+                "'{address}': there is no note value '{value}'. There are {}.",
                 DelayNote::all()
                     .iter()
                     .map(|n| n.name())
@@ -733,7 +742,7 @@ fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, Str
         [slot, "on"] => match FxSlot::parse(slot) {
             Some(slot) => Ok(Target::FxEnabled(track, slot)),
             None => Err(format!(
-                "'{address}': den Effekt '{slot}' gibt es nicht. Es gibt {}.",
+                "'{address}': there is no effect '{slot}'. There are {}.",
                 slot_names().join(", ")
             )),
         },
@@ -750,27 +759,28 @@ fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, Str
 }
 
 fn bus_unknown(address: &str, name: &str) -> String {
-    format!("'{address}': den Bus '{name}' gibt es nicht. Es gibt main und monitor.")
+    format!("'{address}': there is no bus '{name}'. There are main and monitor.")
 }
 
 fn slot_names() -> Vec<&'static str> {
     FxSlot::all().iter().map(|s| s.name()).collect()
 }
 
+/// `what` is a lower-case noun ("section", "layer", "EQ band") that the messages put in a sentence.
 fn one_based(text: &str, what: &str) -> Result<usize, String> {
     let number: usize = text
         .parse()
-        .map_err(|_| format!("'{text}' ist keine {what}-Nummer."))?;
+        .map_err(|_| format!("'{text}' is not a {what} number."))?;
     if number == 0 {
-        return Err(format!("{what}n werden ab 1 gezaehlt, '{what} 0' gibt es nicht."));
+        return Err(format!("{what}s are counted from 1, there is no {what} 0."));
     }
     Ok(number - 1)
 }
 
 fn unknown(address: &str) -> String {
     format!(
-        "'{address}' ist keine bekannte Adresse. Die Liste aller Adressen zeigt \
-         'looper-engine midi targets'."
+        "'{address}' is not a known address. 'looper-engine midi targets' lists every \
+         address."
     )
 }
 
@@ -819,6 +829,47 @@ fn band_kind_name(kind: BandKind) -> &'static str {
         BandKind::Peak => "peak",
         BandKind::LowShelf => "low_shelf",
         BandKind::HighShelf => "high_shelf",
+    }
+}
+
+// English words for the engine types whose own `label()` is German. Only for `Target::label`.
+
+fn bus_word(bus: Bus) -> &'static str {
+    match bus {
+        Bus::Main => "main",
+        Bus::Monitor => "monitor",
+    }
+}
+
+fn source_word(source: TrackSource) -> &'static str {
+    match source {
+        TrackSource::Loop => "Loop",
+        TrackSource::Monitor => "Monitor",
+    }
+}
+
+fn slot_word(slot: FxSlot) -> &'static str {
+    match slot {
+        FxSlot::HighPass => "High-pass",
+        FxSlot::Eq => "EQ",
+        FxSlot::Comp => "Compressor",
+        FxSlot::Delay => "Delay",
+        FxSlot::Reverb => "Reverb",
+    }
+}
+
+fn band_kind_word(kind: BandKind) -> &'static str {
+    match kind {
+        BandKind::Peak => "peak",
+        BandKind::LowShelf => "low shelf",
+        BandKind::HighShelf => "high shelf",
+    }
+}
+
+fn quantize_word(q: Quantize) -> &'static str {
+    match q {
+        Quantize::Bar => "bar",
+        Quantize::Loop => "loop",
     }
 }
 

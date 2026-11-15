@@ -105,26 +105,26 @@ impl MidiEvent {
         }
     }
 
-    /// German one-liner for the monitor display.
+    /// English one-liner for the monitor display.
     pub fn describe(&self) -> String {
         match *self {
             MidiEvent::NoteOn {
                 channel,
                 note,
                 velocity,
-            } => format!("Note an   Kanal {channel:2}  Note {note:3}  Anschlag {velocity:3}"),
+            } => format!("Note on   Channel {channel:2}  Note {note:3}  Velocity {velocity:3}"),
             MidiEvent::NoteOff {
                 channel,
                 note,
                 velocity,
-            } => format!("Note aus  Kanal {channel:2}  Note {note:3}  Anschlag {velocity:3}"),
+            } => format!("Note off  Channel {channel:2}  Note {note:3}  Velocity {velocity:3}"),
             MidiEvent::ControlChange {
                 channel,
                 controller,
                 value,
-            } => format!("Regler    Kanal {channel:2}  CC   {controller:3}  Wert     {value:3}"),
+            } => format!("Control   Channel {channel:2}  CC   {controller:3}  Value    {value:3}"),
             MidiEvent::PitchBend { channel, value } => {
-                format!("Pitchbend Kanal {channel:2}                Wert   {value:6}")
+                format!("Pitchbend Channel {channel:2}                Value  {value:6}")
             }
         }
     }
@@ -191,13 +191,13 @@ impl MidiId {
         }
     }
 
-    /// Parse `ch1.note36` / `ch1.cc64` / `ch1.bend`. German error, because this is read out of a
+    /// Parse `ch1.note36` / `ch1.cc64` / `ch1.bend`. English error, because this is read out of a
     /// file a human wrote.
     pub fn parse(text: &str) -> Result<Self, String> {
         let complaint = || {
             format!(
-                "'{text}' ist keine MIDI-Adresse. Erwartet wird ch<Kanal>.note<Nummer>, \
-                 ch<Kanal>.cc<Nummer> oder ch<Kanal>.bend, z. B. ch1.note36."
+                "'{text}' is not a MIDI address. Expected ch<channel>.note<number>, \
+                 ch<channel>.cc<number> or ch<channel>.bend, e.g. ch1.note36."
             )
         };
         let rest = text.strip_prefix("ch").ok_or_else(complaint)?;
@@ -205,7 +205,7 @@ impl MidiId {
         let channel: u8 = channel.parse().map_err(|_| complaint())?;
         if !(1..=16).contains(&channel) {
             return Err(format!(
-                "MIDI-Kanal {channel} in '{text}' gibt es nicht - es gibt die Kanaele 1 bis 16."
+                "There is no MIDI channel {channel} (in '{text}') - the channels are 1 to 16."
             ));
         }
         let (kind, number) = if rest == "bend" {
@@ -219,7 +219,7 @@ impl MidiId {
         };
         if number > 127 {
             return Err(format!(
-                "Die Nummer {number} in '{text}' ist zu gross - MIDI kennt 0 bis 127."
+                "The number {number} in '{text}' is too large - MIDI has 0 to 127."
             ));
         }
         Ok(Self {
