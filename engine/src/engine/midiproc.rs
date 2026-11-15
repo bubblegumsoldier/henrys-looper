@@ -122,6 +122,7 @@ impl EngineCore {
                 if !track.midi_loop() {
                     continue;
                 }
+                let len = track.loop_len();
                 for layer in track.layers_mut() {
                     if let Some(clip) = layer.clip_mut()
                         && clip.id() == list.clip
@@ -131,7 +132,7 @@ impl EngineCore {
                         if let Some(rack) = rack.as_deref_mut() {
                             clip.tracker.release_own(|msg| rack.push_now(t, msg));
                         }
-                        clip.install_list(&mut list.list);
+                        clip.install_list(&mut list.list, len);
                         break 'tracks;
                     }
                 }
@@ -367,6 +368,9 @@ impl EngineCore {
         };
         let preroll = self.midi_preroll();
         let sustain = self.sources.as_deref().map_or(0, |r| r.live_sustain(t));
+        if let Some(c) = self.tracks[t].layer_mut(take.layer).and_then(|l| l.clip_mut()) {
+            c.set_base(base);
+        }
         let Some(midi) = self.midi.as_deref_mut() else {
             return;
         };
@@ -595,6 +599,7 @@ impl EngineCore {
                 let Some(clip) = layer.clip_mut() else {
                     continue;
                 };
+                let base = clip.base();
                 let mut p = a;
                 while p < b {
                     let offset = (p - origin) % len;
@@ -603,6 +608,10 @@ impl EngineCore {
                     let (lo, hi) = clip.window(offset, offset + (stop - p));
                     for i in lo..hi {
                         let e = clip.play()[i];
+                        // Played live in this very pass of its take: it has sounded already.
+                        if e.heard_live(pass + u64::from(e.offset), base) {
+                            continue;
+                        }
                         let mut msg = e.msg;
                         if is_on(msg) && gain != 1.0 {
                             let v = (f32::from(msg[2]) * gain).round().clamp(0.0, 127.0) as u8;

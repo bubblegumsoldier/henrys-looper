@@ -283,7 +283,8 @@ fn the_pre_roll_keeps_a_hit_just_before_the_start() {
     assert_eq!(r[0].frame, -300);
     assert!(play_list(&rig, 0).contains(&PlayEvent {
         offset: (L - 300) as u32,
-        msg: [0x99, 36, 120]
+        msg: [0x99, 36, 120],
+        frame: -300,
     }));
     // Played back 300 frames before the third pass begins (the first pass was the recording).
     let got = sent(&rig, start + 2 * L - 1_000, start + 2 * L);
@@ -298,7 +299,8 @@ fn the_pre_roll_keeps_a_hit_just_before_the_start() {
     let list = play_list(&rig, 0);
     assert_eq!(list[0], PlayEvent {
         offset: 0,
-        msg: [0x99, 36, 120]
+        msg: [0x99, 36, 120],
+        frame: 0,
     });
     assert_eq!(list[1].offset, 200, "die Laenge bleibt");
     assert_eq!(raw(&rig, 0)[0].frame, -300, "Rohdaten unveraendert");
@@ -335,7 +337,8 @@ fn an_off_after_the_end_wraps_to_the_start() {
     assert_eq!(r[1].frame, (L + 2_000) as i64, "wo es gespielt wurde");
     assert_eq!(play_list(&rig, 0)[0], PlayEvent {
         offset: 2_000,
-        msg: [0x80, 60, 0]
+        msg: [0x80, 60, 0],
+        frame: (L + 2_000) as i64,
     });
     // Pass 3: off at 2000 (from pass 2's note), on at L - 5000.
     let got = sent(&rig, 2 * L, 3 * L);
@@ -1077,4 +1080,210 @@ fn the_owners_drums_with_nothing_played_leave_the_track_empty_and_the_groove_run
     assert_eq!(track.layer_count(), 0);
     assert!(rig.sim.core.track(1).playing());
     assert!(rig.sim.core.track(2).playing());
+}
+
+// ---------------------------------------------------------------------------------------------
+// What is played live sounds once in the pass it is recorded in
+// ---------------------------------------------------------------------------------------------
+
+/// 20 ms at 48 kHz: how early a drummer hits before the grid line.
+const EARLY: u64 = 960;
+
+/// Note ons of key `note` the instrument got in `from..to`.
+fn ons(rig: &Rig, from: u64, to: u64, note: u8) -> Vec<u64> {
+    sent(rig, from, to)
+        .into_iter()
+        .filter(|(_, m)| m[0] & 0xF0 == 0x90 && m[2] > 0 && m[1] == note)
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// One drum hit: on at `at`, off 400 frames later (pads send short notes).
+fn hit(rig: &mut Rig, at: u64, note: u8) {
+    play(rig, at, [0x99, note, 110]);
+    play(rig, at + 400, [0x89, note, 0]);
+}
+
+fn grid_rig(grid: NoteGrid) -> Rig {
+    let mut rig = rig();
+    rig.sim.clips.as_mut().unwrap().set_grid(0, grid);
+    rig
+}
+
+/// One grid step in frames at 100 BPM (a quarter is 28 800 frames).
+fn step_of(grid: NoteGrid) -> u64 {
+    (grid.step().unwrap() as u64) * 28_800 / u64::from(super::source::PPQ)
+}
+
+/// The owner's report: a hit 20 ms before a grid line in the middle of the recording pass sounds
+/// twice - live, and again from the quantised play list on its grid line. It must sound once, live;
+/// the loop plays it from the next pass on, on the line.
+#[test]
+fn an_early_hit_while_recording_sounds_once_in_its_pass() {
+    for grid in [NoteGrid::Sixteenth, NoteGrid::EighthTriplet] {
+        let s = step_of(grid);
+        let mut rig = grid_rig(grid);
+        record_first_pass(&mut rig);
+        let line = 9 * s;
+        hit(&mut rig, line - EARLY, 38);
+        rig.sim.run_to(3 * L);
+        let first = ons(&rig, 0, L, 38);
+        assert_eq!(first.len(), 1, "{grid:?}: Aufnahme-Durchlauf {first:?}");
+        assert_eq!(ons(&rig, L, 2 * L, 38), vec![L + line], "{grid:?}: naechster Durchlauf");
+        assert_eq!(ons(&rig, 2 * L, 3 * L, 38), vec![2 * L + line], "{grid:?}");
+        assert!(sounding(&rig).is_empty());
+    }
+}
+
+/// The same while overdubbing: the old layer plays on as before, the new hit sounds once.
+#[test]
+fn an_early_hit_while_overdubbing_sounds_once_in_its_pass() {
+    for grid in [NoteGrid::Sixteenth, NoteGrid::EighthTriplet] {
+        let s = step_of(grid);
+        let mut rig = grid_rig(grid);
+        record_first_pass(&mut rig);
+        hit(&mut rig, 2 * s, 36);
+        rig.sim.send(Command::StartOverdub { track: 0, at: L });
+        rig.sim.send(Command::StopRecord {
+            track: 0,
+            at: 2 * L,
+        });
+        let line = 5 * s;
+        hit(&mut rig, L + line - EARLY, 38);
+        rig.sim.run_to(4 * L);
+        let dub = ons(&rig, L, 2 * L, 38);
+        assert_eq!(dub.len(), 1, "{grid:?}: Overdub-Durchlauf {dub:?}");
+        assert_eq!(ons(&rig, L, 2 * L, 36), vec![L + 2 * s], "{grid:?}: alte Ebene spielt weiter");
+        for pass in [2, 3] {
+            assert_eq!(ons(&rig, pass * L, (pass + 1) * L, 38), vec![pass * L + line], "{grid:?}");
+            assert_eq!(ons(&rig, pass * L, (pass + 1) * L, 36), vec![pass * L + 2 * s], "{grid:?}");
+        }
+        assert!(sounding(&rig).is_empty());
+    }
+}
+
+/// Edge cases in one place: a hit in the pre-roll, just after the one, late, and just before the
+/// end of the recording (its line is the next pass's one) - with and without a grid. Each sounds
+/// once in the pass it is played in, and once per later pass from the loop.
+#[test]
+fn hits_at_the_edges_of_a_pass_sound_once() {
+    for grid in [NoteGrid::None, NoteGrid::Sixteenth, NoteGrid::EighthTriplet] {
+        let mut rig = grid_rig(grid);
+        rig.sim.run_to(20_000);
+        let start = 40_000u64;
+        rig.sim.send(Command::StartRecord { track: 0, at: start });
+        rig.sim.send(Command::StopRecord {
+            track: 0,
+            at: start + L,
+        });
+        rig.sim.send(Command::StartPlay {
+            track: 0,
+            at: start + L,
+        });
+        hit(&mut rig, start - 300, 36);
+        hit(&mut rig, start + 500, 38);
+        hit(&mut rig, start + 4 * 28_800 + 700, 42);
+        hit(&mut rig, start + L - EARLY, 46);
+        rig.sim.run_to(start + 4 * L + 2_000);
+        let pass = |n: u64| (start + n * L - 2_000, start + (n + 1) * L - 2_000);
+        for note in [36u8, 38, 42] {
+            let (a, b) = pass(0);
+            let got = ons(&rig, a, b, note);
+            assert_eq!(got.len(), 1, "{grid:?} Note {note}: Aufnahme-Durchlauf {got:?}");
+        }
+        // No flam anywhere: two ons of the same key are a loop apart, never a step or less.
+        for note in [36u8, 38, 42, 46] {
+            let all = ons(&rig, 0, start + 4 * L, note);
+            assert!(all.len() >= 3, "{grid:?} Note {note}: {all:?}");
+            for w in all.windows(2) {
+                assert!(w[1] - w[0] > L / 2, "{grid:?} Note {note} doppelt: {all:?}");
+            }
+        }
+        for n in [1u64, 2] {
+            for note in [38u8, 42] {
+                let (a, b) = pass(n);
+                let got = ons(&rig, a, b, note);
+                assert_eq!(got.len(), 1, "{grid:?} Note {note}: Durchlauf {n} {got:?}");
+            }
+        }
+        // 46 was heard live 20 ms before the end; its line is the next one. No flam there: the
+        // loop plays it from the one after.
+        let flam = ons(&rig, start + L - EARLY, start + L + 7_200, 46);
+        assert_eq!(flam.len(), 1, "{grid:?}: 46 an der Grenze {flam:?}");
+        let (a, b) = pass(2);
+        assert_eq!(ons(&rig, a, b, 46).len(), 1, "{grid:?}: 46 spaeter je Durchlauf einmal");
+        assert!(sounding(&rig).is_empty(), "{grid:?}: {:?}", sounding(&rig));
+    }
+}
+
+/// A key held down while overdubbing on a grid: the loop sends neither its on nor its off in that
+/// pass, so the live note is neither struck twice nor cut short; from the next pass on the loop
+/// plays it on the line with its length, and nothing hangs.
+#[test]
+fn a_held_key_while_overdubbing_is_left_alone_by_the_loop() {
+    let grid = NoteGrid::Sixteenth;
+    let s = step_of(grid);
+    let mut rig = grid_rig(grid);
+    record_first_pass(&mut rig);
+    hit(&mut rig, 2 * s, 36);
+    rig.sim.send(Command::StartOverdub { track: 0, at: L });
+    rig.sim.send(Command::StopRecord {
+        track: 0,
+        at: 2 * L,
+    });
+    let line = 4 * s;
+    play(&mut rig, L + line - EARLY, [0x90, 60, 100]);
+    play(&mut rig, L + line - EARLY + 10_000, [0x80, 60, 0]);
+    rig.sim.run_to(4 * L);
+    let keys = |from: u64, to: u64| -> Vec<(u64, [u8; 3])> {
+        sent(&rig, from, to).into_iter().filter(|(_, m)| m[1] == 60).collect()
+    };
+    let dub = keys(L, 2 * L);
+    assert_eq!(dub.len(), 2, "nur live: an und aus {dub:?}");
+    assert_eq!(dub[0].1, [0x90, 60, 100]);
+    assert_eq!(dub[1].1, [0x80, 60, 0]);
+    assert_eq!(keys(2 * L, 3 * L), vec![
+        (2 * L + line, [0x90, 60, 100]),
+        (2 * L + line + 10_000, [0x80, 60, 0])
+    ]);
+    assert!(sounding(&rig).is_empty());
+}
+
+/// Continuous overdub over three passes: every hit of every layer sounds once in its own pass, and
+/// from the next pass on once per pass, on its line.
+#[test]
+fn latched_passes_with_early_hits_sound_once_each() {
+    let grid = NoteGrid::Sixteenth;
+    let s = step_of(grid);
+    let mut rig = grid_rig(grid);
+    record_first_pass(&mut rig);
+    hit(&mut rig, 3 * s - EARLY, 36);
+    rig.sim.run_to(L / 2);
+    rig.sim.send(Command::LatchOverdub {
+        track: 0,
+        on: true,
+        at: 0,
+    });
+    for (pass, note) in [(1u64, 38u8), (2, 42), (3, 46)] {
+        hit(&mut rig, pass * L + (2 + pass) * 4 * s - EARLY, note);
+    }
+    rig.sim.run_to(4 * L - 10_000);
+    rig.sim.send(Command::LatchOverdub {
+        track: 0,
+        on: false,
+        at: 0,
+    });
+    rig.sim.run_to(6 * L);
+    for (pass, note) in [(0u64, 36u8), (1, 38), (2, 42), (3, 46)] {
+        let line = if pass == 0 { 3 * s } else { (2 + pass) * 4 * s };
+        for p in 0..6u64 {
+            let got = ons(&rig, p * L, (p + 1) * L, note);
+            let want = usize::from(p >= pass);
+            assert_eq!(got.len(), want, "Note {note}, Durchlauf {p}: {got:?}");
+            if p > pass {
+                assert_eq!(got, vec![p * L + line], "Note {note}, Durchlauf {p}");
+            }
+        }
+    }
+    assert!(sounding(&rig).is_empty());
 }

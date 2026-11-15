@@ -24,8 +24,20 @@
 //! With the grid at `none` the audio thread keeps `play` itself, one sorted insert per recorded
 //! event - which is what lets the first pass after a recording play its downbeat. With any other
 //! grid the control thread builds the list from its mirror of the raw data ([`build_play_list`])
-//! and swaps it in through a queue; from then on the clip is `external` and the audio thread only
-//! appends to `raw`. The audio thread never quantises.
+//! and swaps it in through a queue - also while the loop length is not known yet; from then on the
+//! clip is `external` and the audio thread only appends to `raw`. The audio thread never
+//! quantises, but it wraps a list into the loop itself, so a grid's downbeat sounds in the first
+//! pass after the recording even though the list was built before the length was known.
+//!
+//! # Played once, live
+//!
+//! Every play-list event keeps the frame it plays at before wrapping. Its occurrence in the pass
+//! of its own take is the one the musician played live - quantised, it can still lie ahead of the
+//! play position, by up to half a grid step (a hit a little early). The loop leaves out exactly
+//! that occurrence ([`PlayEvent::heard_live`]): what is played sounds once, live and unquantised,
+//! and the loop plays it from its next pass on. Its note off is left out with it, so a key held
+//! during the take is neither struck again nor cut short. A hit just before the end whose line
+//! is the next pass's one counts as heard there too - no flam at the boundary.
 //!
 //! # Boundary rules (see `super::process` for where they are applied)
 //!
@@ -66,10 +78,16 @@ pub struct RawEvent {
 }
 
 /// One event of a play list: a frame offset inside the loop and the message.
+///
+/// `frame` is where the event plays counted from the start of the clip's first pass, before it is
+/// wrapped into the loop (quantised, if a grid moved it). The pass of the take it was recorded in
+/// is where the musician played it live: the loop leaves out exactly that occurrence, so what is
+/// played sounds once - live - and the loop plays it from its next pass on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlayEvent {
     pub offset: u32,
     pub msg: [u8; 3],
+    pub frame: i64,
 }
 
 impl PlayEvent {
@@ -88,6 +106,13 @@ impl PlayEvent {
     #[inline]
     fn key(&self) -> (u32, u8) {
         (self.offset, Self::rank(self.msg))
+    }
+
+    /// Whether this event, met at loop position `at` (absolute), is the occurrence the musician
+    /// played live: the one in the pass of its own take. `base` is the clip's [`MidiClip::base`].
+    #[inline]
+    pub fn heard_live(&self, at: u64, base: u64) -> bool {
+        at as i64 - base as i64 == self.frame
     }
 }
 
@@ -148,6 +173,8 @@ pub struct MidiClip {
     /// The longest loop this clip may define, in frames - what an audio buffer's length is to an
     /// audio take. Set by the engine when the take begins.
     max_frames: u64,
+    /// Musical position of frame 0 of `raw` (the start of the pass the take began in).
+    base: u64,
     raw: Vec<RawEvent>,
     play: Vec<PlayEvent>,
     /// The play list came from the control thread (a grid); the audio thread no longer inserts.
@@ -167,6 +194,7 @@ impl MidiClip {
         Box::new(Self {
             id,
             max_frames: 0,
+            base: 0,
             raw: Vec::with_capacity(capacity),
             play: Vec::with_capacity(capacity),
             external: false,
@@ -180,6 +208,7 @@ impl MidiClip {
     pub fn recycle(&mut self, id: u32) {
         self.id = id;
         self.max_frames = 0;
+        self.base = 0;
         self.raw.clear();
         self.play.clear();
         self.external = false;
@@ -205,6 +234,17 @@ impl MidiClip {
     #[inline]
     pub fn set_max_frames(&mut self, frames: u64) {
         self.max_frames = frames;
+    }
+
+    #[inline]
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
+    /// Set by the engine when the take begins.
+    #[inline]
+    pub fn set_base(&mut self, base: u64) {
+        self.base = base;
     }
 
     pub fn raw(&self) -> &[RawEvent] {
@@ -254,6 +294,7 @@ impl MidiClip {
         let p = PlayEvent {
             offset: wrap(event.frame, loop_len),
             msg: event.ev.to_midi(),
+            frame: event.frame,
         };
         let key = p.key();
         // Stable: behind every event with the same key, so equal positions keep arrival order.
@@ -261,10 +302,15 @@ impl MidiClip {
         self.play.insert(i, p);
     }
 
-    /// The loop length has just become known: build the play list from what is recorded so far.
+    /// The loop length has just become known: build the play list from what is recorded so far -
+    /// or, for a list the control thread sent before the length was known, wrap it into the loop.
     /// Bounded by the clip size; nearly every insert is an append, because `raw` is in time order.
     pub fn rebuild_play(&mut self, loop_len: u64) {
-        if self.external || loop_len == 0 {
+        if loop_len == 0 {
+            return;
+        }
+        if self.external {
+            self.wrap_play(loop_len);
             return;
         }
         self.play.clear();
@@ -274,10 +320,26 @@ impl MidiClip {
         }
     }
 
-    /// Swap in a play list the control thread built; the old one is handed back for dropping.
-    pub fn install_list(&mut self, list: &mut Vec<PlayEvent>) {
+    /// Put every play-list event at its place in a loop of `loop_len` frames and sort the list.
+    /// In place, no allocation; the list is nearly sorted already.
+    fn wrap_play(&mut self, loop_len: u64) {
+        for e in self.play.iter_mut() {
+            e.offset = wrap(e.frame, loop_len);
+        }
+        self.play
+            .sort_unstable_by_key(|e| (e.offset, PlayEvent::rank(e.msg), e.frame));
+    }
+
+    /// Swap in a play list the control thread built; the old one is handed back for dropping. The
+    /// engine places it in the loop itself, so a list built before the loop length was known
+    /// plays from the first frame the length is (a grid's downbeat in the first pass after the
+    /// recording would otherwise be missed). `loop_len` 0: not known yet, wrapped later.
+    pub fn install_list(&mut self, list: &mut Vec<PlayEvent>, loop_len: u64) {
         std::mem::swap(&mut self.play, list);
         self.external = true;
+        if loop_len > 0 {
+            self.wrap_play(loop_len);
+        }
     }
 
     /// Indices of the play-list events with an offset in `from..to` (both inside the loop).
@@ -302,6 +364,9 @@ pub fn wrap(frame: i64, loop_len: u64) -> u32 {
 /// exactly what the audio thread builds incrementally. With one, every note on moves to the nearest
 /// grid line (strength 100 %), and its note off moves by the same amount, so the length of the note
 /// is kept; controllers, pitch bend and pressure stay where they were played.
+///
+/// `loop_len` 0 (not known yet): every event keeps its `frame` and offset 0; the engine wraps the
+/// list once the length is known ([`MidiClip::rebuild_play`]).
 pub fn build_play_list(
     raw: &[RawEvent],
     loop_len: u64,
@@ -309,9 +374,6 @@ pub fn build_play_list(
     frames_per_tick: f64,
 ) -> Vec<PlayEvent> {
     let mut list: Vec<PlayEvent> = Vec::with_capacity(raw.len().max(1));
-    if loop_len == 0 {
-        return list;
-    }
     let mut frames: Vec<i64> = raw.iter().map(|e| e.frame).collect();
     if let Some(step) = grid.step() {
         // Pair every note on with the next off of the same key and channel, in raw order.
@@ -335,11 +397,12 @@ pub fn build_play_list(
     }
     for (e, f) in raw.iter().zip(frames) {
         list.push(PlayEvent {
-            offset: wrap(f, loop_len),
+            offset: if loop_len > 0 { wrap(f, loop_len) } else { 0 },
             msg: e.ev.to_midi(),
+            frame: f,
         });
     }
-    list.sort_by_key(|p| p.key());
+    list.sort_by_key(|p| (p.key(), p.frame));
     list
 }
 
@@ -601,8 +664,6 @@ struct Mirror {
     dirty: bool,
     /// The clip plays a list from here; every change has to be sent.
     external: bool,
-    /// Loop length the last list was built for.
-    built_for: u64,
     grid: NoteGrid,
 }
 
@@ -711,23 +772,22 @@ impl ClipPool {
         }
         for (&id, m) in self.mirrors.iter_mut() {
             let grid = self.grids.get(m.track).copied().unwrap_or_default();
-            let len = loop_len(m.track);
-            if len == 0 {
-                continue;
-            }
             // A clip nobody quantised keeps the list the engine builds itself.
             if !m.external && grid == NoteGrid::None {
                 continue;
             }
-            if !m.dirty && m.grid == grid && m.built_for == len {
+            // Also while the loop length is not known yet: the engine wraps the list into the loop
+            // itself, so a recording with a grid plays quantised from the first frame of its next
+            // pass. A length that becomes known is no reason to send it again - a new list ends
+            // what the old one has sounding.
+            if !m.dirty && m.grid == grid {
                 continue;
             }
-            let list = build_play_list(&m.raw, len, grid, frames_per_tick);
+            let list = build_play_list(&m.raw, loop_len(m.track), grid, frames_per_tick);
             if self.lists.push(ClipList { clip: id, list }).is_ok() {
                 m.dirty = false;
                 m.external = true;
                 m.grid = grid;
-                m.built_for = len;
             }
         }
     }
@@ -741,7 +801,6 @@ impl ClipPool {
                         raw: Vec::new(),
                         dirty: false,
                         external: false,
-                        built_for: 0,
                         grid: NoteGrid::None,
                     });
                 }
@@ -751,7 +810,6 @@ impl ClipPool {
                         raw: Vec::new(),
                         dirty: false,
                         external: false,
-                        built_for: 0,
                         grid: NoteGrid::None,
                     });
                     m.raw.push(raw);
@@ -774,6 +832,11 @@ mod tests {
         }
     }
 
+    /// Offset and message of every event.
+    fn om(list: &[PlayEvent]) -> Vec<(u32, [u8; 3])> {
+        list.iter().map(|e| (e.offset, e.msg)).collect()
+    }
+
     #[test]
     fn the_engine_list_and_the_built_list_without_grid_are_the_same() {
         let fpt = 24_000.0 / f64::from(PPQ);
@@ -794,9 +857,9 @@ mod tests {
         let built = build_play_list(&raw, len, NoteGrid::None, fpt);
         assert_eq!(clip.play(), built.as_slice());
         // The pre-roll hit sits right before the end; the wrapped off at the start, before the on.
-        assert_eq!(built.first().unwrap(), &PlayEvent { offset: 0, msg: [0x90, 60, 90] });
-        assert!(built.contains(&PlayEvent { offset: 95_800, msg: [0x90, 36, 100] }));
-        assert!(built.contains(&PlayEvent { offset: 100, msg: [0x80, 62, 0] }));
+        assert_eq!(om(&built)[0], (0, [0x90, 60, 90]));
+        assert!(om(&built).contains(&(95_800, [0x90, 36, 100])));
+        assert!(om(&built).contains(&(100, [0x80, 62, 0])));
     }
 
     #[test]
@@ -822,13 +885,13 @@ mod tests {
         let before = raw.clone();
         let list = build_play_list(&raw, 96_000, NoteGrid::Sixteenth, fpt);
         assert_eq!(raw, before);
-        assert!(list.contains(&PlayEvent { offset: 6_000, msg: [0x90, 60, 100] }));
-        assert!(list.contains(&PlayEvent { offset: 7_000, msg: [0x80, 60, 0] }));
-        assert!(list.contains(&PlayEvent { offset: 0, msg: [0x90, 36, 100] }), "auf die Eins");
-        assert!(list.contains(&PlayEvent { offset: 800, msg: [0x80, 36, 0] }));
-        assert!(list.contains(&PlayEvent { offset: 6_450, msg: [0xE0, 0, 70] }), "Bend bleibt");
+        assert!(om(&list).contains(&(6_000, [0x90, 60, 100])));
+        assert!(om(&list).contains(&(7_000, [0x80, 60, 0])));
+        assert!(om(&list).contains(&(0, [0x90, 36, 100])), "auf die Eins");
+        assert!(om(&list).contains(&(800, [0x80, 36, 0])));
+        assert!(om(&list).contains(&(6_450, [0xE0, 0, 70])), "Bend bleibt");
         let triplet = build_play_list(&raw, 96_000, NoteGrid::EighthTriplet, fpt);
-        assert!(triplet.contains(&PlayEvent { offset: 8_000, msg: [0x90, 60, 100] }));
+        assert!(om(&triplet).contains(&(8_000, [0x90, 60, 100])));
     }
 
     #[test]
