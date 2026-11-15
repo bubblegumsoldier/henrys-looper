@@ -373,7 +373,7 @@ export const IDLE_STATUS: LooperStatus = {
   loop_seconds: 0,
   quantize: "loop",
   overdub_mode: "latch",
-  count_in_bars: 1,
+  count_in_bars: 2,
   counting_in: false,
   sample_rate: 0,
   latency_frames: 0,
@@ -521,7 +521,7 @@ export interface StartConfig {
   quantize: Quantize;
   /** What `O` does in free looping. Missing in an older stored setup: `latch`. */
   overdub_mode?: OverdubMode;
-  /** Bars of count-in before the first take of free looping (0, 1, 2). Missing: 1. */
+  /** Bars of count-in before the first take of free looping (0, 1, 2). Missing: 2. */
   count_in_bars?: number;
   /** Default compensation in frames, for every track that brings none of its own. */
   latency_frames: number;
@@ -649,6 +649,8 @@ export interface CompiledScore {
   beats_per_bar: number;
   /** Denominator: the note value that gets one beat. */
   beat_unit: number;
+  /** The score's `count_in:`, absent when it does not say. */
+  count_in?: number;
   tracks: CompiledTrack[];
   midi: Record<string, { id: string }>;
   sections: CompiledSection[];
@@ -891,6 +893,8 @@ export interface ScoreDoc {
   time_signature?: string;
   /** Old alias for the numerator; kept when a file used it. New documents use `time_signature`. */
   beats_per_bar?: number;
+  /** Bars of click before the first section, 1 to 8; absent means the default of two. */
+  count_in?: number;
   tracks: DocTrack[];
   midi: DocMidiBinding[];
   sections: DocSection[];

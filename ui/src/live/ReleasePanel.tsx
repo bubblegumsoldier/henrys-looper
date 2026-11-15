@@ -22,7 +22,8 @@ import {
   scoreStopAll,
   type ScoreView,
 } from "../shell/scoreTransport";
-import { STATE_WORD, T, bars, countdown, num, PENDING } from "../shell/terms";
+import { STATE_WORD, T, bars, countdown, countInWord, num, PENDING } from "../shell/terms";
+import { nextCountIn, setRunCountIn } from "../arrangement/countIn";
 import type { CompiledScore, LooperTrackStatus } from "../types";
 import type { Clock } from "./PositionPanel";
 
@@ -99,7 +100,7 @@ export function ReleasePanel({ score, compiled, clock, tracks }: Props) {
     );
     when = (
       <>
-        Press <b>{T.start}</b> or Space
+        Press <b>{T.start}</b> or Space · {T.countIn.toLowerCase()} {countInWord(score.countInBars)}
       </>
     );
   } else if (score.phase === "finished" || score.phase === "stopped") {
@@ -116,12 +117,33 @@ export function ReleasePanel({ score, compiled, clock, tracks }: Props) {
         Press for <b>Back to start</b> - clears every track
       </>
     );
+  } else if (armed?.countIn) {
+    // The count-in, counted down over all its bars - the same picture as the free looper's.
+    cls += " armed";
+    state = (
+      <>
+        <Icon name="metro" />
+        {T.countIn} · {countInWord(score.countInBars)}
+      </>
+    );
+    to = (
+      <>
+        <span>then</span>
+        {armed.label}
+      </>
+    );
+    when = (
+      <>
+        {T.bar.toLowerCase()} 1 in <b>{countdown(armed.bars, armed.beats)}</b> · {T.stopAll} cancels
+      </>
+    );
+    meter = <Countdown barsLeft={armed.bars} />;
   } else if (armed) {
     cls += " armed";
     state = (
       <>
         <Icon name="armed" />
-        {armed.countIn ? T.countIn : T.switchArmed}
+        {T.switchArmed}
       </>
     );
     to = (
@@ -130,9 +152,7 @@ export function ReleasePanel({ score, compiled, clock, tracks }: Props) {
         {armed.section === null ? T.end : armed.label}
       </>
     );
-    const grid = armed.countIn
-      ? "count-in"
-      : section?.autorelease
+    const grid = section?.autorelease
         ? "at section end"
         : section?.quantize === "bar"
           ? T.atNextBar
@@ -198,7 +218,7 @@ export function ReleasePanel({ score, compiled, clock, tracks }: Props) {
         <div className="when">{when}</div>
         {meter ?? <div className="countdown placeholder" />}
       </button>
-      <div className="lv-row">
+      <div className="lv-row three">
         <button
           className={`bigbtn${runs ? " running" : scoreCanStart(score) ? " ready" : ""}`}
           data-midi={TRANSPORT.start}
@@ -219,6 +239,19 @@ export function ReleasePanel({ score, compiled, clock, tracks }: Props) {
         >
           <Icon name="stopall" />
           {T.stopAll}
+        </button>
+        <button
+          className="bigbtn"
+          disabled={score.phase !== "idle"}
+          onClick={() => void setRunCountIn(nextCountIn(score.countInBars))}
+          title={
+            score.phase === "idle"
+              ? "Bars of click before the first section. Click to switch: 1 · 2 · 3 · 4 bars. Changes this run, and the score's count_in when the open song is the loaded one."
+              : "The count-in can be changed before the start (or after Back to start)."
+          }
+        >
+          <Icon name="metro" />
+          {T.countIn} {countInWord(score.countInBars)}
         </button>
       </div>
     </div>
@@ -257,7 +290,7 @@ function FreePanel({ clock, tracks }: { clock: Clock; tracks: LooperTrackStatus[
             title="Bars of click before a take that starts the standing clock (R or O). Space starts without one. Click to switch: off · 1 bar · 2 bars."
           >
             <Icon name="metro" />
-            {T.countIn}: {clock.countInBars === 0 ? "off" : clock.countInBars === 1 ? "1 bar" : `${clock.countInBars} bars`}
+            {T.countIn}: {countInWord(clock.countInBars)}
           </button>
         </div>
         {clock.countingIn && first ? (

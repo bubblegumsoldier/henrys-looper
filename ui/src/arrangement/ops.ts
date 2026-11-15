@@ -141,6 +141,14 @@ export function setTimeSignature(doc: ScoreDoc, signature: string): ScoreDoc {
   return done(d);
 }
 
+/** `count_in:` - bars of click before the first section, 1 to 8. Always written, also when it is
+ *  the default: a value somebody set on purpose stays visible in the file. */
+export function setCountIn(doc: ScoreDoc, bars: number): ScoreDoc {
+  const d = draft(doc);
+  d.count_in = Math.max(1, Math.min(8, Math.round(bars) || 1));
+  return done(d);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Cells
 // ---------------------------------------------------------------------------------------------

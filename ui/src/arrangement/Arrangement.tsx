@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MOD_LABEL } from "../platform";
+import { T } from "../shell/terms";
 import type { ModelIssue, ScoreDoc } from "../types";
 import { Grid, type GridZoomApi } from "./Grid";
 import { ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, snapZoom } from "./zoom";
@@ -121,12 +122,15 @@ function FileMenu({ actions }: { actions: ScoreActions }) {
   );
 }
 
+const COUNT_IN_TITLE =
+  "Bars of click before the first section (1 to 8) - the score's count_in, saved with the song. Without it: 2 bars.";
+
 /** Count-in and Load: hands the score to the runner. */
 function LoadControls({ actions, ok, locked }: { actions: ScoreActions; ok: boolean; locked: boolean }) {
   return (
     <>
-      <span className="lbl" title="Bars of click before the first section (1 to 8)">
-        Count-in
+      <span className="lbl" title={COUNT_IN_TITLE}>
+        {T.countIn}
       </span>
       <span className="field countin">
         <input
@@ -135,8 +139,11 @@ function LoadControls({ actions, ok, locked }: { actions: ScoreActions; ok: bool
           max={8}
           value={actions.countIn}
           disabled={locked}
-          onChange={(e) => actions.setCountIn(Number(e.target.value))}
-          title="Bars of click before the first section (1 to 8)"
+          onChange={(e) => {
+            const v = Number(e.target.value);
+            if (v >= 1 && v <= 8 && v !== actions.countIn) actions.setCountIn(v);
+          }}
+          title={COUNT_IN_TITLE}
         />
       </span>
       <button

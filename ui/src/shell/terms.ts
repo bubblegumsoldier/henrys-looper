@@ -240,6 +240,10 @@ export const ENGINE_STATE_KIND: Record<LooperTrackState, StateKind> = {
 export function bars(n: number): string {
   return `${n} ${n === 1 ? "bar" : "bars"}`;
 }
+/** A count-in setting: "off", "1 bar", "2 bars" - the same words in the free looper and the score. */
+export function countInWord(n: number): string {
+  return n <= 0 ? "off" : bars(n);
+}
 export function beats(n: number): string {
   return `${n} ${n === 1 ? "beat" : "beats"}`;
 }

@@ -2,7 +2,8 @@
 //!
 //! What the old score view did besides editing: New (from the template, with the engine's tracks),
 //! Open, Open recent, Save, Save as - each asking before unsaved changes are thrown away - and
-//! loading the score into the runner with a count-in. The text and the file it belongs to live in
+//! loading the score into the runner. The count-in is the score's own `count_in:` (see
+//! `countIn.ts`); the toolbar field edits it like any other head field. The text and the file it belongs to live in
 //! `scoreFile.ts`; the arrangement's document store follows that file (`useDoc.ts`), so opening a
 //! file replaces what the grid shows and starts a fresh undo history.
 //!
@@ -15,12 +16,13 @@ import { filesApi, scoreApi } from "../api";
 import { confirmAction, pickScoreToOpen, pickScoreToSave } from "../dialogs";
 import { IS_MAC } from "../platform";
 import { isDirty, scoreFile, updateScoreFile } from "../scoreFile";
-import { fail, note, say } from "../shell/notes";
+import { fail, note } from "../shell/notes";
 import { setLoadedScore } from "../shell/scoreModel";
 import { useEngine } from "../shell/engine";
 import { currentStatus, useStatusSlice } from "../status";
 import type { RecentFile } from "../types";
-import { docStore } from "./useDoc";
+import { docStore, useDoc } from "./useDoc";
+import { docCountIn, setDocCountIn, withoutCountIn } from "./countIn";
 import { markLoaded, withoutMixer } from "../mixer/scoreMix";
 
 export interface ScoreActions {
@@ -32,7 +34,7 @@ export interface ScoreActions {
   saveAs: () => Promise<void>;
   load: () => Promise<void>;
   loading: boolean;
-  /** Count-in bars for the next start; the runner's own value while it is idle. */
+  /** The score's `count_in:` (2 when it does not say); what "Load" counts in. */
   countIn: number;
   setCountIn: (bars: number) => void;
   /** The runner holds a score, and it is not the text in the editor. */
@@ -47,10 +49,9 @@ export function useScoreActions(): ScoreActions {
   const [defaultDir, setDefaultDir] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const engineInfo = useEngine().info;
-  const [countIn, setCountInRaw] = useState(1);
   const [, setLoadedRev] = useState(0);
+  const countIn = docCountIn(useDoc().doc);
   const runnerCountIn = useStatusSlice((s) => s.score?.count_in ?? null);
-  const runnerIdle = useStatusSlice((s) => s.score?.phase === "idle");
   const inRunner = useStatusSlice((s) => s.score !== null);
 
   useEffect(() => {
@@ -161,15 +162,7 @@ export function useScoreActions(): ScoreActions {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [newScore, openFile, save, saveAs]);
 
-  const shownCountIn = runnerIdle && runnerCountIn !== null ? runnerCountIn : countIn;
-  const setCountIn = useCallback(
-    (bars: number) => {
-      const v = Math.max(1, Math.min(8, Math.round(bars) || 1));
-      setCountInRaw(v);
-      if (runnerIdle) say(() => scoreApi.countIn(v));
-    },
-    [runnerIdle],
-  );
+  const setCountIn = useCallback((bars: number) => setDocCountIn(bars), []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -177,7 +170,8 @@ export function useScoreActions(): ScoreActions {
       await docStore.flush();
       await docStore.settled();
       const text = scoreFile().text;
-      const loaded = await scoreApi.load(text, shownCountIn);
+      // No count-in of its own: the score's `count_in:` is what the runner takes.
+      const loaded = await scoreApi.load(text);
       loadedText = text;
       // The host has applied the score's `mixer:`; from now on fader and section move together.
       markLoaded();
@@ -189,9 +183,14 @@ export function useScoreActions(): ScoreActions {
     } finally {
       setLoading(false);
     }
-  }, [shownCountIn]);
+  }, []);
 
-  // The mix is kept in step with the engine both ways, so it does not make the loaded score stale.
-  const stale = inRunner && loadedText !== null && withoutMixer(loadedText) !== withoutMixer(scoreFile().text);
-  return { recent, newScore, openFile, openRecent, save, saveAs, load, loading, countIn: shownCountIn, setCountIn, stale };
+  // The mix and the count-in are kept in step with the engine both ways, so they do not make the
+  // loaded score stale - unless the runner's count-in really differs from the document's.
+  const plain = (t: string) => withoutCountIn(withoutMixer(t));
+  const stale =
+    inRunner &&
+    loadedText !== null &&
+    (plain(loadedText) !== plain(scoreFile().text) || (runnerCountIn !== null && runnerCountIn !== countIn));
+  return { recent, newScore, openFile, openRecent, save, saveAs, load, loading, countIn, setCountIn, stale };
 }

@@ -26,6 +26,8 @@ export interface ScoreView {
   beat: number;
   pass: number;
   title: string;
+  /** Bars of count-in the next start plays (the run's count-in once it has started). */
+  countInBars: number;
   armed: {
     label: string;
     section: number | null;
@@ -47,6 +49,7 @@ const NONE: ScoreView = {
   beat: 0,
   pass: 0,
   title: "",
+  countInBars: 0,
   armed: null,
 };
 
@@ -65,6 +68,7 @@ function pick(s: LooperStatus): ScoreView {
     beat: score.beat,
     pass: score.pass,
     title: score.title,
+    countInBars: score.count_in,
     armed: a
       ? { label: a.label, section: a.section, bars: a.bars, beats: a.beats, countIn: a.count_in, text: a.text }
       : null,
@@ -82,7 +86,8 @@ function same(a: ScoreView, b: ScoreView): boolean {
     a.barsTotal !== b.barsTotal ||
     a.beat !== b.beat ||
     a.pass !== b.pass ||
-    a.title !== b.title
+    a.title !== b.title ||
+    a.countInBars !== b.countInBars
   )
     return false;
   if (a.armed === null || b.armed === null) return a.armed === b.armed;
