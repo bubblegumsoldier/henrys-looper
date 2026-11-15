@@ -172,6 +172,7 @@ export const T = {
 export const SCORE_STATE: Record<ScoreState, string> = {
   record: "Record",
   overdub: "Overdub",
+  stack: "Stack",
   play: "Play",
   stop: "Stop",
   hear_through: "Monitor",
@@ -180,9 +181,21 @@ export const SCORE_STATE: Record<ScoreState, string> = {
 export const SCORE_STATE_KIND: Record<ScoreState, StateKind> = {
   record: "rec",
   overdub: "dub",
+  // Overdub orange; the grid tells it apart by its icon (a stack of layers).
+  stack: "dub",
   play: "play",
   stop: "stop",
   hear_through: "hear",
+};
+
+/** What each score state does, in one line - the picker's and the inspector's explanation. */
+export const SCORE_STATE_HINT: Record<ScoreState, string> = {
+  record: "a new loop over the section",
+  overdub: "one more layer, one pass",
+  stack: "a new layer every pass until the section ends",
+  play: "plays what is recorded",
+  stop: "silent",
+  hear_through: "the input is heard, nothing is recorded",
 };
 
 /** The word for what a track is doing right now - the big word on a Live tile. */

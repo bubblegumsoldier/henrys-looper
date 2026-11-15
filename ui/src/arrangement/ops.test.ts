@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { henry } from "./fixtures";
 import * as ops from "./ops";
+import { STATE_BY_KEY, STATE_LOOK, STATES } from "./labels";
 import { deriveLayers, inheritedState, resolveSection, sectionSpans, totalBars } from "./resolve";
 
 describe("clip grid", () => {
@@ -230,5 +231,23 @@ describe("instrument tracks", () => {
     // An audio track cannot name an instrument: the entry loses it.
     expect(back.mixer?.tracks).toEqual([{ track: "voice" }]);
     expect(ops.setTrackInstrument(back, 1, false)).toBe(back);
+  });
+});
+
+describe("stack", () => {
+  it("is a pickable state with its own key and the stack symbol in overdub orange", () => {
+    expect(STATES).toContain("stack");
+    expect(STATE_BY_KEY.k).toBe("stack");
+    expect(STATE_LOOK.stack).toMatchObject({ cls: "dub", icon: "ic-layers", word: "Stack", key: "K" });
+    expect(STATE_LOOK.overdub.icon).not.toBe(STATE_LOOK.stack.icon);
+  });
+
+  it("adds at least one layer and leaves the count open for the sections after it", () => {
+    const doc = ops.setCellState(henry(), [{ section: 2, track: 1 }], "stack");
+    const layers = deriveLayers(doc);
+    expect(layers[2][1]).toMatchObject({ writes: 2, layers: 2, open: true });
+    // voice_3 repeats voice_2 and therefore stacks too; "alles" plays three or more.
+    expect(layers[4][1]).toMatchObject({ layers: 3, open: true });
+    expect(layers[1][1].stacked).toBe(true);
   });
 });

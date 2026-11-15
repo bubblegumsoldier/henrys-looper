@@ -8,7 +8,7 @@ import { gotoAddress } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
 import { say } from "../shell/notes";
 import type { ScoreView } from "../shell/scoreTransport";
-import { T } from "../shell/terms";
+import { SCORE_STATE, SCORE_STATE_HINT, T } from "../shell/terms";
 import type { CompiledScore } from "../types";
 
 interface Props {
@@ -63,6 +63,10 @@ export function ArrangementStrip({ score, compiled, onOpenArrangement }: Props) 
         const next = armedTo !== null && i === armedTo && !now;
         const cls = `blk${past ? " past" : ""}${now ? " now" : ""}${next ? " next" : ""}`;
         const progress = now && score.barsTotal > 0 ? (score.bar / score.barsTotal) * 100 : 0;
+        // A section that stacks: every pass is a new layer, so the pass number is the news.
+        const stacking = Object.entries(s.tracks)
+          .filter(([, state]) => state === "stack")
+          .map(([name]) => name);
         return (
           <button
             key={s.id + i}
@@ -70,11 +74,12 @@ export function ArrangementStrip({ score, compiled, onOpenArrangement }: Props) 
             style={{ "--n": Math.max(s.bars, 2.5), "--p": `${progress}%` } as CSSProperties}
             data-midi={gotoAddress(i)}
             onDoubleClick={() => say(() => scoreApi.goto(i))}
-            title={`Double-click to jump to ${s.id}`}
+            title={`Double-click to jump to ${s.id}${stacking.length > 0 ? ` · ${stacking.join(", ")}: ${SCORE_STATE.stack} – ${SCORE_STATE_HINT.stack}` : ""}`}
           >
             <div className="bn">
               <i>{i + 1}</i>
               <b>{s.id}</b>
+              {stacking.length > 0 && <Icon name="layers" />}
             </div>
             <div className="bm">
               {past ? (

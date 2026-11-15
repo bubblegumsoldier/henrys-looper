@@ -17,17 +17,20 @@ export interface StateLook {
   key: string;
 }
 
-const KEY: Record<ScoreState, string> = { record: "R", overdub: "O", play: "P", stop: "S", hear_through: "M" };
+const KEY: Record<ScoreState, string> = { record: "R", overdub: "O", stack: "K", play: "P", stop: "S", hear_through: "M" };
+
+/** A state whose icon is not its kind's: `stack` is overdub orange with a stack-of-layers symbol. */
+const ICON: Partial<Record<ScoreState, string>> = { stack: "ic-layers" };
 
 export const STATE_LOOK = Object.fromEntries(
   (Object.keys(KEY) as ScoreState[]).map((s) => [
     s,
-    { cls: SCORE_STATE_KIND[s], icon: `ic-${STATE_ICON[SCORE_STATE_KIND[s]]}`, word: SCORE_STATE[s], key: KEY[s] },
+    { cls: SCORE_STATE_KIND[s], icon: ICON[s] ?? `ic-${STATE_ICON[SCORE_STATE_KIND[s]]}`, word: SCORE_STATE[s], key: KEY[s] },
   ]),
 ) as Record<ScoreState, StateLook>;
 
-/** Picker order, as in the mockup: record, overdub, play, stop, monitor. */
-export const STATES: ScoreState[] = ["record", "overdub", "play", "stop", "hear_through"];
+/** Picker order, as in the mockup: record, overdub, stack, play, stop, monitor. */
+export const STATES: ScoreState[] = ["record", "overdub", "stack", "play", "stop", "hear_through"];
 
 export const STATE_BY_KEY: Record<string, ScoreState> = Object.fromEntries(
   STATES.map((s) => [STATE_LOOK[s].key.toLowerCase(), s]),

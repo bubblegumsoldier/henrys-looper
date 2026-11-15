@@ -62,11 +62,12 @@ const highlight = HighlightStyle.define([
   { tag: tags.meta, color: "#6b7686" },
 ]);
 
-/** Values the grammar calls plain "content": numbers, booleans and the five states get colours. */
-const VALUE = /(?<=[:[,]\s*)(true|false|-?\d+(?:\.\d+)?|record|overdub|play|stop|hear_through)(?=\s*(?:[,}\]]|#|$))/gm;
+/** Values the grammar calls plain "content": numbers, booleans and the six states get colours. */
+const VALUE = /(?<=[:[,]\s*)(true|false|-?\d+(?:\.\d+)?|record|overdub|stack|play|stop|hear_through)(?=\s*(?:[,}\]]|#|$))/gm;
 const valueClass: Record<string, string> = {
   record: "y-rec",
   overdub: "y-dub",
+  stack: "y-dub",
   play: "y-play",
   stop: "y-stop",
   hear_through: "y-hear",

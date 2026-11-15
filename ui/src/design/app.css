@@ -429,6 +429,12 @@ body {
     linear-gradient(rgba(255,159,67,.45), rgba(255,159,67,.45)) 6px calc(100% - 8px) / calc(100% - 12px) 2px no-repeat,
     linear-gradient(rgba(255,159,67,.30), rgba(255,159,67,.30)) 6px calc(100% - 13px) / calc(100% - 12px) 2px no-repeat,
     linear-gradient(rgba(255,159,67,.18), rgba(255,159,67,.18)) 6px calc(100% - 18px) / calc(100% - 12px) 2px no-repeat; }
+/* stack: dieselben Ebenen-Striche, dazu ein Takt-Raster - "noch eine Ebene, und noch eine" */
+.clip.dub.stack .bd { background:
+    repeating-linear-gradient(to right, rgba(255,159,67,.30) 0 1px, transparent 1px var(--b)),
+    linear-gradient(rgba(255,159,67,.45), rgba(255,159,67,.45)) 6px calc(100% - 8px) / calc(100% - 12px) 2px no-repeat,
+    linear-gradient(rgba(255,159,67,.30), rgba(255,159,67,.30)) 6px calc(100% - 13px) / calc(100% - 12px) 2px no-repeat,
+    linear-gradient(rgba(255,159,67,.18), rgba(255,159,67,.18)) 6px calc(100% - 18px) / calc(100% - 12px) 2px no-repeat; }
 .clip.hear .bd { background: radial-gradient(circle, rgba(56,189,248,.45) 1px, transparent 1.5px) 0 50% / 6px 6px repeat-x; }
 .clip.play .bd .lp { position: absolute; top: 3px; bottom: 3px; width: 1px; background: rgba(46,213,140,.45); }
 /* Wellenform (wenn der Loop existiert) */

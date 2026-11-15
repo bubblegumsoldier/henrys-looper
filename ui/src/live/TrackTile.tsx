@@ -90,12 +90,14 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
   const inPeaks = useCallback((s: LooperStatus) => s.tracks[i]?.input_peaks ?? [0], [i]);
   const outPeaks = useCallback((s: LooperStatus) => s.tracks[i]?.output_peaks ?? [0, 0], [i]);
 
-  // Layer dots: at least three places, one per layer beyond that; the one being written glows.
+  // Layer dots: at least three places, one per layer beyond that; the one being written glows. The
+  // placeholder a `stack` keeps while its first pass stayed empty is not a layer and not counted.
+  const layers = track.layers.filter((l) => !l.placeholder);
   const writing = track.state === "overdub" || track.state === "recording";
-  const dotCount = Math.max(3, track.layers.length + (writing && track.state === "recording" ? 1 : 0));
+  const dotCount = Math.max(3, layers.length + (writing && track.state === "recording" ? 1 : 0));
   const dots = Array.from({ length: Math.min(dotCount, 8) }, (_, n) => {
-    const layer = track.layers[n];
-    if (writing && n === (track.state === "recording" ? 0 : track.layers.length - 1)) return "rec";
+    const layer = layers[n];
+    if (writing && n === (track.state === "recording" ? 0 : layers.length - 1)) return "rec";
     if (layer) return layer.muted ? "muted" : "on";
     return "";
   });
@@ -135,7 +137,7 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
               : `${T.input} ${track.input_channels.join("–")}`}
         </span>
         <FxLetters track={track} />
-        <span className="lay" title={`${track.layers.length} ${track.layers.length === 1 ? "layer" : "layers"}`}>
+        <span className="lay" title={`${layers.length} ${layers.length === 1 ? "layer" : "layers"}`}>
           {dots.map((d, n) => (
             <i key={n} className={d} />
           ))}
@@ -168,7 +170,7 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
       <div className={`is ${kind}`}>
         <Icon name={STATE_ICON[kind]} />
         <div className="w">
-          <b>{kind === "dub" ? `${STATE_WORD[kind]} · ${T.layer.toLowerCase()} ${Math.max(1, track.layers.length)}` : STATE_WORD[kind]}</b>
+          <b>{kind === "dub" ? `${STATE_WORD[kind]} · ${T.layer.toLowerCase()} ${Math.max(1, layers.length)}` : STATE_WORD[kind]}</b>
           <span>{stateLine(track, kind, barInLoop, loopBars, latchMode)}</span>
         </div>
       </div>

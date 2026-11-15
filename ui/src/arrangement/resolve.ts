@@ -137,7 +137,8 @@ export function secondsPerBar(doc: ScoreDoc): number {
 
 /**
  * Which layer each cell produces, walking the score front to back the way an uninterrupted run
- * would: `record` starts a fresh loop (layer 1), `overdub` adds one, `play` plays however many
+ * would: `record` starts a fresh loop (layer 1), `overdub` adds one, `stack` adds one per pass
+ * (at least one - how many depends on when Release is pressed), `play` plays however many
  * there are. `layers` is the count once the section has run; `recordsLoop` tells a take that only
  * defines the loop (nothing is stacked on it later) from the first of several layers.
  */
@@ -147,12 +148,15 @@ export interface CellLayer {
   writes: number | null;
   /** True for a `record` that is followed by an `overdub` on the same loop. */
   stacked: boolean;
+  /** A `stack` ran before (or here): `layers` is the least there will be, possibly more. */
+  open?: boolean;
 }
 
 export function deriveLayers(doc: ScoreDoc): CellLayer[][] {
   const out: CellLayer[][] = doc.sections.map(() => []);
   doc.tracks.forEach((track, t) => {
     let layers = 0;
+    let open = false;
     let lastRecord: CellLayer | null = null;
     doc.sections.forEach((section, s) => {
       const resolved = section.resolved ?? resolveSection(doc, s);
@@ -160,14 +164,16 @@ export function deriveLayers(doc: ScoreDoc): CellLayer[][] {
       let cell: CellLayer;
       if (state === "record") {
         layers = 1;
+        open = false;
         cell = { layers, writes: 1, stacked: false };
         lastRecord = cell;
-      } else if (state === "overdub") {
+      } else if (state === "overdub" || state === "stack") {
         layers = layers === 0 ? 1 : layers + 1;
-        cell = { layers, writes: layers, stacked: false };
+        if (state === "stack") open = true;
+        cell = { layers, writes: layers, stacked: false, open };
         if (lastRecord) lastRecord.stacked = true;
       } else {
-        cell = { layers, writes: null, stacked: false };
+        cell = { layers, writes: null, stacked: false, open };
       }
       out[s][t] = cell;
     });

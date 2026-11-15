@@ -554,10 +554,13 @@ export function Grid({ doc, errors, editable, run, sel, setSel, zoom, setZoom, z
               let lay = "";
               if (st.state === "record") lay = layer?.stacked ? "Layer 1" : `${span.bars} bars`;
               else if (st.state === "overdub" && layer?.writes) lay = `Layer ${layer.writes}`;
-              else if (st.state === "play" && layer) lay = layer.layers > 1 ? `${layer.layers} layers` : layer.layers === 0 ? "nothing yet" : "";
+              else if (st.state === "stack" && layer?.writes) lay = `Layer ${layer.writes}+`;
+              else if (st.state === "play" && layer)
+                lay = layer.open ? `${layer.layers}+ layers` : layer.layers > 1 ? `${layer.layers} layers` : layer.layers === 0 ? "nothing yet" : "";
               const cls = [
                 "clip",
                 look.cls,
+                st.state === "stack" && "stack",
                 inherited && "inh",
                 px < 34 ? "tiny" : px < 96 ? "mini" : "",
                 cellSel.has(`${si}:${ti}`) && "sel",

@@ -9,7 +9,7 @@ import { midiApi } from "../api";
 import { InstrumentPicker } from "../mixer/InstrumentSlot";
 import { noteName } from "../plugins/instruments";
 import { usePlugins } from "../plugins/store";
-import { T } from "../shell/terms";
+import { SCORE_STATE_HINT, T } from "../shell/terms";
 import type { DocTrack, ModelIssue, ScoreDoc, ScoreState, TrackMidi } from "../types";
 import { GRID_CHOICES, TransposeControl } from "../live/MidiLoopRows";
 import { inputLabel } from "./Grid";
@@ -424,7 +424,7 @@ function SectionPanel({ doc, errors, editable, sel, setSel, edit, onIssue, index
                       key={state}
                       className={`${look.cls}${st?.state === state ? " on" : ""}`}
                       disabled={!editable}
-                      title={`${look.word} (${look.key})`}
+                      title={`${look.word} (${look.key}) – ${SCORE_STATE_HINT[state]}`}
                       onClick={() => pick(ti, state)}
                     >
                       <i className={`ic ${look.icon}`} />
@@ -494,7 +494,7 @@ function SectionPanel({ doc, errors, editable, sel, setSel, edit, onIssue, index
   );
 }
 
-function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc; index: number; track: number; layers?: { layers: number; writes: number | null; stacked: boolean }; editable: boolean; edit: Props["edit"] }) {
+function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc; index: number; track: number; layers?: { layers: number; writes: number | null; stacked: boolean; open?: boolean }; editable: boolean; edit: Props["edit"] }) {
   const s = doc.sections[index];
   const r = s.resolved ?? resolveSection(doc, index);
   const t = doc.tracks[track];
@@ -510,8 +510,17 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
     case "overdub":
       what = layers && layers.layers > 1 ? <>{name} keeps playing and records layer {layers.writes} on top.</> : <>{name} has no loop yet at this point, so this overdub records the first one.</>;
       break;
+    case "stack":
+      what = (
+        <>
+          {name} gets a new layer every pass until the section ends{r.autorelease.value ? ` (${bars} bars)` : " - until Release, at the end of the running pass"}.{" "}
+          {layers && layers.layers > 1 ? <>The first pass adds layer {layers.writes}.</> : <>The track has no loop yet, so the first pass defines a {bars}-bar loop; a pass in which nothing is played leaves no layer.</>}
+          {r.autorelease.value && !(layers && layers.layers > 1) && <> With autorelease that is a single pass - use Record, or switch autorelease off.</>}
+        </>
+      );
+      break;
     case "play":
-      what = layers && layers.layers > 0 ? <>{name} plays its loop{layers.layers > 1 ? ` (${layers.layers} layers)` : ""}.</> : <>Nothing has been recorded on {name} yet at this point, so it stays silent.</>;
+      what = layers && layers.layers > 0 ? <>{name} plays its loop{layers.open ? ` (${layers.layers} or more layers)` : layers.layers > 1 ? ` (${layers.layers} layers)` : ""}.</> : <>Nothing has been recorded on {name} yet at this point, so it stays silent.</>;
       break;
     case "stop":
       what = <>{name} is silent. Its loop is kept for later sections.</>;
@@ -524,7 +533,7 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
       );
       break;
   }
-  const needsMonitor = !t.instrument && (st.state === "record" || st.state === "overdub" || st.state === "hear_through");
+  const needsMonitor = !t.instrument && (st.state === "record" || st.state === "overdub" || st.state === "stack" || st.state === "hear_through");
   const own = st.from.kind === "own";
   const ownGrid = s.tracks.find((x) => x.track === t.name)?.grid;
   return (

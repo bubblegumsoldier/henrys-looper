@@ -43,6 +43,11 @@ export interface LayerStatus {
   gain: number;
   /** On a MIDI loop: how many notes the layer holds. Absent on an audio layer. */
   notes?: number;
+  /**
+   * The muted stand-in of a `stack` whose first pass stayed empty: it only holds the loop's grid
+   * and is replaced by the first pass that is played. Not counted as a layer. Absent when false.
+   */
+  placeholder?: boolean;
 }
 
 // --- effects ---------------------------------------------------------------
@@ -602,7 +607,8 @@ export interface CalibrateOutcome {
 // ---------------------------------------------------------------------------------------------
 
 /** What a score asks of a track during a section. The complete state, never a delta. */
-export type ScoreState = "record" | "overdub" | "play" | "stop" | "hear_through";
+/** `stack`: a new layer every pass until the section ends (overdub that keeps going). */
+export type ScoreState = "record" | "overdub" | "stack" | "play" | "stop" | "hear_through";
 
 /** A track after compilation. Carries both numberings so nothing has to convert twice. */
 export interface CompiledTrack {
@@ -1023,6 +1029,7 @@ export interface ScoreStatus {
 export const SCORE_STATE_LABEL: Record<ScoreState, string> = {
   record: "Record",
   overdub: "Overdub",
+  stack: "Stack",
   play: "Play",
   stop: "Stop",
   hear_through: "Monitor",
