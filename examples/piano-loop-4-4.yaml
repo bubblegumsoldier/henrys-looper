@@ -15,6 +15,10 @@
 title: Piano loop 4/4
 bpm: 92
 time_signature: 4/4
+# Takte Klick vor der ersten Sektion (1 bis 8). Fehlt das Feld, zaehlt die App 2 Takte ein;
+# hier steht es ausdruecklich, damit man sieht, wo man es aendert. Im Live-Modus laesst es sich
+# vor dem Start umschalten ("Count-in 2 bars").
+count_in: 2
 
 tracks:
   piano: {input: instrument, midi: {channel: 1}, pan: -0.15}

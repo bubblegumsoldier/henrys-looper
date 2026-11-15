@@ -135,6 +135,7 @@ Bei einem Gruppen-Track: `record`/`overdub` gehen in die nächste freie Layer-Ki
 title: Beispiel-Song
 bpm: 100
 time_signature: 4/4                    # optional, Default 4/4; auch 3/4, 6/8 etc. → beats_per_bar = Zähler
+count_in: 2                            # optional, Takte Klick vor der ersten Sektion, 1–8; Default 2
 tracks:
   gitarre: {ableton_track: 0}                          # Einzelspur (Default)
   voice:   {group: voice, layers: 5, reserve: 3, monitor: true}   # Ableton-Gruppenspur 'voice'

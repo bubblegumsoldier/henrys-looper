@@ -614,12 +614,53 @@ wird nur geschickt, wenn er den Zustand wirklich ändert.
 
 ### Einzähler
 
-Ein Takt Klick vor der ersten Sektion, konfigurierbar über `--count-in`. Ein Takt ist der kürzeste
-Vorlauf, der noch ein *Takt* ist: Der Musiker hört ein vollständiges Muster der Taktart, die er
-gleich spielt (in 3/4 bei 141 BPM sind das 1,28 s). Zwei Takte wären Warten, ein halber würde die
-Taktart nicht etablieren. Der Einzähler beginnt auf der ersten Taktgrenze, die die Kommando-Queue
-noch rechtzeitig erreicht, also ist der tatsächliche Vorlauf ein voller Takt **plus** der Rest des
-angefangenen — nie weniger. Er läuft genau einmal, vor Sektion 0.
+Zwei Takte Klick vor der ersten Sektion — so wünscht es der Besitzer nach dem Spielen damit.
+Ursprünglich war es ein Takt (der kürzeste Vorlauf, der noch ein *Takt* ist); in der Praxis
+reichte das nicht: Im ersten Takt erkennt man das Tempo, im zweiten macht man sich bereit, und
+dann trifft man den Einsatz auch bei schnellem Tempo oder ungerader Taktart. Ein halber Takt
+würde die Taktart nicht etablieren.
+
+Woher die Zahl kommt, in dieser Reihenfolge:
+
+1. ein Wert **für diesen Lauf**: `--count-in` der Score-CLI, oder der Knopf „Count-in 2 bars"
+   im Live-Modus (nur vor dem Start; ist das geöffnete Dokument das geladene, schreibt er auch
+   `count_in:` der Partitur, wie die Mixer-Rückschreibung);
+2. das Partiturfeld `count_in: <Takte>` auf oberster Ebene (1–8; `0` wird mit Begründung
+   abgelehnt — ohne Einzähler begänne der erste Take auf der allernächsten Taktgrenze, ohne etwas
+   zum Mitspielen). Das Einzähler-Feld der Arrangement-Leiste bearbeitet genau dieses Feld (ein
+   Undo-Schritt wie Titel oder Tempo), „Load" übernimmt es;
+3. sonst `DEFAULT_COUNT_IN_BARS` = 2 (auch neue Partituren aus der Vorlage schreiben `count_in: 2`).
+
+Der Einzähler beginnt auf der ersten Taktgrenze, die die Kommando-Queue noch rechtzeitig
+erreicht, also ist der tatsächliche Vorlauf die volle Zahl Takte **plus** der Rest des
+angefangenen — nie weniger. Er läuft genau einmal, vor Sektion 0. Die Release-Fläche zählt ihn
+über alle Takte herunter („bar 1 in 2 bars" … „in 1 beat"), mit derselben Anzeige wie der
+Einzähler des freien Modus. Der freie Modus hat seine eigene Einstellung (Off/1/2 im LOOP-Feld,
+Vorgabe ebenfalls 2 Takte, eine gespeicherte Einstellung bleibt).
+
+### Nichts zu hören, solange die Partitur nicht läuft
+
+Beim Laden startet der Host die Uhr der Engine und lässt sie laufen: Der Runner plant den
+Einzähler, Sektion 0 und jede Loop-Geometrie auf genau diesem Raster, und daran ändert sich
+nichts. Zu **hören** ist von dieser Uhr aber nur etwas, während die Partitur läuft. Dafür hat die
+Engine ein zeitgestempeltes Klickfenster (`Command::ClickGate`):
+
+* Der Host schließt es beim Laden (`runner::CLOSED_CLICK_GATE`) — geladen und bereit ist still,
+  auch mit eingeschaltetem Klick.
+* Der Runner öffnet es beim Start auf der ersten Taktgrenze des Einzählers, sample-genau.
+* Er schließt es auf dem Sample, auf dem die Partitur endet, bei „Stop all" (nie vor dem Öffnen,
+  falls Stop innerhalb des Vorlaufs gedrückt wird) und noch einmal hinter dem `ClearAll` von
+  „Back to start".
+
+Die Loops brauchen kein Fenster: Vor dem Start sind alle Spuren leer, Ende und „Stop all" stoppen
+jede. Bei geschlossenem Fenster hören gehostete Plugins „steht, Position 0"; offen zählen sie auf
+Takt 1 der ersten Sektion zu (im Einzähler negativ, wie beim Einzähler des freien Modus). Der
+Mitschnitt ist nicht betroffen: Er beginnt ohnehin auf Takt 1 der ersten Sektion und enthält
+keinen Klick. Der Weg über ein echtes `TransportStop` im Leerlauf wurde verworfen: Ein Stopp
+verwirft alle wartenden Kommandos (auch die Neutralisierer von „Stop all" und das `ClearAll` von
+„Back to start"), behandelt laufende Takes anders als der Runner, und das Ende der Partitur ließe
+sich nur einen Steuerschleifen-Takt zu spät stoppen — der Klick auf der folgenden Eins wäre zu
+hören. Das Fenster lässt jede Planung des Runners unberührt.
 
 ### Autorelease, Pending, Quantisierung
 

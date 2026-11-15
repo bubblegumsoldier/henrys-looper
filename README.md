@@ -187,7 +187,12 @@ schreibgeschützt.
   (`repeat:` zieht mit, `transport.goto.<n>` wird beim Verschieben umnummeriert); ⌘D dupliziert.
 - Spurkopf: ziehen = umsortieren, Doppelklick = umbenennen (Zustände und `track.<name>.*`
   ziehen mit), Mithören/Busse als Schalter, Pan am Knopf.
-- **File** (Neu, Öffnen, Zuletzt, Sichern) und **Load** (mit Einzähler) in der Werkzeugleiste.
+- **File** (Neu, Öffnen, Zuletzt, Sichern) und **Load** in der Werkzeugleiste. Das Feld
+  **Count-in** daneben ist das Partiturfeld `count_in:` (Takte Klick vor der ersten Sektion, 1–8;
+  fehlt es, sind es 2 Takte) und wird mit dem Stück gespeichert. Im Live-Modus steht der Einzähler
+  neben Start/Stop all („Count-in 2 bars") und lässt sich vor dem Start umschalten. Geladen, aber
+  nicht gestartet, ist die Partitur still — der Klick beginnt mit dem Einzähler und endet mit dem
+  Ende oder „Stop all".
   Läuft eine Partitur, ist das Arrangement gesperrt; ein Klick auf einen Sektionsmarker springt.
 
 **Mix speichern.** Ist eine Partitur geladen, landet jede Mixer-Änderung (Fader, Mute,
