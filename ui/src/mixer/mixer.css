@@ -173,9 +173,9 @@ button.ins.plug:not(:disabled):hover { color: var(--tx-2); border-color: var(--l
 .btn.onsw { gap: 4px; }
 .btn.onsw.on { color: #7fd3ff; }
 .gr .grl { width: 62px; }
-.gr .bar i { width: 0; transition: width 60ms linear; }
+.gr .bar i { width: 100%; transform: scaleX(0); transform-origin: 100% 50%; will-change: transform; }
 .gr .bar i.deep { background: linear-gradient(to left, var(--err), #f7b23b); }
-.gr .num { color: var(--tx-1); width: 52px; text-align: right; }
+.gr .num { color: var(--tx-1); width: 52px; text-align: right; font-variant-numeric: var(--num); }
 .gr.off { opacity: .45; }
 .fxd .num.pct { width: 34px; text-align: right; }
 .insp.chan .num-in { width: 64px; flex: none; }

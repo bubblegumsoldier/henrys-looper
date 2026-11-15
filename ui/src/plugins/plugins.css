@@ -19,3 +19,4 @@
 .plg-pname { color: var(--tx-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .plg-pval { color: var(--tx-1); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .plg-param input[type="range"] { width: 100%; }
+.plg-pk { display: inline-block; font-variant-numeric: var(--num, tabular-nums); min-width: 3.4em; text-align: right; }

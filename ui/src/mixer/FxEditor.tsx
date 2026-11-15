@@ -7,7 +7,8 @@
 //! six compressor knobs with a gain-reduction meter, the delay's note value, feedback and mix, and
 //! the reverb's size, damping and mix. Every control carries its `data-midi` address.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { METER_FLOOR_DB, READOUT_MS, createMeter, meterFeedDb, meterTick, onFrame } from "../design/meter";
 import { Popover } from "./Popover";
 import {
   fxAddress,
@@ -75,30 +76,51 @@ function ParamKnob({
 const REDUCTION_FLOOR_DB = -20;
 const REDUCTION_DEEP_DB = -12;
 
-/** The compressor's gain reduction right now. Never renders: written into the DOM per event. */
+/**
+ * The compressor's gain reduction. Never renders: the status feeds the shared meter ballistics
+ * (design/meter.ts) - the bar deepens at once and comes back slowly - and the shared frame loop
+ * draws it; the number changes at most four times a second.
+ */
 export function CompReduction({ track, on }: { track: number; on: boolean }) {
   const bar = useRef<HTMLElement | null>(null);
   const text = useRef<HTMLSpanElement | null>(null);
-  const drawn = useRef({ w: -1, t: "" });
+  // The ballistics run in dB above the meter floor: a reduction of 6 dB is "floor + 6".
+  const meter = useRef(createMeter());
   useStatusEffect((s: LooperStatus) => {
-    const db = Math.min(0, s.tracks[track]?.fx?.comp_reduction_db ?? 0);
-    const w = Math.round(Math.min(100, (db / REDUCTION_FLOOR_DB) * 100));
-    if (w !== drawn.current.w && bar.current) {
-      bar.current.style.width = `${w}%`;
-      bar.current.classList.toggle("deep", db <= REDUCTION_DEEP_DB);
-      drawn.current.w = w;
-    }
-    const t = db <= -0.05 ? `−${Math.abs(db).toFixed(1)} dB` : "0.0 dB";
-    if (t !== drawn.current.t && text.current) {
-      text.current.textContent = t;
-      drawn.current.t = t;
-    }
+    const depth = Math.max(0, -(s.tracks[track]?.fx?.comp_reduction_db ?? 0));
+    meterFeedDb(meter.current, METER_FLOOR_DB + depth, performance.now());
   });
+  useEffect(() => {
+    const drawn = { w: "", deep: false, t: "", at: -Infinity };
+    return onFrame((now, b) => {
+      const m = meter.current;
+      meterTick(m, now, b);
+      const depth = Math.max(0, m.level - METER_FLOOR_DB);
+      const w = Math.min(1, depth / -REDUCTION_FLOOR_DB).toFixed(3);
+      if (w !== drawn.w && bar.current) {
+        bar.current.style.transform = `scaleX(${w})`;
+        drawn.w = w;
+      }
+      const deep = depth >= -REDUCTION_DEEP_DB;
+      if (deep !== drawn.deep && bar.current) {
+        bar.current.classList.toggle("deep", deep);
+        drawn.deep = deep;
+      }
+      if (now - drawn.at >= READOUT_MS && text.current) {
+        drawn.at = now;
+        const t = depth >= 0.05 ? `−${depth.toFixed(1)} dB` : "0.0 dB";
+        if (t !== drawn.t) {
+          text.current.textContent = t;
+          drawn.t = t;
+        }
+      }
+    });
+  }, []);
   return (
     <div className={`gr${on ? "" : " off"}`} title={`Gain reduction of the compressor right now. Full length is ${-REDUCTION_FLOOR_DB} dB.`}>
       <span className="grl">Reduction</span>
       <span className="bar">
-        <i ref={bar} style={{ width: "0%" }} />
+        <i ref={bar} />
       </span>
       <span className="num" ref={text}>
         0.0 dB

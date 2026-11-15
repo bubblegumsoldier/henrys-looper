@@ -140,7 +140,7 @@ function SlotRow({ slot: s, first, last, prevSlot, nextSlot, paramsOpen, toggleP
           <span className="plg-fmt">{s.format === "vst3" ? "VST3" : "AU"}</span>
           {s.latency > 0 && <span className="plg-fmt">{s.latency} smp</span>}
           {s.active && (
-            <span className="plg-fmt" title="Output peak of this slot">
+            <span className="plg-fmt plg-pk" title="Output peak of this slot">
               {s.peak > 0 ? `${(20 * Math.log10(s.peak)).toFixed(0)} dB` : "−∞ dB"}
             </span>
           )}

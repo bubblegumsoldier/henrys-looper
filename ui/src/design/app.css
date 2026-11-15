@@ -208,6 +208,30 @@ body {
 }
 .hm i::after { content: ""; position: absolute; top: 0; bottom: 0; width: 2px; left: var(--p, 0%); background: #e9eef5; opacity: .8; }
 
+/* Pegelmesser mit Ballistik (design/LevelMeter.tsx): der Verlauf liegt fest, eine Abdeckung (.off) wird
+   per transform über den unbeleuchteten Teil skaliert, der Spitzenhalt (.pk) per transform
+   verschoben - kein Layout, kein Neuzeichnen des Verlaufs, keine CSS-Transition (die Glättung
+   macht meter.ts). Die Segmentlücken liegen als ::after oben drauf, Spitze und Clip darüber. */
+.meter i { overflow: hidden; isolation: isolate; }
+.hm.meter i { background: var(--meter-gradient-h); }
+.vm.meter i { background: var(--meter-gradient); }
+.meter i > b, .meter i > s, .meter i > u { position: absolute; inset: 0; display: block; text-decoration: none; }
+.meter i > .off { background: var(--meter-off); will-change: transform; }
+.hm.meter i > .off { transform-origin: 100% 50%; }
+.vm.meter i > .off { transform-origin: 50% 0; }
+.meter i > .pk { z-index: 1; will-change: transform; }
+.hm.meter i > .pk { left: -2px; right: 2px; border-left: 2px solid rgba(233,238,245,.85); }
+.vm.meter i > .pk { top: calc(100% - 2px); bottom: auto; height: 100%; border-top: 2px solid rgba(233,238,245,.85); }
+.meter i.nopeak > .pk { display: none; }
+.meter i > .cl { z-index: 2; display: none; background: var(--meter-clip); }
+.hm.meter i > .cl { left: auto; width: 4px; }
+.vm.meter i > .cl { bottom: auto; height: 4px; }
+.meter i.clip > .cl { display: block; }
+.meter:has(i.clip) { cursor: pointer; }
+.hm.meter i::after { left: 0; right: 0; width: auto; opacity: 1; background: repeating-linear-gradient(to right, transparent 0 3px, var(--bg-inset) 3px 4px); }
+.vm.meter i::after { content: ""; position: absolute; inset: 0; height: auto; opacity: 1; background: repeating-linear-gradient(to top, transparent 0 2px, var(--bg-inset) 2px 3px); }
+.hm.meter i.nopeak::after, .vm.meter i.nopeak::after { display: block; }
+
 /* Pan-Knopf: --v = -1..1 */
 .knob {
   --s: 26px; width: var(--s); height: var(--s); border-radius: 50%; position: relative; flex: none;

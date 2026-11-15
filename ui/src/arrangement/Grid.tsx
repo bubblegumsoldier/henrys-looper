@@ -11,10 +11,10 @@
 //! zoom), a clip's `--s`/`--n` are its start and length in bars - the same variables the mockup
 //! (design/arrangement.html) uses, so its stylesheet applies unchanged.
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject, type PointerEvent as ReactPointerEvent } from "react";
 import { gotoAddress } from "../midi/addresses";
-import { useStatusEffect } from "../status";
-import type { DocTrack, ModelIssue, ScoreDoc } from "../types";
+import { Meter } from "../design/LevelMeter";
+import type { DocTrack, LooperStatus, ModelIssue, ScoreDoc } from "../types";
 import { STATE_LOOK, plural } from "./labels";
 import { MAX_TRACKS, nameProblem } from "./ops";
 import * as ops from "./ops";
@@ -706,32 +706,19 @@ function TrackHead(p: HeadProps) {
   );
 }
 
-/** Output level of the engine track with this name, written straight into the DOM. */
+/**
+ * Output level of the engine track with this name: the shared meter (design/LevelMeter.tsx) and its
+ * held peak as a number, which changes at most four times a second.
+ */
 function HeadMeter({ name, stereo }: { name: string; stereo: boolean }) {
-  const bars = useRef<(HTMLElement | null)[]>([]);
   const db = useRef<HTMLSpanElement>(null);
-  useStatusEffect((s) => {
-    const t = s.tracks.find((x) => x.name === name);
-    const peaks = t ? t.output_peaks : [];
-    bars.current.forEach((el, i) => {
-      if (!el) return;
-      const peak = peaks[Math.min(i, peaks.length - 1)] ?? 0;
-      const dbv = peak > 0 ? 20 * Math.log10(peak) : -Infinity;
-      el.style.setProperty("--l", `${Math.max(0, Math.min(100, ((dbv + 60) / 60) * 100))}%`);
-    });
-    if (db.current) {
-      const v = t?.output_dbfs;
-      db.current.textContent = v === null || v === undefined || !Number.isFinite(v) ? "−∞" : `${Math.round(v)}`;
-    }
-  });
+  const pick = useCallback((s: LooperStatus) => s.tracks.find((x) => x.name === name)?.output_peaks ?? [], [name]);
   return (
     <>
-      <span className="hm">
-        {(stereo ? [0, 1] : [0]).map((i) => (
-          <i key={i} ref={(el) => (bars.current[i] = el)} style={{ "--l": "0%", "--p": "0%" } as React.CSSProperties} />
-        ))}
+      <Meter pick={pick} channels={stereo ? 2 : 1} readout={db} />
+      <span className="db" ref={db}>
+        −∞
       </span>
-      <span className="db">−∞</span>
     </>
   );
 }
