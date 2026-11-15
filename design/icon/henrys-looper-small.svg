@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+<!-- Henrys Looper - vereinfachte Fassung fuer 16/32 px: dickerer Ring, groesserer Kopf, wenige Flaechen, dicke Konturen. Vorschlag, nicht als App-Icon eingebaut. -->
+<title>Henrys Looper (klein)</title>
+<defs>
+<linearGradient id="tileBg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1c1f21"/><stop offset="1" stop-color="#121415"/></linearGradient>
+<linearGradient id="gs-left" gradientUnits="userSpaceOnUse" x1="150" y1="612" x2="300" y2="260"><stop offset="0" stop-color="#fb5a2a"/><stop offset="1" stop-color="#f79a1c"/></linearGradient>
+<linearGradient id="gs-right" gradientUnits="userSpaceOnUse" x1="700" y1="250" x2="830" y2="520"><stop offset="0" stop-color="#a3f24b"/><stop offset="1" stop-color="#36f6ac"/></linearGradient>
+<linearGradient id="gs-lower-right" gradientUnits="userSpaceOnUse" x1="800" y1="620" x2="590" y2="840"><stop offset="0" stop-color="#38f6aa"/><stop offset="1" stop-color="#5ef584"/></linearGradient>
+<linearGradient id="gs-lower-left" gradientUnits="userSpaceOnUse" x1="200" y1="520" x2="560" y2="840"><stop offset="0" stop-color="#fc5e2b"/><stop offset="0.45" stop-color="#f9a516"/><stop offset="0.8" stop-color="#eaee10"/><stop offset="1" stop-color="#c6f52a"/></linearGradient>
+</defs>
+<rect id="tile" x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#tileBg)"/>
+<g id="shirt" stroke="#0f1415" stroke-width="26" paint-order="stroke"><path d="M349 735C400 712 460 705 512 705C564 705 624 712 675 735A262 262 0 0 1 349 735Z" fill="#121617"/></g>
+<g id="ring">
+<g id="ring-outline" fill="#0f1415" stroke="#0f1415" stroke-width="22" stroke-linejoin="round"><path d="M176.5 488.8A338 338 0 0 1 407.6 208.5L431 280.8A262 262 0 0 0 252.3 495.3L219.1 465.1Z"/><path d="M616.4 208.5A338 338 0 0 1 843.8 465.5L883.1 457.9L809.1 571.8L729.9 487.6L769.2 480A262 262 0 0 0 593 280.8Z"/><path d="M846.7 577A338 338 0 0 1 582.3 860.6L599.7 816.9L569.2 785.7A262 262 0 0 0 771.1 569.2L803.7 600Z"/><path d="M470.8 865.5A338 338 0 0 1 181.4 600.3L142.3 608.6L214.2 493.4L294.9 576.2L255.7 584.5A262 262 0 0 0 480.1 790L484.9 750.3L574.4 823.4L465.9 905.2Z"/></g>
+<path d="M176.5 488.8A338 338 0 0 1 407.6 208.5L431 280.8A262 262 0 0 0 252.3 495.3L219.1 465.1Z" fill="url(#gs-left)"/>
+<path d="M616.4 208.5A338 338 0 0 1 843.8 465.5L883.1 457.9L809.1 571.8L729.9 487.6L769.2 480A262 262 0 0 0 593 280.8Z" fill="url(#gs-right)"/>
+<path d="M846.7 577A338 338 0 0 1 582.3 860.6L599.7 816.9L569.2 785.7A262 262 0 0 0 771.1 569.2L803.7 600Z" fill="url(#gs-lower-right)"/>
+<path d="M470.8 865.5A338 338 0 0 1 181.4 600.3L142.3 608.6L214.2 493.4L294.9 576.2L255.7 584.5A262 262 0 0 0 480.1 790L484.9 750.3L574.4 823.4L465.9 905.2Z" fill="url(#gs-lower-left)"/>
+</g>
+<g id="figure" stroke="#0f1415" stroke-width="26" stroke-linejoin="round" stroke-linecap="round" paint-order="stroke">
+<g id="headphones-band"><path d="M305 400A207 207 0 1 1 719 400" fill="none" stroke="#0f1415" stroke-width="84"/><path d="M305 400A207 207 0 1 1 719 400" fill="none" stroke="#3d9dc9" stroke-width="38"/></g>
+<g id="neck"><path d="M450 600L450 690C470 720 554 720 574 690L574 600Z" fill="#e8907a"/></g>
+<g id="face"><path d="M352 340C352 270 410 246 512 246C614 246 672 270 672 340L672 520C672 625 600 690 512 690C424 690 352 625 352 520Z" fill="#fbc09c"/></g>
+<g id="beard"><path d="M354 500C368 625 436 690 512 690C588 690 656 625 670 500C640 560 600 590 512 590C424 590 384 560 354 500Z" fill="#87593f"/></g>
+<g id="hair"><path d="M352 340C338 262 378 222 430 210L418 176L472 198L502 162L532 196L586 168L582 210C642 224 686 264 672 340C652 294 604 272 512 272C420 272 372 294 352 340Z" fill="#7d533d"/></g>
+<g id="headphones-cups">
+<rect x="262" y="384" width="86" height="184" rx="38" fill="#f6c711"/><rect x="336" y="396" width="42" height="160" rx="20" fill="#3d9dc9"/>
+<rect x="676" y="384" width="86" height="184" rx="38" fill="#f6c711"/><rect x="646" y="396" width="42" height="160" rx="20" fill="#3d9dc9"/>
+</g>
+<g id="brows" stroke="none"><path d="M408 368Q448 340 486 360" fill="none" stroke="#643e2b" stroke-width="22"/><path d="M538 360Q576 340 616 368" fill="none" stroke="#643e2b" stroke-width="22"/></g>
+<g id="eyes" stroke="none"><ellipse cx="448" cy="414" rx="20" ry="24" fill="#0f1415"/><ellipse cx="576" cy="414" rx="20" ry="24" fill="#0f1415"/><circle cx="441" cy="405" r="7" fill="#ffffff"/><circle cx="569" cy="405" r="7" fill="#ffffff"/></g>
+<g id="mouth"><path d="M440 512Q512 520 584 512Q570 580 512 580Q454 580 440 512Z" fill="#ffffff" stroke-width="18"/></g>
+</g>
+</svg>
