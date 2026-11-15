@@ -27,6 +27,7 @@ import type { ScoreActions } from "./scoreActions";
 import { useScoreFile } from "../scoreFile";
 import { docStore, useDoc, useEngineTracks, useRun } from "./useDoc";
 import "./arrangement.css";
+import { ChannelPanel, Mixer, MixerToggle, mixerEditorClass, selectChannelByName, useMixer } from "../mixer";
 
 type View = "grid" | "text";
 
@@ -179,6 +180,11 @@ export function Arrangement({ onGoto, actions }: Props) {
 
   const doc = state.doc;
   const sel = useMemo(() => prune(selRaw, doc), [selRaw, doc]);
+  const mixer = useMixer();
+  // The mixer's detail panel follows the track selected in the grid.
+  const selTrack = sel.kind === "track" ? sel.index : sel.kind === "cells" ? sel.focus.track : null;
+  const selTrackName = selTrack !== null ? doc?.tracks[selTrack]?.name : undefined;
+  useEffect(() => selectChannelByName(selTrackName), [selTrackName]);
   const locked = run.playing;
   const editable = !locked && state.inSync && doc !== null;
 
@@ -391,6 +397,7 @@ export function Arrangement({ onGoto, actions }: Props) {
               <FileMenu actions={actions} />
               <LoadControls actions={actions} ok={state.inSync && errors.length === 0 && !!doc} locked={locked} />
               <div className="sep" />
+              <MixerToggle />
               <button className={`btn s${inspector ? " on" : ""}`} onClick={() => setInspector(!inspector)}>
                 <i className="ic ic-split" />
                 Inspector
@@ -417,7 +424,7 @@ export function Arrangement({ onGoto, actions }: Props) {
 
         {view === "grid" ? (
           <div className={`main${inspector ? "" : " no-insp"}`}>
-            <div className="editor">
+            <div className={`editor${mixerEditorClass(mixer)}`}>
               {doc ? (
                 <Grid
                   doc={doc}
@@ -453,8 +460,10 @@ export function Arrangement({ onGoto, actions }: Props) {
                   )}
                 </div>
               )}
+              {mixer.open && <Mixer />}
             </div>
-            {inspector && doc && (
+            {inspector && mixer.open && <ChannelPanel />}
+            {inspector && !mixer.open && doc && (
               <Inspector doc={doc} errors={state.inSync ? errors : []} editable={editable} sel={sel} setSel={setSel} edit={edit} onIssue={showIssue} />
             )}
           </div>

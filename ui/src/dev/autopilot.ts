@@ -27,6 +27,7 @@ import { setLoadedScore } from "../shell/scoreModel";
 import { setLearnMode, setMidiFocus, setMidiView } from "../midi/store";
 import type { MidiProfileAction } from "../midi/types";
 import { updateScoreFile } from "../scoreFile";
+import { setMixer, type MixerState } from "../mixer/store";
 
 type Step = Record<string, unknown> & { do: string };
 
@@ -106,6 +107,29 @@ async function runStep(step: Step): Promise<void> {
       return;
     case "midiFocus":
       setMidiFocus((step.address as string | undefined) ?? null);
+      return;
+    case "mixer":
+      // {"do": "mixer", "patch": {"open": true, "selected": 1, "full": false}}
+      setMixer(step.patch as Partial<MixerState>);
+      return;
+    case "dom": {
+      // Drive a control like a hand would: {"do": "dom", "sel": ".strip .fader", "index": 0,
+      // "events": [["pointerdown", {"clientY": 500}], ["pointermove", {"clientY": 450}], ...]}
+      const el = document.querySelectorAll<HTMLElement>(String(step.sel))[Number(step.index ?? 0)];
+      if (!el) throw new Error(`no element ${String(step.sel)}`);
+      const r = el.getBoundingClientRect();
+      for (const [type, init] of step.events as [string, Record<string, unknown>][]) {
+        const opts = { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0, pointerId: 1, ...init };
+        if (type.startsWith("key")) el.dispatchEvent(new KeyboardEvent(type, opts));
+        else if (type.startsWith("pointer")) el.dispatchEvent(new PointerEvent(type, opts));
+        else el.dispatchEvent(new MouseEvent(type, opts));
+        await new Promise((res) => setTimeout(res, 30));
+      }
+      return;
+    }
+    case "invoke":
+      // Any Tauri command by name: {"do": "invoke", "cmd": "track_gain", "args": {"track": 0, "gain": 0.5}}
+      await invoke(String(step.cmd), (step.args ?? {}) as Record<string, unknown>);
       return;
     case "mode":
     case "ui":

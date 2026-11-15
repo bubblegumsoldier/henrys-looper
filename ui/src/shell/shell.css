@@ -388,7 +388,6 @@ input.range:disabled { opacity: .4; }
 .layer { gap: 8px; }
 .layer.muted .no { color: var(--tx-4); }
 .layer.muted .range { opacity: .45; }
-.legacy.legacy-fx .live-fx { background: transparent; border: 0; padding: 0; margin: 0; }
 
 /* =============================================================================================
    SETUP

@@ -38,7 +38,8 @@ import { ReleasePanel } from "./ReleasePanel";
 import { ArrangementStrip } from "./ArrangementStrip";
 import { TrackTile, trackColor } from "./TrackTile";
 import { TrackDetail, type TrackActions } from "./TrackDetail";
-import { DELAY_NOTES, FX_NAME, FX_PRESETS, FX_SLOT_ORDER } from "./FxRow";
+import { DELAY_NOTES, FX_NAME, FX_PRESETS, FX_SLOT_ORDER } from "../mixer/fxModel";
+import { channelActions } from "../mixer/actions";
 import type { LooperStatus, LooperTrackStatus, ScoreState } from "../types";
 
 type Chord = "x" | "v" | "d";
@@ -98,24 +99,11 @@ function sameClock(a: ReturnType<typeof pickClock>, b: ReturnType<typeof pickClo
 }
 
 const actions: TrackActions = {
+  ...channelActions,
   record: (t) => run(() => api.trackRecord(t)),
   overdub: (t) => run(() => api.trackOverdub(t)),
   stop: (t) => run(() => api.trackStop(t)),
   play: (t) => run(() => api.trackPlay(t)),
-  clear: (t) => run(() => api.trackClear(t)),
-  monitor: (t, on) => run(() => api.trackMonitor(t, on)),
-  bus: (t, source, bus, on) => run(() => api.trackBus(t, source, bus, on)),
-  pan: (t, pan) => run(() => api.trackPan(t, pan)),
-  latency: (t, measured, trim) => run(() => api.trackLatency(t, measured, trim)),
-  layerMute: (t, l, muted) => run(() => api.layerMute(t, l, muted)),
-  layerRemove: (t, l) => run(() => api.layerRemove(t, l)),
-  layerGain: (t, l, gain) => run(() => api.layerGain(t, l, gain)),
-  fxBypass: (t, on) => run(() => api.fxBypass(t, on)),
-  fxEnable: (t, effect, on) => run(() => api.fxEnable(t, effect, on)),
-  fxPreset: (t, preset) => run(() => api.fxPreset(t, preset)),
-  fxSet: (t, param, value, band) => run(() => api.fxSet(t, param, value, band)),
-  fxBandKind: (t, band, kind) => run(() => api.fxBandKind(t, band, kind)),
-  fxDelayNote: (t, note) => run(() => api.fxDelayNote(t, note)),
 };
 
 /** True while the Live area is narrower than 1200 px - the same break live.css uses. */

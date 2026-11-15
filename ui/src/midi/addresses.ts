@@ -60,7 +60,7 @@
 //! status event uses, and the conversion happens here - once.
 
 import type { BusId, DelayNoteName, FxSlotName, TrackSourceId } from "../types";
-import type { LoadablePreset } from "../live/FxRow";
+import type { LoadablePreset } from "../mixer/fxModel";
 
 /** The score's transport. Available while a score runs - it *is* the score's transport. */
 export const TRANSPORT = {
