@@ -5,8 +5,55 @@ Pedal zu greifen, schreibst du vorher eine Partitur in YAML — Sektionen mit de
 jeder Spur — und die Software steppt live hindurch. Manueller Eingriff reduziert sich auf
 einen Release-Button.
 
-**Status: in Entwicklung.** Eigene Audio-Engine in Rust, getestet auf einer Windows-Maschine
-mit Focusrite Scarlett 2i2. Formate und API können sich jederzeit ändern.
+**Status: in Entwicklung.** Eigene Audio-Engine in Rust mit Desktop-App (Tauri) für macOS
+(CoreAudio) und Windows (ASIO), getestet mit einer Focusrite Scarlett 2i2. Formate und API
+können sich jederzeit ändern. Die Oberfläche ist englisch, Doku und Code-Kommentare deutsch.
+
+## Die Desktop-App
+
+**Henrys Looper** ist ein Fenster mit vier Bereichen, umgeschaltet in der Kopfleiste:
+
+| Modus | Wofür |
+|---|---|
+| **Setup** (Zahnrad) | Audio-Gerät, Puffer, Spuren und Eingänge, Klick, Latenz, MIDI-Geräte, Plugins. *Start engine* öffnet das Interface. |
+| **Live** | Die Bühnenansicht: je Spur eine Kachel mit *Record · Overdub · Play · Stop · Monitor*, Pegel, Ebenen. Ohne geladene Partitur ein freier Looper; mit Partitur oben Sektion, Takt, Schlag, *Release* und *Stop all*. |
+| **Arrangement** | Die Partitur grafisch (Raster Sektionen × Spuren, Inspektor) oder als YAML-Text; *File* (New/Open/Recent/Save) und *Load*. Darunter aufklappbar der **Mixer** (Fader, Pan, Mute/Solo, Effekte, VST3/AU-Plugins, Busse). Läuft eine Partitur, ist das Arrangement gesperrt. |
+| **MIDI Learn** | Jedes bedienbare Element lässt sich per Klick und Druck auf ein Pad/einen Regler belegen; die Seitenleiste zeigt alle Belegungen je Gerät. |
+
+Auf dem Mac starten (aus dem Repo-Wurzelverzeichnis):
+
+```sh
+. "$HOME/.cargo/env"                     # falls Rust nicht im PATH ist
+(cd ui && npm install)                   # einmalig
+ui/node_modules/.bin/tauri dev           # Entwicklungsmodus mit Hot Reload
+ui/node_modules/.bin/tauri build         # Bundle bauen
+open "target/release/bundle/macos/Henrys Looper.app"
+```
+
+Typischer Ablauf: Setup → Gerät wählen → *Start engine* → Arrangement → *File › Open*
+(z. B. `examples/henry-3-4.rust.yaml`) → *Load* → Live → *Start* (Leertaste) → *Release*
+(Leertaste) an den Stellen, die bis Release loopen → *Stop all* (⇧S) → *Back to start*.
+
+**Tastenkürzel**
+
+| Wo | Taste | Wirkung |
+|---|---|---|
+| Live | `1`–`8` | Spur wählen |
+| Live | `R` `O` `P` `S` `M` | Record · Overdub · Play · Stop · Monitor der gewählten Spur |
+| Live | `I` | Spur-Detail auf/zu |
+| Live | `F` | Effekte der Spur umgehen (Bypass) |
+| Live | `X` / `V` / `D` + Ziffer | Effekt an/aus · Preset laden · Delay-Notenwert |
+| Live | `K` | Klick an/aus |
+| Live/Arrangement | Leertaste oder `N` | Partitur starten bzw. *Release* |
+| Live/Arrangement | `⇧S` | *Stop all* |
+| Arrangement | `⌘N` `⌘O` `⌘S` `⇧⌘S` | New · Open · Save · Save as |
+| Arrangement | `⌘Z` / `⇧⌘Z` · `⌘D` · `+`/`-` · `⌫` · `Esc` | Undo/Redo · Sektion duplizieren · Zoom · zurücksetzen · Auswahl aufheben |
+| Arrangement | Clip gewählt: `R` `O` `P` `S` `M` | Zielzustand setzen |
+| überall | `⌘`-Klick | Element per MIDI lernen |
+
+Beispielpartituren im aktuellen Format: `examples/henry-3-4.rust.yaml`,
+`examples/solo-loop-4-4.yaml`, `examples/waltz-three-tracks-3-4.yaml`. Die Dateien in
+`examples/legacy-python/` sind Altformat (Ableton-Prototyp) und laden in der App nicht.
 
 ## Wo anfangen zu lesen
 
@@ -140,7 +187,7 @@ Die Logik dahinter (Bearbeitungsoperationen, Verweise, Undo) testet `npm test` i
 
 ## Benutzen
 
-Alles unter `engine\target\release\looper-engine.exe`.
+Die Kommandozeile liegt nach `cargo build --release -p looper-engine` unter `target/release/looper-engine` (Windows: `target\release\looper-engine.exe`); ihre Ausgaben sind englisch.
 
 ```powershell
 # Geräte und unterstützte Puffergrößen anzeigen
@@ -181,9 +228,10 @@ Zustands-Feedback, fremder Looping-Semantik und grober Quantisierung gescheitert
 Analyse steht in [`docs/plan-standalone-rust.md`](docs/plan-standalone-rust.md), die
 ursprüngliche Vision in [`docs/handover-tag1.md`](docs/handover-tag1.md).
 
-Der Python- und React-Code dieses Ansatzes (`backend/`, `looper/`, `spike/`, `ui/`) liegt
-weiter im Repo. Das Partitur-Modell und die Oberfläche werden übernommen, der OSC-Pfad nicht.
-Er wird **ersetzt, nicht angebunden**: Prozessgrenzen waren das Problem des alten Ansatzes.
+Der Python-Code dieses Ansatzes (`backend/`, `looper/`, `spike/`, `tests/`) und seine
+Partituren (`examples/legacy-python/`) liegen als **Altbestand** weiter im Repo; die App benutzt
+nichts davon. Das Partitur-Modell wurde übernommen, der OSC-Pfad nicht. Die heutige Oberfläche in
+`ui/` ist neu geschrieben und gehört zur Desktop-App.
 
 ## Lizenz
 
