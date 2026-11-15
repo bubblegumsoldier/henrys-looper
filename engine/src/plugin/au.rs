@@ -443,8 +443,9 @@ pub(super) fn open(info: &PluginInfo) -> Result<AuPlugin, String> {
     let status = unsafe { AudioComponentInstanceNew(component, &mut unit) };
     if status != 0 || unit.is_null() {
         return Err(format!(
-            "The Audio Unit \"{}\" could not be opened (error {status}).",
-            info.name
+            "The Audio Unit \"{}\" could not be opened ({}).",
+            info.name,
+            status_text(status)
         ));
     }
     let mut plugin = AuPlugin {
@@ -713,6 +714,57 @@ impl AuPlugin {
     }
 }
 
+/// An Audio Unit error as words, with the number for searching. -1 is what the system answers
+/// when the unit's code could not even be loaded into this process - for a third-party unit
+/// almost always its code signature (the app's library validation) or a missing dependency.
+pub(crate) fn status_text(status: i32) -> String {
+    let words = match status {
+        -1 => "the unit's code could not be loaded into this program - code signature or library \
+               validation, or a missing dependency",
+        -50 => "invalid parameter",
+        -108 => "out of memory",
+        -10879 => "invalid property",
+        -10878 => "invalid parameter",
+        -10877 => "invalid element",
+        -10876 => "no connection",
+        -10875 => "the unit failed to initialise",
+        -10874 => "too many frames to process",
+        -10871 => "invalid file",
+        -10868 => "audio format not supported",
+        -10867 => "the unit is not initialised",
+        -10866 => "invalid scope",
+        -10865 => "property not writable",
+        -10863 => "cannot do this in the current context",
+        -10851 => "invalid property value",
+        -10850 => "property not in use",
+        -10849 => "the unit is already initialised",
+        -10848 => "invalid offline render",
+        -10847 => "unauthorised (copy protection)",
+        -66744 => "the Audio Unit extension was not found",
+        -66745 => "the unit did not render in time",
+        -66746 => "invalid format",
+        -66747 => "the unit did not initialise in time",
+        -66748 => "not permitted (sandbox or entitlement)",
+        -66749 => "the unit's instance was invalidated (its process went away)",
+        -66750 => "too many instances",
+        -66751 => "unsupported unit type",
+        -66752 => "the unit is registered twice",
+        -66754 => "the unit did not start in time",
+        _ => "",
+    };
+    let four: Option<String> = {
+        let b = status.to_be_bytes();
+        b.iter()
+            .all(|c| c.is_ascii_graphic() || *c == b' ')
+            .then(|| b.iter().map(|&c| c as char).collect())
+    };
+    match (words.is_empty(), four) {
+        (false, _) => format!("{words}, error {status}"),
+        (true, Some(code)) => format!("error '{code}' ({status})"),
+        (true, None) => format!("error {status}"),
+    }
+}
+
 unsafe fn send0(obj: *mut AnyObject, sel: Sel) -> *mut AnyObject {
     let f: unsafe extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject =
         unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
@@ -833,7 +885,10 @@ impl PluginInstance for AuPlugin {
             )
         };
         if status != 0 || plist.is_null() {
-            return Err(format!("The plugin did not hand out its state (error {status})."));
+            return Err(format!(
+                "The plugin did not hand out its state ({}).",
+                status_text(status)
+            ));
         }
         let bytes = cf::plist_bytes(plist);
         unsafe { cf::CFRelease(plist) };
@@ -854,7 +909,10 @@ impl PluginInstance for AuPlugin {
         };
         unsafe { cf::CFRelease(plist) };
         if status != 0 {
-            return Err(format!("The plugin refused the saved state (error {status})."));
+            return Err(format!(
+                "The plugin refused the saved state ({}).",
+                status_text(status)
+            ));
         }
         let values: Vec<f32> = self.params.iter().map(|p| self.plain_value(p.id)).collect();
         *self.seen.lock().unwrap() = values;
@@ -921,15 +979,17 @@ impl PluginInstance for AuPlugin {
         };
         if status != 0 {
             return Err(format!(
-                "\"{}\" does not take audio input (error {status}).",
-                self.info.name
+                "\"{}\" does not take audio input ({}).",
+                self.info.name,
+                status_text(status)
             ));
         }
         let status = unsafe { AudioUnitInitialize(self.unit) };
         if status != 0 {
             return Err(format!(
-                "\"{}\" could not be started (error {status}).",
-                self.info.name
+                "\"{}\" could not be started ({}).",
+                self.info.name,
+                status_text(status)
             ));
         }
         self.initialized = true;
@@ -991,8 +1051,9 @@ impl PluginInstance for AuPlugin {
         let status = unsafe { AudioUnitInitialize(self.unit) };
         if status != 0 {
             return Err(format!(
-                "\"{}\" could not be started (error {status}).",
-                self.info.name
+                "\"{}\" could not be started ({}).",
+                self.info.name,
+                status_text(status)
             ));
         }
         self.initialized = true;

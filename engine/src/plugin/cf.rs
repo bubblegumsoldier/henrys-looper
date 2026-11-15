@@ -63,6 +63,13 @@ unsafe extern "C" {
     ) -> CFURLRef;
     pub fn CFBundleCreate(alloc: CFAllocatorRef, url: CFURLRef) -> CFBundleRef;
     pub fn CFBundleLoadExecutable(bundle: CFBundleRef) -> Boolean;
+    pub fn CFBundleLoadExecutableAndReturnError(
+        bundle: CFBundleRef,
+        error: *mut *mut c_void,
+    ) -> Boolean;
+    pub fn CFErrorCopyDescription(err: *mut c_void) -> CFStringRef;
+    pub fn CFErrorCopyUserInfo(err: *mut c_void) -> CFTypeRef;
+    pub fn CFDictionaryGetValue(dict: CFTypeRef, key: *const c_void) -> *const c_void;
     pub fn CFBundleGetFunctionPointerForName(
         bundle: CFBundleRef,
         name: CFStringRef,
@@ -140,6 +147,32 @@ pub fn plist_from(bytes: &[u8]) -> Option<CFTypeRef> {
     }
 }
 
+/// What `CFBundleLoadExecutableAndReturnError` says, with the loader's own reason: the user-facing
+/// description alone is "damaged or missing necessary resources" for nearly everything, while the
+/// debug description carries dyld's message ("code signature ... not valid for use in process",
+/// "incompatible architecture", "library not loaded"). Releases `error`.
+unsafe fn load_error_text(error: *mut c_void) -> String {
+    if error.is_null() {
+        return "no reason given".to_string();
+    }
+    unsafe {
+        let mut text = take_string(CFErrorCopyDescription(error));
+        let info = CFErrorCopyUserInfo(error);
+        if !info.is_null() {
+            let key = new_string("NSDebugDescription");
+            let debug = CFDictionaryGetValue(info, key);
+            CFRelease(key);
+            let debug = string(debug);
+            if !debug.is_empty() {
+                text = format!("{text} - {debug}");
+            }
+            CFRelease(info);
+        }
+        CFRelease(error);
+        text
+    }
+}
+
 /// A loaded bundle. Never unloaded: unloading plugin code that may still have threads or
 /// callbacks registered is the classic way to crash a host on the way out.
 pub struct Bundle {
@@ -167,9 +200,11 @@ impl Bundle {
             if raw.is_null() {
                 return Err(format!("Not a bundle: {}", path.display()));
             }
-            if CFBundleLoadExecutable(raw) == 0 {
+            let mut error: *mut c_void = std::ptr::null_mut();
+            if CFBundleLoadExecutableAndReturnError(raw, &mut error) == 0 {
                 return Err(format!(
-                    "The plugin's code could not be loaded (wrong architecture or damaged): {}",
+                    "The plugin's code could not be loaded: {} ({})",
+                    load_error_text(error),
                     path.display()
                 ));
             }
