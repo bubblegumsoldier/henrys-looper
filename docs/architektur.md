@@ -1368,6 +1368,62 @@ sauber). Vorschlag für später: in der Partitur nur, **welches** Plugin auf wel
 (Id, Slot, Bypass, ggf. ein benannter Preset des Plugins), den Zustand weiter in
 `plugin-rack.json` bzw. einer Datei neben der Partitur (`song.yaml` + `song.plugins.json`).
 
+## 16. Mitschnitt der Performance als Stems
+
+Jeder Durchlauf wird auf Platte geschrieben, als Stems für eine DAW. Code: `engine/src/capture/`
+(Abgriff im Audio-Thread, Schreib-Thread, WAV, `session.json`, Tests) und
+`app/src-tauri/src/recording.rs` (wann, wohin, Einstellungen, Liste). UI: Kopfleiste
+(`ui/src/recording/RecordingBadge.tsx`) und Setup → Recording.
+
+**Wann.** Partitur: ab Takt 1 der ersten Sektion (der Einzähler ist nicht in den Dateien) bis
+„End of the score" oder „Stop all", danach ein Nachlauf bis 0,5 s Stille (−80 dBFS über alle
+Kanäle), höchstens 6 s. Freier Modus: von Start bis Stopp der Uhr (Takt 1 = Uhr-Start). Engine-
+Stopp, Neuaufbau und das Laden einer Partitur beenden einen laufenden Mitschnitt sofort. Läufe
+unter 5 s oder ganz ohne Take werden verworfen. Ein Stopp-Knopf in der Kopfleiste beendet den
+laufenden Mitschnitt von Hand; eine MIDI-Adresse dafür gibt es (noch) nicht.
+
+**Wohin.** `~/Documents/Henrys Looper/Recordings/<YYYY-MM-DD HH.MM.SS> <Titel>/` oder der in Setup
+gewählte Ordner. Einstellungen in `recording.json` im Konfigurationsordner
+(`HENRYS_LOOPER_CONFIG_DIR` gilt).
+
+| Datei | Inhalt |
+|---|---|
+| `01 voice.wav` | Stem, stereo: Beitrag der Spur zum Main-Bus – nach eingebauter FX-Kette, Plugin-Inserts, Fader, Mute/Solo, Pan; vor Main-Bus-Inserts und Main-Lautstärke. Plus Live-Ergänzung (s. u.) |
+| `01 voice (dry).wav` | Loop-Wiedergabe (hörbare Ebenen mit Ebenen-Gain) + roher Live-Eingang während Record/Overdub/Hear-through; vor allem anderen, ohne Monitor-Lautstärke. Kanalzahl der Spur (mono bleibt mono). Abschaltbar |
+| `Mix.wav` | Main-Bus nach seinen Inserts, vor der Main-Lautstärke, **ohne Klick** (auch bei zusammengelegten Bussen) |
+| `score.yaml` | Kopie der geladenen Partitur (nur Partitur-Lauf) |
+| `session.json` | Titel, Modus, Startzeit, BPM, Taktart, Samplerate, Länge, Spuren (mit `midi: null` als Platz für spätere `.mid`-Dateien), Sektionsmarker (Frame, Sekunden, Takt ab 1, Sektions-Id), Aussetzer-Zähler, Klartext-Erklärung der Dateien |
+
+Alle Dateien: 24 Bit PCM, Samplerate der Engine, gleich lang, Frame 0 = Takt 1. Über 4 GB wird
+der Header auf RF64 umgeschrieben (Platz dafür hält ein `JUNK`-Chunk frei); bei 24 Bit stereo
+48 kHz sind das gut vier Stunden.
+
+**Live-Signal im Stem.** Ohne es fehlte im Stem jeweils der erste Durchlauf eines Loops (der Musiker
+spielt ihn, gehört wird er im Raum akustisch oder nur auf dem Monitor). Deshalb legt der Recorder
+während Record/Overdub/Hear-through jedes Eingangs-Frame `k` an die Stelle `m = k − R` der Spur –
+dieselbe Rechnung wie die Aufnahme (Abschnitt 4). Live-Durchlauf und die anschließende
+Loop-Wiedergabe liegen im Stem damit auf demselben Sample (Test
+`a_live_pass_and_its_loop_playback_sit_on_the_same_sample`, Impuls, Toleranz null).
+Im Stem kommt diese Live-Ergänzung durch Fader, Mute/Solo und Pan, **aber nicht durch Effekte
+und Inserts** – die laufen in Echtzeit einmal je Bus auf dem, was der Raum hört, und können nicht
+ein zweites, zeitversetztes Signal verarbeiten. Sie wird nur addiert, wenn der Eingang die Spur
+**nicht** schon über Main erreicht (Monitoring aus oder `monitor_bus` ohne Main; bei
+zusammengelegten Bussen: Monitoring aus oder `monitor_bus: none`). Erreicht er Main, steht er im
+Stem so, wie der Raum ihn hörte: mit Effekten und um die Roundtrip-Latenz später. Der trockene
+Stem hat das Live-Signal immer latenzrichtig.
+
+**Stem gegen Mix.** Ohne Bus-Inserts ist die Summe der Stems gleich `Mix.wav`, abgesehen von den
+Live-Ergänzungen (die im Raum nicht über Main liefen). Main-Bus-Inserts sind nur im Mix; der Klick
+ist in keiner Datei; die Main-Lautstärke ist in keiner Datei.
+
+**Echtzeit.** Der Audio-Thread addiert nur in einen vorab angelegten Sammelring (Größe aus der
+größten Kompensation + zwei Treiberblöcke) und kopiert fertige Frames mit `lag` Frames Verzug in
+eine `rtrb`-Queue (4 s). Ist sie voll, werden die Frames verworfen und als Lücke gemeldet; der
+Schreib-Thread füllt die Lücke mit genau so viel Stille, alle Dateien bleiben synchron, der Vorfall
+wird gezählt (Notice nach dem Lauf, `session.json`). Die WAV-Header werden jede Sekunde
+nachgeführt: Nach einem Absturz ist jede Datei bis zur letzten Sekunde lesbar (nur `session.json`
+fehlt dann).
+
 ## 13. Arbeitsweise
 
 - Henry bedient Hardware selbst; Audio-Tests laufen nur mit seiner Zustimmung.
