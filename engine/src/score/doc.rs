@@ -867,12 +867,12 @@ pub fn map_issues(issues: &[ScoreIssue], locations: &[Location]) -> Vec<ModelIss
                 (Some(line), column) => element_at(line, column.unwrap_or(u32::MAX), locations),
                 _ => None,
             };
-            if issue.message.contains("Tracks; die Engine fuehrt hoechstens") {
+            if issue.message.contains("tracks; the engine handles at most") {
                 at = Some(ScoreRef::Score {
                     field: Some("tracks".to_string()),
                 });
             }
-            if issue.message.contains("weder 'bars' noch 'repeat'")
+            if issue.message.contains("neither 'bars' nor 'repeat'")
                 && let Some(ScoreRef::Section { field, .. }) = at.as_mut()
             {
                 *field = Some("bars".to_string());

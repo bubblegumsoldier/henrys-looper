@@ -212,7 +212,7 @@ fn only_issue(outcome: &RenderOutcome) -> &ModelIssue {
 fn an_invalid_edit_is_reported_with_the_compilers_message_and_its_element() {
     let o = edited(|d| d.bpm = 900.0);
     let issue = only_issue(&o);
-    assert!(issue.message.contains("'bpm' muss zwischen"), "{}", issue.message);
+    assert!(issue.message.contains("'bpm' must be between"), "{}", issue.message);
     assert_eq!(issue.at, Some(ScoreRef::Score { field: Some("bpm".into()) }));
 
     // A track with a bad value is dropped by the compiler, so its uses elsewhere follow up; the
@@ -226,7 +226,7 @@ fn an_invalid_edit_is_reported_with_the_compilers_message_and_its_element() {
 
     let o = edited(|d| d.sections[0].tracks[1].track = "klavir".into());
     let issue = only_issue(&o);
-    assert_eq!(issue.suggestion.as_deref(), Some("meintest du 'klavier'?"));
+    assert_eq!(issue.suggestion.as_deref(), Some("did you mean 'klavier'?"));
     assert_eq!(
         issue.at,
         Some(ScoreRef::SectionTrack {
@@ -244,7 +244,7 @@ fn an_invalid_edit_is_reported_with_the_compilers_message_and_its_element() {
     );
 
     let o = edited(|d| d.sections[2].id = "a".into());
-    assert!(o.errors.iter().any(|i| i.message.contains("doppelt")
+    assert!(o.errors.iter().any(|i| i.message.contains("used twice")
         && i.at == Some(ScoreRef::Section { index: 2, id: "a".into(), field: Some("id".into()) })));
 
     let o = edited(|d| {
@@ -257,7 +257,7 @@ fn an_invalid_edit_is_reported_with_the_compilers_message_and_its_element() {
     );
 
     let o = edited(|d| d.tracks[0].name = "zwei worte".into());
-    assert!(o.errors.iter().any(|i| i.message.contains("Ungueltiger Track-Name")
+    assert!(o.errors.iter().any(|i| i.message.contains("Invalid track name")
         && matches!(&i.at, Some(ScoreRef::Track { index: 0, .. }))));
 
     let o = edited(|d| d.midi[1].mode = Some("halten".into()));

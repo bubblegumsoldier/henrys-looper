@@ -55,7 +55,7 @@ impl Pos {
 
 impl fmt::Display for Pos {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Zeile {}, Spalte {}", self.line, self.column)
+        write!(f, "line {}, column {}", self.line, self.column)
     }
 }
 
@@ -90,12 +90,12 @@ impl<'a> Node<'a> {
     pub fn type_name(&self) -> &'static str {
         match self.kind {
             NodeKind::Null => "null",
-            NodeKind::Bool(_) => "true oder false",
-            NodeKind::Int(_) => "eine ganze Zahl",
-            NodeKind::Float(_) => "eine Zahl",
-            NodeKind::Str(_) => "Text",
-            NodeKind::Seq(_) => "eine Liste",
-            NodeKind::Map(_) => "ein Mapping (Schluessel: Wert)",
+            NodeKind::Bool(_) => "true or false",
+            NodeKind::Int(_) => "a whole number",
+            NodeKind::Float(_) => "a number",
+            NodeKind::Str(_) => "text",
+            NodeKind::Seq(_) => "a list",
+            NodeKind::Map(_) => "a mapping (key: value)",
         }
     }
 
@@ -113,8 +113,8 @@ impl<'a> Node<'a> {
                 }
                 format!("'{text}'")
             }
-            NodeKind::Seq(_) => "eine Liste".to_string(),
-            NodeKind::Map(_) => "ein Mapping".to_string(),
+            NodeKind::Seq(_) => "a list".to_string(),
+            NodeKind::Map(_) => "a mapping".to_string(),
         }
     }
 
@@ -144,11 +144,11 @@ pub fn parse_document(text: &str) -> Result<Node<'_>, ScoreError> {
     match builder.documents.len() {
         0 => Err(ScoreError::single(ScoreIssue::new(
             Some(Pos { line: 1, column: 1 }),
-            "Die Partitur ist leer.",
+            "The score is empty.",
         )
         .with_suggestion(
-            "Eine Partitur braucht mindestens 'bpm', 'tracks' und 'sections'. \
-             Vorlage: examples/henry-3-4.rust.yaml",
+            "A score needs at least 'bpm', 'tracks' and 'sections'. \
+             Template: examples/henry-3-4.rust.yaml",
         ))),
         1 => Ok(builder.documents.pop().expect("genau ein Dokument")),
         _ => {
@@ -156,9 +156,9 @@ pub fn parse_document(text: &str) -> Result<Node<'_>, ScoreError> {
             Err(ScoreError::single(
                 ScoreIssue::new(
                     Some(second.pos),
-                    "Die Datei enthaelt mehrere YAML-Dokumente; eine Partitur ist genau eines.",
+                    "The file contains several YAML documents; a score is exactly one.",
                 )
-                .with_suggestion("Den Trenner '---' entfernen oder die Dokumente auf zwei Dateien verteilen."),
+                .with_suggestion("Remove the '---' separator or split the documents into separate files."),
             ))
         }
     }
@@ -169,13 +169,13 @@ fn syntax_issue(err: &ScanError) -> ScoreIssue {
     let info = err.info();
     let lower = info.to_ascii_lowercase();
     let suggestion = if lower.contains("tab") {
-        "Zum Einruecken Leerzeichen statt Tabs verwenden."
+        "Indent with spaces, not tabs."
     } else if lower.contains("mapping") || lower.contains("could not find expected") {
-        "Einrueckung und Doppelpunkte pruefen (nach 'schluessel:' gehoert ein Leerzeichen und ein Wert)."
+        "Check indentation and colons (after 'key:' comes a space and a value)."
     } else {
-        "Einrueckung, Anfuehrungszeichen und Doppelpunkte in dieser Zeile pruefen."
+        "Check indentation, quotes and colons on this line."
     };
-    ScoreIssue::new(Some(pos), format!("YAML-Syntaxfehler: {info}")).with_suggestion(suggestion)
+    ScoreIssue::new(Some(pos), format!("YAML syntax error: {info}")).with_suggestion(suggestion)
 }
 
 // --------------------------------------------------------------------------------------------
@@ -223,10 +223,10 @@ impl<'a> Builder<'a> {
             Event::Scalar(value, style, _, _) => self.add(Node { pos, kind: scalar_kind(value, style) }),
             Event::Alias(_) => Err(ScoreIssue::new(
                 Some(pos),
-                "YAML-Anker und -Referenzen (&name / *name) werden in Partituren nicht unterstuetzt.",
+                "YAML anchors and aliases (&name / *name) are not supported in a score.",
             )
             .with_suggestion(
-                "Eine Sektion wiederholt man mit 'repeat: <id>', nicht mit einer YAML-Referenz.",
+                "To repeat a section, use 'repeat: <id>', not a YAML alias.",
             )),
         }
     }
@@ -246,9 +246,9 @@ impl<'a> Builder<'a> {
                     if matches!(node.kind, NodeKind::Seq(_) | NodeKind::Map(_)) {
                         return Err(ScoreIssue::new(
                             Some(node.pos),
-                            "Zusammengesetzte Schluessel (Listen oder Mappings als Schluessel) sind in einer Partitur nicht erlaubt.",
+                            "Compound keys (lists or mappings as keys) are not allowed in a score.",
                         )
-                        .with_suggestion("Als Schluessel nur einfache Namen verwenden."));
+                        .with_suggestion("Use only simple names as keys."));
                     }
                     *key = Some(node);
                     Ok(())
@@ -389,20 +389,20 @@ mod tests {
     fn a_syntax_error_reports_its_line() {
         let err = parse_document("tracks:\n  gitarre: {input: 2\nsections: []\n").unwrap_err();
         assert_eq!(err.issues.len(), 1);
-        assert!(err.issues[0].message.contains("YAML-Syntaxfehler"));
+        assert!(err.issues[0].message.contains("YAML syntax error"));
         assert!(err.issues[0].line.is_some());
     }
 
     #[test]
     fn an_empty_file_is_a_score_error_not_a_panic() {
         let err = parse_document("").unwrap_err();
-        assert!(err.issues[0].message.contains("leer"));
+        assert!(err.issues[0].message.contains("empty"));
     }
 
     #[test]
     fn aliases_are_refused_with_an_explanation() {
         let err = parse_document("a: &x 1\nb: *x\n").unwrap_err();
-        assert!(err.issues[0].message.contains("Anker"));
+        assert!(err.issues[0].message.contains("anchors"));
         assert_eq!(err.issues[0].line, Some(2));
     }
 }

@@ -328,7 +328,7 @@ sections: [{id: x, bars: 1}]
     let err = errors(yaml);
     assert_eq!(err.issues.len(), 1);
     assert_eq!(err.issues[0].line, Some(3));
-    assert!(err.issues[0].message.contains("widerspricht"), "{}", err);
+    assert!(err.issues[0].message.contains("contradicts"), "{}", err);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -354,9 +354,9 @@ sections:
     assert_eq!((issue.line, issue.column), (Some(8), Some(7)));
     assert_eq!(
         issue.message,
-        "Sektion 'bridge' referenziert Track 'bss', den es nicht gibt."
+        "Section 'bridge' refers to Track 'bss', which does not exist."
     );
-    assert_eq!(issue.suggestion.as_deref(), Some("meintest du 'bass'?"));
+    assert_eq!(issue.suggestion.as_deref(), Some("did you mean 'bass'?"));
 }
 
 #[test]
@@ -368,7 +368,7 @@ sections:
   - {id: a, bars: 4, tracks: {schlagzeug: play}}
 ";
     let err = errors(yaml);
-    assert_eq!(err.issues[0].suggestion.as_deref(), Some("Bekannte Tracks: bass, gitarre."));
+    assert_eq!(err.issues[0].suggestion.as_deref(), Some("Known tracks: bass, gitarre."));
 }
 
 #[test]
@@ -386,8 +386,8 @@ sections:
     assert_eq!(err.issues.len(), 1);
     assert_eq!(err.issues[0].line, Some(7));
     assert_eq!(err.issues[0].column, Some(13), "zeigt auf den Wert, nicht auf den Schluessel");
-    assert!(err.issues[0].message.contains("Unbekannter Zustand 'recrd'"), "{}", err);
-    assert_eq!(err.issues[0].suggestion.as_deref(), Some("meintest du 'record'?"));
+    assert!(err.issues[0].message.contains("Unknown state 'recrd'"), "{}", err);
+    assert_eq!(err.issues[0].suggestion.as_deref(), Some("did you mean 'record'?"));
 }
 
 #[test]
@@ -402,8 +402,8 @@ sections:
     let err = errors(yaml);
     assert_eq!(err.issues.len(), 1);
     assert_eq!(err.issues[0].line, Some(5));
-    assert!(err.issues[0].message.contains("unbekannte Sektion 'vrse'"), "{}", err);
-    assert_eq!(err.issues[0].suggestion.as_deref(), Some("meintest du 'verse'?"));
+    assert!(err.issues[0].message.contains("unknown section 'vrse'"), "{}", err);
+    assert_eq!(err.issues[0].suggestion.as_deref(), Some("did you mean 'verse'?"));
 }
 
 /// The one that must not hang: `a` repeats `b`, `b` repeats `a`.
@@ -420,7 +420,7 @@ sections:
     assert_eq!(err.issues.len(), 2, "beide Enden des Zyklus werden genannt: {err}");
     assert_eq!(err.issues[0].line, Some(4));
     assert_eq!(err.issues[1].line, Some(5));
-    assert!(err.issues[0].message.contains("zirkulaer"), "{}", err);
+    assert!(err.issues[0].message.contains("circular"), "{}", err);
 }
 
 #[test]
@@ -429,7 +429,7 @@ fn a_section_repeating_itself_is_reported() {
     let err = errors(yaml);
     assert_eq!(err.issues.len(), 1);
     assert_eq!(err.issues[0].line, Some(4));
-    assert!(err.issues[0].message.contains("zirkulaer"), "{}", err);
+    assert!(err.issues[0].message.contains("circular"), "{}", err);
 }
 
 #[test]
@@ -444,7 +444,7 @@ sections:
 ";
     let err = errors(yaml);
     assert_eq!(err.issues.len(), 3);
-    assert!(err.issues.iter().all(|i| i.message.contains("zirkulaer")), "{}", err);
+    assert!(err.issues.iter().all(|i| i.message.contains("circular")), "{}", err);
 }
 
 #[test]
@@ -460,10 +460,10 @@ sections:
     let unknown = err
         .issues
         .iter()
-        .find(|i| i.message.contains("Unbekanntes Feld"))
+        .find(|i| i.message.contains("Unknown field"))
         .unwrap_or_else(|| panic!("kein Feld-Fehler in {err}"));
     assert_eq!((unknown.line, unknown.column), (Some(5), Some(5)));
-    assert_eq!(unknown.suggestion.as_deref(), Some("meintest du 'bars'?"));
+    assert_eq!(unknown.suggestion.as_deref(), Some("did you mean 'bars'?"));
 }
 
 #[test]
@@ -471,8 +471,8 @@ fn an_unknown_root_field_lists_the_allowed_ones() {
     let yaml = "bpm: 120\ntempo_map: 3\ntracks: {b: {input: 1}}\nsections: [{id: a, bars: 1}]\n";
     let err = errors(yaml);
     assert_eq!(err.issues[0].line, Some(2));
-    assert!(err.issues[0].message.contains("Unbekanntes Feld 'tempo_map'"), "{}", err);
-    assert!(err.issues[0].suggestion.as_deref().unwrap().starts_with("Erlaubt: title, bpm"));
+    assert!(err.issues[0].message.contains("Unknown field 'tempo_map'"), "{}", err);
+    assert!(err.issues[0].suggestion.as_deref().unwrap().starts_with("Allowed: title, bpm"));
 }
 
 #[test]
@@ -487,18 +487,18 @@ sections: [{id: a, bars: 1}]
     let err = errors(yaml);
     let lines: Vec<_> = err.issues.iter().map(|i| i.line).collect();
     assert_eq!(lines, vec![Some(3), Some(4), Some(4), Some(4)]);
-    assert!(err.issues[0].message.contains("'ableton_track' gibt es nicht mehr"), "{}", err);
+    assert!(err.issues[0].message.contains("'ableton_track' no longer exists"), "{}", err);
     assert!(err.issues[0].suggestion.as_deref().unwrap().contains("input"));
-    // No follow-up "Track 'gitarre' hat kein 'input'": one mistake, one message.
-    assert!(!err.to_string().contains("hat kein 'input'"), "{}", err);
+    // No follow-up "Track 'gitarre' has no 'input'": one mistake, one message.
+    assert!(!err.to_string().contains("has no 'input'"), "{}", err);
 }
 
 #[test]
 fn a_missing_required_field_is_named() {
     let err = errors("tracks: {b: {input: 1}}\nsections: [{id: a, bars: 1}]\n");
     assert_eq!(err.issues.len(), 1);
-    assert!(err.issues[0].message.contains("Pflichtfeld 'bpm' fehlt"), "{}", err);
-    assert_eq!(err.issues[0].suggestion.as_deref(), Some("z. B. 'bpm: 120'."));
+    assert!(err.issues[0].message.contains("Required field 'bpm' is missing"), "{}", err);
+    assert_eq!(err.issues[0].suggestion.as_deref(), Some("e.g. 'bpm: 120'."));
 }
 
 #[test]
@@ -507,7 +507,7 @@ fn a_track_without_an_input_is_told_what_to_write() {
     let err = errors(yaml);
     assert_eq!(err.issues.len(), 1);
     assert_eq!(err.issues[0].line, Some(3));
-    assert!(err.issues[0].message.contains("hat kein 'input'"), "{}", err);
+    assert!(err.issues[0].message.contains("has no 'input'"), "{}", err);
 }
 
 #[test]
@@ -521,7 +521,7 @@ fn values_out_of_range_name_the_range() {
         let err = errors(yaml);
         assert_eq!(err.issues[0].line, Some(line), "{yaml}\n{err}");
         assert!(err.issues[0].message.contains(needle), "{err}");
-        assert!(err.issues[0].message.contains("zwischen"), "{err}");
+        assert!(err.issues[0].message.contains("between"), "{err}");
     }
 }
 
@@ -537,16 +537,16 @@ sections:
 ";
     let err = errors(yaml);
     assert_eq!(err.issues[0].line, Some(6));
-    assert!(err.issues[0].message.contains("muss true oder false sein"), "{}", err);
+    assert!(err.issues[0].message.contains("must be true or false"), "{}", err);
     assert!(err.issues[0].message.contains("'yes'"), "{}", err);
-    assert!(err.issues[0].suggestion.as_deref().unwrap().contains("true oder false"));
+    assert!(err.issues[0].suggestion.as_deref().unwrap().contains("true or false"));
 }
 
 #[test]
 fn a_quoted_number_is_a_type_error_rather_than_a_silent_success() {
     let err = errors("bpm: \"120\"\ntracks: {a: {input: 1}}\nsections: [{id: x, bars: 1}]\n");
     assert_eq!(err.issues[0].line, Some(1));
-    assert!(err.issues[0].message.contains("muss eine Zahl sein"), "{}", err);
+    assert!(err.issues[0].message.contains("must be a number"), "{}", err);
 }
 
 #[test]
@@ -554,7 +554,7 @@ fn a_section_without_bars_or_repeat_is_refused() {
     let err = errors("bpm: 120\ntracks: {a: {input: 1}}\nsections:\n  - id: leer\n");
     assert_eq!(err.issues.len(), 1);
     assert_eq!(err.issues[0].line, Some(4));
-    assert!(err.issues[0].message.contains("weder 'bars' noch 'repeat'"), "{}", err);
+    assert!(err.issues[0].message.contains("neither 'bars' nor 'repeat'"), "{}", err);
 }
 
 #[test]
@@ -568,7 +568,7 @@ sections:
 ";
     let err = errors(yaml);
     assert_eq!(err.issues[0].line, Some(5));
-    assert!(err.issues[0].message.contains("doppelt vergeben"), "{}", err);
+    assert!(err.issues[0].message.contains("used twice"), "{}", err);
 
     let yaml = "\
 bpm: 120
@@ -580,20 +580,20 @@ sections:
 ";
     let err = errors(yaml);
     assert_eq!(err.issues[0].line, Some(6));
-    assert!(err.issues[0].message.contains("mehrfach vor"), "{}", err);
+    assert!(err.issues[0].message.contains("more than once"), "{}", err);
 }
 
 #[test]
 fn a_midi_binding_needs_exactly_one_of_note_and_cc() {
     let base = "bpm: 120\ntracks: {a: {input: 1}}\nsections: [{id: x, bars: 1}]\n";
     let err = errors(&format!("{base}midi:\n  next_section: {{}}\n"));
-    assert!(err.issues[0].message.contains("weder 'note' noch 'cc'"), "{}", err);
+    assert!(err.issues[0].message.contains("neither 'note' nor 'cc'"), "{}", err);
 
     let err = errors(&format!("{base}midi:\n  next_section: {{note: 36, cc: 64}}\n"));
-    assert!(err.issues[0].message.contains("gleichzeitig"), "{}", err);
+    assert!(err.issues[0].message.contains("both 'note' and 'cc'"), "{}", err);
 
     let err = errors(&format!("{base}midi:\n  next_section: {{cc: 200}}\n"));
-    assert!(err.issues[0].message.contains("zwischen 0 und 127"), "{}", err);
+    assert!(err.issues[0].message.contains("between 0 and 127"), "{}", err);
 }
 
 #[test]
@@ -612,7 +612,7 @@ sections: [{id: x, bars: 1}]
 fn more_tracks_than_the_engine_carries_are_refused() {
     let tracks: String = (1..=9).map(|i| format!("  t{i}: {{input: 1}}\n")).collect();
     let err = errors(&format!("bpm: 120\ntracks:\n{tracks}sections: [{{id: x, bars: 1}}]\n"));
-    assert!(err.issues[0].message.contains("hoechstens 8"), "{}", err);
+    assert!(err.issues[0].message.contains("at most 8"), "{}", err);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -649,10 +649,10 @@ sections:
     assert_eq!(
         suggestions,
         vec![
-            Some("meintest du 'bars'?"),
-            Some("meintest du 'gitarre'?"),
-            Some("meintest du 'record'?"),
-            Some("meintest du 'verse'?"),
+            Some("did you mean 'bars'?"),
+            Some("did you mean 'gitarre'?"),
+            Some("did you mean 'record'?"),
+            Some("did you mean 'verse'?"),
         ]
     );
 }
@@ -669,7 +669,7 @@ sections: [{id: x, bars: 1}]
 ";
     let err = errors(yaml);
     assert_eq!(err.issues.iter().map(|i| i.line).collect::<Vec<_>>(), vec![Some(3), Some(4), Some(5)]);
-    assert_eq!(err.issues[1].suggestion.as_deref(), Some("meintest du 'input'?"));
+    assert_eq!(err.issues[1].suggestion.as_deref(), Some("did you mean 'input'?"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -680,14 +680,14 @@ sections: [{id: x, bars: 1}]
 fn a_yaml_syntax_error_reports_a_line_and_a_hint() {
     let err = errors("bpm: 120\ntracks:\n\tgitarre: {input: 1}\nsections: []\n");
     assert_eq!(err.issues.len(), 1, "{err}");
-    assert!(err.issues[0].message.contains("YAML-Syntaxfehler"), "{}", err);
+    assert!(err.issues[0].message.contains("YAML syntax error"), "{}", err);
     assert_eq!(err.issues[0].line, Some(3));
 }
 
 #[test]
 fn a_score_that_is_not_a_mapping_says_so() {
     let err = errors("- eine\n- Liste\n");
-    assert!(err.issues[0].message.contains("muss ein Mapping"), "{}", err);
+    assert!(err.issues[0].message.contains("must be a mapping"), "{}", err);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -737,13 +737,13 @@ fn a_pair_of_inputs_makes_a_stereo_track() {
 #[test]
 fn a_malformed_input_or_pan_is_refused_in_german() {
     for (yaml, needle) in [
-        ("tracks: {a: {input: [3]}}", "genau zwei Eingaenge"),
-        ("tracks: {a: {input: [3, 4, 5]}}", "genau zwei Eingaenge"),
-        ("tracks: {a: {input: [3, 3]}}", "zweimal Eingang 3"),
-        ("tracks: {a: {input: [3, links]}}", "ganze Zahl"),
-        ("tracks: {a: {input: [0, 4]}}", "zwischen 1 und"),
-        ("tracks: {a: {input: 1, pan: 2}}", "zwischen -1 und 1"),
-        ("tracks: {a: {input: 1, pan: links}}", "muss eine Zahl sein"),
+        ("tracks: {a: {input: [3]}}", "exactly two inputs"),
+        ("tracks: {a: {input: [3, 4, 5]}}", "exactly two inputs"),
+        ("tracks: {a: {input: [3, 3]}}", "input 3 twice"),
+        ("tracks: {a: {input: [3, links]}}", "whole number"),
+        ("tracks: {a: {input: [0, 4]}}", "between 1 and"),
+        ("tracks: {a: {input: 1, pan: 2}}", "between -1 and 1"),
+        ("tracks: {a: {input: 1, pan: links}}", "must be a number"),
     ] {
         let yaml = format!("bpm: 120\n{yaml}\nsections: [{{id: x, bars: 1}}]\n");
         let err = compile_score(&yaml).expect_err(&yaml);
@@ -805,12 +805,12 @@ fn a_track_can_bring_its_own_latency_and_its_own_surcharge() {
 #[test]
 fn a_malformed_latency_is_refused_in_german() {
     for (yaml, needle) in [
-        ("tracks: {a: {input: 1, latency: -5}}", "zwischen 0 und"),
-        ("tracks: {a: {input: 1, latency: 999999}}", "zwischen 0 und"),
-        ("tracks: {a: {input: 1, latency: viel}}", "ganze Zahl"),
-        ("tracks: {a: {input: 1, latency: 512.5}}", "ganze Zahl"),
-        ("tracks: {a: {input: 1, latency_trim: 999999}}", "zwischen -96000 und"),
-        ("tracks: {a: {input: 1, latency_trim: viel}}", "ganze Zahl"),
+        ("tracks: {a: {input: 1, latency: -5}}", "between 0 and"),
+        ("tracks: {a: {input: 1, latency: 999999}}", "between 0 and"),
+        ("tracks: {a: {input: 1, latency: viel}}", "whole number"),
+        ("tracks: {a: {input: 1, latency: 512.5}}", "whole number"),
+        ("tracks: {a: {input: 1, latency_trim: 999999}}", "between -96000 and"),
+        ("tracks: {a: {input: 1, latency_trim: viel}}", "whole number"),
     ] {
         let yaml = format!("bpm: 120\n{yaml}\nsections: [{{id: x, bars: 1}}]\n");
         let err = compile_score(&yaml).expect_err(&yaml);
@@ -921,7 +921,7 @@ fn an_unknown_bus_in_a_score_is_refused_in_german() {
     assert!(err.issues[0].message.contains("saal_hinten"), "{err}");
     let suggestion = err.issues[0].suggestion.clone().unwrap_or_default();
     assert!(suggestion.contains("monitor"), "{suggestion}");
-    assert!(suggestion.contains("Klick"), "der Grund steht dabei: {suggestion}");
+    assert!(suggestion.contains("click"), "der Grund steht dabei: {suggestion}");
 }
 
 /// Messages reach the app as they are written: no line-continuation whitespace in the middle of a

@@ -62,9 +62,9 @@ impl ScoreIssue {
 impl fmt::Display for ScoreIssue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (self.line, self.column) {
-            (Some(line), Some(column)) => write!(f, "Zeile {line}, Spalte {column}: ")?,
-            (Some(line), None) => write!(f, "Zeile {line}: ")?,
-            _ => write!(f, "Partitur: ")?,
+            (Some(line), Some(column)) => write!(f, "Line {line}, column {column}: ")?,
+            (Some(line), None) => write!(f, "Line {line}: ")?,
+            _ => write!(f, "Score: ")?,
         }
         f.write_str(&self.message)?;
         if let Some(suggestion) = &self.suggestion {
@@ -112,7 +112,7 @@ impl std::error::Error for ScoreError {}
 /// `strsim`'s normalised Damerau-Levenshtein, which counts a transposition (`baas`) as one edit
 /// rather than two. That matters because transposition is the typo a musician actually makes.
 pub fn suggest(word: &str, candidates: &[&str]) -> Option<String> {
-    best_match(word, candidates).map(|hit| format!("meintest du '{hit}'?"))
+    best_match(word, candidates).map(|hit| format!("did you mean '{hit}'?"))
 }
 
 /// The bare candidate behind [`suggest`], for callers that want to phrase it differently.
@@ -134,9 +134,9 @@ pub fn best_match<'a>(word: &str, candidates: &[&'a str]) -> Option<&'a str> {
 /// "Erlaubt: a, b, c." - the fallback when nothing is close enough to suggest.
 pub fn allowed(candidates: &[&str]) -> String {
     if candidates.is_empty() {
-        return "Hier ist kein Wert erlaubt.".to_string();
+        return "No value is allowed here.".to_string();
     }
-    format!("Erlaubt: {}.", candidates.join(", "))
+    format!("Allowed: {}.", candidates.join(", "))
 }
 
 /// [`suggest`], falling back to the list of allowed values.
@@ -150,9 +150,9 @@ mod tests {
 
     #[test]
     fn a_close_typo_is_suggested_and_a_far_one_is_not() {
-        assert_eq!(suggest("bss", &["bass", "gitarre"]).as_deref(), Some("meintest du 'bass'?"));
-        assert_eq!(suggest("gitarrre", &["gitarre", "voice"]).as_deref(), Some("meintest du 'gitarre'?"));
-        assert_eq!(suggest("Voice", &["gitarre", "voice"]).as_deref(), Some("meintest du 'voice'?"));
+        assert_eq!(suggest("bss", &["bass", "gitarre"]).as_deref(), Some("did you mean 'bass'?"));
+        assert_eq!(suggest("gitarrre", &["gitarre", "voice"]).as_deref(), Some("did you mean 'gitarre'?"));
+        assert_eq!(suggest("Voice", &["gitarre", "voice"]).as_deref(), Some("did you mean 'voice'?"));
         assert_eq!(suggest("schlagzeug", &["gitarre", "voice"]), None);
         assert_eq!(suggest("", &["gitarre"]), None);
     }
@@ -177,11 +177,11 @@ mod tests {
 
     #[test]
     fn the_rendered_message_names_line_and_column() {
-        let issue = ScoreIssue::new(Some(Pos { line: 12, column: 5 }), "Track 'bss' ist unbekannt.")
-            .with_suggestion("meintest du 'bass'?");
+        let issue = ScoreIssue::new(Some(Pos { line: 12, column: 5 }), "Track 'bss' is unknown.")
+            .with_suggestion("did you mean 'bass'?");
         assert_eq!(
             issue.to_string(),
-            "Zeile 12, Spalte 5: Track 'bss' ist unbekannt. — meintest du 'bass'?"
+            "Line 12, column 5: Track 'bss' is unknown. — did you mean 'bass'?"
         );
     }
 }

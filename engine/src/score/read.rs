@@ -53,23 +53,23 @@ const QUANTIZE_NAMES: [&str; 2] = ["bar", "loop"];
 const RETIRED_TRACK_FIELDS: [(&str, &str); 5] = [
     (
         "ableton_track",
-        "Die Engine steuert kein Ableton mehr. Ein Track nennt seinen Eingangskanal: 'input: <1-basierter Kanal>'.",
+        "The engine no longer controls Ableton. A track names its input channel: 'input: <1-based channel>'.",
     ),
     (
         "group",
-        "Gruppenspuren gibt es nicht mehr - die Engine stapelt Ebenen selbst. Ersetze den Track durch 'input: <Kanal>'.",
+        "Group tracks no longer exist - the engine stacks layers by itself. Replace the track with 'input: <channel>'.",
     ),
     (
         "layers",
-        "Die Zahl der Ebenen wird nicht mehr vorab reserviert; 'overdub' legt beliebig viele an.",
+        "Layers are no longer reserved in advance; 'overdub' adds as many as you like.",
     ),
     (
         "reserve",
-        "Reserve-Spuren gibt es nicht mehr; die Engine legt Ebenen zur Laufzeit an.",
+        "Reserve tracks no longer exist; the engine adds layers while it runs.",
     ),
     (
         "type",
-        "Es gibt nur noch eine Art Track. 'type' entfernen und 'input: <Kanal>' angeben.",
+        "There is only one kind of track now. Remove 'type' and give 'input: <channel>'.",
     ),
 ];
 
@@ -94,7 +94,7 @@ pub fn read_score(yaml_text: &str) -> Result<ScoreSource, ScoreError> {
     if reader.issues.is_empty() {
         // Only a clean read produces a score; anything else would hand the compiler half a file.
         score.ok_or_else(|| {
-            ScoreError::single(ScoreIssue::new(None, "Die Partitur konnte nicht gelesen werden."))
+            ScoreError::single(ScoreIssue::new(None, "The score could not be read."))
         })
     } else {
         Err(ScoreError::new(reader.issues))
@@ -128,7 +128,7 @@ impl Reader {
                 self.error(
                     Some(node.pos),
                     format!(
-                        "{what} muss ein Mapping (Schluessel: Wert) sein, gefunden: {}.",
+                        "{what} must be a mapping (key: value), found: {}.",
                         node.describe()
                     ),
                 );
@@ -143,7 +143,7 @@ impl Reader {
             _ => {
                 self.error(
                     Some(node.pos),
-                    format!("{what} muss eine Liste sein, gefunden: {}.", node.describe()),
+                    format!("{what} must be a list, found: {}.", node.describe()),
                 );
                 None
             }
@@ -156,7 +156,7 @@ impl Reader {
             _ => {
                 self.error(
                     Some(node.pos),
-                    format!("{what} muss Text sein, gefunden: {}.", node.describe()),
+                    format!("{what} must be text, found: {}.", node.describe()),
                 );
                 None
             }
@@ -169,9 +169,9 @@ impl Reader {
             _ => {
                 let issue = ScoreIssue::new(
                     Some(node.pos),
-                    format!("{what} muss true oder false sein, gefunden: {}.", node.describe()),
+                    format!("{what} must be true or false, found: {}.", node.describe()),
                 )
-                .with_suggestion("Schreibe true oder false (ohne Anfuehrungszeichen; 'yes'/'no' gelten nicht).");
+                .with_suggestion("Write true or false (without quotes; 'yes'/'no' don't count).");
                 self.issues.push(issue);
                 None
             }
@@ -187,7 +187,7 @@ impl Reader {
                 self.error(
                     Some(node.pos),
                     format!(
-                        "{what} muss eine ganze Zahl sein, gefunden: {}.",
+                        "{what} must be a whole number, found: {}.",
                         node.describe()
                     ),
                 );
@@ -197,8 +197,8 @@ impl Reader {
         if value < i64::from(min) || value > i64::from(max) {
             self.error_with(
                 Some(node.pos),
-                format!("{what} muss zwischen {min} und {max} liegen, gefunden: {value}."),
-                format!("Erlaubt sind {min} bis {max}."),
+                format!("{what} must be between {min} and {max}, found: {value}."),
+                format!("Allowed: {min} to {max}."),
             );
             return None;
         }
@@ -215,7 +215,7 @@ impl Reader {
                 self.error(
                     Some(node.pos),
                     format!(
-                        "{what} muss eine ganze Zahl sein, gefunden: {}.",
+                        "{what} must be a whole number, found: {}.",
                         node.describe()
                     ),
                 );
@@ -225,8 +225,8 @@ impl Reader {
         if value < min || value > max {
             self.error_with(
                 Some(node.pos),
-                format!("{what} muss zwischen {min} und {max} liegen, gefunden: {value}."),
-                format!("Erlaubt sind {min} bis {max}."),
+                format!("{what} must be between {min} and {max}, found: {value}."),
+                format!("Allowed: {min} to {max}."),
             );
             return None;
         }
@@ -240,7 +240,7 @@ impl Reader {
             _ => {
                 self.error(
                     Some(node.pos),
-                    format!("{what} muss eine Zahl sein, gefunden: {}.", node.describe()),
+                    format!("{what} must be a number, found: {}.", node.describe()),
                 );
                 None
             }
@@ -267,28 +267,28 @@ impl Reader {
             let Some(name) = entry.key.as_str() else {
                 self.error(
                     Some(entry.key.pos),
-                    format!("Schluessel in {what} muessen Text sein, gefunden: {}.", entry.key.describe()),
+                    format!("Keys in {what} must be text, found: {}.", entry.key.describe()),
                 );
                 continue;
             };
             if let Some((_, hint)) = retired.iter().find(|(field, _)| *field == name) {
                 self.error_with(
                     Some(entry.key.pos),
-                    format!("{what}: das Feld '{name}' gibt es nicht mehr."),
+                    format!("{what}: the field '{name}' no longer exists."),
                     *hint,
                 );
                 continue;
             }
             if !known.contains(&name) {
-                let message = format!("Unbekanntes Feld '{name}' in {what}.");
+                let message = format!("Unknown field '{name}' in {what}.");
                 self.error_with(Some(entry.key.pos), message, suggest_or_list(name, known));
                 continue;
             }
             if found.contains_key(name) {
                 self.error_with(
                     Some(entry.key.pos),
-                    format!("Feld '{name}' kommt in {what} mehrfach vor."),
-                    "Jeder Schluessel darf pro Mapping nur einmal stehen; der zweite wuerde den ersten still ueberschreiben.",
+                    format!("Field '{name}' appears more than once in {what}."),
+                    "Each key may appear only once per mapping; the second one would silently overwrite the first.",
                 );
                 continue;
             }
@@ -307,19 +307,19 @@ impl Reader {
             _ => {
                 self.error_with(
                     Some(document.pos),
-                    "Die Partitur muss ein Mapping mit 'bpm', 'tracks' und 'sections' sein.",
-                    "Vorlage: examples/henry-3-4.rust.yaml",
+                    "The score must be a mapping with 'bpm', 'tracks' and 'sections'.",
+                    "Template: examples/henry-3-4.rust.yaml",
                 );
                 return None;
             }
         };
-        let fields = self.index_fields(entries, &ROOT_FIELDS, &[], "der Partitur");
+        let fields = self.index_fields(entries, &ROOT_FIELDS, &[], "the score");
 
         for required in ["bpm", "tracks", "sections"] {
             if !fields.contains_key(required) {
                 self.error_with(
                     Some(document.pos),
-                    format!("Pflichtfeld '{required}' fehlt in der Partitur."),
+                    format!("Required field '{required}' is missing from the score."),
                     required_hint(required),
                 );
             }
@@ -334,8 +334,8 @@ impl Reader {
             if !(BPM_MIN..=BPM_MAX).contains(&value) {
                 self.error_with(
                     Some(node.pos),
-                    format!("'bpm' muss zwischen {BPM_MIN} und {BPM_MAX} liegen, gefunden: {value}."),
-                    "Die Engine spielt Tempi von 20 bis 400 BPM.",
+                    format!("'bpm' must be between {BPM_MIN} and {BPM_MAX}, found: {value}."),
+                    "The engine plays tempos from 20 to 400 BPM.",
                 );
                 return None;
             }
@@ -390,23 +390,23 @@ impl Reader {
         let Some((numerator, denominator)) = split_time_signature(text) else {
             self.error_with(
                 Some(node.pos),
-                format!("Ungueltige Taktart '{text}'."),
-                "Schreibe 'Zaehler/Nenner', z. B. time_signature: 3/4 oder \"7/8\".",
+                format!("Invalid time signature '{text}'."),
+                "Write 'beats/note value', e.g. time_signature: 3/4 or \"7/8\".",
             );
             return (None, beats_per_bar);
         };
         if !(1..=MAX_BEATS_PER_BAR).contains(&numerator) {
             self.error_with(
                 Some(node.pos),
-                format!("Taktart '{text}': der Zaehler muss zwischen 1 und {MAX_BEATS_PER_BAR} liegen."),
-                "z. B. 3/4, 4/4, 6/8, 7/8.",
+                format!("Time signature '{text}': the top number must be between 1 and {MAX_BEATS_PER_BAR}."),
+                "e.g. 3/4, 4/4, 6/8, 7/8.",
             );
             return (None, beats_per_bar);
         }
         if !BEAT_UNITS.contains(&denominator) {
             self.error_with(
                 Some(node.pos),
-                format!("Taktart '{text}': der Nenner muss eine Zweierpotenz sein."),
+                format!("Time signature '{text}': the bottom number must be a power of two."),
                 allowed(&["1", "2", "4", "8", "16", "32"]),
             );
             return (None, beats_per_bar);
@@ -417,8 +417,8 @@ impl Reader {
             let pos = fields.get("beats_per_bar").map(|node| node.pos);
             self.error_with(
                 pos,
-                format!("'beats_per_bar: {alias}' widerspricht 'time_signature: {text}'."),
-                "Nur eines von beiden angeben (bevorzugt time_signature), oder beats_per_bar auf den Zaehler setzen.",
+                format!("'beats_per_bar: {alias}' contradicts 'time_signature: {text}'."),
+                "Give only one of the two (preferably time_signature), or set beats_per_bar to the top number.",
             );
         }
         (Some(text.to_string()), beats_per_bar)
@@ -429,8 +429,8 @@ impl Reader {
         if entries.is_empty() {
             self.error_with(
                 Some(node.pos),
-                "'tracks' ist leer; eine Partitur braucht mindestens einen Track.",
-                "z. B. 'gitarre: {input: 2}'.",
+                "'tracks' is empty; a score needs at least one track.",
+                "e.g. 'guitar: {input: 2}'.",
             );
             return None;
         }
@@ -440,23 +440,23 @@ impl Reader {
             let Some(name) = entry.key.as_str() else {
                 self.error(
                     Some(entry.key.pos),
-                    format!("Track-Namen muessen Text sein, gefunden: {}.", entry.key.describe()),
+                    format!("Track names must be text, found: {}.", entry.key.describe()),
                 );
                 continue;
             };
             if !is_identifier(name) {
                 self.error_with(
                     Some(entry.key.pos),
-                    format!("Ungueltiger Track-Name '{name}'."),
-                    "Erlaubt sind Buchstaben, Ziffern, '_' und '-', beginnend mit einem Buchstaben oder '_'.",
+                    format!("Invalid track name '{name}'."),
+                    "Use letters, digits, '_' and '-', starting with a letter or '_'.",
                 );
                 continue;
             }
             if tracks.contains_key(name) {
                 self.error_with(
                     Some(entry.key.pos),
-                    format!("Track '{name}' ist doppelt definiert."),
-                    "Jeder Track darf nur einmal unter 'tracks' stehen.",
+                    format!("Track '{name}' is defined twice."),
+                    "Each track may appear only once under 'tracks'.",
                 );
                 continue;
             }
@@ -469,10 +469,10 @@ impl Reader {
             self.error_with(
                 Some(node.pos),
                 format!(
-                    "Die Partitur hat {} Tracks; die Engine fuehrt hoechstens {MAX_TRACKS}.",
+                    "The score has {} tracks; the engine handles at most {MAX_TRACKS}.",
                     tracks.len()
                 ),
-                format!("Hoechstens {MAX_TRACKS} Tracks unter 'tracks' auffuehren."),
+                format!("List at most {MAX_TRACKS} tracks under 'tracks'."),
             );
         }
         Some(tracks)
@@ -494,9 +494,9 @@ impl Reader {
                 if !had_field_issue {
                     self.error_with(
                         Some(node.pos),
-                        format!("Track '{name}' hat kein 'input'."),
-                        "Ein Track nennt seinen Eingangskanal am Interface, 1-basiert: 'input: 1' \
-                         fuer mono, 'input: [3, 4]' fuer stereo.",
+                        format!("Track '{name}' has no 'input'."),
+                        "A track names its input channel on the interface, 1-based: 'input: 1' \
+                         for mono, 'input: [3, 4]' for stereo.",
                     );
                 }
                 None
@@ -509,7 +509,7 @@ impl Reader {
             None => Some(0.0),
         };
         let monitor = match fields.get("monitor") {
-            Some(node) => self.as_bool(node, &format!("'monitor' von Track '{name}'")),
+            Some(node) => self.as_bool(node, &format!("'monitor' of Track '{name}'")),
             None => Some(true),
         };
         // Two fields rather than one, and they mean different things: `latency` is what a
@@ -517,7 +517,7 @@ impl Reader {
         // added by ear and survives it. See `engine::track::TrackLatency`.
         let latency = match fields.get("latency") {
             Some(node) => self
-                .as_int(node, &format!("'latency' von Track '{name}'"), 0, MAX_LATENCY as u32)
+                .as_int(node, &format!("'latency' of Track '{name}'"), 0, MAX_LATENCY as u32)
                 .map(Some),
             None => Some(None),
         };
@@ -525,7 +525,7 @@ impl Reader {
             Some(node) => self
                 .as_signed_int(
                     node,
-                    &format!("'latency_trim' von Track '{name}'"),
+                    &format!("'latency_trim' of Track '{name}'"),
                     -MAX_LATENCY,
                     MAX_LATENCY,
                 )
@@ -562,16 +562,16 @@ impl Reader {
     /// den Monitor". The accepted words are exactly the ones `BusSend` writes back out, so a score
     /// round-trips through the compiler unchanged.
     fn read_bus_send(&mut self, name: &str, field: &str, node: &Node<'_>) -> Option<BusSend> {
-        let what = format!("'{field}' von Track '{name}'");
+        let what = format!("'{field}' of Track '{name}'");
         let text = self.as_str(node, &what)?.to_string();
         match BusSend::parse(&text) {
             Some(send) => Some(send),
             None => {
                 self.error_with(
                     Some(node.pos),
-                    format!("{what}: '{text}' ist keine Bus-Angabe."),
-                    "Erlaubt sind 'main' (nur in den Saal), 'monitor' (nur auf den Kopfhoerer), \
-                     'main+monitor' und 'none'. Der Klick liegt immer und nur auf 'monitor'.",
+                    format!("{what}: '{text}' is not a bus."),
+                    "Use 'main' (room only), 'monitor' (headphones only), \
+                     'main+monitor' or 'none'. The click is always on 'monitor' and nowhere else.",
                 );
                 None
             }
@@ -584,30 +584,30 @@ impl Reader {
     /// three would be a surround format the engine does not have. Both get their own sentence
     /// rather than being quietly truncated.
     fn read_track_input(&mut self, name: &str, node: &Node<'_>) -> Option<(u32, Option<u32>)> {
-        let what = format!("'input' von Track '{name}'");
+        let what = format!("'input' of Track '{name}'");
         match &node.kind {
             NodeKind::Seq(items) => {
                 if items.len() != 2 {
                     self.error_with(
                         Some(node.pos),
                         format!(
-                            "{what} ist eine Liste mit {} Eintraegen; ein Stereo-Track nennt genau zwei Eingaenge.",
+                            "{what} is a list with {} entries; a stereo track names exactly two inputs.",
                             items.len()
                         ),
-                        "z. B. 'input: [3, 4]' fuer stereo oder 'input: 3' fuer mono.",
+                        "e.g. 'input: [3, 4]' for stereo or 'input: 3' for mono.",
                     );
                     return None;
                 }
-                let left = self.as_int(&items[0], &format!("der linke Eingang in {what}"), 1, MAX_INPUT_CHANNEL);
-                let right = self.as_int(&items[1], &format!("der rechte Eingang in {what}"), 1, MAX_INPUT_CHANNEL);
+                let left = self.as_int(&items[0], &format!("The left input in {what}"), 1, MAX_INPUT_CHANNEL);
+                let right = self.as_int(&items[1], &format!("The right input in {what}"), 1, MAX_INPUT_CHANNEL);
                 let (left, right) = (left?, right?);
                 if left == right {
                     self.error_with(
                         Some(node.pos),
-                        format!("{what} nennt zweimal Eingang {left}."),
+                        format!("{what} names input {left} twice."),
                         format!(
-                            "Ein Stereo-Track braucht zwei verschiedene Eingaenge; fuer einen \
-                             Mono-Track reicht 'input: {left}'."
+                            "A stereo track needs two different inputs; for a mono \
+                             track, 'input: {left}' is enough."
                         ),
                     );
                     return None;
@@ -620,13 +620,13 @@ impl Reader {
 
     /// `pan: -0.4`. A number, and inside the range the engine's panner actually has.
     fn read_pan(&mut self, name: &str, node: &Node<'_>) -> Option<f32> {
-        let what = format!("'pan' von Track '{name}'");
+        let what = format!("'pan' of Track '{name}'");
         let value = self.as_number(node, &what)?;
         if !(-1.0..=1.0).contains(&value) {
             self.error_with(
                 Some(node.pos),
-                format!("{what} muss zwischen -1 und 1 liegen, gefunden: {value}."),
-                "-1 ist ganz links, 0 die Mitte, 1 ganz rechts.",
+                format!("{what} must be between -1 and 1, found: {value}."),
+                "-1 is hard left, 0 is the center, 1 is hard right.",
             );
             return None;
         }
@@ -660,7 +660,7 @@ impl Reader {
                 self.error(
                     Some(entry.key.pos),
                     format!(
-                        "Schluessel in 'midi' muessen Text sein, gefunden: {}.",
+                        "Keys in 'midi' must be text, found: {}.",
                         entry.key.describe()
                     ),
                 );
@@ -669,8 +669,8 @@ impl Reader {
             if midi.contains_key(key) {
                 self.error_with(
                     Some(entry.key.pos),
-                    format!("'{key}' kommt in 'midi' mehrfach vor."),
-                    "Jeder Schluessel darf pro Mapping nur einmal stehen; der zweite wuerde den ersten still ueberschreiben.",
+                    format!("'{key}' appears more than once in 'midi'."),
+                    "Each key may appear only once per mapping; the second one would silently overwrite the first.",
                 );
                 continue;
             }
@@ -685,10 +685,10 @@ impl Reader {
             if let Some((_, other)) = taken.iter().find(|(used, _)| *used == id) {
                 self.error_with(
                     Some(entry.key.pos),
-                    format!("{id} ist schon mit '{other}' belegt."),
+                    format!("{id} is already used by '{other}'."),
                     format!(
-                        "Eine Taste kann nur eine Sache tun. Fuer '{key}' eine andere Note oder \
-                         einen anderen Regler nehmen."
+                        "A button can only do one thing. Use a different note or \
+                         controller for '{key}'."
                     ),
                 );
                 continue;
@@ -712,7 +712,7 @@ impl Reader {
             Err(message) => {
                 self.error_with(
                     Some(pos),
-                    format!("'{key}' in 'midi' ist kein bekanntes Ziel."),
+                    format!("'{key}' in 'midi' is not a known target."),
                     message,
                 );
                 return None;
@@ -722,7 +722,7 @@ impl Reader {
             Some(TrackRef::Name(name)) if !track_names.contains(&name.as_str()) => {
                 self.error_with(
                     Some(pos),
-                    format!("'{key}' bindet den Track '{name}', den es in 'tracks' nicht gibt."),
+                    format!("'{key}' binds Track '{name}', which is not in 'tracks'."),
                     suggest_or_list(name, track_names),
                 );
                 return None;
@@ -731,12 +731,12 @@ impl Reader {
                 self.error_with(
                     Some(pos),
                     format!(
-                        "'{key}' bindet Track {}, die Partitur hat {}.",
+                        "'{key}' binds Track {}, but the score has {}.",
                         index + 1,
                         track_names.len()
                     ),
-                    "Ein Track wird in einer Bindung mit seiner Nummer (ab 1) oder mit seinem \
-                     Namen angesprochen.",
+                    "In a binding, a track is addressed by its number (from 1) or by its \
+                     name.",
                 );
                 return None;
             }
@@ -748,10 +748,10 @@ impl Reader {
             self.error_with(
                 Some(pos),
                 format!(
-                    "'{key}' springt zu Sektion {}, die Partitur hat {sections}.",
+                    "'{key}' jumps to Section {}, but the score has {sections}.",
                     section + 1
                 ),
-                "Sektionen werden ab 1 gezaehlt, in der Reihenfolge, in der sie unter 'sections' stehen.",
+                "Sections are counted from 1, in the order they appear under 'sections'.",
             );
             return None;
         }
@@ -764,7 +764,7 @@ impl Reader {
         target: &Target,
         node: &Node<'_>,
     ) -> Option<MidiBindingSource> {
-        let what = format!("MIDI-Bindung '{key}'");
+        let what = format!("MIDI binding '{key}'");
         let entries = self.as_map(node, &what)?;
         let fields = self.index_fields(entries, &MIDI_BINDING_FIELDS, &[], &what);
 
@@ -780,21 +780,21 @@ impl Reader {
             (Some(_), Some(cc)) => {
                 self.error_with(
                     Some(cc.pos),
-                    format!("{what} nennt 'note' und 'cc' gleichzeitig."),
-                    "Genau eines von beiden angeben.",
+                    format!("{what} gives both 'note' and 'cc'."),
+                    "Give exactly one of the two.",
                 );
                 return None;
             }
             (None, None) => {
                 self.error_with(
                     Some(node.pos),
-                    format!("{what} nennt weder 'note' noch 'cc'."),
-                    "z. B. 'next_section: {cc: 64}' oder 'track.stimme.record: {note: 36}'.",
+                    format!("{what} gives neither 'note' nor 'cc'."),
+                    "e.g. 'next_section: {cc: 64}' or 'track.voice.record: {note: 36}'.",
                 );
                 return None;
             }
         };
-        let number = self.as_int(value_node, &format!("Nummer in {what}"), 0, 127)? as u8;
+        let number = self.as_int(value_node, &format!("The number in {what}"), 0, 127)? as u8;
 
         let mode = match fields.get("mode") {
             Some(node) => {
@@ -804,7 +804,7 @@ impl Reader {
                     None => {
                         self.error_with(
                             Some(node.pos),
-                            format!("'{text}' ist kein Tastenverhalten in {what}."),
+                            format!("'{text}' is not a button mode in {what}."),
                             suggest_or_list(text, &ButtonMode::names()),
                         );
                         return None;
@@ -821,7 +821,7 @@ impl Reader {
                     None => {
                         self.error_with(
                             Some(node.pos),
-                            format!("'{text}' ist keine Wertuebernahme in {what}."),
+                            format!("'{text}' is not a takeover mode in {what}."),
                             suggest_or_list(text, &Takeover::names()),
                         );
                         return None;
@@ -848,7 +848,7 @@ impl Reader {
         binding = binding.with_bounds(min, max);
         if let Err(message) = binding.check() {
             self.error_with(Some(node.pos), format!("{what}: {message}"), match target.control() {
-                Control::Trigger => "Erlaubt sind hier 'press' und 'release'.".to_string(),
+                Control::Trigger => "Only 'press' and 'release' are allowed here.".to_string(),
                 _ => allowed(&ButtonMode::names()),
             });
             return None;
@@ -871,8 +871,8 @@ impl Reader {
         if items.is_empty() {
             self.error_with(
                 Some(node.pos),
-                "'sections' ist leer; eine Partitur braucht mindestens eine Sektion.",
-                "Eine Sektion besteht mindestens aus 'id' und 'bars'.",
+                "'sections' is empty; a score needs at least one section.",
+                "A section needs at least 'id' and 'bars'.",
             );
             return None;
         }
@@ -897,49 +897,49 @@ impl Reader {
         track_names: &[&str],
         previous: &[SectionSource],
     ) -> Option<(SectionSource, Option<Pos>)> {
-        let entries = self.as_map(node, "Eine Sektion")?;
+        let entries = self.as_map(node, "A section")?;
         // Same rule as in `read_track`: a section whose field names are already being complained
         // about does not additionally get told that 'bars' is missing.
         let before = self.issues.len();
-        let fields = self.index_fields(entries, &SECTION_FIELDS, &[], "einer Sektion");
+        let fields = self.index_fields(entries, &SECTION_FIELDS, &[], "a section");
         let had_field_issue = self.issues.len() > before;
 
         let Some(id_node) = fields.get("id") else {
             self.error_with(
                 Some(node.pos),
-                "Pflichtfeld 'id' fehlt in einer Sektion.",
-                "Jede Sektion braucht eine eindeutige 'id', z. B. 'id: intro'.",
+                "Required field 'id' is missing in a section.",
+                "Every section needs a unique 'id', e.g. 'id: intro'.",
             );
             return None;
         };
-        let id = self.as_str(id_node, "'id' einer Sektion")?;
+        let id = self.as_str(id_node, "The 'id' of a section")?;
         if !is_identifier(id) {
             self.error_with(
                 Some(id_node.pos),
-                format!("Ungueltige Sektions-ID '{id}'."),
-                "Erlaubt sind Buchstaben, Ziffern, '_' und '-', beginnend mit einem Buchstaben oder '_'.",
+                format!("Invalid section id '{id}'."),
+                "Use letters, digits, '_' and '-', starting with a letter or '_'.",
             );
             return None;
         }
         if previous.iter().any(|section| section.id == id) {
             self.error_with(
                 Some(id_node.pos),
-                format!("Sektions-ID '{id}' ist doppelt vergeben."),
-                "IDs muessen eindeutig sein; 'repeat: <id>' koennte sonst nicht sagen, welche gemeint ist.",
+                format!("Section id '{id}' is used twice."),
+                "Ids must be unique; otherwise 'repeat: <id>' could not tell which one is meant.",
             );
             return None;
         }
 
         let repeat_node = fields.get("repeat");
         let repeat = repeat_node
-            .and_then(|node| self.as_str(node, &format!("'repeat' in Sektion '{id}'")))
+            .and_then(|node| self.as_str(node, &format!("'repeat' in Section '{id}'")))
             .map(str::to_string);
         let bars = fields
             .get("bars")
-            .and_then(|node| self.as_int(node, &format!("'bars' in Sektion '{id}'"), 1, MAX_BARS));
+            .and_then(|node| self.as_int(node, &format!("'bars' in Section '{id}'"), 1, MAX_BARS));
         let autorelease = fields
             .get("autorelease")
-            .and_then(|node| self.as_bool(node, &format!("'autorelease' in Sektion '{id}'")));
+            .and_then(|node| self.as_bool(node, &format!("'autorelease' in Section '{id}'")));
         let quantize = fields
             .get("quantize")
             .and_then(|node| self.read_quantize(id, node));
@@ -950,8 +950,8 @@ impl Reader {
         if !fields.contains_key("bars") && repeat_node.is_none() && !had_field_issue {
             self.error_with(
                 Some(id_node.pos),
-                format!("Sektion '{id}' hat weder 'bars' noch 'repeat'."),
-                "Gib 'bars: <Anzahl Takte>' an, oder wiederhole eine Sektion mit 'repeat: <id>'.",
+                format!("Section '{id}' has neither 'bars' nor 'repeat'."),
+                "Give 'bars: <number of bars>', or repeat a section with 'repeat: <id>'.",
             );
         }
 
@@ -975,14 +975,14 @@ impl Reader {
     }
 
     fn read_quantize(&mut self, section: &str, node: &Node<'_>) -> Option<Quantize> {
-        let text = self.as_str(node, &format!("'quantize' in Sektion '{section}'"))?;
+        let text = self.as_str(node, &format!("'quantize' in Section '{section}'"))?;
         match text {
             "bar" => Some(Quantize::Bar),
             "loop" => Some(Quantize::Loop),
             _ => {
                 self.error_with(
                     Some(node.pos),
-                    format!("Unbekannte Quantisierung '{text}' in Sektion '{section}'."),
+                    format!("Unknown quantize value '{text}' in Section '{section}'."),
                     suggest_or_list(text, &QUANTIZE_NAMES),
                 );
                 None
@@ -996,26 +996,26 @@ impl Reader {
         node: &Node<'_>,
         track_names: &[&str],
     ) -> Option<OrderedMap<TrackState>> {
-        let entries = self.as_map(node, &format!("'tracks' in Sektion '{section}'"))?;
+        let entries = self.as_map(node, &format!("'tracks' in Section '{section}'"))?;
         let mut states = OrderedMap::new();
         let state_names = TrackState::names();
         for entry in entries {
             let Some(name) = entry.key.as_str() else {
                 self.error(
                     Some(entry.key.pos),
-                    format!("Track-Namen muessen Text sein, gefunden: {}.", entry.key.describe()),
+                    format!("Track names must be text, found: {}.", entry.key.describe()),
                 );
                 continue;
             };
             if !track_names.contains(&name) {
                 self.error_with(
                     Some(entry.key.pos),
-                    format!("Sektion '{section}' referenziert Track '{name}', den es nicht gibt."),
+                    format!("Section '{section}' refers to Track '{name}', which does not exist."),
                     suggest(name, track_names).unwrap_or_else(|| {
                         if track_names.is_empty() {
-                            "Unter 'tracks' ist kein Track definiert.".to_string()
+                            "No track is defined under 'tracks'.".to_string()
                         } else {
-                            format!("Bekannte Tracks: {}.", track_names.join(", "))
+                            format!("Known tracks: {}.", track_names.join(", "))
                         }
                     }),
                 );
@@ -1024,8 +1024,8 @@ impl Reader {
             if states.contains_key(name) {
                 self.error_with(
                     Some(entry.key.pos),
-                    format!("Track '{name}' kommt in Sektion '{section}' mehrfach vor."),
-                    "Ein Track hat pro Sektion genau einen Zustand.",
+                    format!("Track '{name}' appears more than once in Section '{section}'."),
+                    "A track has exactly one state per section.",
                 );
                 continue;
             }
@@ -1033,7 +1033,7 @@ impl Reader {
                 self.error_with(
                     Some(entry.value.pos),
                     format!(
-                        "Zustand von Track '{name}' in Sektion '{section}' muss Text sein, gefunden: {}.",
+                        "The state of Track '{name}' in Section '{section}' must be text, found: {}.",
                         entry.value.describe()
                     ),
                     allowed(&state_names),
@@ -1044,7 +1044,7 @@ impl Reader {
                 Some(state) => states.insert(name, state),
                 None => self.error_with(
                     Some(entry.value.pos),
-                    format!("Unbekannter Zustand '{text}' fuer Track '{name}' in Sektion '{section}'."),
+                    format!("Unknown state '{text}' for Track '{name}' in Section '{section}'."),
                     suggest_or_list(text, &state_names),
                 ),
             }
@@ -1070,11 +1070,11 @@ impl Reader {
                 None => self.error_with(
                     repeat_pos[i],
                     format!(
-                        "Sektion '{}' wiederholt die unbekannte Sektion '{target}'.",
+                        "Section '{}' repeats the unknown section '{target}'.",
                         section.id
                     ),
                     suggest(target, &ids).unwrap_or_else(|| {
-                        format!("Bekannte Sektionen: {}.", ids.join(", "))
+                        format!("Known sections: {}.", ids.join(", "))
                     }),
                 ),
             }
@@ -1104,11 +1104,11 @@ impl Reader {
                 self.error_with(
                     repeat_pos[start],
                     format!(
-                        "Sektion '{}': 'repeat: {}' ist zirkulaer.",
+                        "Section '{}': 'repeat: {}' is circular.",
                         sections[start].id,
                         sections[start].repeat.as_deref().unwrap_or("?")
                     ),
-                    "Eine Sektion kann sich nicht selbst wiederholen, auch nicht ueber Umwege.",
+                    "A section cannot repeat itself, not even through other sections.",
                 );
             }
         }
@@ -1117,9 +1117,9 @@ impl Reader {
 
 fn required_hint(field: &str) -> &'static str {
     match field {
-        "bpm" => "z. B. 'bpm: 120'.",
-        "tracks" => "z. B. 'tracks:' mit 'gitarre: {input: 2}' darunter.",
-        _ => "Die Sektionen stehen als Liste unter 'sections:'.",
+        "bpm" => "e.g. 'bpm: 120'.",
+        "tracks" => "e.g. 'tracks:' with 'guitar: {input: 2}' below it.",
+        _ => "The sections go as a list under 'sections:'.",
     }
 }
 

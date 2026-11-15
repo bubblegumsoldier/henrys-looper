@@ -83,11 +83,11 @@ impl TrackState {
     /// disagreeing.
     pub fn label(self) -> &'static str {
         match self {
-            TrackState::Record => "Aufnahme",
+            TrackState::Record => "Record",
             TrackState::Overdub => "Overdub",
-            TrackState::Play => "Wiedergabe",
-            TrackState::Stop => "still",
-            TrackState::HearThrough => "mithoeren",
+            TrackState::Play => "Play",
+            TrackState::Stop => "Stop",
+            TrackState::HearThrough => "Monitor",
         }
     }
 

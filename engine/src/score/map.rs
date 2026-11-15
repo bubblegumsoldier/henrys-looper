@@ -97,7 +97,7 @@ impl<'de, V: Deserialize<'de>> Deserialize<'de> for OrderedMap<V> {
             type Value = OrderedMap<V>;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("ein Mapping (Schluessel: Wert)")
+                f.write_str("a mapping (key: value)")
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
