@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["engine", "app/src-tauri", "tools/test-vst3-gain"]
+members = ["engine", "app/src-tauri", "tools/test-vst3-gain", "tools/test-vst3-sine"]
 
 # One profile for the whole workspace. Cargo only honours profile settings in the workspace root,
 # so these used to live in engine/Cargo.toml and moved here unchanged.

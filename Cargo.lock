@@ -4136,6 +4136,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-vst3-sine"
+version = "0.1.0"
+dependencies = [
+ "vst3",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
