@@ -1247,6 +1247,26 @@ fn knob_value(settings: &looper_engine::engine::fx::ChainSettings, knob: FxKnob)
 /// whatever the tracks hold, which is why it is only done while every track is empty and no score
 /// plays; otherwise the old refusal stands, with the reason. Device, buffer size, sample rate,
 /// latency default, bus outputs, bus volumes and the click carry over from the running session.
+/// One sentence on what a load did to the mix, for the load's message: which of the engine's
+/// tracks the score's `mixer:` set, and whether it set the bus levels.
+fn mix_summary(mixer: Option<&MixerSource>, names: &[String]) -> String {
+    let Some(mixer) = mixer else {
+        return "No mixer section: the mix stays as it is.".to_string();
+    };
+    let applied = mixer
+        .tracks
+        .iter()
+        .filter(|(name, _)| names.iter().any(|n| n == name))
+        .count();
+    let tracks = match applied {
+        0 => "no track".to_string(),
+        1 => "1 track".to_string(),
+        n => format!("{n} tracks"),
+    };
+    let buses = if mixer.buses.is_some() { " and the bus levels" } else { "" };
+    format!("Mixer applied to {tracks}{buses}.")
+}
+
 fn load_score_onto(
     session: &mut Option<Session>,
     midi: &mut MidiBridge,
@@ -2658,7 +2678,6 @@ impl Session {
     /// the `score` subcommand does by building the engine out of the score - here the device stays
     /// open and only the grid moves, which the engine allows precisely because nothing is recorded.
     fn load_score(&mut self, yaml: &str, count_in: Option<u32>) -> Result<ScoreLoaded, String> {
-        self.score_yaml = Some(yaml.to_string());
         if self.score_is_playing() {
             return Err(
                 "A score is already running. Press \"Stop all\" first - switching in the middle of a \
@@ -2727,7 +2746,10 @@ impl Session {
                 }
             }
         }
-        // The score's mix, for the tracks it names. What it leaves out keeps what it has.
+        // The score's mix, for the tracks it names. What it leaves out keeps what it has. Always,
+        // whatever the engine had before: on "Load" the file is the truth.
+        let names: Vec<String> = self.tracks.iter().map(|ui| ui.name.clone()).collect();
+        let mix_note = mix_summary(score.mixer.as_ref(), &names);
         if let Some(mixer) = &score.mixer {
             self.queue_mix(mixer);
         }
@@ -2761,10 +2783,13 @@ impl Session {
             self.recorder.end(self.estimated_pos());
         }
         self.runner = Some(runner);
+        // Only now: a refused load must not put its text into the next recording's `score.yaml`
+        // while the runner still plays the previous score.
+        self.score_yaml = Some(yaml.to_string());
 
         let mut message = format!(
             "Score \"{title}\" loaded: {sections} sections, {:.1} BPM, {}, longest section \
-             {bars} bars, {count_in}-bar count-in.",
+             {bars} bars, {count_in}-bar count-in. {mix_note}",
             score.bpm,
             score.time_signature,
         );
@@ -4475,6 +4500,29 @@ mod tests {
 
     /// The load command has nowhere to put markers, so it says the same thing as one block of text -
     /// with the positions in it, so it can be pasted back into the editor.
+    /// "Load" says what it did to the mix, so a refused or mix-less load is not mistaken for one
+    /// that moved the faders.
+    #[test]
+    fn the_load_message_says_which_tracks_the_mixer_section_set() {
+        let yaml = "title: t\nbpm: 100\ntime_signature: 4/4\ntracks:\n  a: {input: 1}\n  b: {input: 2}\n\
+                    sections:\n  - id: s\n    bars: 1\n    tracks: {a: play, b: play}\n\
+                    mixer:\n  buses: {main: -2}\n  tracks:\n    a: {gain: -6}\n    b: {gain: 4, mute: true}\n";
+        let score = compile_score(yaml).expect("compiles");
+        let names = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(
+            mix_summary(score.mixer.as_ref(), &names),
+            "Mixer applied to 2 tracks and the bus levels."
+        );
+        assert_eq!(
+            mix_summary(score.mixer.as_ref(), &names[..1]),
+            "Mixer applied to 1 track and the bus levels."
+        );
+        assert_eq!(
+            mix_summary(None, &names),
+            "No mixer section: the mix stays as it is."
+        );
+    }
+
     #[test]
     fn the_load_command_renders_every_complaint_into_one_block() {
         let error = compile_score("bpm: 100\n").expect_err("ohne tracks und sections");

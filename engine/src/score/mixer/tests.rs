@@ -250,3 +250,30 @@ fn a_rebuilt_engine_gets_every_track_its_mix_by_name() {
         assert_eq!(&BusLevels::from_status(&status), mixer.buses.as_ref().unwrap());
     }
 }
+
+/// "Load" of the same file after it was changed elsewhere, onto the same running engine (same
+/// tracks, no rebuild): the new section wins over everything the engine had - the first load's
+/// values and a fader moved by hand since. Only a track without an entry keeps what it has.
+#[test]
+fn a_second_load_on_the_same_engine_applies_the_changed_section_in_full() {
+    let first = compile_score(SCORE).expect("compiles").mixer.expect("mixer");
+    let names = ["voice", "guitar", "extra"];
+    let mut engine = sim(names.len());
+    apply(&mut engine, &first, &names);
+    // By hand afterwards: the voice fader up, the extra track down.
+    engine.send(Command::SetTrackGain { track: 0, gain: 1.5 });
+    engine.send(Command::SetTrackGain { track: 2, gain: 0.25 });
+
+    let changed = SCORE
+        .replace("voice: {gain: -3.5, preset: voice}", "voice: {gain: -6}")
+        .replace("      gain: 2\n      mute: true\n", "      gain: 4\n");
+    let second = compile_score(&changed).expect("compiles").mixer.expect("mixer");
+    let status = apply(&mut engine, &second, &names);
+    let (v, g, e) = (status.tracks()[0], status.tracks()[1], status.tracks()[2]);
+    assert_eq!(v.gain, db_to_gain(-6.0, MAX_TRACK_GAIN));
+    assert_eq!(v.fx.preset, FxPreset::Dry, "kein Preset im Eintrag heisst dry");
+    assert_eq!(g.gain, db_to_gain(4.0, MAX_TRACK_GAIN));
+    assert!(!g.muted, "fehlendes mute heisst nicht stumm");
+    assert_eq!(g.fx.settings.comp.threshold_db, -10.0);
+    assert_eq!(e.gain, 0.25, "eine Spur ohne Eintrag behaelt, was sie hat");
+}
