@@ -458,6 +458,13 @@ impl Track {
         self.audible.next()
     }
 
+    /// Where the fader is right now, without advancing it - for the recorder, which places live
+    /// input through the strip at a different moment than the strip runs.
+    #[inline(always)]
+    pub fn fader_level(&self) -> f32 {
+        self.audible.value()
+    }
+
     /// Fader, then panner, for one bus frame. `g` is this frame's [`Track::fader_next`].
     #[inline(always)]
     pub fn strip(&self, wet: Frame, g: f32) -> Frame {

@@ -127,6 +127,8 @@
 //! question, and on a two-output interface the honest answer is "the same socket" - see
 //! [`super::bus`], which says that out loud instead of quietly turning the click off.
 
+use crate::capture::{CaptureEndpoint, CaptureSlot};
+
 use super::bus::{
     BUS_CHANNELS, BUS_COUNT, BUS_SAMPLES, Bus, BusOutput, BusRouting, MAX_BUS_GAIN, TrackSource,
 };
@@ -232,6 +234,9 @@ pub struct EngineCore {
     /// from the start for everything except the app, which opens with it standing - see
     /// [`EngineCore::hold_transport`].
     transport: bool,
+    /// The recorder's slot (`crate::capture`), if the host attached one. Taps the stems, the mix and
+    /// the latency-aligned live input; `None` costs one branch per frame.
+    capture: Option<Box<CaptureSlot>>,
 }
 
 impl EngineCore {
@@ -280,6 +285,7 @@ impl EngineCore {
             inserts: None,
             any_solo: false,
             transport: true,
+            capture: None,
         }
     }
 
@@ -302,6 +308,12 @@ impl EngineCore {
     /// the audio callback; the rack's scratch blocks are allocated here.
     pub fn attach_inserts(&mut self, endpoint: InsertEndpoint) {
         self.inserts = Some(Box::new(InsertRack::new(endpoint)));
+    }
+
+    /// Give the engine its recorder slot. Control thread, before the engine moves into the audio
+    /// callback; recordings are handed in later through the matching `CapturePort`.
+    pub fn attach_capture(&mut self, endpoint: CaptureEndpoint) {
+        self.capture = Some(Box::new(CaptureSlot::new(endpoint)));
     }
 
     #[cfg(test)]
@@ -341,6 +353,7 @@ impl EngineCore {
         self.refill_spares();
         self.collect_commands();
         self.collect_inserts();
+        self.collect_capture();
         self.publish_tempo();
         let in_frames = input.len() / self.input_channels;
         let out_frames = output.len() / BUS_SAMPLES;
@@ -348,6 +361,9 @@ impl EngineCore {
         self.render_with_commands(input, in_frames, output, out_frames);
         self.clamp_and_meter(output);
         self.record_input(input, in_frames);
+        if let Some(capture) = self.capture.as_deref_mut() {
+            capture.end_block(self.out_pos + out_frames as u64);
+        }
 
         self.out_pos += out_frames as u64;
         self.in_index += in_frames as u64;
@@ -431,6 +447,21 @@ impl EngineCore {
         for (t, track) in self.tracks.iter_mut().enumerate() {
             track.set_playback_advance(rack.track_latency(t));
         }
+    }
+
+    /// Take a new recording over, if the control thread sent one. The lag it hands frames on with
+    /// follows the largest compensation the tracks use right now.
+    fn collect_capture(&mut self) {
+        let Some(capture) = self.capture.as_deref_mut() else {
+            return;
+        };
+        let max_latency = self
+            .tracks
+            .iter()
+            .map(Track::latency_frames)
+            .max()
+            .unwrap_or(self.latency);
+        capture.collect(max_latency);
     }
 
     /// Tell every chain what a quarter note is worth, so a tempo-synchronous delay knows its time.
@@ -584,6 +615,7 @@ impl EngineCore {
         let metro = &self.metro;
         let timeline = &self.timeline;
         let tracks = &mut self.tracks;
+        let mut capture = self.capture.as_deref_mut().and_then(CaptureSlot::session);
 
         for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
             let pos = start + i as u64;
@@ -596,14 +628,23 @@ impl EngineCore {
                 buses[bus.index()] = Frame::mono(metro.sample_at(timeline, pos) * click_gain);
             }
             let frame = in_base + i;
-            for track in tracks.iter_mut() {
+            let mut mix = Frame::SILENT;
+            for (t, track) in tracks.iter_mut().enumerate() {
                 // The live input of this track, already stereo: one channel fanned out on a mono
                 // track, the recorded pair on a stereo one.
                 let monitor = monitor_frame(track, input, frame, in_frames, channels, monitor_gain);
                 let sent = track.render(pos, monitor, collapsed);
+                if let Some(capture) = capture.as_mut() {
+                    let main = sent[Bus::Main.index()];
+                    capture.track_frame(t, pos, main, track);
+                    mix = mix.added(main);
+                }
                 for (bus, part) in buses.iter_mut().zip(sent) {
                     *bus = bus.added(part);
                 }
+            }
+            if let Some(capture) = capture.as_mut() {
+                capture.mix_frame(pos, mix);
             }
             for (b, bus) in buses.iter().enumerate() {
                 slot[b * BUS_CHANNELS] = bus.l * bus_gain[b];
@@ -658,6 +699,7 @@ impl EngineCore {
         let Some(rack) = self.inserts.as_deref_mut() else {
             return;
         };
+        let mut capture = self.capture.as_deref_mut().and_then(CaptureSlot::session);
         for bus in rack.bus_scratch.iter_mut() {
             bus.clear(n);
         }
@@ -699,10 +741,20 @@ impl EngineCore {
                 bus_monitor.r[i] += monitor.r;
                 track.note_strip_peak(main);
                 track.note_strip_peak(monitor);
+                if let Some(capture) = capture.as_mut() {
+                    capture.track_frame(t, start + i as u64, main, track);
+                }
             }
         }
         for b in 0..BUS_COUNT {
             rack.process_bus(b, n);
+        }
+        if let Some(capture) = capture.as_mut() {
+            // The Main bus after its inserts; the click and the bus volume come after this.
+            let main = &rack.bus_scratch[Bus::Main.index()];
+            for i in 0..n {
+                capture.mix_frame(start + i as u64, Frame::new(main.l[i], main.r[i]));
+            }
         }
         let click_bus = if collapsed { Bus::Main } else { Bus::Monitor }.index();
         for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
@@ -764,6 +816,7 @@ impl EngineCore {
     #[inline]
     fn record_input(&mut self, input: &[f32], frames: usize) {
         let ch = self.input_channels;
+        let collapsed = self.routing.collapsed();
         for j in 0..frames {
             let k = self.in_index + j as u64;
             let base = j * ch;
@@ -803,54 +856,69 @@ impl EngineCore {
                 if !recordable {
                     continue;
                 }
-                let Some(take) = self.tracks[t].take() else {
-                    continue;
-                };
-                if pos < take.start {
-                    continue;
+                let wrote = self.record_frame(t, pos, frame);
+                // The recorder hears what the musician plays on this track while it records,
+                // overdubs or hears through - placed at `pos`, the same position the take uses.
+                if let Some(capture) = self.capture.as_deref_mut().and_then(CaptureSlot::session) {
+                    let track = &self.tracks[t];
+                    let live = wrote || track.monitor();
+                    capture.live_frame(t, pos, frame, track, live, collapsed);
                 }
-                // Two ways a take ends: at the position it was stopped at, or - if it was never
-                // stopped - at the buffer length (first layer) respectively after one pass through
-                // the loop (overdub), instead of overwriting what it just recorded.
-                let ended = match take.end {
-                    Some(end) if pos >= end => Some(end),
-                    _ => match self.tracks[t].take_limit() {
-                        Some(limit) if pos >= limit => Some(limit),
-                        _ => None,
-                    },
-                };
-                if let Some(end) = ended {
-                    self.finish_take(t, end);
-                    // This very sample is the first one *after* the old take - and therefore the
-                    // first one of a take queued behind it, if the two are back to back.
-                    self.write_into_take(t, pos, frame);
-                    continue;
-                }
-                self.tracks[t].write(pos, frame);
             }
         }
     }
 
-    /// Write one frame into whatever take is open on this track, if the position belongs to it.
+    /// The take part of [`Self::record_input`] for one track and one input frame at musical
+    /// position `pos`. Returns whether the frame went into a take.
     #[inline]
-    fn write_into_take(&mut self, track: usize, pos: u64, frame: Frame) {
-        let Some(take) = self.tracks[track].take() else {
-            return;
+    fn record_frame(&mut self, t: usize, pos: u64, frame: Frame) -> bool {
+        let Some(take) = self.tracks[t].take() else {
+            return false;
         };
         if pos < take.start {
-            return;
+            return false;
+        }
+        // Two ways a take ends: at the position it was stopped at, or - if it was never stopped -
+        // at the buffer length (first layer) respectively after one pass through the loop
+        // (overdub), instead of overwriting what it just recorded.
+        let ended = match take.end {
+            Some(end) if pos >= end => Some(end),
+            _ => match self.tracks[t].take_limit() {
+                Some(limit) if pos >= limit => Some(limit),
+                _ => None,
+            },
+        };
+        if let Some(end) = ended {
+            self.finish_take(t, end);
+            // This very sample is the first one *after* the old take - and therefore the first
+            // one of a take queued behind it, if the two are back to back.
+            return self.write_into_take(t, pos, frame);
+        }
+        self.tracks[t].write(pos, frame);
+        true
+    }
+
+    /// Write one frame into whatever take is open on this track, if the position belongs to it.
+    #[inline]
+    fn write_into_take(&mut self, track: usize, pos: u64, frame: Frame) -> bool {
+        let Some(take) = self.tracks[track].take() else {
+            return false;
+        };
+        if pos < take.start {
+            return false;
         }
         if take.end.map(|end| pos >= end).unwrap_or(false) {
-            return;
+            return false;
         }
         if self.tracks[track]
             .take_limit()
             .map(|limit| pos >= limit)
             .unwrap_or(false)
         {
-            return;
+            return false;
         }
         self.tracks[track].write(pos, frame);
+        true
     }
 
     fn apply(&mut self, cmd: Command) {

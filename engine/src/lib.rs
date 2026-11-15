@@ -12,6 +12,7 @@
 //! and lock-free ring buffers.
 
 pub mod audio;
+pub mod capture;
 pub mod click;
 pub mod duplex;
 pub mod engine;
