@@ -42,7 +42,7 @@ use looper_engine::score::doc::{ParseOutcome, RenderOutcome};
 use proto::{
     AppInfo, BandKindName, BusOutConfig, CalibrateConfig, CalibrateOutcome, CompileOutcome,
     DelayNoteName,
-    DeviceReport, EngineInfo, FxParamName, FxPresetName, FxSlotName, QuantizeName, ScoreLoaded,
+    DeviceReport, EngineInfo, FxParamName, FxPresetName, FxSlotName, OverdubMode, QuantizeName, ScoreLoaded,
     StartConfig,
 };
 
@@ -506,6 +506,16 @@ async fn set_quantize(
         },
     )
     .await
+}
+
+/// What `O` does in free looping: `"latch"` (stays on until pressed again, every pass a layer) or
+/// `"once"` (one pass).
+#[tauri::command(rename_all = "snake_case")]
+async fn set_overdub_mode(
+    mode: OverdubMode,
+    engine: State<'_, EngineHandle>,
+) -> Result<(), String> {
+    act(engine, Action::SetOverdubMode { mode }).await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1011,6 +1021,7 @@ fn main() {
             click_gain,
             monitor_gain,
             set_quantize,
+            set_overdub_mode,
             fx_bypass,
             fx_enable,
             fx_preset,

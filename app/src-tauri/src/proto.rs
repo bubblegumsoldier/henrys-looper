@@ -342,6 +342,18 @@ impl From<QuantizeName> for Quantize {
     }
 }
 
+/// What `O` does in free looping.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OverdubMode {
+    /// The overdub stays on until it is pressed again: every pass of the loop becomes a layer of
+    /// its own, and a pass in which nothing was played is dropped. The default.
+    #[default]
+    Latch,
+    /// One press, one pass, one layer - the behaviour before there was a choice.
+    Once,
+}
+
 /// What a track is waiting for, mirroring [`PendingKind`] one to one.
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -407,6 +419,10 @@ pub struct StartConfig {
     /// loop boundary, so one early press is enough; `bar` is the old next-bar behaviour.
     #[serde(default)]
     pub quantize: QuantizeName,
+    /// What `O` does in free looping: `latch` (stays on until pressed again, the default) or
+    /// `once` (one pass). A score is not affected - its sections say what to overdub.
+    #[serde(default)]
+    pub overdub_mode: OverdubMode,
     /// Roundtrip latency removed while recording, in **frames** - the default for every track that
     /// brings no value of its own. Measure it with `calibrate` after every change of device,
     /// sample rate or buffer size.
@@ -733,6 +749,9 @@ pub struct TrackStatusEvent {
     pub pending_bars: u32,
     /// Beats on top of `pending_bars`. Inside the last bar `pending_bars` is 0 and this counts down.
     pub pending_beats: u32,
+    /// The overdub keeps going into the next pass. While the first take is still recording this
+    /// means "overdub next": the recording runs straight on into a continuous overdub.
+    pub latched: bool,
 
     /// This track's effect chain. Effects act on playback and on monitoring; what is recorded is
     /// always dry, so nothing in here can be baked into a layer.
@@ -770,6 +789,8 @@ pub struct StatusEvent {
     pub loop_seconds: f64,
     /// Grid a recording and an overdub currently snap to. Changeable while the engine runs.
     pub quantize: QuantizeName,
+    /// What `O` does in free looping. Changeable while the engine runs.
+    pub overdub_mode: OverdubMode,
     pub sample_rate: u32,
     /// The engine's **default** compensation in frames. A track that brings its own reports it in
     /// its own entry; this is what the others follow.
@@ -853,6 +874,7 @@ impl StatusEvent {
             loop_samples: 0,
             loop_seconds: 0.0,
             quantize: QuantizeName::default(),
+            overdub_mode: OverdubMode::default(),
             sample_rate: 0,
             latency_frames: 0,
             click: false,
@@ -1003,6 +1025,7 @@ pub fn track_event(
         pending_label: lead.kind.map(|k| k.label().to_string()),
         pending_bars: lead.bars,
         pending_beats: lead.beats,
+        latched: ts.latched,
         fx: fx_event(&ts.fx, sample_rate),
     }
 }
@@ -1960,6 +1983,7 @@ mod tests {
                 "output_dbfs",
                 "output_peak",
                 "output_peaks",
+                "overdub_mode",
                 "pos",
                 "quantize",
                 "running",
@@ -2021,6 +2045,7 @@ mod tests {
                 "input_peaks",
                 "instrument",
                 "instrument_loaded",
+                "latched",
                 "latency_frames",
                 "latency_inherited",
                 "latency_measured",

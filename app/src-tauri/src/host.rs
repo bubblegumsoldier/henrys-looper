@@ -75,8 +75,8 @@ use crate::mixstore;
 use crate::midi::{BindingOptions, MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView, ProfileAction};
 use crate::proto::{
     AppInfo, BusOutConfig, CalibrateConfig, NoticeEvent, CalibrateOutcome, CompileOutcome, ConfigInfo, DeviceInfo,
-    DeviceReport, EngineInfo, HostInfo, InstrumentInput, QuantizeName, ScoreLoaded, StartConfig,
-    StatusEvent, TrackConfig, bus_events, dbfs, score_event, track_event,
+    DeviceReport, EngineInfo, HostInfo, InstrumentInput, OverdubMode, QuantizeName, ScoreLoaded,
+    StartConfig, StatusEvent, TrackConfig, bus_events, dbfs, score_event, track_event,
 };
 use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tracks};
 
@@ -182,6 +182,8 @@ pub enum Action {
     SetQuantize { quantize: Quantize },
     /// "All notes off" on one track's instrument, or on every instrument.
     Panic { track: Option<usize> },
+    /// What `O` does in free looping: stay on until pressed again, or one pass.
+    SetOverdubMode { mode: OverdubMode },
 
     // --- effects. They act on playback and monitoring; the recording stays dry. ---------------
     /// Whole chain of one track out of the signal path (bit-identical pass-through) or back in.
@@ -280,7 +282,8 @@ impl Action {
             | Action::SetBusGain { .. }
             | Action::SetBusOutput { .. }
             | Action::SetTempo { .. }
-            | Action::SetQuantize { .. } => None,
+            | Action::SetQuantize { .. }
+            | Action::SetOverdubMode { .. } => None,
         }
     }
 }
@@ -2241,6 +2244,7 @@ impl Session {
                 .timeline
                 .samples_to_secs(self.scheduler.timeline.span_bars(0, self.scheduler.bars)),
             quantize: QuantizeName::from(self.scheduler.quantize),
+            overdub_mode: self.config.overdub_mode,
             sample_rate: rate,
             latency_frames: self.info.latency_frames,
             click: status.click,
@@ -2671,6 +2675,89 @@ impl Session {
             + s.overruns.load(Ordering::Relaxed)
     }
 
+    /// One overdub pass, planned on the track's own grid (and the clock started if it stands).
+    fn overdub_plan(&mut self, track: usize, est: u64) -> Result<Scheduled, String> {
+        let mut ts = self.status_of(track);
+        let name = self.tracks[track].name.clone();
+        if !self.transport && self.runner.is_none() {
+            self.start_for_take()?;
+            // The engine re-anchors every loop on the new bar 1; plan on that grid.
+            if ts.loop_len > 0 {
+                ts.origin = self.scheduler.timeline.zero();
+            }
+        }
+        // `origin` and `loop_len` are this track's own grid; a further layer has to start on it,
+        // not on the global one. See looper_engine::engine::schedule.
+        Ok(self
+            .scheduler
+            .overdub(track, &name, est, ts.origin, ts.loop_len, ts.layers))
+    }
+
+    /// `O` in free looping with the continuous overdub (`OverdubMode::Latch`). One button, read
+    /// against what the track is doing - see `looper_engine::engine::latch` for the engine side:
+    ///
+    /// * **idle** (empty, stopped, playing): arm an overdub as before and latch it - every pass from
+    ///   then on is a layer of its own. On an empty track the first pass defines the loop.
+    /// * **recording or armed**: toggle "overdub next" - the take runs straight on into a
+    ///   continuous overdub instead of into playback.
+    /// * **overdubbing, latched**: end it. The running pass is finished to the loop end, so a press
+    ///   anywhere in the last pass keeps a complete layer and the phrase is never cut. A press in
+    ///   the first beat of a pass counts as a late press for the boundary just gone: that pass ends
+    ///   right away (and is dropped if nothing was played in it).
+    /// * **overdubbing, not latched** (a last pass running out): latch it again.
+    fn latched_overdub(&mut self, track: usize, est: u64) -> Result<(), String> {
+        let ts = self.status_of(track);
+        let name = self.tracks[track].name.clone();
+        let layer = ts.layers.max(1);
+        match ts.state {
+            TrackState::Recording | TrackState::Armed => {
+                let on = !ts.latched;
+                self.cmd.send(Command::LatchOverdub { track, on })?;
+                self.message = Some(if on {
+                    format!("\"{name}\": overdub next - the take runs straight on into overdub.")
+                } else {
+                    format!("\"{name}\": overdub next cancelled.")
+                });
+                Ok(())
+            }
+            TrackState::Overdub if ts.latched => {
+                self.cmd.send(Command::LatchOverdub { track, on: false })?;
+                let beat = self.scheduler.timeline.samples_per_beat().round() as u64;
+                let into = match ts.loop_len {
+                    0 => u64::MAX,
+                    len => est.saturating_sub(ts.origin) % len,
+                };
+                if into < beat {
+                    let at = self.scheduler.soon(est);
+                    self.cmd.send(Command::StopRecord { track, at })?;
+                    self.cmd.send(Command::StartPlay { track, at })?;
+                    self.message = Some(format!("\"{name}\": overdub off."));
+                } else {
+                    self.message = Some(format!(
+                        "\"{name}\": overdub ends at the end of this pass (layer {layer})."
+                    ));
+                }
+                Ok(())
+            }
+            TrackState::Overdub => {
+                self.cmd.send(Command::LatchOverdub { track, on: true })?;
+                self.message = Some(format!("\"{name}\": overdub stays on."));
+                Ok(())
+            }
+            TrackState::Empty | TrackState::Ready | TrackState::Playing => {
+                let plan = self.overdub_plan(track, est)?;
+                self.cmd.send(Command::LatchOverdub { track, on: true })?;
+                self.send_all(Scheduled {
+                    message: format!(
+                        "{} Stays on until O is pressed again.",
+                        plan.message
+                    ),
+                    ..plan
+                })
+            }
+        }
+    }
+
     fn send_all(&mut self, plan: Scheduled) -> Result<(), String> {
         for command in plan.commands {
             self.cmd.send(command)?;
@@ -2723,6 +2810,10 @@ impl Session {
             }
             Action::Record { track } => {
                 let name = self.tracks[track].name.clone();
+                // A new loop is "another action of the track": a continuous overdub ends with it.
+                if self.status_of(track).latched {
+                    self.cmd.send(Command::LatchOverdub { track, on: false })?;
+                }
                 // With the clock standing, `soon(est)` is the new bar 1 and therefore the first
                 // point of every grid - `record` lands exactly on it.
                 self.start_for_take()?;
@@ -2730,31 +2821,42 @@ impl Session {
                 self.tracks[track].gains.clear();
                 self.send_all(plan)
             }
+            Action::Overdub { track }
+                if self.config.overdub_mode == OverdubMode::Latch && self.runner.is_none() =>
+            {
+                self.latched_overdub(track, est)
+            }
             Action::Overdub { track } => {
-                let mut ts = self.status_of(track);
-                let name = self.tracks[track].name.clone();
-                if !self.transport && self.runner.is_none() {
-                    self.start_for_take()?;
-                    // The engine re-anchors every loop on the new bar 1; plan on that grid.
-                    if ts.loop_len > 0 {
-                        ts.origin = self.scheduler.timeline.zero();
-                    }
-                }
-                // `origin` and `loop_len` are this track's own grid; a further layer has to start
-                // on it, not on the global one. See looper_engine::engine::schedule.
-                let plan =
-                    self.scheduler
-                        .overdub(track, &name, est, ts.origin, ts.loop_len, ts.layers);
+                let plan = self.overdub_plan(track, est)?;
                 self.send_all(plan)
             }
             Action::StopTrack { track } => {
                 let ts = self.status_of(track);
+                if ts.latched {
+                    self.cmd.send(Command::LatchOverdub { track, on: false })?;
+                }
                 let name = self.tracks[track].name.clone();
                 let plan = self.scheduler.stop(track, &name, est, ts.state);
                 self.send_all(plan)
             }
             Action::Play { track } => {
                 let name = self.tracks[track].name.clone();
+                let ts = self.status_of(track);
+                if ts.latched {
+                    self.cmd.send(Command::LatchOverdub { track, on: false })?;
+                }
+                // Play during a continuous overdub means "enough layers, just play": the take ends
+                // on the next bar line, exactly like Stop ends it.
+                if ts.state == TrackState::Overdub
+                    && self.config.overdub_mode == OverdubMode::Latch
+                    && self.runner.is_none()
+                {
+                    let plan = self.scheduler.stop(track, &name, est, ts.state);
+                    return self.send_all(Scheduled {
+                        message: format!("\"{name}\": overdub ends at the next bar line, then plays."),
+                        ..plan
+                    });
+                }
                 if !self.transport {
                     // No bar to wait for: the track is on play at once and is heard from bar 1
                     // when the transport starts.
@@ -2985,6 +3087,17 @@ impl Session {
             }
             Action::SetQuantize { quantize } => {
                 self.message = Some(self.scheduler.set_quantize(quantize));
+                Ok(())
+            }
+            Action::SetOverdubMode { mode } => {
+                self.config.overdub_mode = mode;
+                self.message = Some(
+                    match mode {
+                        OverdubMode::Latch => "Overdub stays on until pressed again.",
+                        OverdubMode::Once => "Overdub records one pass.",
+                    }
+                    .to_string(),
+                );
                 Ok(())
             }
             Action::FxBypass { track, on } => {
