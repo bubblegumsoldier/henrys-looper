@@ -99,7 +99,10 @@ async function runStep(step: Step): Promise<void> {
       // The page as text (or one element's), plus the notes, into a file in the temp directory:
       // {"do": "dump", "path": "/private/tmp/…/ui.txt", "sel": ".ticker"}
       const els = step.sel ? Array.from(document.querySelectorAll<HTMLElement>(String(step.sel))) : [document.body];
-      const text = els.map((e) => e.innerText).join("\n----\n");
+      // A field shows its value, not its (empty) text.
+      const shown = (e: HTMLElement) =>
+        e instanceof HTMLInputElement || e instanceof HTMLSelectElement ? `[${e.value}]` : e.innerText;
+      const text = els.map(shown).join("\n----\n");
       await invoke("dev_dump", { path: String(step.path), text });
       return;
     }
@@ -131,6 +134,39 @@ async function runStep(step: Step): Promise<void> {
       // A click on the first element matching a CSS selector (a row, a button).
       document.querySelector<HTMLElement>(String(step.sel))?.click();
       return;
+    case "clickText": {
+      // A hand's click on the control that shows this text: {"do": "clickText", "within": ".drawer",
+      // "sel": "button", "text": "MIDI"}. Goes through pointer and mouse events like a real click,
+      // so a disabled button stays dead and a covered one is found out (`elementFromPoint`).
+      const scope = step.within ? document.querySelector<HTMLElement>(String(step.within)) : document.body;
+      const el = Array.from(scope?.querySelectorAll<HTMLElement>(String(step.sel ?? "button")) ?? []).find(
+        (e) => e.innerText.trim() === String(step.text),
+      );
+      if (!el) throw new Error(`no ${String(step.sel ?? "button")} "${String(step.text)}"`);
+      el.scrollIntoView({ block: "center" });
+      const r = el.getBoundingClientRect();
+      const at = { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+      const top = document.elementFromPoint(at.clientX, at.clientY);
+      if (top && top !== el && !el.contains(top)) throw new Error(`"${String(step.text)}" is covered by ${top.className}`);
+      const opts = { bubbles: true, cancelable: true, button: 0, pointerId: 1, ...at };
+      el.dispatchEvent(new PointerEvent("pointerdown", opts));
+      el.dispatchEvent(new MouseEvent("mousedown", opts));
+      el.dispatchEvent(new PointerEvent("pointerup", opts));
+      el.dispatchEvent(new MouseEvent("mouseup", opts));
+      el.dispatchEvent(new MouseEvent("click", opts));
+      return;
+    }
+    case "selectValue": {
+      // Pick an option of a <select> the way the browser reports a choice: {"do": "selectValue",
+      // "within": ".drawer", "index": 0, "value": "1/16"}.
+      const scope = step.within ? document.querySelector<HTMLElement>(String(step.within)) : document.body;
+      const sel = scope?.querySelectorAll<HTMLSelectElement>(String(step.sel ?? "select"))[Number(step.index ?? 0)];
+      if (!sel) throw new Error(`no select ${String(step.sel ?? "select")}`);
+      // React tracks the value itself; set it through the prototype so the change is seen.
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(sel, String(step.value));
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+      return;
+    }
     case "midiOpen":
       setMidiView(await midiApi.open(String(step.device)));
       return;
