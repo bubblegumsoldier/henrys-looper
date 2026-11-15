@@ -33,12 +33,13 @@ sections:
       piano: record
       voice: hear_through
 
-  # Weitere Klavier-Ebenen, je eine pro Durchlauf, bis Release.
+  # Weitere Klavier-Ebenen, je eine pro Durchlauf, bis Release (stack). Ein Durchlauf, in dem
+  # nichts gespielt wird, hinterlaesst keine Ebene.
   - id: layers
     bars: 4
     autorelease: false
     tracks:
-      piano: overdub
+      piano: stack
       voice: hear_through
 
   # Die Stimme bekommt ihren eigenen Loop ueber acht Takte.

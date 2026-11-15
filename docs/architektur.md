@@ -598,6 +598,10 @@ merkt sich, was er zuletzt von einem Track verlangt hat, und schickt nur die Dif
 |---|---|---|
 | egal | `record` | `StartRecord`, `StopRecord`, `StartPlay` — ein Take über die Sektion |
 | egal | `overdub` | `StartOverdub`, `StopRecord`, `StartPlay` — eine Ebene, genau ein Loop-Durchlauf |
+| nicht `stack` | `stack` | `LatchOverdub an`, dann der erste Durchlauf wie `record` (leere Spur) bzw. `overdub` — jeder weitere Durchlauf ist Sache der Engine |
+| `stack` | `stack` | **keins** — der Stapel läuft einfach weiter |
+| `stack` | `play` | nur `LatchOverdub aus` mitten im letzten Durchlauf |
+| `stack` | `record` / `overdub` | `LatchOverdub aus` + `StopRecord` am Ende des letzten Durchlaufs, dann wie oben |
 | klingt schon | `play` | **keins** |
 | still, mit Inhalt | `play` | `StartPlay` |
 | klingt | `stop` / `hear_through` | `StopPlay` |
@@ -608,9 +612,69 @@ durchgehend `stop` steht, ebenso. Das ist keine Sparsamkeit, sondern Klangschutz
 überflüssige Kommando ist ein Zustandswechsel im Audio-Thread an einer musikalisch exponierten
 Stelle — die Sorte Fehler, die man erst nach zwanzig Minuten Spielen als Knacksen bemerkt.
 
-**Mithören** folgt demselben Prinzip: an bei `record`, `overdub` und `hear_through`, aus bei `play`
+**Mithören** folgt demselben Prinzip: an bei `record`, `overdub`, `stack` und `hear_through`, aus bei `play`
 und `stop`, und nur, wenn die Partitur es dem Track überhaupt erlaubt (`monitor:`). Ein Wechsel
 wird nur geschickt, wenn er den Zustand wirklich ändert.
+
+### `stack`: eine neue Ebene in jedem Durchlauf, bis die Sektion endet
+
+```yaml
+  - id: drums
+    bars: 4
+    autorelease: false      # stapeln bis Release
+    quantize: loop
+    tracks:
+      Drums: stack          # Audio- und Instrument-Spuren, auch {state: stack, grid: 1/16}
+```
+
+`overdub` nimmt genau **eine** Ebene im ersten Durchlauf der Sektion auf und spielt danach nur
+noch. `stack` nimmt in **jedem** Durchlauf eine eigene Ebene auf, solange die Sektion läuft:
+
+- **Start.** Auf einer leeren Spur definiert der erste Durchlauf den Loop wie `record`: Ursprung
+  = Sektionsanfang, Länge = `bars`. Auf einer Spur mit Inhalt ist schon der erste Durchlauf eine
+  neue Ebene, auf dem Raster der Spur (`origin + n · loop_len`, wie `overdub`).
+- **Ende.** Mit `autorelease: false` bis Release; der Wechsel greift bei `quantize: loop` am Ende
+  des laufenden Durchlaufs, und auch bei `quantize: bar` wird der laufende Durchlauf zu Ende
+  aufgenommen (ein Wechsel landet nie in einem laufenden Take). Mit `autorelease: true` genau
+  `bars` Takte, also `bars / Looplänge` Durchläufe — auf einer leeren Spur ist das ein einziger
+  Durchlauf, gleichbedeutend mit `record`; der Compiler gibt dafür einen Hinweis („stack with
+  autorelease records a single pass – use record, or switch autorelease off"), keinen Fehler.
+- **Leere Durchläufe** (Audio: Spitze unter −40 dBFS; MIDI: keine Note) werden verworfen — so
+  stapelt sich nichts Stilles, während man nach dem letzten Fill auf den Release wartet. Der
+  zuletzt laufende Durchlauf beim Sektionsende zählt normal.
+- **Leerer erster Durchlauf auf leerer Spur** (der Besitzer braucht ihn, um von der Gitarre zu den
+  Pads zu kommen): Die Geometrie steht trotzdem fest. Die Engine behält die leere erste Ebene als
+  **stumme Platzhalter-Ebene**, solange keine andere existiert; der erste bespielte Durchlauf
+  ersetzt sie und wird Ebene 1 — auf demselben Raster, taktgenau zu den anderen Spuren. Wird bis
+  zum Ende gar nichts gespielt, ist die Spur danach leer, und folgende `play`-Sektionen laufen
+  ohne Fehler still weiter. Die Live-Kachel zählt den Platzhalter nicht mit (Status-Feld
+  `placeholder` an der Ebene).
+- **Frühe Schläge (MIDI).** Ein Durchlauf, dessen einzige Noten im Vorlauf-Fenster vor der
+  nächsten Eins liegen (eine Zweiunddreißigstel), gilt als leer; seine Noten gehen in den
+  Durchlauf, der dort beginnt — für den waren sie gemeint. Ein Durchlauf mit sonstigem Inhalt
+  behält sie an seinem Ende, wie bisher.
+- **Ebenengrenze 16:** Das Stapeln endet mit der Meldung „Overdub ended: this track holds 16
+  layers…", die Spur spielt weiter.
+
+**Wie es gebaut ist.** Der Runner plant nicht einen Take pro Durchlauf, sondern schaltet den
+durchgehenden Overdub der Engine (`Command::LatchOverdub`, `engine/src/engine/latch.rs` — derselbe
+wie im freien Modus, seit `stack` mit Zeitstempel `at`) zum ersten Durchlauf ein und plant nur
+diesen ersten Durchlauf selbst. Jeden weiteren beginnt die Engine auf genau der Sample, auf der
+der vorige endete — also auf `origin + n · loop_len`, nie auf einzeln gerundeten Taktgrenzen; die
+Vorhersage des Runners (unten) und das Raster der Engine können nicht auseinanderlaufen. Das Ende
+kennt der Runner erst, wenn die Folgesektion geplant wird (Release, bzw. sofort bei
+`autorelease`): Dann geht der Latch **mitten im letzten Durchlauf** aus — der, der auf dem letzten
+Rasterpunkt vor der Grenze beginnt —, damit dieser zu Ende aufgenommen wird und keiner mehr
+folgt. Ein halber Durchlauf ist weit mehr als jede Verzögerung zwischen den Threads. Folgt auf der
+Spur ein Take (`record`/`overdub`), bekommt der letzte Durchlauf zusätzlich sein `StopRecord`,
+damit die Engine den neuen Take dahinter einreiht. Während ein Stapel läuft, beantwortet der
+Runner „läuft hier noch ein Take" aus dem Raster: Ein Release wird ans Ende des Durchlaufs
+geschoben, der zum frühesten möglichen Wechselzeitpunkt läuft. „Stop all" und das Partiturende
+schalten den Latch ebenfalls ab. Bewiesen in `runner/tests.rs` (drei nahtlose Ebenen mit Impuls
+auf der Grenze, leerer Durchlauf, leerer erster Durchlauf, `stack`→`play`/`stack`/`overdub`,
+Stop all, 80 Startpositionen wie beim Fix ce2eeb2) und `midi_tests.rs` (der Ablauf des Besitzers:
+zwei Aufnahmen, dann sofort `stack` auf leerer Drum-Spur mit leerem erstem Durchlauf und frühem
+Schlag; und derselbe Ablauf ganz ohne Spielen).
 
 ### Einzähler
 

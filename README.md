@@ -181,8 +181,10 @@ bleiben am Element), Getipptes erscheint nach einer kurzen Pause im Raster. ⌘Z
 beide Sichten gemeinsam. Ist der Text fehlerhaft, zeigt das Raster den letzten gültigen Stand
 schreibgeschützt.
 
-- Clip anklicken (⇧ = Rechteck, ⌘ = einzeln dazu), dann `R` Record · `O` Overdub · `P` Play ·
-  `S` Stop · `M` Monitor; Pfeiltasten wandern, `⌫` setzt auf die Vorlage zurück.
+- Clip anklicken (⇧ = Rechteck, ⌘ = einzeln dazu), dann `R` Record · `O` Overdub · `K` Stack ·
+  `P` Play · `S` Stop · `M` Monitor; Pfeiltasten wandern, `⌫` setzt auf die Vorlage zurück.
+  **Stack** (`stack` im YAML) legt in jedem Durchlauf eine neue Ebene an, bis die Sektion endet —
+  mit `autorelease: false` also bis Release; leere Durchläufe bleiben nicht liegen.
 - Sektionsmarker: ziehen = verschieben, rechte Kante ziehen = Takte, Doppelklick = umbenennen
   (`repeat:` zieht mit, `transport.goto.<n>` wird beim Verschieben umnummeriert); ⌘D dupliziert.
 - Spurkopf: ziehen = umsortieren, Doppelklick = umbenennen (Zustände und `track.<name>.*`
