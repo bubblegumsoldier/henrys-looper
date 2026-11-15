@@ -1500,7 +1500,26 @@ Ruhepause von 350 ms `mixer_take` und schreibt **nur die geänderten Einträge**
 in die offene Partitur — die Datei ist dann geändert, ⌘S speichert den Mix mit. Hat die Partitur
 noch keinen Abschnitt, wird beim ersten Mal der ganze Mix geschrieben. Das gilt nur, wenn das
 offene Dokument das geladene ist (Dokument-Id aus dem Laden, nach einem Fenster-Reload: gleiche
-Spurnamen). Der `mixer:`-Block zählt nicht für „geladene Partitur ist veraltet“.
+Spurnamen – und nur für das Dokument, mit dem das Fenster zurückkam; eine danach geöffnete Datei
+bewegt die Engine nie). Für „geladene Partitur ist veraltet“ (Knopf „Reload“) zählt der
+`mixer:`-Block **nach Bedeutung**: verglichen wird mit dem Mix, den die Engine von hier bekommen
+hat (Laden, Rückschreibung, Undo/Tippen in der geladenen Partitur). Was die Rückschreibung schreibt,
+ist also kein Unterschied; ein Wert, der anders in der Datei steht (auf der Platte geändert und neu
+geöffnet), schon – erst „Load“ wendet ihn an. Wird die geladene Datei unverändert noch einmal
+geöffnet, gilt sie weiter als die laufende (Fader schreiben weiter hinein).
+
+*Laden ist die Wahrheit.* „Load“ wendet den `mixer:`-Abschnitt immer vollständig an, mit und ohne
+Neuaufbau und egal, was die Engine vorher hatte; die Meldung sagt „Mixer applied to N tracks“. Ein
+abgelehntes Laden (Spur nicht leer, Partitur läuft) ändert nichts – auch nicht den Text, den der
+nächste Mitschnitt als `score.yaml` ablegt (der ist immer der zuletzt erfolgreich geladene).
+Offen: Tippen im `mixer:` der geladenen Partitur bewegt die Engine sofort, die `score.yaml` des
+Mitschnitts zeigt aber den Text vom Laden.
+
+*Datei auf der Platte geändert.* Bekommt das Fenster den Fokus zurück, und vor ⌘S auf dieselbe
+Datei, liest die App die Datei (`score_file_peek`, ohne Recent-Liste) und vergleicht mit dem Text
+vom Öffnen/Speichern. Weicht er ab, erscheint im Arrangement die Leiste „… was changed on disk“
+mit „Reload from disk“ und „Keep mine“; ⌘S schreibt bis dahin nicht darüber. „Keep mine“ gilt für
+genau diesen Stand der Datei, eine weitere Änderung wird wieder gemeldet.
 
 *Undo/Redo — Entscheidung.* Mix-Änderungen sind Schritte in derselben Historie wie Rasteränderungen
 (`docStore.ts`), eine Geste (eine Fader-Fahrt) ist **ein** Schritt. Undo/Redo und Tippen im
