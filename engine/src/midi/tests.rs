@@ -782,7 +782,10 @@ fn a_profile_reports_every_problem_at_once_and_with_a_line() {
     )
     .unwrap_err();
     assert_eq!(issues.len(), 2, "{issues:?}");
-    assert!(issues.iter().all(|i| i.starts_with("Zeile")), "{issues:?}");
+    assert!(
+        issues.iter().all(|i| i.to_lowercase().starts_with("line")),
+        "{issues:?}"
+    );
 }
 
 /// One pad can only do one thing. A repeated key is a file that does something other than it says.
@@ -897,7 +900,11 @@ fn a_score_binding_is_checked_against_the_score_itself() {
     );
 
     let error = compile_score(&score_with("  transport.goto.9: {note: 36}\n")).unwrap_err();
-    assert!(error.issues[0].message.contains("Sektion 9"), "{:?}", error.issues);
+    assert!(
+        error.issues[0].message.contains("Section 9"),
+        "{:?}",
+        error.issues
+    );
 
     let error = compile_score(&score_with("  track.3.record: {note: 36}\n")).unwrap_err();
     assert!(error.issues[0].message.contains("Track 3"), "{:?}", error.issues);

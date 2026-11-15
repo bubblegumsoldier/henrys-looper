@@ -1224,13 +1224,13 @@ pub fn measurement_routing(output_channels: usize) -> BusRouting {
 /// than the write pointer trails the play pointer on the worst of them - see [`max_latency`].
 pub fn check_loop(timeline: &Timeline, bars: u32, latency: u64) -> Result<(), String> {
     if bars == 0 {
-        return Err("--bars muss mindestens 1 sein.".to_string());
+        return Err("--bars must be at least 1.".to_string());
     }
     let len = timeline.span_bars(0, bars);
     if len <= latency {
         return Err(format!(
-            "Der Loop waere mit {len} Frames kuerzer als die Latenzkompensation ({latency} Frames). \
-             Mehr Takte, hoeheres Tempo pruefen oder --latency-frames korrigieren."
+            "At {len} frames the loop would be shorter than the latency compensation ({latency} frames). \
+             Use more bars, check the tempo or correct --latency-frames."
         ));
     }
     Ok(())
@@ -1266,8 +1266,8 @@ pub fn limits_line(
     spare_channels: usize,
 ) -> String {
     format!(
-        "Ebenen:   bis zu {} je Track, {:.1} MB je Mono-Ebene ({:.1} MB stereo), \
-         hoechstens {:.0} MB fuer {} Tracks",
+        "Layers:   up to {} per track, {:.1} MB per mono layer ({:.1} MB stereo), \
+         at most {:.0} MB for {} tracks",
         MAX_LAYERS,
         layer_frames as f64 * 4.0 / 1_048_576.0,
         layer_frames as f64 * 8.0 / 1_048_576.0,

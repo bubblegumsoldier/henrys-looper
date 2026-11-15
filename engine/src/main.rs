@@ -20,7 +20,7 @@ use looper_engine::{click, duplex, engine, latency, midi, plugin, soak};
 #[command(
     name = "looper-engine",
     version,
-    about = "Audio-Messwerkzeug fuer den Looper-Prototyp (cpal; Windows und macOS)"
+    about = "Henrys Looper engine and audio measuring tool (cpal; Windows and macOS)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -29,20 +29,20 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Alle Hosts und Geraete mit ihren unterstuetzten Konfigurationen auflisten
+    /// List all hosts and devices with their supported configurations
     List,
 
-    /// Duplex-Durchhoeren: Eingang auf Ausgang, mit Pegelanzeige und Xrun-Zaehler
+    /// Duplex pass-through: input to output, with level meter and xrun counter
     Thru {
         #[command(flatten)]
         dev: DeviceOpts,
 
-        /// Verstaerkung des durchgehoerten Signals
+        /// Gain of the passed-through signal
         #[arg(long, default_value_t = 1.0)]
         gain: f32,
     },
 
-    /// Metronom mit sample-genauer Klickposition
+    /// Metronome with sample-accurate click position
     Click {
         #[command(flatten)]
         dev: DeviceOpts,
@@ -51,32 +51,32 @@ enum Command {
         click: ClickOpts,
     },
 
-    /// Roundtrip-Latenz per Loopback-Kabel messen (Ausgang 1 zurueck in Eingang 1)
+    /// Measure roundtrip latency with a loopback cable (output 1 back into input 1)
     Latency {
         #[command(flatten)]
         dev: DeviceOpts,
 
-        /// Anzahl der Messdurchlaeufe
+        /// Number of measurement runs
         #[arg(long, default_value_t = 20)]
         runs: u32,
     },
 
-    /// Dauerlauf: Durchhoeren und Klick gleichzeitig, mit Xrun- und Callback-Statistik
+    /// Soak test: pass-through and click at the same time, with xrun and callback statistics
     Soak {
         #[command(flatten)]
         dev: DeviceOpts,
 
-        /// Laufzeit in Minuten
+        /// Duration in minutes
         #[arg(long, default_value_t = 10)]
         minutes: u64,
 
-        /// Verstaerkung des durchgehoerten Signals
+        /// Gain of the passed-through signal
         #[arg(long, default_value_t = 1.0)]
         gain: f32,
     },
 
-    /// Looper (Phase 2): mehrere Tracks mit eigenen Eingangskanaelen, unbegrenzte Overdub-Ebenen,
-    /// Mithoeren je Track, Aufnahme auf Taktgrenze, Latenzkompensation, Tastatursteuerung
+    /// Looper (phase 2): several tracks with their own input channels, unlimited Overdub layers,
+    /// Monitor per track, Record on the bar line, latency compensation, keyboard control
     Live {
         #[command(flatten)]
         dev: DeviceOpts,
@@ -85,9 +85,9 @@ enum Command {
         live: LiveOpts,
     },
 
-    /// Partitur abspielen (Phase 3): Tempo, Taktart, Tracks und Sektionen kommen aus der
-    /// YAML-Datei. Einzaehler, Autorelease und armierte Wechsel uebernimmt der Runner; von Hand
-    /// wird nur noch der Release-Knopf bedient.
+    /// Play a score (phase 3): tempo, time signature, tracks and sections come from the YAML
+    /// file. The runner handles count-in, auto-release and armed switches; the only thing left
+    /// to press by hand is Release.
     Score {
         #[command(flatten)]
         dev: DeviceOpts,
@@ -96,29 +96,28 @@ enum Command {
         score: ScoreOpts,
     },
 
-    /// Rechenlast der Effektkette messen: Zeit je Effekt und fuer die ganze Kette, als Anteil am
-    /// Callback-Budget. Oeffnet kein Geraet und macht keinen Ton - aussagekraeftig nur im
-    /// Release-Build.
+    /// Measure the CPU load of the effect chain: time per effect and for the whole chain, as a
+    /// share of the callback budget. Opens no device and makes no sound - only meaningful in a
+    /// release build.
     Fxbench {
-        /// Samplerate, fuer die gerechnet wird
+        /// Sample rate to compute for
         #[arg(long, default_value_t = 48_000)]
         rate: u32,
 
-        /// Wie viele Sekunden Audio je Messzeile durchgerechnet werden
+        /// Seconds of audio processed per result line
         #[arg(long, default_value_t = 2.0)]
         seconds: f64,
     },
 
-    /// MIDI-Steuerung (Phase 5): Geraete auflisten, eingehende Ereignisse anzeigen, Tasten auf
-    /// Ziele lernen und im Controller-Profil speichern. Macht keinen Ton und oeffnet kein
-    /// Audiogeraet.
+    /// MIDI control (phase 5): list devices, show incoming events, learn buttons onto targets
+    /// and save them in the controller profile. Makes no sound and opens no audio device.
     Midi {
         #[command(flatten)]
         midi: MidiOpts,
     },
 
-    /// Latenzkompensation pruefen: die Engine nimmt per Loopback-Kabel ihren eigenen Klick auf
-    /// und misst, wie weit er vom Schlagraster abweicht
+    /// Check the latency compensation: the engine records its own click through a loopback cable
+    /// and measures how far it lands from the beat grid
     Calibrate {
         #[command(flatten)]
         dev: DeviceOpts,
@@ -170,7 +169,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("\nFehler: {msg}");
+            eprintln!("\nError: {msg}");
             ExitCode::FAILURE
         }
     }

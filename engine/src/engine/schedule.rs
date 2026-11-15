@@ -82,7 +82,7 @@ impl Quantize {
     /// German word for the display.
     pub fn label(self) -> &'static str {
         match self {
-            Quantize::Bar => "Takt",
+            Quantize::Bar => "Bar",
             Quantize::Loop => "Loop",
         }
     }
@@ -90,8 +90,8 @@ impl Quantize {
     /// One German sentence explaining what this mode does to a key press.
     pub fn explanation(self) -> &'static str {
         match self {
-            Quantize::Bar => "Aufnahme beginnt an der naechsten Taktgrenze.",
-            Quantize::Loop => "Aufnahme beginnt am naechsten Loop-Anfang.",
+            Quantize::Bar => "Recording starts at the next bar line.",
+            Quantize::Loop => "Recording starts at the top of the next loop.",
         }
     }
 }
@@ -109,10 +109,10 @@ impl PendingKind {
     /// German word for the display, in the same spirit as [`TrackState::label`].
     pub fn label(self) -> &'static str {
         match self {
-            PendingKind::Record => "Aufnahme",
+            PendingKind::Record => "Record",
             PendingKind::Overdub => "Overdub",
-            PendingKind::Play => "Wiedergabe",
-            PendingKind::Stop => "Stopp",
+            PendingKind::Play => "Play",
+            PendingKind::Stop => "Stop",
         }
     }
 }
@@ -147,13 +147,15 @@ impl Lead {
     pub fn text(&self) -> Option<String> {
         let kind = self.kind?;
         Some(match (self.bars, self.beats) {
-            (0, 0) => format!("{} jetzt", kind.label()),
-            (0, 1) => format!("{} in 1 Schlag", kind.label()),
-            (0, b) => format!("{} in {b} Schlaegen", kind.label()),
-            (1, 0) => format!("{} in 1 Takt", kind.label()),
-            (t, 0) => format!("{} in {t} Takten", kind.label()),
-            (1, b) => format!("{} in 1 Takt und {b} Schlaegen", kind.label()),
-            (t, b) => format!("{} in {t} Takten und {b} Schlaegen", kind.label()),
+            (0, 0) => format!("{} now", kind.label()),
+            (0, 1) => format!("{} in 1 beat", kind.label()),
+            (0, b) => format!("{} in {b} beats", kind.label()),
+            (1, 0) => format!("{} in 1 bar", kind.label()),
+            (t, 0) => format!("{} in {t} bars", kind.label()),
+            (1, 1) => format!("{} in 1 bar and 1 beat", kind.label()),
+            (1, b) => format!("{} in 1 bar and {b} beats", kind.label()),
+            (t, 1) => format!("{} in {t} bars and 1 beat", kind.label()),
+            (t, b) => format!("{} in {t} bars and {b} beats", kind.label()),
         })
     }
 }
@@ -329,7 +331,7 @@ impl Scheduler {
         let end = self.timeline.position_of(bar + bars as u64, 0);
         Scheduled {
             commands: self.take_commands(track, start, end, true),
-            message: format!("\"{name}\": neuer Loop ab Takt {} ueber {bars} Takte.", bar + 1),
+            message: format!("\"{name}\": new loop from bar {} over {bars} bars.", bar + 1),
         }
     }
 
@@ -345,7 +347,7 @@ impl Scheduler {
         let bar = self.timeline.bar_index_at(start);
         Scheduled {
             commands: self.take_commands(track, start, end, false),
-            message: format!("\"{name}\": Ebene {} ab Takt {}.", layers as usize + 1, bar + 1),
+            message: format!("\"{name}\": layer {} from bar {}.", layers as usize + 1, bar + 1),
         }
     }
 
@@ -355,7 +357,7 @@ impl Scheduler {
         Scheduled {
             commands: vec![Command::StartPlay { track, at }],
             message: format!(
-                "\"{name}\": Wiedergabe ab Takt {}.",
+                "\"{name}\": Play from bar {}.",
                 self.timeline.bar_index_at(at) + 1
             ),
         }
@@ -368,7 +370,7 @@ impl Scheduler {
         Scheduled {
             commands: vec![Command::StopPlay { track, at }],
             message: format!(
-                "\"{name}\": still ab Takt {}.",
+                "\"{name}\": silent from bar {}.",
                 self.timeline.bar_index_at(at) + 1
             ),
         }
@@ -418,7 +420,7 @@ impl Scheduler {
                         track,
                         at: self.soon(est),
                     }],
-                    message: "Geplante Aufnahme abgebrochen.".to_string(),
+                    message: "Scheduled recording cancelled.".to_string(),
                 }
             }
             TrackState::Recording | TrackState::Overdub => {
@@ -429,7 +431,7 @@ impl Scheduler {
                         Command::StopRecord { track, at: end },
                         Command::StartPlay { track, at: end },
                     ],
-                    message: format!("Aufnahme endet mit Takt {}.", self.timeline.bar_index_at(end)),
+                    message: format!("Recording ends with bar {}.", self.timeline.bar_index_at(end)),
                 }
             }
             _ => {
@@ -439,7 +441,7 @@ impl Scheduler {
                         track,
                         at: self.soon(est),
                     }],
-                    message: format!("\"{name}\": Wiedergabe gestoppt."),
+                    message: format!("\"{name}\": stopped."),
                 }
             }
         }
@@ -457,7 +459,7 @@ impl Scheduler {
                 track,
                 at: self.soon(est),
             }],
-            message: format!("\"{name}\" geleert."),
+            message: format!("\"{name}\" cleared."),
         }
     }
 
@@ -465,7 +467,7 @@ impl Scheduler {
         self.pending = [None; MAX_TRACKS];
         Scheduled {
             commands: vec![Command::ClearAll { at: self.soon(est) }],
-            message: "Alles geleert - Zustand wie frisch gestartet.".to_string(),
+            message: "All cleared - back to a fresh start.".to_string(),
         }
     }
 
@@ -474,7 +476,7 @@ impl Scheduler {
     pub fn set_quantize(&mut self, quantize: Quantize) -> String {
         self.quantize = quantize;
         format!(
-            "Quantisierung: {} - {}",
+            "Quantize: {} - {}",
             quantize.label(),
             quantize.explanation()
         )
@@ -528,8 +530,8 @@ mod tests {
                 Command::StartPlay { track: 0, at: 2 * BAR + 8 * BAR },
             ]
         );
-        assert!(plan.message.contains("Takt 3"), "{}", plan.message);
-        assert!(plan.message.contains("8 Takte"), "{}", plan.message);
+        assert!(plan.message.contains("bar 3"), "{}", plan.message);
+        assert!(plan.message.contains("8 bars"), "{}", plan.message);
 
         // Exactly on a boundary the *next* one is taken, because the head start has to fit.
         let plan = s.record(1, "stimme", BAR);
@@ -585,7 +587,7 @@ mod tests {
                 Command::StartPlay { track: 0, at: 2 * BAR + loop_len },
             ]
         );
-        assert!(plan.message.contains("Ebene 3"), "{}", plan.message);
+        assert!(plan.message.contains("layer 3"), "{}", plan.message);
 
         // On an empty track it behaves like a first take of the configured length.
         let plan = s.overdub(0, "gitarre", 100_000, 0, 0, 0);
@@ -650,7 +652,7 @@ mod tests {
         let mut s = scheduler(120.0, 8, Quantize::Loop);
         let armed = s.stop(0, "gitarre", 100_000, TrackState::Armed);
         assert!(matches!(armed.commands[0], Command::ClearTrack { .. }));
-        assert!(armed.message.contains("abgebrochen"), "{}", armed.message);
+        assert!(armed.message.contains("cancelled"), "{}", armed.message);
 
         let recording = s.stop(0, "gitarre", 100_000, TrackState::Recording);
         assert_eq!(
@@ -755,7 +757,7 @@ mod tests {
                 beats: 0
             }
         );
-        assert_eq!(s.lead(0, 0).text().unwrap(), "Aufnahme in 8 Takten");
+        assert_eq!(s.lead(0, 0).text().unwrap(), "Record in 8 bars");
         // Three beats into the last bar of the count-in: one beat left.
         let pos = 7 * BAR + 3 * 24_000;
         assert_eq!(
@@ -766,9 +768,9 @@ mod tests {
                 beats: 1
             }
         );
-        assert_eq!(s.lead(0, pos).text().unwrap(), "Aufnahme in 1 Schlag");
-        assert_eq!(s.lead(0, 6 * BAR).text().unwrap(), "Aufnahme in 2 Takten");
-        assert_eq!(s.lead(0, 7 * BAR).text().unwrap(), "Aufnahme in 1 Takt");
+        assert_eq!(s.lead(0, pos).text().unwrap(), "Record in 1 beat");
+        assert_eq!(s.lead(0, 6 * BAR).text().unwrap(), "Record in 2 bars");
+        assert_eq!(s.lead(0, 7 * BAR).text().unwrap(), "Record in 1 bar");
     }
 
     /// Every action that can be waited for announces itself, and everything that cancels one takes
@@ -808,7 +810,7 @@ mod tests {
         let plan = s.record(0, "t", 1_000);
         assert_eq!(start_of(&plan), 8 * BAR);
         let message = s.set_quantize(Quantize::Bar);
-        assert!(message.contains("Takt"), "{message}");
+        assert!(message.contains("Bar"), "{message}");
         // The armed take keeps its position; the engine already has that command.
         assert_eq!(s.lead(0, 0).bars, 8);
         let plan = s.record(1, "t", 1_000);

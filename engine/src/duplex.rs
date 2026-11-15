@@ -156,18 +156,18 @@ pub fn start_duplex(
     )?;
 
     if let Ok(frames) = input.buffer_size() {
-        println!("Tatsaechliche Puffergroesse Eingang laut Treiber: {frames} Frames");
+        println!("Actual input buffer size per driver: {frames} frames");
     }
     if let Ok(frames) = output.buffer_size() {
-        println!("Tatsaechliche Puffergroesse Ausgang laut Treiber: {frames} Frames");
+        println!("Actual output buffer size per driver: {frames} frames");
     }
 
     input
         .play()
-        .map_err(|e| format!("Eingangsstream startet nicht: {e}"))?;
+        .map_err(|e| format!("Input stream does not start: {e}"))?;
     output
         .play()
-        .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+        .map_err(|e| format!("Output stream does not start: {e}"))?;
 
     Ok(DuplexRunner {
         _input: input,
@@ -190,13 +190,13 @@ pub fn cmd_thru(dev: &DeviceOpts, gain: f32) -> Result<(), String> {
     audio::print_setup(&setup);
     let runner = start_duplex(&setup, gain, None)?;
     println!(
-        "Ringpuffer: {} Samples ({} x Puffergroesse, max. {:.2} ms Zusatzlatenz)",
+        "Ring buffer: {} samples ({} x buffer size, max. {:.2} ms extra latency)",
         runner.ring_capacity,
         RING_BUFFERS,
         runner.ring_capacity as f64 * 1000.0 / setup.sample_rate() as f64
     );
-    println!("Verstaerkung: {gain:.2}");
-    println!("\nDurchhoeren laeuft. Enter beendet.\n");
+    println!("Gain: {gain:.2}");
+    println!("\nPass-through running. Press Enter to stop.\n");
 
     let enter = crate::wait_for_enter();
     let stats = Arc::clone(&runner.stats);
@@ -209,7 +209,7 @@ pub fn cmd_thru(dev: &DeviceOpts, gain: f32) -> Result<(), String> {
             + stats.underruns.load(Ordering::Relaxed)
             + stats.overruns.load(Ordering::Relaxed);
         print!(
-            "\rEingang: {} | Xruns gesamt: {:<6} (cpal {}, Ring leer {}, Ring voll {})   ",
+            "\rInput: {} | Xruns total: {:<6} (cpal {}, ring empty {}, ring full {})   ",
             fmt_dbfs(peak),
             xruns,
             stats.xruns.load(Ordering::Relaxed),
@@ -236,17 +236,17 @@ pub fn print_summary(stats: &DuplexStats) {
         stats.overruns.load(Ordering::Relaxed)
     );
     println!(
-        "Sonstige Fehler:     {}",
+        "Other errors:        {}",
         stats.other_errors.load(Ordering::Relaxed)
     );
     println!(
-        "Callback-Aufrufe:    {} (Eingang {}, Ausgang {})",
+        "Callbacks:           {} (input {}, output {})",
         stats.callbacks(),
         stats.in_callbacks.load(Ordering::Relaxed),
         stats.out_callbacks.load(Ordering::Relaxed)
     );
     println!(
-        "Callback-Dauer:      max {:.3} ms, Mittel {:.3} ms",
+        "Callback duration:   max {:.3} ms, mean {:.3} ms",
         stats.max_callback_ms(),
         stats.avg_callback_ms()
     );

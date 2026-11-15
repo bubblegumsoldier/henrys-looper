@@ -87,8 +87,8 @@ impl Bus {
     /// German label for the display.
     pub fn label(self) -> &'static str {
         match self {
-            Bus::Main => "Main (Saal)",
-            Bus::Monitor => "Monitor (Kopfhoerer)",
+            Bus::Main => "Main (room)",
+            Bus::Monitor => "Monitor (headphones)",
         }
     }
 
@@ -150,7 +150,7 @@ impl BusSend {
     /// German label: what a track line and a tooltip say.
     pub fn label(self) -> &'static str {
         match self.0 {
-            0 => "nirgends",
+            0 => "nowhere",
             1 => "Main",
             2 => "Monitor",
             _ => "Main+Monitor",
@@ -162,8 +162,8 @@ impl BusSend {
         match self.0 {
             0 => "--",
             1 => "M-",
-            2 => "-K",
-            _ => "MK",
+            2 => "-H",
+            _ => "MH",
         }
     }
 
@@ -223,7 +223,7 @@ impl TrackSource {
     pub fn label(self) -> &'static str {
         match self {
             TrackSource::Loop => "Loop",
-            TrackSource::Monitor => "Mithoeren",
+            TrackSource::Monitor => "Monitor",
         }
     }
 
@@ -400,33 +400,33 @@ pub fn routing_note(routing: &BusRouting, channels: usize) -> Option<String> {
     let monitor = routing.get(Bus::Monitor);
     if !routing.collapsed() {
         return Some(format!(
-            "Main liegt auf Ausgang {}, Monitor auf Ausgang {} - die beiden ueberschneiden sich \
-             teilweise, auf dem gemeinsamen Kanal wird summiert und der Klick geht mit in den Saal. \
-             Sauber getrennt z.B. mit --bus-out main:1-2 --bus-out monitor:3-4.",
+            "Main is on output {}, Monitor on output {} - they partly overlap, the shared \
+             channel is summed and the click goes out to the room as well. \
+             Cleanly separated e.g. with --bus-out main:1-2 --bus-out monitor:3-4.",
             main.label(),
             monitor.label()
         ));
     }
     let head = if channels < 4 {
         format!(
-            "Das Geraet hat {channels} Ausgangskanaele. Getrennte Busse brauchen vier. \
-             Main und Monitor liegen deshalb beide auf Ausgang {}",
+            "The device has {channels} output channels. Separate buses need four. \
+             Main and Monitor are therefore both on output {}",
             main.label()
         )
     } else {
         format!(
-            "Main und Monitor liegen beide auf Ausgang {} - das Geraet haette mit {channels} \
-             Kanaelen Platz fuer getrennte Paare",
+            "Main and Monitor are both on output {} - with {channels} channels the device \
+             would have room for separate pairs",
             main.label()
         )
     };
     Some(format!(
-        "{head}: es gibt einen Weg hinaus und damit eine Mischung. Jede Quelle klingt darin genau \
-         einmal, die Lautstaerken bleiben also, wie sie waeren - aber der Klick geht mit in den \
-         Saal, und die Monitor-Lautstaerke hat nichts, was sie getrennt regeln koennte. \
-         Mit vier Ausgaengen: --bus-out main:1-2 --bus-out monitor:3-4. \
-         Notbehelf mit zweien: --bus-out main:1 --bus-out monitor:2 legt den Mix nach links und \
-         den Klick nach rechts, mit einem Y-Kabel aufzutrennen."
+        "{head}: there is one way out and therefore one mix. Every source is in it exactly \
+         once, so levels stay as they would be - but the click goes out to the room too, \
+         and the Monitor level has nothing of its own to control. \
+         With four outputs: --bus-out main:1-2 --bus-out monitor:3-4. \
+         Stopgap with two: --bus-out main:1 --bus-out monitor:2 puts the mix on the left and \
+         the click on the right, to be split with a Y-cable."
     ))
 }
 
@@ -515,17 +515,17 @@ mod tests {
         assert!(two.overlaps());
         assert!(two.collapsed(), "ein Weg hinaus ist eine Mischung");
         let note = routing_note(&two, 2).expect("zwei Ausgaenge werden erklaert");
-        assert!(note.contains("vier"), "{note}");
-        assert!(note.contains("Klick"), "{note}");
-        assert!(note.contains("genau einmal"), "keine Verdopplung: {note}");
-        assert!(note.contains("Y-Kabel"), "der Notbehelf steht drin: {note}");
+        assert!(note.contains("four"), "{note}");
+        assert!(note.contains("click"), "{note}");
+        assert!(note.contains("exactly once"), "keine Verdopplung: {note}");
+        assert!(note.contains("Y-cable"), "der Notbehelf steht drin: {note}");
 
         // A partial overlap is a routing somebody chose; it really does sum, and says so.
         let odd = BusRouting::new(BusOutput::pair(0), BusOutput::pair(1));
         assert!(odd.overlaps());
         assert!(!odd.collapsed());
         let note = routing_note(&odd, 4).expect("Ueberschneidung wird erklaert");
-        assert!(note.contains("teilweise"), "{note}");
+        assert!(note.contains("partly"), "{note}");
 
         // Eight outputs still default to the first two pairs; more is a routing decision.
         let eight = BusRouting::default_for(8);

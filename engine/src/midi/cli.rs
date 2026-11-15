@@ -36,57 +36,57 @@ pub struct MidiOpts {
 
 #[derive(Subcommand, Debug)]
 pub enum MidiCommand {
-    /// MIDI-Eingaenge auflisten. Oeffnet nichts.
+    /// List MIDI inputs. Opens nothing.
     List,
 
-    /// Eingehende Ereignisse anzeigen: was sendet dieses Pad, dieser Regler?
+    /// Show incoming events: what does this pad or knob send?
     Monitor {
-        /// Nummer oder Namensteil des Eingangs. Ohne Angabe: der einzige, falls es nur einen gibt.
+        /// Number or part of the name of the input. If omitted: the only one, if there is just one.
         #[arg(long, default_value = "")]
         device: String,
 
-        /// Profil-Datei, gegen die aufgeloest wird. Ohne Angabe wird das Profil zum Geraet
-        /// gesucht.
+        /// Profile file to resolve against. If omitted, the profile for the device is looked
+        /// up.
         #[arg(long)]
         profile: Option<PathBuf>,
 
-        /// Nach so vielen Sekunden beenden. 0 heisst: bis Strg+C.
+        /// Stop after this many seconds. 0 means: until Ctrl+C.
         #[arg(long, default_value_t = 0)]
         seconds: u64,
     },
 
-    /// Die naechste gedrueckte Taste beziehungsweise der naechste bewegte Regler wird auf ein Ziel
-    /// gelegt. Mit --save landet das Ergebnis im Profil.
+    /// Bind the next key pressed or knob moved to a target. With --save the result goes into
+    /// the profile.
     Learn {
-        /// Zieladresse, z. B. track.1.record. Alle Adressen zeigt 'midi targets'.
+        /// Target address, e.g. track.1.record. 'midi targets' lists every address.
         #[arg(long)]
         target: String,
 
         #[arg(long, default_value = "")]
         device: String,
 
-        /// Profil-Datei. Ohne Angabe die Datei zum Geraet im Anwendungsdatenverzeichnis.
+        /// Profile file. If omitted: the device's file in the application data folder.
         #[arg(long)]
         profile: Option<PathBuf>,
 
-        /// Das Gelernte ins Profil schreiben.
+        /// Write the learned binding into the profile.
         #[arg(long)]
         save: bool,
 
-        /// Tastenverhalten: press, release, toggle, momentary. Ohne Angabe die Vorgabe des Ziels.
+        /// Button mode: press, release, toggle, momentary. If omitted: the target's default.
         #[arg(long)]
         mode: Option<String>,
 
-        /// Wertuebernahme fuer einen Regler: pickup oder jump.
+        /// Takeover mode for a knob: pickup or jump.
         #[arg(long)]
         takeover: Option<String>,
 
-        /// Nach so vielen Sekunden aufgeben.
+        /// Give up after this many seconds.
         #[arg(long, default_value_t = 30)]
         seconds: u64,
     },
 
-    /// Das Profil anzeigen - Pfad und Inhalt.
+    /// Show the profile - path and contents.
     Profile {
         #[arg(long, default_value = "")]
         device: String,
@@ -95,21 +95,21 @@ pub enum MidiCommand {
         profile: Option<PathBuf>,
     },
 
-    /// Alle Zieladressen auflisten. Braucht kein Geraet.
+    /// List all target addresses. Needs no device.
     Targets {
-        /// Fuer wie viele Tracks die Liste aufgebaut wird.
+        /// How many tracks to build the list for.
         #[arg(long, default_value_t = 2)]
         tracks: usize,
 
-        /// Wie viele Ebenen je Track aufgefuehrt werden.
+        /// How many layers to list per track.
         #[arg(long, default_value_t = 2)]
         layers: usize,
 
-        /// Wie viele Sektionen die Partitur hat (fuer transport.goto.N).
+        /// How many sections the score has (for transport.goto.N).
         #[arg(long, default_value_t = 4)]
         sections: usize,
 
-        /// Nur Adressen, die diesen Text enthalten.
+        /// Only addresses containing this text.
         #[arg(long, default_value = "")]
         filter: String,
     },
@@ -157,37 +157,37 @@ fn list() -> Result<(), String> {
     if ports.is_empty() {
         if cfg!(windows) {
             println!(
-                "Kein MIDI-Eingang gefunden.\n\
-                 Haengt der Controller am Rechner? Windows zeigt ein MIDI-Geraet erst, wenn es \
-                 angesteckt und der Treiber geladen ist."
+                "No MIDI input found.\n\
+                 Is the controller connected? Windows shows a MIDI device only once it is \
+                 plugged in and its driver is loaded."
             );
         } else {
             println!(
-                "Kein MIDI-Eingang gefunden.\n\
-                 Haengt der Controller am Rechner? Unter macOS zeigt \"Audio-MIDI-Setup\" im \
-                 Fenster \"MIDI-Studio\", welche Geraete das System sieht."
+                "No MIDI input found.\n\
+                 Is the controller connected? On macOS, the \"MIDI Studio\" window of \
+                 \"Audio MIDI Setup\" shows which devices the system sees."
             );
         }
         return Ok(());
     }
-    println!("MIDI-Eingaenge:");
+    println!("MIDI inputs:");
     for port in &ports {
         let profile = profile::profile_for_port(&port.name);
         let note = match &profile {
             Some((path, profile)) => format!(
-                "   Profil \"{}\" ({} Bindungen): {}",
+                "   Profile \"{}\" ({} bindings): {}",
                 profile.device,
                 profile.map.len(),
                 path.display()
             ),
-            None => "   kein Profil".to_string(),
+            None => "   no profile".to_string(),
         };
         println!("  {}  {}\n{note}", port.index, port.name);
     }
     if cfg!(windows) {
         println!(
-            "\nHinweis: Windows gibt ein MIDI-Geraet immer nur an ein Programm gleichzeitig heraus. \
-             Laeuft Ableton mit dem Controller als Control Surface, laesst er sich hier nicht oeffnen."
+            "\nNote: Windows gives a MIDI device to only one program at a time. \
+             If Ableton is running with the controller as a control surface, it cannot be opened here."
         );
     }
     Ok(())
@@ -209,16 +209,16 @@ fn monitor(device: &str, profile_path: Option<&std::path::Path>, seconds: u64) -
         .as_ref()
         .map(|p| p.map.clone())
         .unwrap_or_else(MidiMap::new);
-    println!("MIDI-Eingang \"{name}\" offen.");
+    println!("MIDI input \"{name}\" open.");
     match &profile {
         Some(profile) => println!(
-            "Profil \"{}\" mit {} Bindungen wird zum Aufloesen benutzt.",
+            "Resolving with profile \"{}\" ({} bindings).",
             profile.device,
             profile.map.len()
         ),
-        None => println!("Kein Profil - es werden nur die eingehenden Ereignisse angezeigt."),
+        None => println!("No profile - showing incoming events only."),
     }
-    println!("Pads druecken, Regler drehen. Beenden mit Strg+C.\n");
+    println!("Hit pads, turn knobs. Ctrl+C to quit.\n");
 
     // The layout is synthetic: the monitor has no engine, so a binding on `track.1.record` resolves
     // against a made-up list of eight tracks. It says *which* target a control is on, which is what
@@ -235,23 +235,23 @@ fn monitor(device: &str, profile_path: Option<&std::path::Path>, seconds: u64) -
             let line = format!("{:>10}  {}", id.to_string(), timed.event.describe());
             let ctx = Context::bare(&layout);
             let verdict = match router.resolve(&timed.event, &ctx) {
-                Resolution::Unbound => "nicht belegt".to_string(),
+                Resolution::Unbound => "unbound".to_string(),
                 Resolution::Absorbed(reason) => format!("- {reason}"),
-                Resolution::Refused(reason) => format!("abgelehnt: {reason}"),
+                Resolution::Refused(reason) => format!("refused: {reason}"),
                 Resolution::Action(action) => format!("=> {action:?}"),
             };
             println!("{line}   {verdict}");
             let _ = std::io::stdout().flush();
         }
         if midi.dropped() > 0 {
-            println!("Achtung: {} Ereignisse verloren gegangen.", midi.dropped());
+            println!("Warning: {} events were lost.", midi.dropped());
         }
         if seconds > 0 && started.elapsed() >= Duration::from_secs(seconds) {
             break;
         }
         std::thread::sleep(POLL);
     }
-    println!("\n{count} Ereignisse.");
+    println!("\n{count} events.");
     Ok(())
 }
 
@@ -292,8 +292,8 @@ fn learn(
         }
         if started.elapsed() >= Duration::from_secs(seconds.max(1)) {
             return Err(format!(
-                "In {seconds} Sekunden kam nichts an. Sendet der Controller auf diesem Eingang? \
-                 'looper-engine midi monitor' zeigt es."
+                "Nothing arrived in {seconds} seconds. Is the controller sending on this input? \
+                 'looper-engine midi monitor' shows it."
             ));
         }
         std::thread::sleep(POLL);
@@ -303,7 +303,7 @@ fn learn(
     if let Some(mode) = mode {
         binding.button = ButtonMode::parse(mode).ok_or_else(|| {
             format!(
-                "'{mode}' ist kein Tastenverhalten. Erlaubt: {}.",
+                "'{mode}' is not a button mode. Allowed: {}.",
                 ButtonMode::names().join(", ")
             )
         })?;
@@ -311,7 +311,7 @@ fn learn(
     if let Some(takeover) = takeover {
         binding.takeover = Takeover::parse(takeover).ok_or_else(|| {
             format!(
-                "'{takeover}' ist keine Wertuebernahme. Erlaubt: {}.",
+                "'{takeover}' is not a takeover mode. Allowed: {}.",
                 Takeover::names().join(", ")
             )
         })?;
@@ -321,15 +321,15 @@ fn learn(
     println!("{}", learned.message);
     if !save {
         println!(
-            "Nicht gespeichert. Mit --save landet die Bindung in {}.",
+            "Not saved. With --save the binding goes into {}.",
             path.display()
         );
-        println!("Fuer die Partitur: {}: {{{}}}", binding.target, id_yaml(learned.id));
+        println!("For the score: {}: {{{}}}", binding.target, id_yaml(learned.id));
         return Ok(());
     }
     profile.map.insert(learned.id, binding);
     profile.save(&path)?;
-    println!("Gespeichert in {}.", path.display());
+    println!("Saved to {}.", path.display());
     Ok(())
 }
 
@@ -364,16 +364,16 @@ fn show_profile(device: &str, profile_path: Option<&std::path::Path>) -> Result<
             match profile::profile_for_port(&port) {
                 Some(found) => found,
                 None => {
-                    println!("Profilverzeichnis: {}", profile::profile_dir().display());
+                    println!("Profile folder: {}", profile::profile_dir().display());
                     if port.is_empty() {
                         println!(
-                            "Es ist kein MIDI-Geraet angeschlossen und keine Datei mit --profile \
-                             genannt, also ist auch kein Profil zu zeigen."
+                            "No MIDI device is connected and no file was given with --profile, \
+                             so there is no profile to show."
                         );
                     } else {
                         println!(
-                            "Fuer \"{port}\" gibt es noch kein Profil. \
-                             'looper-engine midi learn --target ... --save' legt eines an."
+                            "There is no profile for \"{port}\" yet. \
+                             'looper-engine midi learn --target ... --save' creates one."
                         );
                     }
                     return Ok(());
@@ -381,9 +381,9 @@ fn show_profile(device: &str, profile_path: Option<&std::path::Path>) -> Result<
             }
         }
     };
-    println!("Profil: {}", path.display());
-    println!("Geraet: {}", profile.device);
-    println!("{} Bindungen:\n", profile.map.len());
+    println!("Profile: {}", path.display());
+    println!("Device: {}", profile.device);
+    println!("{} bindings:\n", profile.map.len());
     for (id, binding) in profile.map.sorted() {
         println!("  {:>10}  {}", id.to_string(), binding.describe());
     }
@@ -395,9 +395,8 @@ fn targets(tracks: usize, layers: usize, sections: usize, filter: &str) -> Resul
     let all = catalogue(tracks, layers, sections);
     let mut shown = 0usize;
     println!(
-        "Zieladressen fuer {tracks} Tracks, {layers} Ebenen je Track, {sections} Sektionen.\n\
-         Ein Track wird mit seiner Nummer (im Profil) oder mit seinem Namen (in der Partitur) \
-         angesprochen.\n"
+        "Target addresses for {tracks} tracks, {layers} layers per track, {sections} sections.\n\
+         A track is addressed by its number (in a profile) or by its name (in a score).\n"
     );
     for target in &all {
         let address = target.to_string();
@@ -406,16 +405,16 @@ fn targets(tracks: usize, layers: usize, sections: usize, filter: &str) -> Resul
         }
         shown += 1;
         let kind = match target.control() {
-            super::target::Control::Trigger => "Taster ".to_string(),
-            super::target::Control::Switch => "Schalter".to_string(),
+            super::target::Control::Trigger => "Trigger".to_string(),
+            super::target::Control::Switch => "Switch".to_string(),
             super::target::Control::Range(range) => format!(
-                "Wert    {} .. {}",
+                "Value   {} .. {}",
                 super::binding::trim_number(range.min),
                 super::binding::trim_number(range.max)
             ),
         };
         println!("  {address:<38} {kind:<22} {}", target.label());
     }
-    println!("\n{shown} von {} Adressen.", all.len());
+    println!("\n{shown} of {} addresses.", all.len());
     Ok(())
 }

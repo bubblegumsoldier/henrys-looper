@@ -97,31 +97,31 @@ impl Stats {
 pub fn print_stats(title: &str, samples: &[f64], rate: u32) {
     let ms = |s: f64| s * 1000.0 / rate as f64;
     match Stats::of(samples) {
-        None => println!("{title}: keine gueltigen Messwerte."),
+        None => println!("{title}: no valid values."),
         Some(s) => {
-            println!("{title} ({} Laeufe):", s.count);
+            println!("{title} ({} runs):", s.count);
             println!(
-                "  Minimum:           {:>10.1} Samples   {:>8.3} ms",
+                "  Minimum:           {:>10.1} samples   {:>8.3} ms",
                 s.min,
                 ms(s.min)
             );
             println!(
-                "  Median:            {:>10.1} Samples   {:>8.3} ms",
+                "  Median:            {:>10.1} samples   {:>8.3} ms",
                 s.median,
                 ms(s.median)
             );
             println!(
-                "  Mittelwert:        {:>10.1} Samples   {:>8.3} ms",
+                "  Mean:              {:>10.1} samples   {:>8.3} ms",
                 s.mean,
                 ms(s.mean)
             );
             println!(
-                "  Maximum:           {:>10.1} Samples   {:>8.3} ms",
+                "  Maximum:           {:>10.1} samples   {:>8.3} ms",
                 s.max,
                 ms(s.max)
             );
             println!(
-                "  Standardabweichung:{:>10.1} Samples   {:>8.3} ms",
+                "  Std. deviation:    {:>10.1} samples   {:>8.3} ms",
                 s.stddev,
                 ms(s.stddev)
             );

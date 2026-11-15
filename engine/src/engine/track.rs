@@ -203,12 +203,12 @@ impl TrackState {
     /// German label for the terminal display.
     pub fn label(self) -> &'static str {
         match self {
-            TrackState::Empty => "leer",
-            TrackState::Armed => "scharf",
-            TrackState::Recording => "Aufnahme",
+            TrackState::Empty => "Empty",
+            TrackState::Armed => "Armed",
+            TrackState::Recording => "Record",
             TrackState::Overdub => "Overdub",
-            TrackState::Ready => "bereit",
-            TrackState::Playing => "Wiedergabe",
+            TrackState::Ready => "Ready",
+            TrackState::Playing => "Play",
         }
     }
 }

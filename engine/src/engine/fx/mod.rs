@@ -151,11 +151,11 @@ impl FxSlot {
     /// German name, for the display.
     pub fn label(self) -> &'static str {
         match self {
-            FxSlot::HighPass => "Hochpass",
+            FxSlot::HighPass => "High-pass",
             FxSlot::Eq => "EQ",
-            FxSlot::Comp => "Kompressor",
+            FxSlot::Comp => "Compressor",
             FxSlot::Delay => "Delay",
-            FxSlot::Reverb => "Hall",
+            FxSlot::Reverb => "Reverb",
         }
     }
 
@@ -175,12 +175,12 @@ impl FxSlot {
         Self::all().into_iter().find(|slot| slot.name() == text)
     }
 
-    /// One letter for the compact status line: `HEKDR`.
+    /// One letter for the compact status line: `HECDR`.
     pub fn letter(self) -> char {
         match self {
             FxSlot::HighPass => 'H',
             FxSlot::Eq => 'E',
-            FxSlot::Comp => 'K',
+            FxSlot::Comp => 'C',
             FxSlot::Delay => 'D',
             FxSlot::Reverb => 'R',
         }
@@ -208,10 +208,10 @@ pub enum FxPreset {
 impl FxPreset {
     pub fn label(self) -> &'static str {
         match self {
-            FxPreset::Dry => "trocken",
-            FxPreset::Voice => "stimme",
-            FxPreset::PiezoGuitar => "gitarre",
-            FxPreset::Custom => "eigen",
+            FxPreset::Dry => "dry",
+            FxPreset::Voice => "voice",
+            FxPreset::PiezoGuitar => "guitar",
+            FxPreset::Custom => "custom",
         }
     }
 
@@ -520,7 +520,7 @@ impl Default for FxStatus {
 }
 
 impl FxStatus {
-    /// `HEK-R` style summary: the letter of every effect that is on, a dash for one that is off.
+    /// `HEC-R` style summary: the letter of every effect that is on, a dash for one that is off.
     /// Five characters, always, so the terminal display does not jump.
     pub fn letters(&self) -> String {
         FxSlot::all()

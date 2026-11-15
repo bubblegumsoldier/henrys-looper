@@ -36,50 +36,50 @@ use super::track::TrackState;
 
 #[derive(Args, Debug, Clone)]
 pub struct ScoreOpts {
-    /// Pfad zur Partitur (YAML)
-    #[arg(value_name = "DATEI")]
+    /// Path to the score (YAML)
+    #[arg(value_name = "FILE")]
     pub file: PathBuf,
 
-    /// Roundtrip-Latenz in Frames, die beim Aufnehmen herausgerechnet wird - die Vorgabe fuer
-    /// jeden Track, der in der Partitur nichts eigenes sagt.
+    /// Round-trip latency in frames that is compensated when recording - the default for
+    /// every track that has no value of its own in the score.
     #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = audio::DEFAULT_LATENCY_FRAMES)]
     pub latency_frames: u64,
 
-    /// Eigene Latenzkompensation fuer einen Track: NAME:FRAMES[+ZUSCHLAG] oder NAME:+ZUSCHLAG.
-    /// Ueberschreibt, was die Partitur sagt.
-    #[arg(long = "track-latency", value_name = "NAME:FRAMES[+ZUSCHLAG]")]
+    /// Latency compensation of one track: NAME:FRAMES[+TRIM] or NAME:+TRIM.
+    /// Overrides what the score says.
+    #[arg(long = "track-latency", value_name = "NAME:FRAMES[+TRIM]")]
     pub track_latencies: Vec<String>,
 
-    /// Takte Einzaehler vor der ersten Sektion
+    /// Count-in bars before the first section
     #[arg(long = "count-in", default_value_t = DEFAULT_COUNT_IN_BARS)]
     pub count_in: u32,
 
-    /// Verstaerkung des mitgehoerten Eingangssignals
+    /// Gain of the monitored input signal
     #[arg(long, default_value_t = 1.0)]
     pub monitor_gain: f32,
 
-    /// Lautstaerke des Klicks
+    /// Click level
     #[arg(long, default_value_t = 1.0)]
     pub click_gain: f32,
 
-    /// Ausgangspaar eines Busses: BUS:KANAL[-KANAL] mit BUS = main oder monitor, mehrfach
-    /// angebbar. Der Klick liegt immer und nur auf dem Monitor-Bus.
-    #[arg(long = "bus-out", value_name = "BUS:KANAL[-KANAL]")]
+    /// Output pair of a bus: BUS:CHANNEL[-CHANNEL] with BUS = main or monitor,
+    /// repeatable. The click is always and only on the Monitor bus.
+    #[arg(long = "bus-out", value_name = "BUS:CHANNEL[-CHANNEL]")]
     pub bus_outs: Vec<String>,
 
-    /// Lautstaerke eines Busses: BUS:WERT, mehrfach angebbar.
-    #[arg(long = "bus-gain", value_name = "BUS:WERT")]
+    /// Level of a bus: BUS:VALUE, repeatable.
+    #[arg(long = "bus-gain", value_name = "BUS:VALUE")]
     pub bus_gains: Vec<String>,
 
-    /// Ohne Klick starten (der Einzaehler ist dann stumm)
+    /// Start without click (the count-in is then silent)
     #[arg(long)]
     pub no_click: bool,
 
-    /// Partitur nur uebersetzen und den Aufbau ausgeben, kein Geraet oeffnen, kein Ton
+    /// Only compile the score and print its layout; no device opened, no sound
     #[arg(long)]
     pub check: bool,
 
-    /// Anzeige ohne Cursor-Steuerung: jede Aktualisierung wird angehaengt statt ueberschrieben
+    /// Display without cursor control: every update is appended instead of overwritten
     #[arg(long)]
     pub simple_display: bool,
 }
@@ -90,13 +90,13 @@ pub struct ScoreOpts {
 /// of them at once; this only prefixes the file name so the output can be pasted into an editor.
 pub fn load_score(path: &PathBuf) -> Result<CompiledScore, String> {
     let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("Partitur \"{}\" laesst sich nicht lesen: {e}", path.display()))?;
+        .map_err(|e| format!("Cannot read score \"{}\": {e}", path.display()))?;
     compile_score(&text).map_err(|error| render_errors(path, &error))
 }
 
 fn render_errors(path: &PathBuf, error: &ScoreError) -> String {
     let mut out = format!(
-        "{} Fehler in \"{}\":",
+        "{} error(s) in \"{}\":",
         error.issues.len(),
         path.display()
     );
@@ -137,7 +137,7 @@ pub fn track_defs(score: &CompiledScore) -> Vec<TrackDef> {
 fn section_line(runner: &Runner, view: &super::runner::RunnerView, status: &Status) -> String {
     let head = match view.section {
         Some(index) => format!(
-            "Sektion {}/{} \"{}\"  Takt {}/{}  Schlag {}  Durchlauf {}",
+            "Section {}/{} \"{}\"  Bar {}/{}  Beat {}  Pass {}",
             index + 1,
             view.section_count,
             view.section_id,
@@ -150,11 +150,11 @@ fn section_line(runner: &Runner, view: &super::runner::RunnerView, status: &Stat
     };
     let armed = match &view.armed {
         Some(a) => a.text(),
-        None if view.phase == Phase::Running => "kein Wechsel armiert".to_string(),
+        None if view.phase == Phase::Running => "no switch armed".to_string(),
         None => String::new(),
     };
     format!(
-        "{head} | {armed} | {:.1} BPM {} | Klick {} | {} | {}",
+        "{head} | {armed} | {:.1} BPM {} | Click {} | {} | {}",
         status.bpm,
         runner.score().time_signature,
         on_off(status.click),
@@ -180,7 +180,7 @@ fn track_line(
     let loop_text = if ts.loop_len > 0 {
         format!("{:.2} s", timeline.samples_to_secs(ts.loop_len))
     } else if ts.state == TrackState::Recording {
-        format!("laeuft, {:.2} s", timeline.samples_to_secs(ts.filled))
+        format!("running, {:.2} s", timeline.samples_to_secs(ts.filled))
     } else {
         "-".to_string()
     };
@@ -193,7 +193,7 @@ fn track_line(
         _ => format!("{}      ", fmt_dbfs(ts.input_peak[0])),
     };
     format!(
-        "  {:<10} {} | Soll {:<11} | Ist {:<32} | Loop {:>10} | Ebenen {:>2} {:<20} | Pegel {} | Pan {:<5} | Bus {:<5} | Lat {:<14} | Mithoeren {} | FX {:<16}",
+        "  {:<10} {} | Score {:<11} | Engine {:<32} | Loop {:>10} | Layers {:>2} {:<20} | Level {} | Pan {:<5} | Bus {:<5} | Lat {:<14} | Monitor {} | FX {:<16}",
         name,
         input_text(def.input),
         want.label(),
@@ -212,9 +212,9 @@ fn track_line(
 
 /// Print what the score says, before anything is opened. Also the whole of `--check`.
 fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, rate: u32) {
-    println!("Partitur: \"{}\"", score.title);
+    println!("Score:    \"{}\"", score.title);
     println!(
-        "Takt:     {:.1} BPM, {}, {} Sektionen, {} Takte gesamt",
+        "Tempo:    {:.1} BPM, {}, {} sections, {} bars in total",
         score.bpm,
         score.time_signature,
         score.sections.len(),
@@ -224,13 +224,13 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
     for (track, def) in score.tracks.iter().zip(defs) {
         let effective = def.latency.resolve(default_latency);
         println!(
-            "  {} {:<10} Eingang {} ({}), Panorama {}, Mithoeren {}, Latenz {} Frames ({:.2} ms, {}), Loop -> {}, Mithoer-Bus {}",
+            "  {} {:<10} input {} ({}), pan {}, Monitor {}, latency {} frames ({:.2} ms, {}), Loop -> {}, Monitor bus {}",
             track.index + 1,
             track.name,
             def.input.label(),
             def.input.channels().label(),
             pan_label(def.pan),
-            if track.monitor { "erlaubt" } else { "aus" },
+            if track.monitor { "allowed" } else { "off" },
             effective,
             effective as f64 * 1000.0 / rate.max(1) as f64,
             latency_origin(def.latency, default_latency),
@@ -238,7 +238,7 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
             def.monitor_send.label(),
         );
     }
-    println!("Sektionen:");
+    println!("Sections:");
     for section in &score.sections {
         let states: Vec<String> = score
             .tracks
@@ -257,14 +257,14 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
             })
             .collect();
         println!(
-            "  {:>2} {:<14} {:>2} Takte  {:<24} {}",
+            "  {:>2} {:<14} {:>2} bars  {:<24} {}",
             section.index + 1,
             section.id,
             section.bars,
             if section.autorelease {
                 "autorelease".to_string()
             } else {
-                format!("Release, Raster {}", section.quantize.label())
+                format!("Release, grid {}", section.quantize.label())
             },
             states.join("  ")
         );
@@ -278,7 +278,7 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
 
     if opts.check {
         print_score(&score, &defs, opts.latency_frames, 48_000);
-        println!("\nPartitur uebersetzt, keine Fehler. Kein Geraet geoeffnet, kein Ton.");
+        println!("\nScore compiled, no errors. No device opened, no sound.");
         return Ok(());
     }
 
@@ -286,8 +286,8 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
     let rate = setup.sample_rate();
     if setup.out_plan.config.sample_rate != rate {
         return Err(format!(
-            "Ein- und Ausgang laufen auf verschiedenen Sampleraten ({} und {}). \
-             Die Zeitachse der Engine setzt eine gemeinsame Clock voraus.",
+            "Input and output run at different sample rates ({} and {}). \
+             The engine's timeline needs a shared clock.",
             rate, setup.out_plan.config.sample_rate
         ));
     }
@@ -299,10 +299,10 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
     for def in &defs {
         if def.input.highest() >= in_channels {
             return Err(format!(
-                "Track \"{}\" hoert laut Partitur auf Eingang {}, das Geraet liefert aber nur {} \
-                 Eingangskanaele.\n\
-                 \x20 - in der Partitur einen anderen Eingang eintragen, oder\n\
-                 \x20 - mehr Kanaele oeffnen: --in-channels {}",
+                "Track \"{}\" listens to input {} according to the score, but the device only provides {} \
+                 input channels.\n\
+                 \x20 - enter a different input in the score, or\n\
+                 \x20 - open more channels: --in-channels {}",
                 def.name,
                 def.input.highest() + 1,
                 in_channels,
@@ -324,7 +324,7 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
     print_score(&score, &defs, opts.latency_frames, rate);
     let capacity = loop_capacity(&timeline, max_bars);
     println!(
-        "Ebenen:   Puffer fuer die laengste Sektion ({max_bars} Takte = {capacity} Frames = {:.2} s)",
+        "Layers:   buffers for the longest section ({max_bars} bars = {capacity} frames = {:.2} s)",
         timeline.samples_to_secs(capacity)
     );
 
@@ -332,8 +332,8 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
     let routing = resolve_routing(&opts.bus_outs, out_channels)?;
     let bus_gain = resolve_bus_gains(&opts.bus_gains)?;
     println!(
-        "Busse:    Main -> Ausgang {} (x{:.2}), Monitor -> Ausgang {} (x{:.2}), von {} Kanaelen. \
-         Der Klick liegt auf Monitor und nie auf Main.",
+        "Buses:    Main -> output {} (x{:.2}), Monitor -> output {} (x{:.2}), of {} channels. \
+         The click is on Monitor and never on Main.",
         routing.get(Bus::Main).label(),
         bus_gain[Bus::Main.index()],
         routing.get(Bus::Monitor).label(),
@@ -341,7 +341,7 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
         out_channels
     );
     if let Some(note) = routing_note(&routing, out_channels) {
-        println!("ACHTUNG:  {note}");
+        println!("WARNING:  {note}");
     }
 
     let RunningEngine {
@@ -371,13 +371,13 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
     let mut runner = Runner::new(score, timeline, buffer_frames)?.with_count_in(opts.count_in);
 
     println!(
-        "\nTasten (jeweils mit Enter bestaetigen):\n\
-         \x20 <leer> oder n   naechste Sektion ausloesen (der Release-Knopf)\n\
-         \x20 g <nr>          zu Sektion <nr> springen (nur solange kein Wechsel armiert ist)\n\
-         \x20 s               alle Tracks stoppen\n\
-         \x20 k               Klick an/aus\n\
-         \x20 q               beenden\n\
-         Der Einzaehler laeuft, sobald die erste Statusmeldung da ist.\n"
+        "\nKeys (confirm each with Enter):\n\
+         \x20 <empty> or n   trigger the next section (the Release button)\n\
+         \x20 g <no>         jump to section <no> (only while no switch is armed)\n\
+         \x20 s              Stop all tracks\n\
+         \x20 k              Click on/off\n\
+         \x20 q              quit\n\
+         The count-in starts as soon as the first status report arrives.\n"
     );
 
     let keys = spawn_keyboard();
@@ -425,22 +425,22 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
                     "" | "n" => message = runner.next(est),
                     "g" => match parts.next().and_then(|n| n.parse::<usize>().ok()) {
                         Some(n) if n >= 1 => message = runner.goto(n - 1, est),
-                        _ => message = "Aufruf: g <nr>  (Sektionsnummer, ab 1)".to_string(),
+                        _ => message = "Usage: g <no>  (section number, from 1)".to_string(),
                     },
                     "s" => message = runner.stop_all(est),
                     "k" => {
                         let on = !last.map(|(s, _)| s.click).unwrap_or(true);
                         let _ = cmd.send(Command::SetClick { on });
-                        message = format!("Klick {}.", if on { "an" } else { "aus" });
+                        message = format!("Click {}.", if on { "on" } else { "off" });
                     }
                     "q" => {
                         let _ = cmd.send(Command::Stop);
                         running = false;
-                        message = "Beende.".to_string();
+                        message = "Quitting.".to_string();
                     }
                     other => {
                         message =
-                            format!("Unbekannte Eingabe \"{other}\". Tasten: <leer>/n g <nr> s k q")
+                            format!("Unknown input \"{other}\". Keys: <empty>/n g <no> s k q")
                     }
                 }
             }
@@ -484,6 +484,6 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
     pool.drain();
     println!("\n");
     println!("{}", stats_report(&stats));
-    println!("Xruns gesamt:        {}", stats.xruns.load(Ordering::Relaxed));
+    println!("Xruns total:         {}", stats.xruns.load(Ordering::Relaxed));
     Ok(())
 }

@@ -1724,7 +1724,7 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
     let fx = status.tracks()[0].fx;
     assert!(fx.bypass);
     assert_eq!(fx.preset, FxPreset::Voice);
-    assert_eq!(fx.letters(), "HEK-R");
+    assert_eq!(fx.letters(), "HEC-R");
 }
 
 /// The delay is tempo-synchronous, and the engine is where the tempo actually lives: a quarter
@@ -1757,7 +1757,7 @@ fn the_delay_time_comes_from_the_engine_timeline() {
     sim.run_blocks(8);
     let status = sim.latest_status().expect("Status");
     assert_eq!(status.tracks()[0].fx.delay_samples, 24_000);
-    assert_eq!(status.tracks()[0].fx.letters(), "HEKDR");
+    assert_eq!(status.tracks()[0].fx.letters(), "HECDR");
 
     // A tempo change moves it, because the delay asks the timeline rather than a millisecond
     // value somebody typed in.

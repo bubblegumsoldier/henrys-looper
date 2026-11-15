@@ -10,13 +10,13 @@
 //! The port exists while the program runs. Commands come on standard input, one per line:
 //!
 //! ```text
-//! note 36        Note an (Kanal 1, Anschlag 100), gleich danach Note aus
-//! on 36 [vel]    nur Note an
-//! off 36         nur Note aus
-//! cc 3 64        Regler 3 auf 64
-//! ch 2           folgende Befehle auf Kanal 2
-//! sleep 500      warten (Millisekunden)
-//! quit           Port schliessen und beenden (wie Kabel ab)
+//! note 36        note on (channel 1, velocity 100), note off right after
+//! on 36 [vel]    note on only
+//! off 36         note off only
+//! cc 3 64        controller 3 to 64
+//! ch 2           following commands on channel 2
+//! sleep 500      wait (milliseconds)
+//! quit           close the port and exit (like pulling the cable)
 //! ```
 
 #[cfg(unix)]
@@ -30,11 +30,11 @@ fn main() {
     let name = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "Looper Testpad".to_string());
-    let output = MidiOutput::new("Looper Testcontroller").expect("MIDI-System");
+    let output = MidiOutput::new("Looper Testcontroller").expect("MIDI system");
     let mut port = output
         .create_virtual(&name)
-        .unwrap_or_else(|e| panic!("virtueller Port \"{name}\": {e}"));
-    println!("bereit: {name}");
+        .unwrap_or_else(|e| panic!("virtual port \"{name}\": {e}"));
+    println!("ready: {name}");
 
     let mut channel: u8 = 0;
     let stdin = std::io::stdin();
@@ -65,21 +65,21 @@ fn main() {
             }
             Some("quit") => break,
             Some(other) => {
-                eprintln!("unbekannt: {other}");
+                eprintln!("unknown: {other}");
                 Ok(())
             }
             None => Ok(()),
         };
         match sent {
             Ok(()) => println!("ok {line}"),
-            Err(e) => println!("fehler {line}: {e}"),
+            Err(e) => println!("error {line}: {e}"),
         }
     }
     drop(port);
-    println!("geschlossen: {name}");
+    println!("closed: {name}");
 }
 
 #[cfg(not(unix))]
 fn main() {
-    eprintln!("Virtuelle MIDI-Ports gibt es hier nur unter macOS und Linux.");
+    eprintln!("Virtual MIDI ports are only available on macOS and Linux.");
 }

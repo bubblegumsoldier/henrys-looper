@@ -94,91 +94,91 @@ const LINE_WIDTH: usize = 208;
 
 #[derive(Args, Debug, Clone)]
 pub struct LiveOpts {
-    /// Track als NAME:KANAL (mono) oder NAME:KANAL-KANAL (stereo), mehrfach angebbar. KANAL ist
-    /// die Eingangsnummer wie am Geraet beschriftet (1-basiert), z.B.
+    /// Track as NAME:CHANNEL (mono) or NAME:CHANNEL-CHANNEL (stereo), repeatable. CHANNEL is
+    /// the input number as labelled on the device (1-based), e.g.
     /// --track stimme:1 --track gitarre:2 --track klavier:3-4.
-    /// Optional dahinter das Panorama, -1 links bis 1 rechts: --track stimme:1@-0.3
-    #[arg(long = "track", value_name = "NAME:KANAL[-KANAL][@PANORAMA]")]
+    /// Optionally followed by the pan, -1 left to 1 right: --track stimme:1@-0.3
+    #[arg(long = "track", value_name = "NAME:CHANNEL[-CHANNEL][@PAN]")]
     pub tracks: Vec<String>,
 
-    /// Tempo in Schlaegen pro Minute (bezogen auf Viertel)
+    /// Tempo in beats per minute (in quarter notes)
     #[arg(long, default_value_t = 100.0)]
     pub bpm: f64,
 
-    /// Schlaege pro Takt (3, 4, 5, 7 ... alles erlaubt)
+    /// Beats per bar (3, 4, 5, 7 ... anything goes)
     #[arg(long, default_value_t = 4)]
     pub beats_per_bar: u32,
 
-    /// Zaehlzeit: 4 = Viertel, 8 = Achtel
+    /// Beat unit: 4 = quarter, 8 = eighth
     #[arg(long, default_value_t = 4)]
     pub beat_unit: u32,
 
-    /// Loop-Laenge in Takten
+    /// Loop length in bars
     #[arg(long, default_value_t = 8)]
     pub bars: u32,
 
-    /// Raster, auf das Aufnahme und Overdub einrasten:
-    /// loop = naechster Loop-Anfang (einmal frueh druecken reicht), bar = naechste Taktgrenze
+    /// Grid that Record and Overdub snap to:
+    /// loop = top of the next loop (one early press is enough), bar = next bar line
     #[arg(long, value_enum, default_value_t = Quantize::Loop)]
     pub quantize: Quantize,
 
-    /// Roundtrip-Latenz in Frames, die beim Aufnehmen herausgerechnet wird - die Vorgabe fuer
-    /// jeden Track, der nichts eigenes sagt. Ein Frame ist ein Zeitpunkt: ein Sample bei einer
-    /// Mono-Quelle, zwei bei einer Stereo-Quelle.
-    /// Standard: unter Windows der Messwert aus Phase 0 (827, Scarlett 2i2 an ASIO, 128 Frames,
-    /// 48 kHz), unter macOS ein ungemessener Schaetzwert aus den CoreAudio-Angaben (596).
+    /// Round-trip latency in frames that is compensated when recording - the default for every
+    /// track that has no value of its own. A frame is one point in time: one sample for a
+    /// mono source, two for a stereo source.
+    /// Default: on Windows the value measured in phase 0 (827, Scarlett 2i2 on ASIO, 128 frames,
+    /// 48 kHz), on macOS an unmeasured estimate from the CoreAudio figures (596).
     #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = audio::DEFAULT_LATENCY_FRAMES)]
     pub latency_frames: u64,
 
-    /// Eigene Latenzkompensation fuer einen Track, mehrfach angebbar:
-    /// NAME:FRAMES fuer den gemessenen Wert, NAME:FRAMES+ZUSCHLAG mit manuellem Aufschlag,
-    /// NAME:+ZUSCHLAG nur Aufschlag auf die globale Vorgabe.
-    /// Beispiel: --track-latency cantabile:512+96
-    #[arg(long = "track-latency", value_name = "NAME:FRAMES[+ZUSCHLAG]")]
+    /// Latency compensation of one track, repeatable:
+    /// NAME:FRAMES for the measured value, NAME:FRAMES+TRIM with a manual trim,
+    /// NAME:+TRIM only a trim on top of the global default.
+    /// Example: --track-latency cantabile:512+96
+    #[arg(long = "track-latency", value_name = "NAME:FRAMES[+TRIM]")]
     pub track_latencies: Vec<String>,
 
-    /// Ausgangspaar eines Busses, mehrfach angebbar: BUS:KANAL[-KANAL] mit BUS = main oder
-    /// monitor. Der Klick liegt immer und nur auf dem Monitor-Bus.
-    /// Voreinstellung: ab vier Ausgaengen main:1-2 und monitor:3-4, sonst beide auf 1-2 (dann
-    /// summiert, der Klick geht mit in den Saal).
-    /// Notbehelf mit zwei Ausgaengen: --bus-out main:1 --bus-out monitor:2 (Mix links, Klick
-    /// rechts, mit einem Y-Kabel aufzutrennen).
-    #[arg(long = "bus-out", value_name = "BUS:KANAL[-KANAL]")]
+    /// Output pair of a bus, repeatable: BUS:CHANNEL[-CHANNEL] with BUS = main or
+    /// monitor. The click is always and only on the Monitor bus.
+    /// Default: with four or more outputs main:1-2 and monitor:3-4, otherwise both on 1-2 (then
+    /// summed, and the click goes out to the room too).
+    /// Stopgap with two outputs: --bus-out main:1 --bus-out monitor:2 (mix left, click
+    /// right, to be split with a Y-cable).
+    #[arg(long = "bus-out", value_name = "BUS:CHANNEL[-CHANNEL]")]
     pub bus_outs: Vec<String>,
 
-    /// Lautstaerke eines Busses, mehrfach angebbar: BUS:WERT, z.B. --bus-gain monitor:0.8.
-    /// Damit laesst sich der Kopfhoerer regeln, ohne den Saal zu veraendern.
-    #[arg(long = "bus-gain", value_name = "BUS:WERT")]
+    /// Level of a bus, repeatable: BUS:VALUE, e.g. --bus-gain monitor:0.8.
+    /// Lets you set the headphones without changing the room.
+    #[arg(long = "bus-gain", value_name = "BUS:VALUE")]
     pub bus_gains: Vec<String>,
 
-    /// Auf welche Busse die Loop-Wiedergabe eines Tracks geht, mehrfach angebbar:
-    /// NAME:main | monitor | main+monitor | none. Voreinstellung main+monitor.
+    /// Which buses a track's loop playback goes to, repeatable:
+    /// NAME:main | monitor | main+monitor | none. Default main+monitor.
     #[arg(long = "track-bus", value_name = "NAME:BUS")]
     pub track_buses: Vec<String>,
 
-    /// Auf welche Busse das Mithoer-Signal eines Tracks geht, unabhaengig von der Wiedergabe.
-    /// Voreinstellung monitor - der Saal hoert den Musiker in der Regel ueber die PA.
+    /// Which buses a track's monitor signal goes to, independent of playback.
+    /// Default monitor - the room usually hears the musician through the PA.
     #[arg(long = "track-monitor-bus", value_name = "NAME:BUS")]
     pub track_monitor_buses: Vec<String>,
 
-    /// Verstaerkung des mitgehoerten Eingangssignals
+    /// Gain of the monitored input signal
     #[arg(long, default_value_t = 1.0)]
     pub monitor_gain: f32,
 
-    /// Lautstaerke des Klicks
+    /// Click level
     #[arg(long, default_value_t = 1.0)]
     pub click_gain: f32,
 
-    /// Mit eingeschaltetem Mithoeren starten (fuer alle Tracks)
+    /// Start with Monitor switched on (for all tracks)
     #[arg(long)]
     pub monitor: bool,
 
-    /// Ohne Klick starten
+    /// Start without click
     #[arg(long)]
     pub no_click: bool,
 
-    /// Anzeige ohne Cursor-Steuerung: jede Aktualisierung wird angehaengt statt ueberschrieben.
-    /// Noetig nur in Terminals, die ANSI-Steuerzeichen nicht koennen.
+    /// Display without cursor control: every update is appended instead of overwritten.
+    /// Only needed in terminals that cannot handle ANSI control codes.
     #[arg(long)]
     pub simple_display: bool,
 }
@@ -243,27 +243,27 @@ pub fn parse_track_latency_arg(spec: &str) -> Result<(String, TrackLatency), Str
     let spec = spec.trim();
     let Some((name, value)) = spec.rsplit_once(':') else {
         return Err(format!(
-            "--track-latency \"{spec}\" ist unvollstaendig. Erwartet wird NAME:FRAMES, \
-             NAME:FRAMES+ZUSCHLAG oder NAME:+ZUSCHLAG, z.B. --track-latency cantabile:512+96"
+            "--track-latency \"{spec}\" is incomplete. Expected NAME:FRAMES, \
+             NAME:FRAMES+TRIM or NAME:+TRIM, e.g. --track-latency cantabile:512+96"
         ));
     };
     let name = name.trim();
     if name.is_empty() {
         return Err(format!(
-            "--track-latency \"{spec}\": vor dem Doppelpunkt fehlt der Trackname."
+            "--track-latency \"{spec}\": the track name before the colon is missing."
         ));
     }
     let value = value.trim();
     if value.is_empty() {
         return Err(format!(
-            "--track-latency \"{spec}\": hinter dem Doppelpunkt fehlt die Zahl."
+            "--track-latency \"{spec}\": the number after the colon is missing."
         ));
     }
 
     let number = |text: &str, what: &str| -> Result<i64, String> {
         text.trim().parse::<i64>().map_err(|_| {
             format!(
-                "--track-latency \"{spec}\": \"{}\" ist keine {what} in Frames.",
+                "--track-latency \"{spec}\": \"{}\" is not a valid {what} in frames.",
                 text.trim()
             )
         })
@@ -271,9 +271,9 @@ pub fn parse_track_latency_arg(spec: &str) -> Result<(String, TrackLatency), Str
     let in_range = |value: i64, what: &str| -> Result<(), String> {
         if value.abs() > MAX_LATENCY_FRAMES {
             return Err(format!(
-                "--track-latency \"{spec}\": {what} liegt mit {value} Frames ausserhalb von \
-                 {MAX_LATENCY_FRAMES} Frames (zwei Sekunden bei 48 kHz). Das ist keine Latenz, \
-                 sondern ein Tippfehler."
+                "--track-latency \"{spec}\": {what} of {value} frames is beyond \
+                 {MAX_LATENCY_FRAMES} frames (two seconds at 48 kHz). That is not a latency, \
+                 it is a typo."
             ));
         }
         Ok(())
@@ -285,19 +285,19 @@ pub fn parse_track_latency_arg(spec: &str) -> Result<(String, TrackLatency), Str
     let mut chars = value.char_indices();
     let first = chars.next().expect("nicht leer").1;
     let (measured, trim) = if first == '+' || first == '-' {
-        (None, number(value, "Zuschlagszahl")?)
+        (None, number(value, "trim")?)
     } else {
         match chars.find(|(_, c)| *c == '+' || *c == '-').map(|(i, _)| i) {
             Some(cut) => (
-                Some(number(&value[..cut], "Frame-Zahl")?),
-                number(&value[cut..], "Zuschlagszahl")?,
+                Some(number(&value[..cut], "frame count")?),
+                number(&value[cut..], "trim")?,
             ),
-            None => (Some(number(value, "Frame-Zahl")?), 0),
+            None => (Some(number(value, "frame count")?), 0),
         }
     };
-    in_range(trim, "der Zuschlag")?;
+    in_range(trim, "the trim")?;
     if let Some(measured) = measured {
-        in_range(measured, "der gemessene Wert")?;
+        in_range(measured, "the measured value")?;
     }
 
     Ok((
@@ -322,8 +322,8 @@ pub fn apply_track_latencies(defs: &mut [TrackDef], specs: &[String]) -> Result<
             None => {
                 let known: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
                 return Err(format!(
-                    "--track-latency \"{spec}\": den Track \"{name}\" gibt es nicht. \
-                     Vorhanden: {}.",
+                    "--track-latency \"{spec}\": there is no track \"{name}\". \
+                     Available: {}.",
                     known.join(", ")
                 ));
             }
@@ -352,15 +352,15 @@ pub fn parse_track_arg(spec: &str) -> Result<TrackDef, String> {
         Some((head, pan)) => {
             let value: f32 = pan.trim().parse().map_err(|_| {
                 format!(
-                    "--track \"{spec}\": \"{}\" ist keine Panorama-Zahl. Erwartet wird -1 (ganz \
-                     links) bis 1 (ganz rechts), z.B. --track stimme:1@-0.5",
+                    "--track \"{spec}\": \"{}\" is not a pan value. Expected -1 (hard \
+                     left) to 1 (hard right), e.g. --track stimme:1@-0.5",
                     pan.trim()
                 )
             })?;
             if !(-1.0..=1.0).contains(&value) {
                 return Err(format!(
-                    "--track \"{spec}\": das Panorama muss zwischen -1 (ganz links) und 1 (ganz \
-                     rechts) liegen, gefunden {value}."
+                    "--track \"{spec}\": the pan must be between -1 (hard left) and 1 (hard \
+                     right), found {value}."
                 ));
             }
             (head, value)
@@ -370,26 +370,26 @@ pub fn parse_track_arg(spec: &str) -> Result<TrackDef, String> {
 
     let Some((name, channels)) = head.rsplit_once(':') else {
         return Err(format!(
-            "--track \"{spec}\" ist unvollstaendig. Erwartet wird NAME:KANAL fuer mono oder \
-             NAME:KANAL-KANAL fuer stereo, z.B. --track stimme:1 oder --track klavier:3-4"
+            "--track \"{spec}\" is incomplete. Expected NAME:CHANNEL for mono or \
+             NAME:CHANNEL-CHANNEL for stereo, e.g. --track stimme:1 or --track klavier:3-4"
         ));
     };
     let name = name.trim();
     if name.is_empty() {
-        return Err(format!("--track \"{spec}\": vor dem Doppelpunkt fehlt der Name."));
+        return Err(format!("--track \"{spec}\": the name before the colon is missing."));
     }
 
     let number = |text: &str| -> Result<usize, String> {
         let text = text.trim();
         let value: usize = text.parse().map_err(|_| {
             format!(
-                "--track \"{spec}\": \"{text}\" ist keine Kanalnummer. Erwartet wird eine ganze \
-                 Zahl ab 1."
+                "--track \"{spec}\": \"{text}\" is not a channel number. Expected a whole \
+                 number from 1."
             )
         })?;
         if value == 0 {
             return Err(format!(
-                "--track \"{spec}\": Kanaele werden ab 1 gezaehlt, wie am Geraet beschriftet."
+                "--track \"{spec}\": channels are counted from 1, as labelled on the device."
             ));
         }
         Ok(value - 1)
@@ -401,8 +401,8 @@ pub fn parse_track_arg(spec: &str) -> Result<TrackDef, String> {
             let right = number(right)?;
             if left == right {
                 return Err(format!(
-                    "--track \"{spec}\": ein Stereo-Track braucht zwei verschiedene Eingaenge. \
-                     Fuer einen Mono-Track reicht --track {name}:{}",
+                    "--track \"{spec}\": a stereo track needs two different inputs. \
+                     For a mono track use --track {name}:{}",
                     left + 1
                 ));
             }
@@ -437,20 +437,20 @@ pub fn parse_track_send_arg(flag: &str, spec: &str) -> Result<(String, BusSend),
     let spec = spec.trim();
     let Some((name, value)) = spec.rsplit_once(':') else {
         return Err(format!(
-            "{flag} \"{spec}\" ist unvollstaendig. Erwartet wird NAME:BUS, z.B. \
+            "{flag} \"{spec}\" is incomplete. Expected NAME:BUS, e.g. \
              {flag} stimme:main+monitor"
         ));
     };
     let name = name.trim();
     if name.is_empty() {
         return Err(format!(
-            "{flag} \"{spec}\": vor dem Doppelpunkt fehlt der Trackname."
+            "{flag} \"{spec}\": the track name before the colon is missing."
         ));
     }
     let Some(send) = BusSend::parse(value) else {
         return Err(format!(
-            "{flag} \"{spec}\": \"{}\" ist keine Bus-Angabe. Erlaubt sind main, monitor, \
-             main+monitor und none.",
+            "{flag} \"{spec}\": \"{}\" is not a bus. Allowed are main, monitor, \
+             main+monitor and none.",
             value.trim()
         ));
     };
@@ -481,7 +481,7 @@ pub fn apply_track_sends(
             None => {
                 let known: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
                 return Err(format!(
-                    "{flag} \"{spec}\": den Track \"{name}\" gibt es nicht. Vorhanden: {}.",
+                    "{flag} \"{spec}\": there is no track \"{name}\". Available: {}.",
                     known.join(", ")
                 ));
             }
@@ -498,24 +498,24 @@ pub fn parse_bus_out_arg(spec: &str) -> Result<(Bus, BusOutput), String> {
     let spec = spec.trim();
     let Some((bus, channels)) = spec.rsplit_once(':') else {
         return Err(format!(
-            "--bus-out \"{spec}\" ist unvollstaendig. Erwartet wird BUS:KANAL[-KANAL], z.B. \
+            "--bus-out \"{spec}\" is incomplete. Expected BUS:CHANNEL[-CHANNEL], e.g. \
              --bus-out monitor:3-4"
         ));
     };
     let Some(bus) = Bus::parse(bus) else {
         return Err(format!(
-            "--bus-out \"{spec}\": \"{}\" ist kein Bus. Es gibt main und monitor.",
+            "--bus-out \"{spec}\": \"{}\" is not a bus. There are main and monitor.",
             bus.trim()
         ));
     };
     let number = |text: &str| -> Result<usize, String> {
         let text = text.trim();
         let value: usize = text.parse().map_err(|_| {
-            format!("--bus-out \"{spec}\": \"{text}\" ist keine Kanalnummer (ganze Zahl ab 1).")
+            format!("--bus-out \"{spec}\": \"{text}\" is not a channel number (whole number from 1).")
         })?;
         if value == 0 {
             return Err(format!(
-                "--bus-out \"{spec}\": Kanaele werden ab 1 gezaehlt, wie am Geraet beschriftet."
+                "--bus-out \"{spec}\": channels are counted from 1, as labelled on the device."
             ));
         }
         Ok(value - 1)
@@ -526,8 +526,8 @@ pub fn parse_bus_out_arg(spec: &str) -> Result<(Bus, BusOutput), String> {
             let right = number(right)?;
             if right != left + 1 {
                 return Err(format!(
-                    "--bus-out \"{spec}\": ein Bus liegt auf einem benachbarten Kanalpaar, also \
-                     z.B. {}-{}. Fuer einen einzelnen Kanal reicht {}:{}.",
+                    "--bus-out \"{spec}\": a bus sits on an adjacent channel pair, \
+                     e.g. {}-{}. For a single channel use {}:{}.",
                     left + 1,
                     left + 2,
                     bus.name(),
@@ -546,25 +546,25 @@ pub fn parse_bus_gain_arg(spec: &str) -> Result<(Bus, f32), String> {
     let spec = spec.trim();
     let Some((bus, value)) = spec.rsplit_once(':') else {
         return Err(format!(
-            "--bus-gain \"{spec}\" ist unvollstaendig. Erwartet wird BUS:WERT, z.B. \
+            "--bus-gain \"{spec}\" is incomplete. Expected BUS:VALUE, e.g. \
              --bus-gain monitor:0.8"
         ));
     };
     let Some(bus) = Bus::parse(bus) else {
         return Err(format!(
-            "--bus-gain \"{spec}\": \"{}\" ist kein Bus. Es gibt main und monitor.",
+            "--bus-gain \"{spec}\": \"{}\" is not a bus. There are main and monitor.",
             bus.trim()
         ));
     };
     let gain: f32 = value.trim().parse().map_err(|_| {
         format!(
-            "--bus-gain \"{spec}\": \"{}\" ist keine Zahl.",
+            "--bus-gain \"{spec}\": \"{}\" is not a number.",
             value.trim()
         )
     })?;
     if !(0.0..=MAX_BUS_GAIN).contains(&gain) {
         return Err(format!(
-            "--bus-gain \"{spec}\": die Lautstaerke muss zwischen 0.0 und {MAX_BUS_GAIN} liegen."
+            "--bus-gain \"{spec}\": the level must be between 0.0 and {MAX_BUS_GAIN}."
         ));
     }
     Ok((bus, gain))
@@ -577,9 +577,9 @@ pub fn resolve_routing(specs: &[String], out_channels: usize) -> Result<BusRouti
         let (bus, out) = parse_bus_out_arg(spec)?;
         if out.first + out.width > out_channels {
             return Err(format!(
-                "--bus-out \"{}\": das Geraet hat {} Ausgangskanaele, Kanal {} gibt es nicht.\n\
-                 \x20 - anderes Paar waehlen: --bus-out {}:1-2\n\
-                 \x20 - oder mehr Kanaele oeffnen: --out-channels {}",
+                "--bus-out \"{}\": the device has {} output channels, there is no channel {}.\n\
+                 \x20 - choose another pair: --bus-out {}:1-2\n\
+                 \x20 - or open more channels: --out-channels {}",
                 spec.trim(),
                 out_channels,
                 out.first + out.width,
@@ -610,7 +610,7 @@ pub fn resolve_bus_gains(specs: &[String]) -> Result<[f32; BUS_COUNT], String> {
 /// off the device.
 pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackDef>, String> {
     if in_channels == 0 {
-        return Err("Das Geraet meldet keinen einzigen Eingangskanal.".to_string());
+        return Err("The device reports no input channel at all.".to_string());
     }
     let defs: Vec<TrackDef> = if specs.is_empty() {
         ["stimme", "gitarre"]
@@ -628,7 +628,7 @@ pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackD
 
     if defs.len() > MAX_TRACKS {
         return Err(format!(
-            "{} Tracks angefragt, moeglich sind hoechstens {MAX_TRACKS}.",
+            "{} tracks requested, at most {MAX_TRACKS} are possible.",
             defs.len()
         ));
     }
@@ -636,10 +636,10 @@ pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackD
         let highest = def.input.highest();
         if highest >= in_channels {
             return Err(format!(
-                "Track \"{}\" soll auf Eingang {} hoeren, das Geraet liefert aber nur {} Eingangskanaele \
-                 (also Eingang 1 bis {}).\n\
-                 \x20 - anderen Kanal waehlen: --track {}:1\n\
-                 \x20 - oder mehr Kanaele oeffnen: --in-channels {}",
+                "Track \"{}\" should listen to input {}, but the device only provides {} input channels \
+                 (inputs 1 to {}).\n\
+                 \x20 - choose another channel: --track {}:1\n\
+                 \x20 - or open more channels: --in-channels {}",
                 def.name,
                 highest + 1,
                 in_channels,
@@ -652,7 +652,7 @@ pub fn resolve_tracks(specs: &[String], in_channels: usize) -> Result<Vec<TrackD
     for (i, def) in defs.iter().enumerate() {
         if let Some(other) = defs[..i].iter().find(|d| d.name == def.name) {
             return Err(format!(
-                "Der Trackname \"{}\" kommt zweimal vor. Namen muessen eindeutig sein.",
+                "The track name \"{}\" appears twice. Names must be unique.",
                 other.name
             ));
         }
@@ -754,10 +754,10 @@ impl Control {
                 let n: usize = d.parse().unwrap_or(0);
                 if n >= 1 && n <= self.tracks.len() {
                     self.active = n - 1;
-                    self.message = format!("Track {} \"{}\" gewaehlt.", n, self.tracks[n - 1].name);
+                    self.message = format!("Track {} \"{}\" selected.", n, self.tracks[n - 1].name);
                 } else {
                     self.message = format!(
-                        "Track {n} gibt es nicht. Vorhanden: 1 bis {}.",
+                        "There is no track {n}. Available: 1 to {}.",
                         self.tracks.len()
                     );
                 }
@@ -803,15 +803,15 @@ impl Control {
                 let on = !ts.monitor;
                 self.send(Command::SetMonitor { track, on });
                 self.message = format!(
-                    "\"{}\": Mithoeren {}.",
+                    "\"{}\": Monitor {}.",
                     self.tracks[track].name,
-                    if on { "an" } else { "aus" }
+                    if on { "on" } else { "off" }
                 );
             }
             "k" => {
                 let on = !last.map(|(s, _)| s.click).unwrap_or(true);
                 self.send(Command::SetClick { on });
-                self.message = format!("Klick {}.", if on { "an" } else { "aus" });
+                self.message = format!("Click {}.", if on { "on" } else { "off" });
             }
             "n" => self.set_pan(parts.next()),
             "b" => self.set_track_send(parts.next(), parts.next()),
@@ -829,11 +829,11 @@ impl Control {
             "q" => {
                 self.send(Command::Stop);
                 self.running = false;
-                self.message = "Beende.".to_string();
+                self.message = "Quitting.".to_string();
             }
             other => {
                 self.message = format!(
-                    "Unbekannte Eingabe \"{other}\". Tasten: 1-{} r o s p c a m n b g u i k e w l t f x v d q",
+                    "Unknown input \"{other}\". Keys: 1-{} r o s p c a m n b g u i k e w l t f x v d q",
                     self.tracks.len()
                 );
             }
@@ -842,19 +842,19 @@ impl Control {
 
     /// `n <wert>` - where this track sits between the speakers, -1 to 1.
     fn set_pan(&mut self, arg: Option<&str>) {
-        let usage = "n <wert>  (Panorama, -1 ganz links bis 1 ganz rechts, 0 Mitte)";
+        let usage = "n <value>  (pan, -1 hard left to 1 hard right, 0 centre)";
         let Some(Ok(pan)) = arg.map(str::parse::<f32>) else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return;
         };
         if !(-1.0..=1.0).contains(&pan) {
-            self.message = "Das Panorama muss zwischen -1 (links) und 1 (rechts) liegen.".to_string();
+            self.message = "The pan must be between -1 (left) and 1 (right).".to_string();
             return;
         }
         let track = self.active;
         self.send(Command::SetPan { track, pan });
         self.message = format!(
-            "\"{}\": Panorama {}.",
+            "\"{}\": pan {}.",
             self.tracks[track].name,
             pan_label(pan)
         );
@@ -866,17 +866,17 @@ impl Control {
     /// and a second letter for the second half would be a letter spent on nothing.
     fn set_track_send(&mut self, source: Option<&str>, value: Option<&str>) {
         let usage =
-            "b <loop|mon> <main|monitor|main+monitor|none>  (auf welche Busse dieser Track geht)";
+            "b <loop|mon> <main|monitor|main+monitor|none>  (which buses this track goes to)";
         let source = match source {
             Some("loop") | Some("l") => TrackSource::Loop,
             Some("mon") | Some("monitor") | Some("m") => TrackSource::Monitor,
             _ => {
-                self.message = format!("Aufruf: {usage}");
+                self.message = format!("Usage: {usage}");
                 return;
             }
         };
         let Some(send) = value.and_then(BusSend::parse) else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return;
         };
         let track = self.active;
@@ -901,18 +901,18 @@ impl Control {
         value: Option<&str>,
         last: Option<(Status, Instant)>,
     ) {
-        let usage = "g <main|monitor> <0.0-4.0>  (Lautstaerke eines Busses)";
+        let usage = "g <main|monitor> <0.0-4.0>  (level of a bus)";
         let Some(bus) = bus.and_then(Bus::parse) else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return;
         };
         let Some(Ok(gain)) = value.map(str::parse::<f32>) else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return;
         };
         if !(0.0..=MAX_BUS_GAIN).contains(&gain) {
             self.message =
-                format!("Die Bus-Lautstaerke muss zwischen 0.0 und {MAX_BUS_GAIN} liegen.");
+                format!("The bus level must be between 0.0 and {MAX_BUS_GAIN}.");
             return;
         }
         self.send(Command::SetBusGain { bus, gain });
@@ -922,7 +922,7 @@ impl Control {
         };
         let untouched = last.map(|(s, _)| s.bus_gain(other)).unwrap_or(1.0);
         self.message = format!(
-            "{} auf {gain:.2}. {} bleibt bei {untouched:.2}.",
+            "{} at {gain:.2}. {} stays at {untouched:.2}.",
             bus.label(),
             other.label()
         );
@@ -930,17 +930,17 @@ impl Control {
 
     /// `u <main|monitor> <kanal[-kanal]>` - which socket a bus leaves on.
     fn set_bus_out(&mut self, bus: Option<&str>, value: Option<&str>) {
-        let usage = "u <main|monitor> <kanal[-kanal]>  (Ausgangspaar eines Busses, 1-basiert)";
+        let usage = "u <main|monitor> <channel[-channel]>  (output pair of a bus, 1-based)";
         let (Some(bus), Some(value)) = (bus.and_then(Bus::parse), value) else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return;
         };
         match parse_bus_out_arg(&format!("{}:{value}", bus.name())) {
             Ok((bus, out)) => {
                 self.send(Command::SetBusOutput { bus, out });
                 self.message = format!(
-                    "{} liegt auf Ausgang {}. Was das Geraet nicht hat, wird auf das naechste \
-                     vorhandene Paar gelegt.",
+                    "{} is on output {}. Channels the device does not have are moved to the nearest \
+                     existing pair.",
                     bus.label(),
                     out.label()
                 );
@@ -955,9 +955,9 @@ impl Control {
     /// had, because the two numbers are set by different people at different times - a
     /// measurement writes the first, an ear the second.
     fn set_latency(&mut self, base: Option<&str>, trim: Option<&str>, ts: TrackStatus) {
-        let usage = "i <frames|-> [zuschlag]  (Latenzkompensation dieses Tracks; - nimmt die globale Vorgabe)";
+        let usage = "i <frames|-> [trim]  (latency compensation of this track; - uses the global default)";
         let Some(base) = base else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return;
         };
         let measured = if base == "-" {
@@ -967,8 +967,8 @@ impl Control {
                 Ok(value) if (0..=MAX_LATENCY_FRAMES).contains(&value) => Some(value as u32),
                 _ => {
                     self.message = format!(
-                        "Die Latenz muss eine ganze Zahl von 0 bis {MAX_LATENCY_FRAMES} Frames \
-                         sein, oder \"-\" fuer die globale Vorgabe."
+                        "The latency must be a whole number from 0 to {MAX_LATENCY_FRAMES} frames, \
+                         or \"-\" for the global default."
                     );
                     return;
                 }
@@ -980,8 +980,8 @@ impl Control {
                 Ok(value) if value.abs() <= MAX_LATENCY_FRAMES => value as i32,
                 _ => {
                     self.message = format!(
-                        "Der Zuschlag muss eine ganze Zahl zwischen -{MAX_LATENCY_FRAMES} und \
-                         {MAX_LATENCY_FRAMES} Frames sein."
+                        "The trim must be a whole number between -{MAX_LATENCY_FRAMES} and \
+                         {MAX_LATENCY_FRAMES} frames."
                     );
                     return;
                 }
@@ -994,8 +994,8 @@ impl Control {
         let rate = self.sched.timeline.sample_rate().max(1) as f64;
         let effective = latency.resolve(self.latency);
         self.message = format!(
-            "\"{}\": Latenzkompensation {} Frames ({:.2} ms) - {}. Wirkt auf kommende Aufnahmen, \
-             nicht auf schon Aufgenommenes.",
+            "\"{}\": latency compensation {} frames ({:.2} ms) - {}. Applies to future recordings, \
+             not to what is already recorded.",
             self.tracks[track].name,
             effective,
             effective as f64 * 1000.0 / rate,
@@ -1013,27 +1013,27 @@ impl Control {
         let on = !ts.fx.bypass;
         self.send(Command::SetFxBypass { track, on });
         self.message = format!(
-            "\"{}\": Effektkette {}.",
+            "\"{}\": effect chain {}.",
             self.tracks[track].name,
-            if on { "umgangen" } else { "aktiv" }
+            if on { "bypassed" } else { "active" }
         );
     }
 
     /// `x <1-5>` - one effect on or off.
     fn fx_slot(&mut self, arg: Option<&str>, ts: TrackStatus) {
-        let usage = "x <1-5>  (1 Hochpass, 2 EQ, 3 Kompressor, 4 Delay, 5 Hall)";
+        let usage = "x <1-5>  (1 High-pass, 2 EQ, 3 Compressor, 4 Delay, 5 Reverb)";
         let Some(slot) = arg
             .and_then(|a| a.parse::<usize>().ok())
             .and_then(FxSlot::from_number)
         else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return;
         };
         let track = self.active;
         let on = !ts.fx.settings.enabled[slot.index()];
         self.send(Command::SetFxEnabled { track, slot, on });
         let hint = if ts.fx.bypass {
-            " (die ganze Kette ist noch umgangen - f druecken)"
+            " (the whole chain is still bypassed - press f)"
         } else {
             ""
         };
@@ -1041,7 +1041,7 @@ impl Control {
             "\"{}\": {} {}{hint}.",
             self.tracks[track].name,
             slot.label(),
-            if on { "an" } else { "aus" }
+            if on { "on" } else { "off" }
         );
     }
 
@@ -1049,13 +1049,13 @@ impl Control {
     fn fx_preset(&mut self, arg: Option<&str>) {
         let names: Vec<&str> = FxPreset::loadable().iter().map(|p| p.label()).collect();
         let Some(preset) = arg.and_then(FxPreset::parse) else {
-            self.message = format!("Aufruf: v <{}>", names.join("|"));
+            self.message = format!("Usage: v <{}>", names.join("|"));
             return;
         };
         let track = self.active;
         self.send(Command::LoadFxPreset { track, preset });
         self.message = format!(
-            "\"{}\": Preset \"{}\" geladen.",
+            "\"{}\": preset \"{}\" loaded.",
             self.tracks[track].name,
             preset.label()
         );
@@ -1065,7 +1065,7 @@ impl Control {
     fn fx_delay_note(&mut self, arg: Option<&str>) {
         let names: Vec<&str> = DelayNote::all().iter().map(|n| n.label()).collect();
         let Some(note) = arg.and_then(DelayNote::parse) else {
-            self.message = format!("Aufruf: d <{}>", names.join("|"));
+            self.message = format!("Usage: d <{}>", names.join("|"));
             return;
         };
         let track = self.active;
@@ -1074,7 +1074,7 @@ impl Control {
             param: FxParam::DelayNote(note),
         });
         self.message = format!(
-            "\"{}\": Delay auf {} (aus dem Tempo gerechnet).",
+            "\"{}\": delay at {} (derived from the tempo).",
             self.tracks[track].name,
             note.label()
         );
@@ -1083,15 +1083,15 @@ impl Control {
     /// Parse a 1-based layer number against what the engine says exists.
     fn layer_index(&mut self, arg: Option<&str>, ts: TrackStatus, usage: &str) -> Option<usize> {
         let Some(Ok(n)) = arg.map(str::parse::<usize>) else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return None;
         };
         if n == 0 || n > ts.layers as usize {
             self.message = if ts.layers == 0 {
-                format!("\"{}\" hat keine Ebenen.", self.tracks[self.active].name)
+                format!("\"{}\" has no layers.", self.tracks[self.active].name)
             } else {
                 format!(
-                    "\"{}\" hat die Ebenen 1 bis {}.",
+                    "\"{}\" has layers 1 to {}.",
                     self.tracks[self.active].name, ts.layers
                 )
             };
@@ -1101,7 +1101,7 @@ impl Control {
     }
 
     fn layer_mute(&mut self, arg: Option<&str>, ts: TrackStatus) {
-        let Some(index) = self.layer_index(arg, ts, "e <nr>  (Ebene stumm/laut)") else {
+        let Some(index) = self.layer_index(arg, ts, "e <no>  (mute/unmute layer)") else {
             return;
         };
         let muted = ts.muted_mask & (1 << index) == 0;
@@ -1112,15 +1112,15 @@ impl Control {
             muted,
         });
         self.message = format!(
-            "\"{}\": Ebene {} {}.",
+            "\"{}\": layer {} {}.",
             self.tracks[track].name,
             index + 1,
-            if muted { "stumm" } else { "wieder hoerbar" }
+            if muted { "muted" } else { "audible again" }
         );
     }
 
     fn layer_remove(&mut self, arg: Option<&str>, ts: TrackStatus) {
-        let Some(index) = self.layer_index(arg, ts, "w <nr>  (Ebene weg)") else {
+        let Some(index) = self.layer_index(arg, ts, "w <no>  (remove layer)") else {
             return;
         };
         let track = self.active;
@@ -1132,23 +1132,23 @@ impl Control {
             self.tracks[track].gains.remove(index);
         }
         self.message = format!(
-            "\"{}\": Ebene {} entfernt.",
+            "\"{}\": layer {} removed.",
             self.tracks[track].name,
             index + 1
         );
     }
 
     fn layer_gain(&mut self, nr: Option<&str>, value: Option<&str>, ts: TrackStatus) {
-        let usage = "l <nr> <wert>  (Lautstaerke einer Ebene, 0.0 bis 4.0)";
+        let usage = "l <no> <value>  (level of a layer, 0.0 to 4.0)";
         let Some(index) = self.layer_index(nr, ts, usage) else {
             return;
         };
         let Some(Ok(gain)) = value.map(str::parse::<f32>) else {
-            self.message = format!("Aufruf: {usage}");
+            self.message = format!("Usage: {usage}");
             return;
         };
         if !(0.0..=4.0).contains(&gain) {
-            self.message = "Die Lautstaerke muss zwischen 0.0 und 4.0 liegen.".to_string();
+            self.message = "The level must be between 0.0 and 4.0.".to_string();
             return;
         }
         let track = self.active;
@@ -1163,7 +1163,7 @@ impl Control {
         }
         gains[index] = gain;
         self.message = format!(
-            "\"{}\": Ebene {} auf {:.2}.",
+            "\"{}\": layer {} at {:.2}.",
             self.tracks[track].name,
             index + 1,
             gain
@@ -1184,11 +1184,11 @@ impl Control {
             .unwrap_or(false);
         if busy {
             self.message =
-                "Tempo laesst sich nur aendern, wenn alle Tracks leer sind (erst a).".to_string();
+                "Tempo can only change while all tracks are empty (press a first).".to_string();
             return;
         }
         let Some(Ok(bpm)) = bpm.map(str::parse::<f64>) else {
-            self.message = "Aufruf: t <bpm> [schlaege_pro_takt] [zaehlzeit]".to_string();
+            self.message = "Usage: t <bpm> [beats_per_bar] [beat_unit]".to_string();
             return;
         };
         let old = self.sched.timeline.signature();
@@ -1196,7 +1196,7 @@ impl Control {
             Some(Ok(v)) => v,
             None => old.beats_per_bar,
             Some(Err(_)) => {
-                self.message = "Schlaege pro Takt muss eine ganze Zahl sein.".to_string();
+                self.message = "Beats per bar must be a whole number.".to_string();
                 return;
             }
         };
@@ -1204,7 +1204,7 @@ impl Control {
             Some(Ok(v)) => v,
             None => old.beat_unit,
             Some(Err(_)) => {
-                self.message = "Zaehlzeit muss eine ganze Zahl sein.".to_string();
+                self.message = "Beat unit must be a whole number.".to_string();
                 return;
             }
         };
@@ -1281,8 +1281,8 @@ pub struct RunningEngine {
 /// German summary of what the callbacks saw, for the end of a session.
 pub fn stats_report(stats: &LiveStats) -> String {
     format!(
-        "Xruns (cpal):        {}\nFIFO leer:           {}\nFIFO uebergelaufen:  {}\n\
-         Sonstige Fehler:     {}\nCallback-Dauer max:  {:.3} ms",
+        "Xruns (cpal):        {}\nFIFO empty:          {}\nFIFO overflowed:     {}\n\
+         Other errors:        {}\nCallback time max:   {:.3} ms",
         stats.xruns.load(Ordering::Relaxed),
         stats.underruns.load(Ordering::Relaxed),
         stats.overruns.load(Ordering::Relaxed),
@@ -1432,10 +1432,10 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
     )?;
 
     if let Ok(frames) = input.buffer_size() {
-        println!("Puffer laut Treiber: Eingang {frames} Frames");
+        println!("Buffer per driver: input {frames} frames");
     }
     if let Ok(frames) = output.buffer_size() {
-        println!("Puffer laut Treiber: Ausgang {frames} Frames");
+        println!("Buffer per driver: output {frames} frames");
     }
 
     // Order matters: input first, then output, exactly as in the phase 0 latency measurement. Both
@@ -1443,10 +1443,10 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
     // them the same origin the 827 samples were measured against.
     input
         .play()
-        .map_err(|e| format!("Eingangsstream startet nicht: {e}"))?;
+        .map_err(|e| format!("Input stream does not start: {e}"))?;
     output
         .play()
-        .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+        .map_err(|e| format!("Output stream does not start: {e}"))?;
 
     Ok(RunningEngine {
         input,
@@ -1484,14 +1484,14 @@ pub(crate) fn spawn_keyboard() -> Receiver<String> {
 }
 
 pub(crate) fn on_off(v: bool) -> &'static str {
-    if v { "an " } else { "aus" }
+    if v { "on " } else { "off" }
 }
 
-/// `Mitte`, `L50`, `R100` - short enough for a track line, unambiguous enough to read at a glance.
+/// `C`, `L50`, `R100` - short enough for a track line, unambiguous enough to read at a glance.
 pub(crate) fn pan_label(pan: f32) -> String {
     let percent = (pan.abs() * 100.0).round() as i32;
     if percent == 0 {
-        "Mitte".to_string()
+        "C".to_string()
     } else if pan < 0.0 {
         format!("L{percent}")
     } else {
@@ -1499,29 +1499,29 @@ pub(crate) fn pan_label(pan: f32) -> String {
     }
 }
 
-/// `Ein 1 mono` for a microphone, `Ein 3+4 stereo` for a pair. Which inputs and how many channels
+/// `In 1 mono` for a microphone, `In 3+4 stereo` for a pair. Which inputs and how many channels
 /// end up in the loop buffer is the one setup fact worth repeating on every line.
 pub(crate) fn input_text(input: TrackInput) -> String {
-    format!("Ein {:<4} {:<6}", input.label(), input.channels().label())
+    format!("In {:<4} {:<6}", input.label(), input.channels().label())
 }
 
-/// Where a track's compensation comes from, as a sentence fragment: `gemessen 512 + 96 Zuschlag`,
-/// `Vorgabe 827`. Never just a number - a value that looks like a setting but is inherited is
+/// Where a track's compensation comes from, as a sentence fragment: `measured 512 + 96 trim`,
+/// `default 827`. Never just a number - a value that looks like a setting but is inherited is
 /// exactly the thing this is here to prevent.
 pub(crate) fn latency_origin(latency: TrackLatency, default: u64) -> String {
     let base = match latency.measured {
-        Some(frames) => format!("gemessen {frames}"),
-        None => format!("Vorgabe {default}"),
+        Some(frames) => format!("measured {frames}"),
+        None => format!("default {default}"),
     };
     match latency.trim {
         0 => base,
-        trim => format!("{base} {} {} Zuschlag", if trim < 0 { '-' } else { '+' }, trim.abs()),
+        trim => format!("{base} {} {} trim", if trim < 0 { '-' } else { '+' }, trim.abs()),
     }
 }
 
 /// The latency column of a track line: the effective number, and whether it is the track's own.
 pub(crate) fn latency_text(ts: &TrackStatus) -> String {
-    let mark = if ts.latency.inherits() { "geerbt" } else { "eigen " };
+    let mark = if ts.latency.inherits() { "default" } else { "own    " };
     match ts.latency.trim {
         0 => format!("{:>5} {mark}", ts.latency_frames),
         trim => format!("{:>5} {mark}{trim:+}", ts.latency_frames),
@@ -1549,11 +1549,11 @@ pub(crate) fn layer_list(ts: &TrackStatus, gains: &[f32]) -> String {
     format!("[{}]", parts.join(" "))
 }
 
-/// The effect column of a track line: `stimme HEK-R 1/8.` - which preset, which effects are on,
+/// The effect column of a track line: `voice HEC-R 1/8.` - which preset, which effects are on,
 /// and, when the delay is one of them, the note value it is locked to.
 pub(crate) fn fx_text(fx: &FxStatus) -> String {
     if fx.bypass {
-        return "aus".to_string();
+        return "off".to_string();
     }
     let mut text = format!("{} {}", fx.preset.label(), fx.letters());
     if fx.settings.enabled[FxSlot::Delay.index()] {
@@ -1579,7 +1579,7 @@ pub(crate) fn bus_text(s: &Status, bus: Bus) -> String {
     )
 }
 
-/// `MK/-K` - which buses the loop goes to, and which the monitor signal goes to.
+/// `MH/-H` - which buses the loop goes to, and which the monitor signal goes to.
 pub(crate) fn send_text(ts: &TrackStatus) -> String {
     format!("{}/{}", ts.loop_send.short(), ts.monitor_send.short())
 }
@@ -1600,7 +1600,7 @@ fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
     let loop_len = tl.span_bars(0, bars);
 
     let mut line = format!(
-        "Takt {:>4} Schlag {}/{} [{}] | Loop {} Takte = {} Frames = {:.2} s | {:.1} BPM | Raster {} | Klick {} | {} | {}",
+        "Bar {:>4} Beat {}/{} [{}] | Loop {} bars = {} frames = {:.2} s | {:.1} BPM | Grid {} | Click {} | {} | {}",
         s.bar + 1,
         s.beat + 1,
         beats_per_bar,
@@ -1620,11 +1620,11 @@ fn global_line(s: &Status, sched: &Scheduler, stats: &LiveStats) -> String {
     let underruns = stats.underruns.load(Ordering::Relaxed);
     let overruns = stats.overruns.load(Ordering::Relaxed);
     if xruns > 0 || underruns > 0 {
-        line.push_str(&format!(" | Xruns {xruns}, FIFO leer {underruns}"));
+        line.push_str(&format!(" | Xruns {xruns}, FIFO empty {underruns}"));
     }
     if overruns > 0 {
         line.push_str(&format!(
-            " | ACHTUNG {overruns} FIFO-Ueberlaeufe: Eingangssamples verloren, Aufnahme verschoben"
+            " | WARNING {overruns} FIFO overflows: input samples lost, recording shifted"
         ));
     }
     line
@@ -1637,7 +1637,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
     let loop_text = if ts.loop_len > 0 {
         format!("{:.2} s", tl.samples_to_secs(ts.loop_len))
     } else if ts.state == TrackState::Recording {
-        format!("laeuft, {:.2} s", tl.samples_to_secs(ts.filled))
+        format!("running, {:.2} s", tl.samples_to_secs(ts.filled))
     } else {
         "-".to_string()
     };
@@ -1656,7 +1656,7 @@ fn track_line(ts: &TrackStatus, ui: &TrackUi, tl: &Timeline, lead: Lead, active:
         _ => format!("{}      ", fmt_dbfs(ts.input_peak[0])),
     };
     format!(
-        "{} {:<10} {} | {:<34} | Loop {:>10} | Ebenen {:>2} {:<28} | Pegel {} | Pan {:<5} | Bus {:<5} | Lat {:<14} | Mithoeren {} | FX {:<22}",
+        "{} {:<10} {} | {:<34} | Loop {:>10} | Layers {:>2} {:<28} | Level {} | Pan {:<5} | Bus {:<5} | Lat {:<14} | Monitor {} | FX {:<22}",
         if active { '>' } else { ' ' },
         ui.name,
         input_text(ui.input),
@@ -1694,8 +1694,8 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     let rate = setup.sample_rate();
     if setup.out_plan.config.sample_rate != rate {
         return Err(format!(
-            "Ein- und Ausgang laufen auf verschiedenen Sampleraten ({} und {}). \
-             Die Zeitachse der Engine setzt eine gemeinsame Clock voraus.",
+            "Input and output run at different sample rates ({} and {}). \
+             The engine's timeline needs a shared clock.",
             rate, setup.out_plan.config.sample_rate
         ));
     }
@@ -1722,20 +1722,20 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     audio::print_setup(&setup);
     let loop_len = timeline.span_bars(0, opts.bars);
     println!(
-        "Takt:     {:.1} BPM, {}/{}, {:.3} Frames pro Schlag",
+        "Tempo:    {:.1} BPM, {}/{}, {:.3} frames per beat",
         opts.bpm,
         opts.beats_per_bar,
         opts.beat_unit,
         timeline.samples_per_beat()
     );
     println!(
-        "Loop:     {} Takte = {} Frames = {:.2} s",
+        "Loop:     {} bars = {} frames = {:.2} s",
         opts.bars,
         loop_len,
         timeline.samples_to_secs(loop_len)
     );
     println!(
-        "Raster:   {} - {}",
+        "Grid:     {} - {}",
         opts.quantize.label(),
         opts.quantize.explanation()
     );
@@ -1755,7 +1755,7 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     for (i, def) in defs.iter().enumerate() {
         let effective = def.latency.resolve(opts.latency_frames);
         println!(
-            "  {} {:<10} Eingang {} ({}, von {} Kanaelen), Panorama {}, Latenz {} Frames ({:.2} ms, {}), Loop -> {}, Mithoeren -> {}",
+            "  {} {:<10} input {} ({}, of {} channels), pan {}, latency {} frames ({:.2} ms, {}), Loop -> {}, Monitor -> {}",
             i + 1,
             def.name,
             def.input.label(),
@@ -1770,8 +1770,8 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         );
     }
     println!(
-        "Busse:    Main -> Ausgang {} (Lautstaerke {:.2}), Monitor -> Ausgang {} (Lautstaerke {:.2}), 
-                   von {} Ausgangskanaelen. Der Klick liegt auf Monitor und nie auf Main.",
+        "Buses:    Main -> output {} (level {:.2}), Monitor -> output {} (level {:.2}), 
+                   of {} output channels. The click is on Monitor and never on Main.",
         routing.get(Bus::Main).label(),
         bus_gain[Bus::Main.index()],
         routing.get(Bus::Monitor).label(),
@@ -1779,18 +1779,18 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
         out_channels
     );
     if let Some(note) = routing_note(&routing, out_channels) {
-        println!("ACHTUNG:  {note}");
+        println!("WARNING:  {note}");
     }
     println!(
-        "Latenz:   Vorgabe {} Frames ({:.2} ms) - sie gilt fuer jeden Track, der nichts eigenes sagt",
+        "Latency:  default {} frames ({:.2} ms) - applies to every track without a value of its own",
         opts.latency_frames,
         opts.latency_frames as f64 * 1000.0 / rate as f64
     );
     println!(
-        "          Der Wert stammt aus der Loopback-Messung. Nach jeder Aenderung von Geraet,\n\
-         \x20         Samplerate oder Puffergroesse neu messen (Subcommand calibrate). Eine Quelle,\n\
-         \x20         die ueber einen Plugin-Host hereinkommt, hat einen eigenen Weg und braucht\n\
-         \x20         einen eigenen Wert: calibrate --for-track, dann --track-latency NAME:FRAMES."
+        "          The value comes from the loopback measurement. Measure again after any change of device,\n\
+         \x20         sample rate or buffer size (subcommand calibrate). A source that comes in\n\
+         \x20         through a plugin host has its own path and needs its own value:\n\
+         \x20         calibrate --for-track, then --track-latency NAME:FRAMES."
     );
 
     let RunningEngine {
@@ -1816,37 +1816,37 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
     })?;
 
     let grid = match opts.quantize {
-        Quantize::Bar => "der naechsten Taktgrenze",
-        Quantize::Loop => "dem naechsten Loop-Anfang",
+        Quantize::Bar => "the next bar line",
+        Quantize::Loop => "the top of the next loop",
     };
     println!(
-        "\nTasten (jeweils mit Enter bestaetigen). Alles ausser 1-{} wirkt auf den gewaehlten Track:\n\
-         \x20 1-{}  Track waehlen\n\
-         \x20 r   neuer Loop ab {grid}, {} Takte (ersetzt vorhandene Ebenen)\n\
-         \x20 o   Overdub: weitere Ebene ab {grid}, eine Loop-Laenge lang\n\
-         \x20 s   Stopp: laufende Aufnahme auf der naechsten Taktgrenze beenden, sonst Wiedergabe aus\n\
-         \x20 p   Wiedergabe ab der naechsten Taktgrenze\n\
-         \x20 c   diesen Track leeren\n\
-         \x20 a   alles leeren (alle Tracks, Zustand wie frisch gestartet)\n\
-         \x20 m   Mithoeren an/aus (unabhaengig von der Wiedergabe)\n\
-         \x20 e <nr>        Ebene stumm/laut\n\
-         \x20 w <nr>        Ebene weg\n\
-         \x20 l <nr> <wert> Lautstaerke einer Ebene (0.0 bis 4.0)\n\
-         \x20 n <wert>      Panorama: -1 ganz links, 0 Mitte, 1 ganz rechts\n\
-         \x20 i <frames|-> [zuschlag]  Latenzkompensation dieses Tracks; - nimmt die globale Vorgabe.\n\
-         \x20               Wirkt auf kommende Aufnahmen, nicht auf schon Aufgenommenes.\n\
-         Busse - Main geht in den Saal, Monitor auf den Kopfhoerer, der Klick nur auf Monitor:\n\
-         \x20 b <loop|mon> <main|monitor|main+monitor|none>  Bus-Zuordnung dieses Tracks\n\
-         \x20 g <main|monitor> <wert>  Lautstaerke eines Busses (der andere bleibt, wie er ist)\n\
-         \x20 u <main|monitor> <kanal[-kanal]>  Ausgangspaar eines Busses\n\
-         \x20 k   Klick an/aus (er liegt auf dem Monitor-Bus)\n\
-         \x20 t   Tempo aendern, z.B. \"t 120\" oder \"t 120 7 8\" (nur wenn alles leer ist)\n\
-         Effekte - wirken auf Wiedergabe und Mithoeren, die Aufnahme bleibt immer trocken:\n\
-         \x20 v <name>      Preset laden: stimme | gitarre | trocken\n\
-         \x20 f             ganze Effektkette an/aus (aus = bitgleich durchgereicht)\n\
-         \x20 x <1-5>       einzeln: 1 Hochpass, 2 EQ, 3 Kompressor, 4 Delay, 5 Hall\n\
-         \x20 d <wert>      Delay-Notenwert: 1/4 | 1/8. | 1/8 | 1/8T (aus dem Tempo gerechnet)\n\
-         \x20 q   Beenden\n",
+        "\nKeys (confirm each with Enter). Everything except 1-{} acts on the selected track:\n\
+         \x20 1-{}  select track\n\
+         \x20 r   Record a new loop from {grid}, {} bars (replaces existing layers)\n\
+         \x20 o   Overdub: another layer from {grid}, one loop long\n\
+         \x20 s   Stop: end a running recording at the next bar line, otherwise stop playback\n\
+         \x20 p   Play from the next bar line\n\
+         \x20 c   Clear this track\n\
+         \x20 a   Clear all (all tracks, back to a fresh start)\n\
+         \x20 m   Monitor on/off (independent of playback)\n\
+         \x20 e <no>        mute/unmute layer\n\
+         \x20 w <no>        remove layer\n\
+         \x20 l <no> <value> level of a layer (0.0 to 4.0)\n\
+         \x20 n <value>     pan: -1 hard left, 0 centre, 1 hard right\n\
+         \x20 i <frames|-> [trim]  latency compensation of this track; - uses the global default.\n\
+         \x20               Applies to future recordings, not to what is already recorded.\n\
+         Buses - Main goes to the room, Monitor to the headphones, the click only to Monitor:\n\
+         \x20 b <loop|mon> <main|monitor|main+monitor|none>  bus routing of this track\n\
+         \x20 g <main|monitor> <value>  level of a bus (the other one stays as it is)\n\
+         \x20 u <main|monitor> <channel[-channel]>  output pair of a bus\n\
+         \x20 k   Click on/off (it is on the Monitor bus)\n\
+         \x20 t   change tempo, e.g. \"t 120\" or \"t 120 7 8\" (only while everything is empty)\n\
+         Effects - apply to playback and Monitor, the recording always stays dry:\n\
+         \x20 v <name>      load preset: voice | guitar | dry\n\
+         \x20 f             whole effect chain on/off (off = passed through bit-identical)\n\
+         \x20 x <1-5>       single: 1 High-pass, 2 EQ, 3 Compressor, 4 Delay, 5 Reverb\n\
+         \x20 d <value>     delay note value: 1/4 | 1/8. | 1/8 | 1/8T (derived from the tempo)\n\
+         \x20 q   quit\n",
         defs.len(),
         defs.len(),
         opts.bars
@@ -1976,11 +1976,11 @@ mod tests {
 
         // Every mistake gets its own German sentence rather than a silently wrong track.
         for (bad, needle) in [
-            ("klavier:3-0", "ab 1"),
-            ("klavier:3-x", "Kanalnummer"),
-            ("klavier:3-3", "zwei verschiedene"),
-            ("stimme:1@links", "Panorama-Zahl"),
-            ("stimme:1@2", "zwischen -1"),
+            ("klavier:3-0", "from 1"),
+            ("klavier:3-x", "channel number"),
+            ("klavier:3-3", "two different"),
+            ("stimme:1@links", "pan value"),
+            ("stimme:1@2", "between -1"),
         ] {
             let err = parse_track_arg(bad).expect_err(bad);
             assert!(err.contains(needle), "\"{bad}\" meldet: {err}");
@@ -2007,15 +2007,15 @@ mod tests {
     fn a_channel_the_device_does_not_have_is_refused_in_german() {
         let err = resolve_tracks(&specs(&["stimme:1", "gitarre:4"]), 2).expect_err("muss scheitern");
         assert!(err.contains("gitarre"), "{err}");
-        assert!(err.contains("Eingang 4"), "{err}");
+        assert!(err.contains("input 4"), "{err}");
         assert!(err.contains("--in-channels"), "Hinweis fehlt: {err}");
 
         // The same for the second half of a stereo pair, which is the one a device runs out of.
         let err = resolve_tracks(&specs(&["klavier:2-3"]), 2).expect_err("Kanal 3 gibt es nicht");
-        assert!(err.contains("Eingang 3"), "{err}");
+        assert!(err.contains("input 3"), "{err}");
 
         let err = resolve_tracks(&specs(&["a:1", "a:2"]), 4).expect_err("doppelter Name");
-        assert!(err.contains("eindeutig"), "{err}");
+        assert!(err.contains("unique"), "{err}");
 
         let many: Vec<String> = (1..=MAX_TRACKS + 1).map(|i| format!("t{i}:1")).collect();
         assert!(resolve_tracks(&many, 8).is_err(), "Obergrenze greift");
@@ -2045,16 +2045,16 @@ mod tests {
         assert_eq!(only_trim.resolve(827), 923);
 
         for (bad, needle) in [
-            ("cantabile", "unvollstaendig"),
-            (":512", "Trackname"),
-            ("cantabile:", "fehlt die Zahl"),
-            ("cantabile:viel", "Frame-Zahl"),
-            ("cantabile:512+viel", "Zuschlagszahl"),
-            ("cantabile:999999", "Tippfehler"),
-            ("cantabile:+999999", "Tippfehler"),
+            ("cantabile", "incomplete"),
+            (":512", "track name"),
+            ("cantabile:", "number after the colon"),
+            ("cantabile:viel", "frame count"),
+            ("cantabile:512+viel", "trim"),
+            ("cantabile:999999", "typo"),
+            ("cantabile:+999999", "typo"),
             // A non-ASCII first character must produce the German message, not a panic on a char
             // boundary.
-            ("cantabile:ue512", "Frame-Zahl"),
+            ("cantabile:ue512", "frame count"),
         ] {
             let err = parse_track_latency_arg(bad).expect_err(bad);
             assert!(err.contains(needle), "\"{bad}\" meldet: {err}");
@@ -2107,25 +2107,25 @@ mod tests {
             latency_frames: 827,
             ..Default::default()
         };
-        assert_eq!(latency_text(&inherited).trim(), "827 geerbt");
-        assert_eq!(latency_origin(inherited.latency, 827), "Vorgabe 827");
+        assert_eq!(latency_text(&inherited).trim(), "827 default");
+        assert_eq!(latency_origin(inherited.latency, 827), "default 827");
 
         let own = TrackStatus {
             latency: TrackLatency::measured(512).with_trim(96),
             latency_frames: 608,
             ..Default::default()
         };
-        assert_eq!(latency_text(&own).trim(), "608 eigen +96");
-        assert_eq!(latency_origin(own.latency, 827), "gemessen 512 + 96 Zuschlag");
+        assert_eq!(latency_text(&own).trim(), "608 own    +96");
+        assert_eq!(latency_origin(own.latency, 827), "measured 512 + 96 trim");
         assert_eq!(
             latency_origin(TrackLatency::INHERITED.with_trim(-40), 827),
-            "Vorgabe 827 - 40 Zuschlag"
+            "default 827 - 40 trim"
         );
     }
 
     #[test]
     fn the_pan_is_written_as_a_side_and_a_percentage() {
-        assert_eq!(pan_label(0.0), "Mitte");
+        assert_eq!(pan_label(0.0), "C");
         assert_eq!(pan_label(-1.0), "L100");
         assert_eq!(pan_label(1.0), "R100");
         assert_eq!(pan_label(-0.5), "L50");
@@ -2134,10 +2134,10 @@ mod tests {
 
     #[test]
     fn the_input_column_names_the_channels_and_the_channel_count() {
-        assert_eq!(input_text(TrackInput::Mono(0)).trim(), "Ein 1    mono");
+        assert_eq!(input_text(TrackInput::Mono(0)).trim(), "In 1    mono");
         assert_eq!(
             input_text(TrackInput::Stereo { left: 2, right: 3 }).trim(),
-            "Ein 3+4  stereo"
+            "In 3+4  stereo"
         );
     }
 
@@ -2151,7 +2151,7 @@ mod tests {
             fx: chain.status(),
             ..Default::default()
         };
-        assert_eq!(fx_text(&ts.fx), "stimme HEK-R");
+        assert_eq!(fx_text(&ts.fx), "voice HEC-R");
 
         chain.set_enabled(FxSlot::Delay, true);
         chain.set_param(FxParam::DelayNote(DelayNote::Quarter));
@@ -2159,16 +2159,16 @@ mod tests {
             fx: chain.status(),
             ..Default::default()
         };
-        assert_eq!(fx_text(&ts.fx), "eigen HEKDR 1/4");
+        assert_eq!(fx_text(&ts.fx), "custom HECDR 1/4");
 
         chain.set_bypass(true);
         let ts = TrackStatus {
             fx: chain.status(),
             ..Default::default()
         };
-        assert_eq!(fx_text(&ts.fx), "aus");
+        assert_eq!(fx_text(&ts.fx), "off");
         // A track nobody has touched shows nothing either, because it starts bypassed.
-        assert_eq!(fx_text(&TrackStatus::default().fx), "aus");
+        assert_eq!(fx_text(&TrackStatus::default().fx), "off");
     }
 
     #[test]
@@ -2200,12 +2200,12 @@ mod tests {
         );
 
         for (bad, needle) in [
-            ("main", "unvollstaendig"),
-            ("buehne:1-2", "kein Bus"),
-            ("main:0", "ab 1"),
-            ("main:x", "Kanalnummer"),
+            ("main", "incomplete"),
+            ("buehne:1-2", "not a bus"),
+            ("main:0", "from 1"),
+            ("main:x", "channel number"),
             // A pair is adjacent; anything else would be a routing nobody could wire.
-            ("main:1-3", "benachbarten"),
+            ("main:1-3", "adjacent"),
         ] {
             let err = parse_bus_out_arg(bad).expect_err(bad);
             assert!(err.contains(needle), "\"{bad}\" meldet: {err}");
@@ -2223,7 +2223,7 @@ mod tests {
         let two = resolve_routing(&[], 2).unwrap();
         assert!(two.collapsed(), "zwei Ausgaenge sind ein Weg hinaus");
         let note = routing_note(&two, 2).expect("das wird erklaert");
-        assert!(note.contains("Klick"), "{note}");
+        assert!(note.contains("click"), "{note}");
 
         let split = resolve_routing(&specs(&["main:1", "monitor:2"]), 2).unwrap();
         assert_eq!(split.get(Bus::Main), BusOutput::mono(0));
@@ -2232,7 +2232,7 @@ mod tests {
         assert!(routing_note(&split, 2).is_none());
 
         let err = resolve_routing(&specs(&["monitor:3-4"]), 2).expect_err("Kanal 4 gibt es nicht");
-        assert!(err.contains("Ausgangskanaele"), "{err}");
+        assert!(err.contains("output channels"), "{err}");
         assert!(err.contains("--out-channels"), "der Ausweg fehlt: {err}");
     }
 
@@ -2245,10 +2245,10 @@ mod tests {
             "was nicht genannt wird, bleibt auf 1.0"
         );
         for (bad, needle) in [
-            ("monitor", "unvollstaendig"),
-            ("buehne:1", "kein Bus"),
-            ("monitor:laut", "keine Zahl"),
-            ("monitor:9", "zwischen"),
+            ("monitor", "incomplete"),
+            ("buehne:1", "not a bus"),
+            ("monitor:laut", "not a number"),
+            ("monitor:9", "between"),
         ] {
             let err = parse_bus_gain_arg(bad).expect_err(bad);
             assert!(err.contains(needle), "\"{bad}\" meldet: {err}");
@@ -2294,13 +2294,13 @@ mod tests {
             monitor_send: BusSend::MONITOR,
             ..Default::default()
         };
-        assert_eq!(send_text(&ts), "MK/-K");
+        assert_eq!(send_text(&ts), "MH/-H");
 
         let cue = TrackStatus {
             loop_send: BusSend::MONITOR,
             monitor_send: BusSend::NONE,
             ..Default::default()
         };
-        assert_eq!(send_text(&cue), "-K/--");
+        assert_eq!(send_text(&cue), "-H/--");
     }
 }

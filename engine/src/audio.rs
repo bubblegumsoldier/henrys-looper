@@ -48,44 +48,44 @@ pub const DEFAULT_LATENCY_MEASURED: bool = cfg!(not(target_os = "macos"));
 
 /// One sentence on where [`DEFAULT_LATENCY_FRAMES`] comes from, for help texts and the UI.
 #[cfg(target_os = "macos")]
-pub const DEFAULT_LATENCY_ORIGIN: &str = "Schaetzwert aus den CoreAudio-Angaben einer Scarlett 2i2 \
-     (48 kHz, 128 Frames), nicht per Loopback gemessen - mit calibrate nachmessen";
+pub const DEFAULT_LATENCY_ORIGIN: &str = "Estimate from what CoreAudio reports for a Scarlett 2i2 \
+     (48 kHz, 128 frames), not measured with a loopback cable - measure it with calibrate";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_LATENCY_ORIGIN: &str =
-    "Messwert aus Phase 0 (Scarlett 2i2 an ASIO, 48 kHz, 128 Frames)";
+    "Measured in phase 0 (Scarlett 2i2 on ASIO, 48 kHz, 128 frames)";
 
 /// Flags shared by every subcommand that opens an audio device.
 #[derive(Args, Debug, Clone)]
 pub struct DeviceOpts {
-    /// Audio-Host: coreaudio (macOS), wasapi oder asio (Windows; asio nur mit --features asio
-    /// gebaut). Standard ist der uebliche Host des Systems.
+    /// Audio host: coreaudio (macOS), wasapi or asio (Windows; asio only when built with
+    /// --features asio). Default is the system's usual host.
     #[arg(long, default_value = DEFAULT_HOST)]
     pub host: String,
 
-    /// Teilstring des Geraetenamens (Gross-/Kleinschreibung egal), sonst Standardgeraet
+    /// Part of the device name (case-insensitive); default device if omitted
     #[arg(long)]
     pub device: Option<String>,
 
-    /// Samplerate in Hz
+    /// Sample rate in Hz
     #[arg(long, default_value_t = 48_000)]
     pub rate: u32,
 
-    /// Puffergroesse in Frames
+    /// Buffer size in frames
     #[arg(long, default_value_t = 128)]
     pub buffer: u32,
 
-    /// Anzahl Eingangskanaele (Standard: Vorgabe des Geraets)
+    /// Number of input channels (default: the device default)
     #[arg(long)]
     pub in_channels: Option<u16>,
 
-    /// Anzahl Ausgangskanaele (Standard: Vorgabe des Geraets)
+    /// Number of output channels (default: the device default)
     #[arg(long)]
     pub out_channels: Option<u16>,
 
-    /// Puffergroesse trotzdem anfordern, wenn das Geraet einen anderen Bereich meldet.
-    /// WASAPI im Shared Mode meldet nur die Geraeteperiode (bei 48 kHz meist 480 Frames);
-    /// ob eine kleinere Anforderung wirklich greift, ist selbst Teil der Messung. CoreAudio
-    /// meldet ehrlich 15..4096 und braucht das nicht.
+    /// Request the buffer size anyway, even if the device reports a different range.
+    /// WASAPI in shared mode only reports the device period (usually 480 frames at 48 kHz);
+    /// whether a smaller request really takes effect is part of the measurement. CoreAudio
+    /// honestly reports 15..4096 and does not need this.
     #[arg(long)]
     pub force_buffer: bool,
 }
@@ -99,8 +99,8 @@ pub enum Direction {
 impl Direction {
     fn label(self) -> &'static str {
         match self {
-            Direction::Input => "Eingang",
-            Direction::Output => "Ausgang",
+            Direction::Input => "input",
+            Direction::Output => "output",
         }
     }
 }
@@ -159,38 +159,38 @@ impl DuplexSetup {
 /// feature is missing.
 #[cfg(feature = "asio")]
 pub fn asio_status() -> &'static str {
-    "ASIO ist eingebaut (Feature \"asio\")."
+    "ASIO is built in (feature \"asio\")."
 }
 
 #[cfg(all(not(feature = "asio"), target_os = "windows"))]
 pub fn asio_status() -> &'static str {
-    "ASIO ist NICHT eingebaut. Neu bauen mit: cargo build --release --features asio"
+    "ASIO is NOT built in. Rebuild with: cargo build --release --features asio"
 }
 
 #[cfg(all(not(feature = "asio"), not(target_os = "windows")))]
 pub fn asio_status() -> &'static str {
-    "ASIO gibt es nur unter Windows; hier ist der Audio-Host CoreAudio (macOS) bzw. ALSA (Linux)."
+    "ASIO exists only on Windows; here the audio host is CoreAudio (macOS) or ALSA (Linux)."
 }
 
 pub fn open_host(name: &str) -> Result<Host, String> {
     let id = HostId::from_str(name).map_err(|e| {
         if name.eq_ignore_ascii_case("asio") && cfg!(not(target_os = "windows")) {
             format!(
-                "Host \"asio\" gibt es auf diesem System nicht - ASIO ist ein Windows-Treibermodell. \
-                 Unter macOS heisst der Host \"{DEFAULT_HOST}\"."
+                "There is no host \"asio\" on this system - ASIO is a Windows driver model. \
+                 On macOS the host is called \"{DEFAULT_HOST}\"."
             )
         } else if name.eq_ignore_ascii_case("asio") {
-            format!("ASIO-Host nicht verfuegbar: {e}. {}", asio_status())
+            format!("ASIO host not available: {e}. {}", asio_status())
         } else {
             let available: Vec<String> =
                 cpal::available_hosts().iter().map(|h| h.to_string()).collect();
             format!(
-                "Host \"{name}\" unbekannt: {e}. Verfuegbar auf diesem System: {}",
+                "Unknown host \"{name}\": {e}. Available on this system: {}",
                 available.join(", ")
             )
         }
     })?;
-    cpal::host_from_id(id).map_err(|e| format!("Host \"{name}\" liess sich nicht oeffnen: {e}"))
+    cpal::host_from_id(id).map_err(|e| format!("Could not open host \"{name}\": {e}"))
 }
 
 fn device_name(device: &Device) -> String {
@@ -204,12 +204,12 @@ pub fn pick_device(host: &Host, wanted: Option<&str>, dir: Direction) -> Result<
             Direction::Input => host.default_input_device(),
             Direction::Output => host.default_output_device(),
         }
-        .ok_or_else(|| format!("Kein Standard-{} auf diesem Host gefunden.", dir.label())),
+        .ok_or_else(|| format!("No default {} device found on this host.", dir.label())),
         Some(needle) => {
             let needle_lc = needle.to_lowercase();
             let devices = host
                 .devices()
-                .map_err(|e| format!("Geraeteliste nicht lesbar: {e}"))?;
+                .map_err(|e| format!("Cannot read the device list: {e}"))?;
             let mut candidates = Vec::new();
             let mut all = Vec::new();
             for device in devices {
@@ -227,14 +227,14 @@ pub fn pick_device(host: &Host, wanted: Option<&str>, dir: Direction) -> Result<
             }
             match candidates.len() {
                 0 => Err(format!(
-                    "Kein {} passt auf \"{needle}\". Vorhanden:\n  {}",
+                    "No {} device matches \"{needle}\". Available:\n  {}",
                     dir.label(),
                     all.join("\n  ")
                 )),
                 _ => {
                     if candidates.len() > 1 {
                         eprintln!(
-                            "Hinweis: {} Geraete passen auf \"{needle}\", nehme \"{}\".",
+                            "Note: {} devices match \"{needle}\", using \"{}\".",
                             candidates.len(),
                             device_name(&candidates[0])
                         );
@@ -253,11 +253,11 @@ fn supported_ranges(
     let list: Vec<SupportedStreamConfigRange> = match dir {
         Direction::Input => device
             .supported_input_configs()
-            .map_err(|e| format!("{}-Konfigurationen nicht lesbar: {e}", dir.label()))?
+            .map_err(|e| format!("Cannot read {} configurations: {e}", dir.label()))?
             .collect(),
         Direction::Output => device
             .supported_output_configs()
-            .map_err(|e| format!("{}-Konfigurationen nicht lesbar: {e}", dir.label()))?
+            .map_err(|e| format!("Cannot read {} configurations: {e}", dir.label()))?
             .collect(),
     };
     Ok(list)
@@ -268,20 +268,20 @@ fn default_channels(device: &Device, dir: Direction) -> Result<u16, String> {
         Direction::Input => device.default_input_config(),
         Direction::Output => device.default_output_config(),
     }
-    .map_err(|e| format!("Standardkonfiguration ({}) nicht lesbar: {e}", dir.label()))?;
+    .map_err(|e| format!("Cannot read default configuration ({}): {e}", dir.label()))?;
     Ok(cfg.channels())
 }
 
 pub fn describe_buffer_size(b: &SupportedBufferSize) -> String {
     match b {
-        SupportedBufferSize::Range { min, max } => format!("{min}..{max} Frames"),
-        SupportedBufferSize::Unknown => "unbekannt".to_string(),
+        SupportedBufferSize::Range { min, max } => format!("{min}..{max} frames"),
+        SupportedBufferSize::Unknown => "unknown".to_string(),
     }
 }
 
 fn describe_range(r: &SupportedStreamConfigRange) -> String {
     format!(
-        "{} Kanaele, {}..{} Hz, {:?}, Puffer {}",
+        "{} channels, {}..{} Hz, {:?}, buffer {}",
         r.channels(),
         r.min_sample_rate(),
         r.max_sample_rate(),
@@ -290,7 +290,7 @@ fn describe_range(r: &SupportedStreamConfigRange) -> String {
     )
 }
 
-/// Build a `StreamConfig` for the requested rate/buffer/channels, or explain in German why the
+/// Build a `StreamConfig` for the requested rate/buffer/channels, or explain in plain words why the
 /// device cannot do it. Never silently substitutes different values.
 pub fn resolve_config(
     device: &Device,
@@ -301,7 +301,7 @@ pub fn resolve_config(
     let ranges = supported_ranges(device, dir)?;
     if ranges.is_empty() {
         return Err(format!(
-            "Geraet \"{}\" meldet keine {}-Konfigurationen.",
+            "Device \"{}\" reports no {} configurations.",
             device_name(device),
             dir.label()
         ));
@@ -315,7 +315,7 @@ pub fn resolve_config(
         ranges.iter().filter(|r| r.channels() == channels).collect();
     if by_channels.is_empty() {
         return Err(format!(
-            "Geraet \"{}\" kann am {} keine {channels} Kanaele. Unterstuetzt:\n  {}",
+            "Device \"{}\" on the {} cannot do {channels} channels. Supported:\n  {}",
             device_name(device),
             dir.label(),
             ranges.iter().map(describe_range).collect::<Vec<_>>().join("\n  ")
@@ -328,7 +328,7 @@ pub fn resolve_config(
         .collect();
     if by_rate.is_empty() {
         return Err(format!(
-            "Geraet \"{}\" kann am {} keine {} Hz bei {channels} Kanaelen. Unterstuetzt:\n  {}",
+            "Device \"{}\" on the {} cannot do {} Hz with {channels} channels. Supported:\n  {}",
             device_name(device),
             dir.label(),
             opts.rate,
@@ -343,7 +343,7 @@ pub fn resolve_config(
         .find_map(|f| by_rate.iter().find(|r| r.sample_format() == *f))
         .ok_or_else(|| {
             format!(
-                "Geraet \"{}\" bietet am {} bei {} Hz keins der unterstuetzten Formate ({}). Vorhanden:\n  {}",
+                "Device \"{}\" on the {} at {} Hz offers none of the supported formats ({}). Available:\n  {}",
                 device_name(device),
                 dir.label(),
                 opts.rate,
@@ -358,18 +358,18 @@ pub fn resolve_config(
         if !opts.force_buffer {
             let ways = if cfg!(target_os = "windows") {
                 format!(
-                    "\x20 - mit --buffer {min} messen (das ist die Geraeteperiode im WASAPI-Shared-Mode)\n\
-                     \x20 - ASIO nutzen: --host asio --buffer {} (Binary mit --features asio bauen)\n",
+                    "\x20 - measure with --buffer {min} (that is the device period in WASAPI shared mode)\n\
+                     \x20 - use ASIO: --host asio --buffer {} (build the binary with --features asio)\n",
                     opts.buffer
                 )
             } else {
-                format!("\x20 - eine Puffergroesse zwischen {min} und {max} Frames waehlen\n")
+                format!("\x20 - choose a buffer size between {min} and {max} frames\n")
             };
             return Err(format!(
-                "Puffergroesse {} Frames wird am {} nicht unterstuetzt. Geraet \"{}\" meldet bei {} Hz nur {min}..{max} Frames.\n\
-                 Moeglichkeiten:\n\
+                "Buffer size {} frames is not supported on the {}. Device \"{}\" reports only {min}..{max} frames at {} Hz.\n\
+                 Options:\n\
                  {ways}\
-                 \x20 - --force-buffer setzen, um {} Frames trotzdem anzufordern (dann steht im Ergebnis, was der Treiber daraus macht)",
+                 \x20 - set --force-buffer to request {} frames anyway (the result then shows what the driver made of it)",
                 opts.buffer,
                 dir.label(),
                 device_name(device),
@@ -378,7 +378,7 @@ pub fn resolve_config(
             ));
         }
         eprintln!(
-            "Warnung: --force-buffer aktiv. {} Frames werden am {} angefordert, obwohl das Geraet {min}..{max} meldet.",
+            "Warning: --force-buffer is on. Requesting {} frames on the {}, although the device reports {min}..{max}.",
             opts.buffer,
             dir.label()
         );
@@ -412,9 +412,9 @@ pub fn open_output(opts: &DeviceOpts) -> Result<OutputSetup, String> {
 /// both directions; CoreAudio can provide that through an aggregate device.
 fn separate_devices_hint() -> &'static str {
     if cfg!(target_os = "macos") {
-        "\nEin- und Ausgang muessen auf demselben Geraet liegen (eine gemeinsame Clock). Sollen \
-         es zwei verschiedene sein, in \"Audio-MIDI-Setup\" ein Aggregatgeraet mit \
-         Drift-Korrektur anlegen und das waehlen."
+        "\nInput and output must be on the same device (one shared clock). To use two \
+         different ones, create an aggregate device with drift correction in \"Audio MIDI Setup\" \
+         and choose that."
     } else {
         ""
     }
@@ -433,9 +433,9 @@ pub fn open_duplex(opts: &DeviceOpts) -> Result<DuplexSetup, String> {
         None => {
             let output = pick_device(&host, None, Direction::Output)?;
             eprintln!(
-                "Warnung: Standard-Eingang \"{}\" und Standard-Ausgang \"{}\" sind verschiedene \
-                 Geraete mit getrennten Clocks. Fuer den Looper besser ein Geraet mit --device \
-                 waehlen.{}",
+                "Warning: default input \"{}\" and default output \"{}\" are different \
+                 devices with separate clocks. For the looper, better choose one device with \
+                 --device.{}",
                 device_name(&input),
                 device_name(&output),
                 separate_devices_hint()
@@ -572,7 +572,7 @@ where
         ),
         other => return Err(unsupported_format(other)),
     };
-    result.map_err(|e| format!("Eingangsstream liess sich nicht bauen: {e}"))
+    result.map_err(|e| format!("Could not build the input stream: {e}"))
 }
 
 /// Build an output stream that is fed f32 no matter what the device speaks.
@@ -611,12 +611,12 @@ where
         ),
         other => return Err(unsupported_format(other)),
     };
-    result.map_err(|e| format!("Ausgabestream liess sich nicht bauen: {e}"))
+    result.map_err(|e| format!("Could not build the output stream: {e}"))
 }
 
 fn unsupported_format(format: SampleFormat) -> String {
     format!(
-        "Sample-Format {format:?} wird von diesem Werkzeug nicht unterstuetzt (nur {}).",
+        "Sample format {format:?} is not supported by this tool (only {}).",
         FORMAT_PREFERENCE
             .iter()
             .map(|f| format!("{f:?}"))
@@ -628,21 +628,21 @@ fn unsupported_format(format: SampleFormat) -> String {
 pub fn print_setup(setup: &DuplexSetup) {
     println!("Host:     {}", setup.host_name);
     println!(
-        "Eingang:  {} ({} Kanaele, {:?})",
+        "Input:    {} ({} channels, {:?})",
         setup.in_name, setup.in_plan.config.channels, setup.in_plan.format
     );
     println!(
-        "Ausgang:  {} ({} Kanaele, {:?})",
+        "Output:   {} ({} channels, {:?})",
         setup.out_name, setup.out_plan.config.channels, setup.out_plan.format
     );
     println!(
-        "Format:   {} Hz, {} Frames Puffer angefordert ({:.2} ms pro Puffer)",
+        "Format:   {} Hz, {} frames buffer requested ({:.2} ms per buffer)",
         setup.sample_rate(),
         setup.buffer_frames(),
         setup.buffer_frames() as f64 * 1000.0 / setup.sample_rate() as f64
     );
     println!(
-        "Geraet meldet als Pufferbereich: Eingang {}, Ausgang {}",
+        "Device reports buffer range: input {}, output {}",
         describe_buffer_size(&setup.in_plan.reported_buffer),
         describe_buffer_size(&setup.out_plan.reported_buffer)
     );
@@ -653,7 +653,7 @@ pub fn cmd_list() -> Result<(), String> {
     println!("{}\n", asio_status());
     let hosts = cpal::available_hosts();
     if hosts.is_empty() {
-        println!("Kein Audio-Host verfuegbar.");
+        println!("No audio host available.");
         return Ok(());
     }
     for host_id in hosts {
@@ -661,7 +661,7 @@ pub fn cmd_list() -> Result<(), String> {
         let host = match cpal::host_from_id(host_id) {
             Ok(h) => h,
             Err(e) => {
-                println!("  Host nicht zu oeffnen: {e}\n");
+                println!("  Cannot open host: {e}\n");
                 continue;
             }
         };
@@ -670,7 +670,7 @@ pub fn cmd_list() -> Result<(), String> {
         let devices = match host.devices() {
             Ok(d) => d,
             Err(e) => {
-                println!("  Geraeteliste nicht lesbar: {e}\n");
+                println!("  Cannot read the device list: {e}\n");
                 continue;
             }
         };
@@ -680,34 +680,34 @@ pub fn cmd_list() -> Result<(), String> {
             let name = device_name(&device);
             let mut tags = Vec::new();
             if default_in.as_ref() == Some(&device) {
-                tags.push("STANDARD-EINGANG");
+                tags.push("DEFAULT INPUT");
             }
             if default_out.as_ref() == Some(&device) {
-                tags.push("STANDARD-AUSGANG");
+                tags.push("DEFAULT OUTPUT");
             }
             let tag = if tags.is_empty() {
                 String::new()
             } else {
                 format!("  [{}]", tags.join(" + "))
             };
-            println!("\n  Geraet: {name}{tag}");
+            println!("\n  Device: {name}{tag}");
             if let Ok(desc) = device.description() {
                 let mut extra = Vec::new();
                 if let Some(m) = desc.manufacturer() {
-                    extra.push(format!("Hersteller: {m}"));
+                    extra.push(format!("Manufacturer: {m}"));
                 }
                 if let Some(d) = desc.driver() {
-                    extra.push(format!("Treiber: {d}"));
+                    extra.push(format!("Driver: {d}"));
                 }
-                extra.push(format!("Typ: {:?}", desc.device_type()));
-                extra.push(format!("Anschluss: {:?}", desc.interface_type()));
+                extra.push(format!("Type: {:?}", desc.device_type()));
+                extra.push(format!("Interface: {:?}", desc.interface_type()));
                 println!("    {}", extra.join(", "));
             }
             for dir in [Direction::Input, Direction::Output] {
                 match supported_ranges(&device, dir) {
                     Ok(list) if list.is_empty() => {}
                     Ok(list) => {
-                        println!("    {}-Konfigurationen:", dir.label());
+                        println!("    {} configurations:", dir.label());
                         for r in &list {
                             println!("      - {}", describe_range(r));
                         }
@@ -717,7 +717,7 @@ pub fn cmd_list() -> Result<(), String> {
                         };
                         if let Ok(cfg) = default_cfg {
                             println!(
-                                "      Standard: {} Kanaele, {} Hz, {:?}, Puffer {}",
+                                "      Default: {} channels, {} Hz, {:?}, buffer {}",
                                 cfg.channels(),
                                 cfg.sample_rate(),
                                 cfg.sample_format(),
@@ -730,7 +730,7 @@ pub fn cmd_list() -> Result<(), String> {
             }
         }
         if count == 0 {
-            println!("  (keine Geraete)");
+            println!("  (no devices)");
         }
         println!();
     }

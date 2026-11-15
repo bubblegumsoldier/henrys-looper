@@ -34,11 +34,11 @@ impl TimeSignature {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.beats_per_bar == 0 {
-            return Err("--beats-per-bar muss mindestens 1 sein.".to_string());
+            return Err("--beats-per-bar must be at least 1.".to_string());
         }
         if ![1, 2, 4, 8, 16, 32].contains(&self.beat_unit) {
             return Err(format!(
-                "--beat-unit {} ist keine Notenlaenge (erlaubt: 1, 2, 4, 8, 16, 32).",
+                "--beat-unit {} is not a note length (allowed: 1, 2, 4, 8, 16, 32).",
                 self.beat_unit
             ));
         }
@@ -79,10 +79,10 @@ impl Timeline {
     pub fn validate(sample_rate: u32, bpm: f64, signature: TimeSignature) -> Result<(), String> {
         signature.validate()?;
         if !(1.0..=400.0).contains(&bpm) {
-            return Err(format!("BPM {bpm} liegt ausserhalb von 1..400."));
+            return Err(format!("BPM {bpm} is outside 1..400."));
         }
         if sample_rate == 0 {
-            return Err("Samplerate 0 ist nicht moeglich.".to_string());
+            return Err("A sample rate of 0 is not possible.".to_string());
         }
         Ok(())
     }

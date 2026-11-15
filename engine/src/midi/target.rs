@@ -850,6 +850,17 @@ fn parse_insert(owner: InsertOwner, rest: &[&str], address: &str) -> Result<Targ
     }
 }
 
+/// The preset's name inside a MIDI address. Fixed on purpose: profiles and scores on disk carry
+/// these, so they must not follow the display label (`FxPreset::label`).
+fn preset_address(preset: FxPreset) -> &'static str {
+    match preset {
+        FxPreset::Dry => "trocken",
+        FxPreset::Voice => "stimme",
+        FxPreset::PiezoGuitar => "gitarre",
+        FxPreset::Custom => "eigen",
+    }
+}
+
 fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, String> {
     match rest {
         ["bypass"] => Ok(Target::FxBypass(track)),
@@ -858,7 +869,7 @@ fn parse_fx(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, Str
                 "'{address}': there is no preset '{name}'. There are {}.",
                 FxPreset::loadable()
                     .iter()
-                    .map(|p| p.label())
+                    .map(|p| preset_address(*p))
                     .collect::<Vec<_>>()
                     .join(", ")
             )),
@@ -975,7 +986,9 @@ impl fmt::Display for Target {
             Target::LayerGain(t, l) => write!(f, "track.{t}.layer.{}.gain", l + 1),
             Target::FxBypass(t) => write!(f, "track.{t}.fx.bypass"),
             Target::FxEnabled(t, slot) => write!(f, "track.{t}.fx.{}.on", slot.name()),
-            Target::FxPreset(t, preset) => write!(f, "track.{t}.fx.preset.{}", preset.label()),
+            Target::FxPreset(t, preset) => {
+                write!(f, "track.{t}.fx.preset.{}", preset_address(*preset))
+            }
             Target::FxDelayNote(t, note) => write!(f, "track.{t}.fx.delay.note.{}", note.name()),
             Target::FxBandKind(t, band, kind) => {
                 write!(f, "track.{t}.fx.eq.{}.{}", band + 1, band_kind_name(*kind))

@@ -125,7 +125,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
         std::f32::consts::FRAC_1_SQRT_2,
     )); 2];
     rows.push(Row {
-        name: "Hochpass",
+        name: "High-pass",
         ns_per_sample: time(&signal, |x| {
             Frame::new(hp[0].process(x.l), hp[1].process(x.r))
         }),
@@ -138,7 +138,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
         .map(|b| [Biquad::new(Coeffs::band(sample_rate, b.kind, b.hz, b.q, b.gain_db)); 2])
         .collect();
     rows.push(Row {
-        name: "EQ (3 Baender)",
+        name: "EQ (3 bands)",
         ns_per_sample: time(&signal, |x| {
             let mut y = x;
             for b in bands.iter_mut() {
@@ -150,7 +150,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
 
     let mut comp = Compressor::new(sample_rate, CompSettings::default());
     rows.push(Row {
-        name: "Kompressor",
+        name: "Compressor",
         ns_per_sample: time(&signal, |x| comp.process(x)),
     });
 
@@ -164,7 +164,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
     let mut reverb = Reverb::new(sample_rate, 0.62, 0.45, 0.18);
     reverb.snap_mix(0.18);
     rows.push(Row {
-        name: "Hall",
+        name: "Reverb",
         ns_per_sample: time(&signal, |x| reverb.process(x)),
     });
 
@@ -173,7 +173,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
     chain.load_preset(FxPreset::Voice);
     chain.set_quarter_samples(sample_rate as f64 * 60.0 / 100.0);
     rows.push(Row {
-        name: "Kette \"stimme\"",
+        name: "Chain \"voice\"",
         ns_per_sample: time(&signal, |x| chain.process(x)),
     });
 
@@ -183,7 +183,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
     full.set_enabled(super::FxSlot::Delay, true);
     full.set_quarter_samples(sample_rate as f64 * 60.0 / 100.0);
     rows.push(Row {
-        name: "Kette komplett",
+        name: "Chain full",
         ns_per_sample: time(&signal, |x| full.process(x)),
     });
 
@@ -200,7 +200,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
         black_box(idle.process(black_box(Frame::SILENT)));
     }
     rows.push(Row {
-        name: "Kette still (Leerlauf)",
+        name: "Chain silent (idle)",
         ns_per_sample: started.elapsed().as_nanos() as f64 / samples as f64,
     });
 
@@ -211,7 +211,7 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
         bypassed.process(Frame::SILENT);
     }
     rows.push(Row {
-        name: "Kette umgangen",
+        name: "Chain bypassed",
         ns_per_sample: time(&signal, |x| bypassed.process(x)),
     });
 
@@ -225,18 +225,18 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
 /// German table for the terminal.
 pub fn print(report: &Report) {
     println!(
-        "Rechenlast der Effektkette, gemessen ueber {:.1} s Audio je Zeile bei {} Hz.",
+        "CPU load of the effect chain, measured over {:.1} s of audio per row at {} Hz.",
         report.samples as f64 / report.sample_rate as f64,
         report.sample_rate
     );
     println!(
-        "Budget eines Callbacks: {} Frames = {:.3} ms\n",
+        "Budget of one callback: {} frames = {:.3} ms\n",
         BUDGET_FRAMES,
         report.budget_us() / 1000.0
     );
     println!(
         "{:<26} {:>12} {:>14} {:>16}",
-        "", "ns/Frame", "% je Track", "% bei 8 Tracks"
+        "", "ns/frame", "% per track", "% at 8 tracks"
     );
     for row in &report.rows {
         let per_track = row.percent_of_budget(report.sample_rate);
@@ -249,9 +249,9 @@ pub fn print(report: &Report) {
         );
     }
     println!(
-        "\nDie Zeile \"Kette komplett\" ist der ungueltigste Fall: alle fuenf Effekte an, Signal\n\
-         durchgehend ueber der Kompressorschwelle. Ein stiller Track kostet die Zeile\n\
-         \"Kette still\", weil die Kette nach dem Ausklingen gar nicht mehr rechnet."
+        "\nThe row \"Chain full\" is the worst case: all five effects on, signal\n\
+         constantly above the compressor threshold. A silent track costs the row\n\
+         \"Chain silent\", because the chain stops computing once its tail has died away."
     );
 }
 
@@ -259,11 +259,11 @@ pub fn print(report: &Report) {
 pub fn cmd_fxbench(sample_rate: u32, seconds: f64) -> Result<(), String> {
     if sample_rate < 8_000 || sample_rate > 192_000 {
         return Err(format!(
-            "Samplerate {sample_rate} liegt ausserhalb von 8000..192000."
+            "Sample rate {sample_rate} is outside 8000..192000."
         ));
     }
     if !(0.05..=60.0).contains(&seconds) {
-        return Err("--seconds muss zwischen 0.05 und 60 liegen.".to_string());
+        return Err("--seconds must be between 0.05 and 60.".to_string());
     }
     let report = measure(sample_rate, seconds);
     print(&report);
@@ -288,9 +288,9 @@ mod tests {
             );
         }
 
-        let full = report.get("Kette komplett").expect("Zeile fehlt");
-        let idle = report.get("Kette still (Leerlauf)").expect("Zeile fehlt");
-        let bypassed = report.get("Kette umgangen").expect("Zeile fehlt");
+        let full = report.get("Chain full").expect("Zeile fehlt");
+        let idle = report.get("Chain silent (idle)").expect("Zeile fehlt");
+        let bypassed = report.get("Chain bypassed").expect("Zeile fehlt");
         // Build-independent claims: the two cheap states really are cheap compared with the
         // expensive one. This is what the early exits in `Chain::process` are for, and it holds
         // whatever the optimisation level is.

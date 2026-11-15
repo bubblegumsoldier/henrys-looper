@@ -97,13 +97,13 @@ fn shifted_instant(
 
 pub fn cmd_latency(dev: &DeviceOpts, runs: u32) -> Result<(), String> {
     if runs == 0 {
-        return Err("--runs muss mindestens 1 sein.".to_string());
+        return Err("--runs must be at least 1.".to_string());
     }
     let setup = audio::open_duplex(dev)?;
     audio::print_setup(&setup);
-    println!("Laeufe:   {runs}");
+    println!("Runs:     {runs}");
     println!(
-        "\nAufbau: Kabel von Ausgang 1 zurueck in Eingang 1. Monitor-/Direct-Monitor am Interface aus.\n"
+        "\nSetup: cable from output 1 back into input 1. Monitor/direct monitor on the interface off.\n"
     );
 
     let rate = setup.sample_rate();
@@ -216,20 +216,20 @@ pub fn cmd_latency(dev: &DeviceOpts, runs: u32) -> Result<(), String> {
 
     input
         .play()
-        .map_err(|e| format!("Eingangsstream startet nicht: {e}"))?;
+        .map_err(|e| format!("Input stream does not start: {e}"))?;
     output
         .play()
-        .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+        .map_err(|e| format!("Output stream does not start: {e}"))?;
 
     // ---- a) noise floor -----------------------------------------------------------------
-    println!("Messe Grundrauschen ({NOISE_SECONDS:.1} s) ...");
+    println!("Measuring noise floor ({NOISE_SECONDS:.1} s) ...");
     std::thread::sleep(Duration::from_secs_f64(NOISE_SECONDS));
     shared.measure_noise.store(false, Ordering::Relaxed);
     let noise_peak = f32::from_bits(shared.noise_peak.load(Ordering::Relaxed));
     let noise_frames = shared.noise_frames.load(Ordering::Relaxed);
     if noise_frames == 0 {
         return Err(
-            "Der Eingangsstream hat in 0,5 s keinen einzigen Callback geliefert - Geraet oder Treiber pruefen."
+            "The input stream delivered not a single callback in 0.5 s - check the device or driver."
                 .to_string(),
         );
     }
@@ -237,14 +237,14 @@ pub fn cmd_latency(dev: &DeviceOpts, runs: u32) -> Result<(), String> {
         ((shared.noise_sq_sum.load(Ordering::Relaxed) as f64 / SQ_SCALE) / noise_frames as f64)
             .sqrt() as f32;
     println!(
-        "Grundrauschen: RMS {} , Peak {}",
+        "Noise floor: RMS {} , peak {}",
         fmt_dbfs(noise_rms),
         fmt_dbfs(noise_peak)
     );
 
     if noise_peak > MAX_NOISE_PEAK {
         return Err(format!(
-            "Eingang zu laut oder Rueckkopplung - Gain pruefen (Peak {:.1} dBFS, Grenze {:.1} dBFS).",
+            "Input too loud or feedback - check the gain (peak {:.1} dBFS, limit {:.1} dBFS).",
             dbfs(noise_peak),
             dbfs(MAX_NOISE_PEAK)
         ));
@@ -254,14 +254,14 @@ pub fn cmd_latency(dev: &DeviceOpts, runs: u32) -> Result<(), String> {
     let threshold = (20.0 * noise_peak).max(MIN_THRESHOLD);
     if threshold > MAX_THRESHOLD {
         return Err(format!(
-            "Grundrauschen zu hoch: die Detektionsschwelle laege bei {:.3} ({:.1} dBFS) und damit ueber der Impulsamplitude. Gain herunterdrehen oder Kabel pruefen.",
+            "Noise floor too high: the detection threshold would be {:.3} ({:.1} dBFS), above the pulse amplitude. Turn the gain down or check the cable.",
             threshold,
             dbfs(threshold)
         ));
     }
     shared.threshold.store(threshold.to_bits(), Ordering::Relaxed);
     println!(
-        "Detektionsschwelle: {:.4} ({})\n",
+        "Detection threshold: {:.4} ({})\n",
         threshold,
         fmt_dbfs(threshold)
     );
@@ -269,17 +269,17 @@ pub fn cmd_latency(dev: &DeviceOpts, runs: u32) -> Result<(), String> {
     // ---- c/d) the runs ------------------------------------------------------------------
     match in_buffer {
         Some(frames) => println!(
-            "Tatsaechliche Puffergroesse Eingang laut Treiber: {frames} Frames ({:.2} ms)",
+            "Actual input buffer size per driver: {frames} frames ({:.2} ms)",
             frames as f64 * 1000.0 / rate_f
         ),
-        None => println!("Tatsaechliche Puffergroesse Eingang laut Treiber: nicht ermittelbar"),
+        None => println!("Actual input buffer size per driver: unknown"),
     }
     match out_buffer {
         Some(frames) => println!(
-            "Tatsaechliche Puffergroesse Ausgang laut Treiber: {frames} Frames ({:.2} ms)",
+            "Actual output buffer size per driver: {frames} frames ({:.2} ms)",
             frames as f64 * 1000.0 / rate_f
         ),
-        None => println!("Tatsaechliche Puffergroesse Ausgang laut Treiber: nicht ermittelbar"),
+        None => println!("Actual output buffer size per driver: unknown"),
     }
     println!();
 
@@ -331,7 +331,7 @@ pub fn cmd_latency(dev: &DeviceOpts, runs: u32) -> Result<(), String> {
                     let ts_smp = delta.as_secs_f64() * rate_f;
                     ts_samples.push(ts_smp);
                     format!(
-                        "{:>8.1} Samples ({:>6.2} ms)",
+                        "{:>8.1} samples ({:>6.2} ms)",
                         ts_smp,
                         ts_smp * 1000.0 / rate_f
                     )
@@ -339,18 +339,18 @@ pub fn cmd_latency(dev: &DeviceOpts, runs: u32) -> Result<(), String> {
                 None => {
                     ts_invalid += 1;
                     // Same width as the valid column so the table stays readable.
-                    format!("{:>28}", "ungueltig (kein Roundtrip)")
+                    format!("{:>28}", "invalid (no roundtrip)")
                 }
             };
             println!(
-                "Lauf {run:>3}: Zeitstempel {ts_column}  |  Frame-Zaehler {:>8.1} Samples ({:>6.2} ms)",
+                "Run {run:>3}: timestamps {ts_column}  |  frame counter {:>8.1} samples ({:>6.2} ms)",
                 frame_smp,
                 frame_smp * 1000.0 / rate_f
             );
         } else {
             misses += 1;
             shared.armed.store(false, Ordering::Relaxed);
-            println!("Lauf {run:>3}: keine Detektion innerhalb von {RUN_TIMEOUT:?} (Ausreisser)");
+            println!("Run {run:>3}: no detection within {RUN_TIMEOUT:?} (outlier)");
         }
 
         std::thread::sleep(GAP);
@@ -360,45 +360,44 @@ pub fn cmd_latency(dev: &DeviceOpts, runs: u32) -> Result<(), String> {
     drop(output);
 
     // ---- e) statistics ------------------------------------------------------------------
-    println!("\n===== Ergebnis =====");
-    println!("Laeufe gesamt: {runs}, davon ohne Detektion (Ausreisser): {misses}");
+    println!("\n===== Result =====");
+    println!("Runs total: {runs}, without detection (outliers): {misses}");
     println!(
-        "Methode 1 (Zeitstempel): {} von {} detektierten Laeufen gueltig, {ts_invalid} ungueltig.",
+        "Method 1 (timestamps): {} of {} detected runs valid, {ts_invalid} invalid.",
         ts_samples.len(),
         frame_samples.len()
     );
     println!();
-    print_stats("Methode 1: Zeitstempel (playback/capture)", &ts_samples, rate);
+    print_stats("Method 1: timestamps (playback/capture)", &ts_samples, rate);
     if ts_samples.is_empty() && ts_invalid > 0 {
         println!(
-            "  ACHTUNG: Methode 1 hat in KEINEM Lauf einen gueltigen Wert geliefert. Die\n\
-             Zeitstempel des Treibers (bei ASIO speist cpal sie aus timeGetTime()) lagen jedes\n\
-             Mal in der falschen Reihenfolge - Erfassung vor Ausgabe. Fuer diese Messung sind\n\
-             sie damit unbrauchbar; es zaehlt ausschliesslich Methode 2."
+            "  WARNING: method 1 gave no valid value in ANY run. The driver's timestamps\n\
+             (on ASIO cpal takes them from timeGetTime()) were in the wrong order every time -\n\
+             capture before playback. That makes them useless for this measurement; only\n\
+             method 2 counts."
         );
     }
     println!();
-    print_stats("Methode 2: Frame-Zaehler (absolute Indizes)", &frame_samples, rate);
+    print_stats("Method 2: frame counter (absolute indices)", &frame_samples, rate);
     println!(
-        "\nHinweis: Der Frame-Zaehler beider Streams startet beim jeweils ersten Callback bei 0.\n\
-         Ein konstanter Versatz zwischen beiden Methoden ist deshalb erwartbar; aussagekraeftig\n\
-         ist vor allem die Streuung. Laufen beide Methoden stark auseinander, ist genau das das\n\
-         Messergebnis."
+        "\nNote: the frame counter of each stream starts at 0 on its first callback.\n\
+         A constant offset between the two methods is therefore expected; what matters most\n\
+         is the spread. If the two methods differ widely, that difference is the result."
     );
     println!(
-        "\nXruns waehrend der Messung: {}, sonstige Stream-Fehler: {}",
+        "\nXruns during the measurement: {}, other stream errors: {}",
         shared.xruns.load(Ordering::Relaxed),
         shared.errors.load(Ordering::Relaxed)
     );
     println!(
-        "\nZum Vergleich: ein Puffer sind {} Frames = {:.2} ms.",
+        "\nFor comparison: one buffer is {} frames = {:.2} ms.",
         setup.buffer_frames(),
         setup.buffer_frames() as f64 * 1000.0 / rate_f
     );
     println!(
-        "Zur Plausibilitaet des Absolutwerts: dieselbe Messung bei mehreren Puffergroessen\n\
-         (z.B. 128 / 256 / 512) laufen lassen - die Latenz muss linear mitwachsen. Die oben\n\
-         ausgegebene Puffergroesse laut Treiber ist der Bezugswert dafuer."
+        "To check the absolute value: run the same measurement at several buffer sizes\n\
+         (e.g. 128 / 256 / 512) - the latency must grow linearly with it. The driver's buffer\n\
+         size printed above is the reference for that."
     );
     Ok(())
 }

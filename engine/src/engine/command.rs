@@ -256,10 +256,10 @@ impl Refusal {
                 Some("This track has reached its layer limit. Remove a layer first.")
             }
             Refusal::NoBuffer => Some(
-                "Kein vorbereiteter Puffer frei - der Steuer-Thread kommt mit dem Nachlegen nicht nach.",
+                "No prepared buffer free - the control thread cannot keep up refilling them.",
             ),
-            Refusal::NoSuchTarget => Some("Das Kommando meinte einen Track oder eine Ebene, die es nicht gibt."),
-            Refusal::Busy => Some("Ebenen lassen sich nicht bearbeiten, waehrend dieser Track aufnimmt."),
+            Refusal::NoSuchTarget => Some("The command referred to a track or layer that does not exist."),
+            Refusal::Busy => Some("Layers cannot be edited while this track is recording."),
         }
     }
 
@@ -471,7 +471,7 @@ impl CommandSender {
     pub fn send(&mut self, cmd: Command) -> Result<(), String> {
         self.tx
             .push(cmd)
-            .map_err(|_| "Kommando-Queue ist voll - der Audio-Thread holt nichts mehr ab.".to_string())
+            .map_err(|_| "Command queue is full - the audio thread is not picking anything up.".to_string())
     }
 }
 
@@ -545,7 +545,7 @@ impl BufferChannel {
     pub fn install(&mut self, buffer: Vec<f32>) -> Result<(), String> {
         self.install_tx
             .push(buffer)
-            .map_err(|_| "Puffer-Queue ist voll.".to_string())
+            .map_err(|_| "Buffer queue is full.".to_string())
     }
 
     pub fn drain_retired(&mut self) {

@@ -57,9 +57,9 @@ pub enum BandKind {
 impl BandKind {
     pub fn label(self) -> &'static str {
         match self {
-            BandKind::Peak => "Glocke",
-            BandKind::LowShelf => "Tiefen-Kuhschwanz",
-            BandKind::HighShelf => "Hoehen-Kuhschwanz",
+            BandKind::Peak => "Bell",
+            BandKind::LowShelf => "Low shelf",
+            BandKind::HighShelf => "High shelf",
         }
     }
 }

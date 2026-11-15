@@ -21,19 +21,19 @@ const CLICK_AMP: f32 = 0.5;
 
 #[derive(Args, Debug, Clone)]
 pub struct ClickOpts {
-    /// Tempo in Schlaegen pro Minute (bezogen auf Viertel)
+    /// Tempo in beats per minute (quarter notes)
     #[arg(long, default_value_t = 100.0)]
     pub bpm: f64,
 
-    /// Schlaege pro Takt (3, 4, 5, 7 ... alles erlaubt)
+    /// Beats per bar (3, 4, 5, 7 ... anything goes)
     #[arg(long, default_value_t = 4)]
     pub beats_per_bar: u32,
 
-    /// Zaehlzeit: 4 = Viertel, 8 = Achtel
+    /// Beat unit: 4 = quarter, 8 = eighth
     #[arg(long, default_value_t = 4)]
     pub beat_unit: u32,
 
-    /// Anzahl Takte, 0 = endlos
+    /// Number of bars, 0 = endless
     #[arg(long, default_value_t = 0)]
     pub bars: u32,
 }
@@ -49,14 +49,14 @@ pub struct ClickSpec {
 impl ClickSpec {
     pub fn validate(&self) -> Result<(), String> {
         if !(1.0..=400.0).contains(&self.bpm) {
-            return Err(format!("BPM {} liegt ausserhalb von 1..400.", self.bpm));
+            return Err(format!("BPM {} is outside 1..400.", self.bpm));
         }
         if self.beats_per_bar == 0 {
-            return Err("--beats-per-bar muss mindestens 1 sein.".to_string());
+            return Err("--beats-per-bar must be at least 1.".to_string());
         }
         if ![1, 2, 4, 8, 16, 32].contains(&self.beat_unit) {
             return Err(format!(
-                "--beat-unit {} ist keine Notenlaenge (erlaubt: 1, 2, 4, 8, 16, 32).",
+                "--beat-unit {} is not a note length (allowed: 1, 2, 4, 8, 16, 32).",
                 self.beat_unit
             ));
         }
@@ -188,25 +188,25 @@ pub fn cmd_click(dev: &DeviceOpts, click: &ClickOpts) -> Result<(), String> {
     let mut clicker = ClickGen::new(spec, rate);
     println!("Host:     {}", setup.host_name);
     println!(
-        "Ausgang:  {} ({} Kanaele, {:?})",
+        "Output:   {} ({} channels, {:?})",
         setup.name, channels, setup.plan.format
     );
     println!(
-        "Format:   {} Hz, {} Frames Puffer angefordert (Geraet meldet {})",
+        "Format:   {} Hz, {} frames buffer requested (device reports {})",
         rate,
         dev.buffer,
         audio::describe_buffer_size(&setup.plan.reported_buffer)
     );
     println!(
-        "Klick:    {} BPM, {}/{}, {:.3} Samples pro Schlag, {}",
+        "Click:    {} BPM, {}/{}, {:.3} samples per beat, {}",
         spec.bpm,
         spec.beats_per_bar,
         spec.beat_unit,
         clicker.samples_per_beat(),
         if spec.bars == 0 {
-            "endlos".to_string()
+            "endless".to_string()
         } else {
-            format!("{} Takte", spec.bars)
+            format!("{} bars", spec.bars)
         }
     );
 
@@ -242,13 +242,13 @@ pub fn cmd_click(dev: &DeviceOpts, click: &ClickOpts) -> Result<(), String> {
     )?;
 
     if let Ok(actual) = stream.buffer_size() {
-        println!("Tatsaechliche Puffergroesse laut Treiber: {actual} Frames");
+        println!("Actual buffer size per driver: {actual} frames");
     }
     stream
         .play()
-        .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+        .map_err(|e| format!("Output stream does not start: {e}"))?;
 
-    println!("\nLaeuft. Enter beendet.");
+    println!("\nRunning. Press Enter to stop.");
     let enter = crate::wait_for_enter();
     loop {
         if enter.recv_timeout(Duration::from_millis(100)).is_ok() {
@@ -262,7 +262,7 @@ pub fn cmd_click(dev: &DeviceOpts, click: &ClickOpts) -> Result<(), String> {
     }
     drop(stream);
     println!(
-        "\nBeendet. Xruns: {}, sonstige Stream-Fehler: {}",
+        "\nStopped. Xruns: {}, other stream errors: {}",
         xruns.load(Ordering::Relaxed),
         errors.load(Ordering::Relaxed)
     );

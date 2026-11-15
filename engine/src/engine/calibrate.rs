@@ -129,34 +129,34 @@ const RUN_SLACK: f64 = 5.0;
 
 #[derive(Args, Debug, Clone)]
 pub struct CalibrateOpts {
-    /// Tempo in Schlaegen pro Minute (Viertel; die Messung laeuft in 4/4)
+    /// Tempo in beats per minute (quarter notes; the measurement runs in 4/4)
     #[arg(long, default_value_t = 100.0)]
     pub bpm: f64,
 
-    /// Laenge einer Messaufnahme in Takten
+    /// Length of one measurement recording in bars
     #[arg(long, default_value_t = 4)]
     pub bars: u32,
 
-    /// Zu pruefende Latenzkompensation in Frames (Standard: unter Windows der Messwert
-    /// aus Phase 0, unter macOS ein ungemessener Schaetzwert)
+    /// Latency compensation to check, in frames (default: on Windows the value measured
+    /// in phase 0, on macOS an unmeasured estimate)
     #[arg(long = "latency-frames", alias = "latency-samples", default_value_t = audio::DEFAULT_LATENCY_FRAMES)]
     pub latency_frames: u64,
 
-    /// Anzahl der Messdurchlaeufe
+    /// Number of measurement runs
     #[arg(long, default_value_t = 5)]
     pub runs: u32,
 
-    /// Lautstaerke des Klicks
+    /// Click volume
     #[arg(long, default_value_t = 1.0)]
     pub click_gain: f32,
 
-    /// Track als NAME:KANAL (mono) oder NAME:KANAL-KANAL (stereo), mehrfach angebbar - dieselbe
-    /// Schreibweise wie bei live. Ohne Angabe gilt dieselbe Vorgabe wie dort (stimme:1, gitarre:2).
-    #[arg(long = "track", value_name = "NAME:KANAL[-KANAL][@PANORAMA]")]
+    /// Track as NAME:CHANNEL (mono) or NAME:CHANNEL-CHANNEL (stereo), repeatable - the same
+    /// spelling as for live. Without it the same default applies as there (stimme:1, gitarre:2).
+    #[arg(long = "track", value_name = "NAME:CHANNEL[-CHANNEL][@PAN]")]
     pub tracks: Vec<String>,
 
-    /// Welcher Track gemessen wird, 1-basiert. Gemessen wird auf dessen Eingang; bei einem
-    /// Stereo-Track auf dem linken der beiden.
+    /// Which track to measure, 1-based. The measurement uses its input; for a stereo track the
+    /// left of the two.
     #[arg(long = "for-track", default_value_t = 1)]
     pub for_track: usize,
 }
@@ -286,55 +286,55 @@ fn nearest_beat(timeline: &Timeline, pos: u64) -> (u64, f64) {
     }
 }
 
-/// German one-liner classifying a mean deviation.
+/// One-liner classifying a mean deviation.
 fn verdict(mean: f64) -> String {
     if mean.abs() <= GOOD_ENOUGH_SAMPLES {
         format!(
-            "Die mittlere Abweichung liegt mit {:.1} Samples im Rahmen der Impulsdetektion \
-             (Grenze {:.0} Samples). Der eingestellte Wert passt.",
+            "The mean deviation of {:.1} samples is within the tolerance of the onset detection \
+             (limit {:.0} samples). The current value is right.",
             mean, GOOD_ENOUGH_SAMPLES
         )
     } else if mean > 0.0 {
         format!(
-            "Der aufgenommene Klick sitzt im Mittel {:.1} Samples ZU SPAET im Loop. Die \
-             Kompensation zieht zu wenig ab, der Wert muss groesser werden.",
+            "On average the recorded click lands {:.1} samples TOO LATE in the loop. The \
+             compensation subtracts too little, the value must go up.",
             mean
         )
     } else {
         format!(
-            "Der aufgenommene Klick sitzt im Mittel {:.1} Samples ZU FRUEH im Loop. Die \
-             Kompensation zieht zu viel ab, der Wert muss kleiner werden.",
+            "On average the recorded click lands {:.1} samples TOO EARLY in the loop. The \
+             compensation subtracts too much, the value must go down.",
             -mean
         )
     }
 }
 
-/// German warning about a loop that was recorded too quietly to trust.
+/// Warning about a loop that was recorded too quietly to trust.
 ///
 /// The numbers in it are the ones from the module comment, and they are in it on purpose: "Pegel
 /// zu leise" invites a shrug, "32 Samples statt 7,2 bei gleicher Latenz" does not.
 fn low_peak_warning(peak: f32) -> String {
     format!(
-        "  ACHTUNG: Der Loop erreicht nur {} - die Impulserkennung ist pegelabhaengig.\n\
-         \x20 Gemessen auf diesem Rechner bei unveraenderter Latenz: -27 dBFS ergaben 32 Samples\n\
-         \x20 Abweichung, -18 dBFS nur noch 7,2. Wer zu leise einpegelt, kalibriert ein\n\
-         \x20 Messartefakt ein. Erst lauter machen (--click-gain, Eingangs-Gain am Interface,\n\
-         \x20 Ziel mindestens {}), dann neu messen.",
+        "  WARNING: the loop only reaches {} - the onset detection depends on the level.\n\
+         \x20 Measured on this machine at an unchanged latency: -27 dBFS gave 32 samples of\n\
+         \x20 deviation, -18 dBFS only 7.2. Setting the level too low calibrates a measurement\n\
+         \x20 artefact into the setup. Turn it up first (--click-gain, input gain on the\n\
+         \x20 interface, aim for at least {}), then measure again.",
         fmt_dbfs(peak),
         fmt_dbfs(GOOD_PEAK)
     )
 }
 
-/// Which of the configured tracks is being measured, or a German sentence saying why not.
+/// Which of the configured tracks is being measured, or a sentence saying why not.
 fn pick_track(defs: &[TrackDef], for_track: usize) -> Result<usize, String> {
     if for_track == 0 || for_track > defs.len() {
         let list: Vec<String> = defs
             .iter()
             .enumerate()
-            .map(|(i, d)| format!("{} {} (Eingang {})", i + 1, d.name, d.input.label()))
+            .map(|(i, d)| format!("{} {} (input {})", i + 1, d.name, d.input.label()))
             .collect();
         return Err(format!(
-            "--for-track {for_track} gibt es nicht. Vorhanden: {}.",
+            "There is no --for-track {for_track}. Available: {}.",
             list.join(", ")
         ));
     }
@@ -429,8 +429,8 @@ fn poll_until(
         }
         if Instant::now() >= deadline {
             return Err(
-                "Die Engine hat die Messaufnahme nicht rechtzeitig abgeschlossen - Streams oder \
-                 Geraet pruefen."
+                "The engine did not finish the measurement recording in time - check the streams \
+                 or the device."
                     .to_string(),
             );
         }
@@ -447,7 +447,7 @@ fn take_retired(buffers: &mut BufferChannel, timeout: Duration) -> Result<Vec<f3
         }
         if Instant::now() >= deadline {
             return Err(
-                "Der Audio-Thread hat den aufgenommenen Loop-Puffer nicht zurueckgegeben."
+                "The audio thread did not hand back the recorded loop buffer."
                     .to_string(),
             );
         }
@@ -457,15 +457,15 @@ fn take_retired(buffers: &mut BufferChannel, timeout: Duration) -> Result<Vec<f3
 
 pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), String> {
     if opts.runs == 0 {
-        return Err("--runs muss mindestens 1 sein.".to_string());
+        return Err("--runs must be at least 1.".to_string());
     }
     let signature = TimeSignature::new(4, 4);
     let setup = audio::open_duplex(dev)?;
     let rate = setup.sample_rate();
     if setup.out_plan.config.sample_rate != rate {
         return Err(format!(
-            "Ein- und Ausgang laufen auf verschiedenen Sampleraten ({} und {}). \
-             Die Zeitachse der Engine setzt eine gemeinsame Clock voraus.",
+            "Input and output run at different sample rates ({} and {}). \
+             The engine's timeline needs one shared clock.",
             rate, setup.out_plan.config.sample_rate
         ));
     }
@@ -484,25 +484,25 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     audio::print_setup(&setup);
     let loop_len_nominal = timeline.span_bars(0, opts.bars);
     println!(
-        "Takt:     {:.1} BPM, 4/4, {:.3} Samples pro Schlag",
+        "Tempo:    {:.1} BPM, 4/4, {:.3} samples per beat",
         opts.bpm,
         timeline.samples_per_beat()
     );
     println!(
-        "Messloop: {} Takte = {} Samples = {:.2} s, {} Schlaege",
+        "Loop:     {} bars = {} samples = {:.2} s, {} beats",
         opts.bars,
         loop_len_nominal,
         timeline.samples_to_secs(loop_len_nominal),
         opts.bars * 4
     );
     println!(
-        "Pruefwert: --latency-frames {} ({:.2} ms)",
+        "Checking: --latency-frames {} ({:.2} ms)",
         opts.latency_frames,
         opts.latency_frames as f64 * 1000.0 / rate as f64
     );
-    println!("Laeufe:   {}", opts.runs);
+    println!("Runs:     {}", opts.runs);
     println!(
-        "Gemessen wird Track {} \"{}\" auf Eingang {} (von {} Kanaelen).",
+        "Measuring track {} \"{}\" on input {} (of {} channels).",
         target + 1,
         defs[target].name,
         measure_channel + 1,
@@ -516,20 +516,20 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
             .map(|(i, d)| format!("{} {}", i + 1, d.name))
             .collect();
         println!(
-            "Andere Tracks messen mit --for-track: {}. Jede Quelle mit eigenem Weg braucht einen\n\
-             eigenen Wert - ein Plugin-Host ueber einen ASIO-Router hat keinen Wandler im Weg und\n\
-             kommt frueher an als ein Mikrofon.",
+            "Measure other tracks with --for-track: {}. Every source with its own path needs its\n\
+             own value - a plugin host through an ASIO router has no converter in the way and\n\
+             arrives earlier than a microphone.",
             others.join(", ")
         );
     }
     println!(
-        "\nAufbau: Kabel von Ausgang 1 zurueck in Eingang {}, Direct Monitor am Interface aus.\n\
-         Kommt die Quelle ueber einen ASIO-Router herein, braucht es kein Kabel - der Router\n\
-         schleift den Ausgang selbst auf diesen Eingang zurueck.\n\
-         Die Engine spielt ihren eigenen Klick ueber den Ausgang und nimmt ihn wieder auf.\n\
-         Kopfhoerer vorher abnehmen oder leise drehen.\n\
-         Pegel hoch genug einstellen: die Impulserkennung ist pegelabhaengig, unter {} Loop-Peak\n\
-         misst sie den Pegel mit statt nur die Latenz.\n",
+        "\nSetup: cable from output 1 back into input {}, direct monitor on the interface off.\n\
+         If the source comes in through an ASIO router, no cable is needed - the router\n\
+         loops the output back into this input itself.\n\
+         The engine plays its own click through the output and records it again.\n\
+         Take off your headphones or turn them down first.\n\
+         Set the level high enough: the onset detection depends on the level; below a loop\n\
+         peak of {} it measures the level along with the latency.\n",
         measure_channel + 1,
         fmt_dbfs(GOOD_PEAK)
     );
@@ -672,30 +672,30 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     )?;
 
     if let Ok(frames) = input.buffer_size() {
-        println!("Puffer laut Treiber: Eingang {frames} Frames");
+        println!("Driver buffer: input {frames} frames");
     }
     if let Ok(frames) = output.buffer_size() {
-        println!("Puffer laut Treiber: Ausgang {frames} Frames");
+        println!("Driver buffer: output {frames} frames");
     }
 
     // Input first, then output - the same order the 827 samples of phase 0 were measured in.
     input
         .play()
-        .map_err(|e| format!("Eingangsstream startet nicht: {e}"))?;
+        .map_err(|e| format!("Input stream does not start: {e}"))?;
     output
         .play()
-        .map_err(|e| format!("Ausgabestream startet nicht: {e}"))?;
+        .map_err(|e| format!("Output stream does not start: {e}"))?;
 
     // ---- a) noise floor -------------------------------------------------------------------
-    println!("\nMesse Grundrauschen ({NOISE_SECONDS:.1} s, Klick noch aus) ...");
+    println!("\nMeasuring noise floor ({NOISE_SECONDS:.1} s, click still off) ...");
     std::thread::sleep(Duration::from_secs_f64(NOISE_SECONDS));
     shared.measure_noise.store(false, Ordering::Relaxed);
     let noise_peak = f32::from_bits(shared.noise_peak.load(Ordering::Relaxed));
     let noise_frames = shared.noise_frames.load(Ordering::Relaxed);
     if noise_frames == 0 {
         return Err(
-            "Der Eingangsstream hat in 0,5 s keinen einzigen Callback geliefert - Geraet oder \
-             Treiber pruefen."
+            "The input stream delivered not a single callback in 0.5 s - check the device or \
+             driver."
                 .to_string(),
         );
     }
@@ -703,13 +703,13 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         ((shared.noise_sq_sum.load(Ordering::Relaxed) as f64 / SQ_SCALE) / noise_frames as f64)
             .sqrt() as f32;
     println!(
-        "Grundrauschen: RMS {} , Peak {}",
+        "Noise floor: RMS {} , peak {}",
         fmt_dbfs(noise_rms),
         fmt_dbfs(noise_peak)
     );
     if noise_peak > MAX_NOISE_PEAK {
         return Err(format!(
-            "Eingang zu laut oder Rueckkopplung - Gain pruefen (Peak {:.1} dBFS, Grenze {:.1} dBFS).",
+            "Input too loud or feedback - check the gain (peak {:.1} dBFS, limit {:.1} dBFS).",
             dbfs(noise_peak),
             dbfs(MAX_NOISE_PEAK)
         ));
@@ -718,15 +718,15 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     let threshold = (NOISE_FACTOR * noise_peak).max(MIN_THRESHOLD);
     if threshold > MAX_THRESHOLD {
         return Err(format!(
-            "Grundrauschen zu hoch: die Detektionsschwelle laege bei {:.3} ({:.1} dBFS) und damit \
-             ueber dem, was der Klick nach dem Kabel noch erreicht. Gain herunterdrehen oder Kabel \
-             pruefen.",
+            "Noise floor too high: the detection threshold would be {:.3} ({:.1} dBFS), above \
+             what the click still reaches after the cable. Turn the gain down or check the \
+             cable.",
             threshold,
             dbfs(threshold)
         ));
     }
     println!(
-        "Detektionsschwelle: {:.4} ({})",
+        "Detection threshold: {:.4} ({})",
         threshold,
         fmt_dbfs(threshold)
     );
@@ -736,7 +736,7 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     // swallowed. Never more than half a beat, so a slow tempo cannot mask the next click.
     let tone_len = Metronome::new(rate).tone_len();
     let blanking = (2 * tone_len).min((timeline.samples_per_beat() / 2.0) as u64).max(1);
-    println!("Sperrzeit nach einem Onset: {blanking} Samples\n");
+    println!("Blanking time after an onset: {blanking} samples\n");
 
     cmd_tx.send(Command::SetClick { on: true })?;
 
@@ -778,7 +778,7 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         let mut recorded = take_retired(&mut buffers, Duration::from_secs(2))?;
         if (recorded.len() as u64) < done_loop_len {
             return Err(format!(
-                "Der zurueckgegebene Puffer ist mit {} Samples kuerzer als der Loop ({} Samples).",
+                "The returned buffer of {} samples is shorter than the loop ({} samples).",
                 recorded.len(),
                 done_loop_len
             ));
@@ -792,14 +792,14 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
             blanking,
         );
         println!(
-            "----- Lauf {run} von {} (Takt {} bis {}, {} Samples) -----",
+            "----- Run {run} of {} (bar {} to {}, {} samples) -----",
             opts.runs,
             bar + 1,
             bar + opts.bars as u64,
             loop_len
         );
         println!(
-            "  Klicks erkannt: {} von {} erwartet, {} ausserhalb des Rasters, Loop-Peak {}",
+            "  Clicks detected: {} of {} expected, {} off the grid, loop peak {}",
             analysis.matched,
             analysis.expected,
             analysis.spurious,
@@ -807,17 +807,17 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         );
         if !analysis.conclusive() {
             println!(
-                "  ACHTUNG: zu wenige Klicks erkannt. Dieser Lauf ist KEIN Beleg fuer eine\n\
-                 \x20 korrekte Kalibrierung, sondern ein Hinweis auf einen zu leisen Pegel, ein\n\
-                 \x20 fehlendes Loopback-Kabel oder einen leeren Loop."
+                "  WARNING: too few clicks detected. This run is NO proof of a correct\n\
+                 \x20 calibration, but a sign of a level that is too low, a missing loopback\n\
+                 \x20 cable or an empty loop."
             );
         } else if analysis.peak < GOOD_PEAK {
             println!("{}", low_peak_warning(analysis.peak));
         }
         if analysis.deviations.is_empty() {
-            println!("  Keine Abweichung berechenbar.\n");
+            println!("  No deviation to compute.\n");
         } else {
-            print_stats("  Abweichung", &analysis.deviations, rate);
+            print_stats("  Deviation", &analysis.deviations, rate);
             println!();
         }
 
@@ -841,41 +841,39 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     buffers.drain_retired();
 
     // ---- c) result ------------------------------------------------------------------------
-    println!("===== Ergebnis =====");
+    println!("===== Result =====");
     println!(
-        "Klicks erkannt: {total_matched} von {total_expected} erwartet ({} ausserhalb des Rasters).",
+        "Clicks detected: {total_matched} of {total_expected} expected ({} off the grid).",
         total_spurious
     );
     let overruns = shared.overruns.load(Ordering::Relaxed);
     println!(
-        "Xruns {}, FIFO leer {}, FIFO uebergelaufen {overruns}, sonstige Fehler {}.",
+        "Xruns {}, FIFO empty {}, FIFO overflowed {overruns}, other errors {}.",
         shared.xruns.load(Ordering::Relaxed),
         shared.underruns.load(Ordering::Relaxed),
         shared.errors.load(Ordering::Relaxed)
     );
     if overruns > 0 {
         println!(
-            "ACHTUNG: Der Eingangs-FIFO ist uebergelaufen. Dabei gehen Eingangssamples verloren,\n\
-             und genau das verschiebt jede spaetere Position. Die Messung ist damit unbrauchbar -\n\
-             bitte wiederholen."
+            "WARNING: the input FIFO overflowed. Input samples get lost that way, and that\n\
+             shifts every later position. The measurement is unusable - please repeat it."
         );
     }
 
     if total_matched == 0 {
         return Err(
-            "In keinem Lauf wurde auch nur ein Klick erkannt. Das ist KEINE perfekte Kalibrierung,\n\
-             sondern eine leere Aufnahme. Zu pruefen: Loopback-Kabel gesteckt (Ausgang 1 in\n\
-             Eingang 1), Eingangs-Gain hoch genug, Ausgangspegel nicht auf null, richtiges Geraet\n\
-             gewaehlt."
+            "Not a single click was detected in any run. That is NOT a perfect calibration but\n\
+             an empty recording. Check: loopback cable plugged in (output 1 into input 1), input\n\
+             gain high enough, output level not at zero, the right device chosen."
                 .to_string(),
         );
     }
 
     println!();
-    print_stats("Abweichung ueber alle Laeufe", &all_deviations, rate);
+    print_stats("Deviation over all runs", &all_deviations, rate);
     if run_means.len() > 1 {
         println!();
-        print_stats("Mittelwert je Lauf", &run_means, rate);
+        print_stats("Mean per run", &run_means, rate);
     }
 
     let conclusive = total_expected > 0
@@ -889,43 +887,43 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
     println!("\n{}", verdict(mean));
     if !conclusive {
         println!(
-            "ACHTUNG: Es wurden deutlich weniger Klicks erkannt als erwartet ({total_matched} von\n\
-             {total_expected}). Die Zahlen unten stuetzen sich auf zu wenige Treffer - erst den\n\
-             Pegel oder die Verkabelung in Ordnung bringen und neu messen."
+            "WARNING: far fewer clicks were detected than expected ({total_matched} of\n\
+             {total_expected}). The numbers below rest on too few hits - fix the level or the\n\
+             cabling first and measure again."
         );
     }
     if worst_peak.is_finite() && worst_peak < GOOD_PEAK {
         println!("{}", low_peak_warning(worst_peak));
     }
     println!(
-        "\nAktuell {} Frames, mittlere Abweichung {:+.1} Frames ({:+.3} ms).",
+        "\nCurrently {} frames, mean deviation {:+.1} frames ({:+.3} ms).",
         opts.latency_frames,
         mean,
         mean * 1000.0 / rate as f64
     );
     println!(
-        "Empfehlung fuer Track {} \"{name}\" auf Eingang {}: {recommended} Frames\n\
-         (Herleitung: der aufgenommene Klick landet bei R_wahr - R vom Raster entfernt, also ist\n\
-         R_wahr = R + Abweichung. Zu spaet aufgenommen heisst: zu wenig abgezogen.)",
+        "Recommendation for track {} \"{name}\" on input {}: {recommended} frames\n\
+         (Derivation: the recorded click lands R_true - R away from the grid, so\n\
+         R_true = R + deviation. Recorded too late means: too little subtracted.)",
         target + 1,
         measure_channel + 1
     );
     println!(
-        "\nUebernehmen mit:\n  looper-engine live {} --bpm {} {} --track-latency {name}:{recommended}",
+        "\nApply with:\n  looper-engine live {} --bpm {} {} --track-latency {name}:{recommended}",
         device_flags(dev),
         opts.bpm,
         track_flags(&defs),
     );
     if defs.len() == 1 || target == 0 {
         println!(
-            "  ... oder als globale Vorgabe fuer alle Quellen am selben Wandler:\n\
+            "  ... or as the global default for all sources on the same converter:\n\
              \x20 looper-engine live {} --bpm {} --latency-frames {recommended}",
             device_flags(dev),
             opts.bpm
         );
     }
     println!(
-        "  looper-engine calibrate {} --bpm {} --bars {} {} --for-track {} --latency-frames {recommended}   (zur Gegenprobe)",
+        "  looper-engine calibrate {} --bpm {} --bars {} {} --for-track {} --latency-frames {recommended}   (to double-check)",
         device_flags(dev),
         opts.bpm,
         opts.bars,
@@ -933,20 +931,19 @@ pub fn cmd_calibrate(dev: &DeviceOpts, opts: &CalibrateOpts) -> Result<(), Strin
         target + 1
     );
     println!(
-        "\nHinweis: Die Onset-Detektion erkennt den Klick erst, wenn er die Schwelle ueberschreitet,\n\
-         also systematisch ein paar Frames zu spaet. Abweichungen unter {:.0} Frames ({:.2} ms)\n\
-         sind deshalb Messrauschen und kein Korrekturbedarf.",
+        "\nNote: the onset detection only sees the click once it crosses the threshold, so\n\
+         systematically a few frames late. Deviations below {:.0} frames ({:.2} ms) are\n\
+         therefore measurement noise, not a reason to correct.",
         GOOD_ENOUGH_SAMPLES,
         GOOD_ENOUGH_SAMPLES * 1000.0 / rate as f64
     );
     println!(
-        "Was hier gemessen wurde, ist der Weg vom Ausgang bis zu diesem Eingang. Was ein externer\n\
-         Host (Cantabile und dergleichen) intern an Latenz hat - sein eigener ASIO-Puffer, die von\n\
-         seinen Plugins gemeldete Verzoegerung -, liegt nicht auf diesem Weg und laesst sich von\n\
-         aussen nicht messen. Dafuer gibt es den manuellen Zuschlag: --track-latency \
-         {name}:{recommended}+<zuschlag>.\n\
-         Der Zuschlag bleibt bei der naechsten Kalibrierung stehen, gemessen wird nur die Zahl \
-         davor."
+        "What was measured here is the path from the output to this input. Latency inside an\n\
+         external host (Cantabile and the like) - its own ASIO buffer, the delay its plugins\n\
+         report - is not on this path and cannot be measured from outside. That is what the\n\
+         manual surcharge is for: --track-latency {name}:{recommended}+<surcharge>.\n\
+         The surcharge stays as it is at the next calibration; only the number in front of it \
+         is measured."
     );
     Ok(())
 }
@@ -1149,7 +1146,7 @@ mod tests {
         for wrong in [0usize, 3, 99] {
             let err = pick_track(&defs, wrong).expect_err("gibt es nicht");
             assert!(err.contains("cantabile"), "die Meldung zaehlt auf: {err}");
-            assert!(err.contains("Eingang 3+4"), "{err}");
+            assert!(err.contains("input 3+4"), "{err}");
         }
 
         // The command line the recommendation prints has to describe the same tracks again, in the
@@ -1165,9 +1162,9 @@ mod tests {
     #[test]
     fn a_quiet_loop_is_called_out_with_the_measurement_behind_the_rule() {
         let text = low_peak_warning(0.045); // about -27 dBFS
-        assert!(text.contains("pegelabhaengig"), "{text}");
-        assert!(text.contains("32 Samples"), "{text}");
-        assert!(text.contains("7,2"), "{text}");
+        assert!(text.contains("depends on the level"), "{text}");
+        assert!(text.contains("32 samples"), "{text}");
+        assert!(text.contains("7.2"), "{text}");
         assert!(text.contains("--click-gain"), "{text}");
         // -18 dBFS is the line, and the constant really is that.
         assert!((dbfs(GOOD_PEAK) + 18.0).abs() < 0.1, "{}", dbfs(GOOD_PEAK));

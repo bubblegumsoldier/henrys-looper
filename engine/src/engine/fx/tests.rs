@@ -436,7 +436,7 @@ fn the_status_letters_show_what_is_on() {
     let mut chain = Chain::new(RATE);
     chain.load_preset(FxPreset::Voice);
     let status = chain.status();
-    assert_eq!(status.letters(), "HEK-R", "Delay ist im Stimme-Preset aus");
+    assert_eq!(status.letters(), "HEC-R", "Delay ist im Stimme-Preset aus");
     assert!(status.active());
     assert_eq!(status.preset, FxPreset::Voice);
 
