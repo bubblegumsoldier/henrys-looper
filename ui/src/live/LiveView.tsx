@@ -18,6 +18,10 @@
 //! *structure*, the clock (bar/beat) and the runner view, all of which change a few times a second
 //! at most. Levels and the progress inside a bar are written into the DOM without a render.
 //!
+//! The clock can stand (free looping opens that way): then the backend reports bar 1, beat 1 and
+//! `transport: false`, nothing here moves, and Space or the big Start button starts it. R on a
+//! standing clock starts it too, with the take on bar 1.
+//!
 //! Keyboard: a digit picks a track, then R O S P M act on it, K toggles the click, F takes the
 //! selected track's effect chain in or out, I opens its details. X, V and D wait for one more digit
 //! - `X 3` switches the compressor, `V 1` loads "Voice", `D 2` sets the delay to a dotted eighth,
@@ -79,6 +83,7 @@ function pickClock(s: LooperStatus): Clock & { latency: number } {
     click: s.click,
     loopSeconds: s.loop_seconds,
     quantize: s.quantize,
+    transport: s.transport,
     latency: s.latency_frames,
   };
 }
@@ -94,6 +99,7 @@ function sameClock(a: ReturnType<typeof pickClock>, b: ReturnType<typeof pickClo
     a.click === b.click &&
     a.loopSeconds === b.loopSeconds &&
     a.quantize === b.quantize &&
+    a.transport === b.transport &&
     a.latency === b.latency
   );
 }
@@ -226,8 +232,9 @@ function Stage({ onOpenArrangement }: Props) {
     if (beatId !== lastBeat.current) {
       lastBeat.current = beatId;
       el.dataset.beat = beatId % 2 === 0 ? "a" : "b";
-      el.classList.toggle("downbeat", s.beat === 1);
+      el.classList.toggle("downbeat", s.beat === 1 && s.transport);
     }
+    el.classList.toggle("stopped", !s.transport);
   });
 
   // --- keyboard --------------------------------------------------------------------------------

@@ -252,6 +252,11 @@ export interface LooperTrackStatus {
 /** Event `looper://status`, pushed about twenty times a second while the engine runs. */
 export interface LooperStatus {
   running: boolean;
+  /**
+   * Whether the clock runs. False: bar 1, beat 1, nothing counts or blinks. In free looping it is
+   * the Start/Stop button (`api.transport`); with a score it is true from count-in to end of run.
+   */
+  transport: boolean;
   pos: number;
   seconds: number;
   /** One-based bar, as counted in music. */
@@ -314,6 +319,7 @@ export interface LooperStatus {
 
 export const IDLE_STATUS: LooperStatus = {
   running: false,
+  transport: false,
   pos: 0,
   seconds: 0,
   bar: 1,

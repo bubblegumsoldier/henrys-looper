@@ -21,6 +21,8 @@ export interface Clock {
   click: boolean;
   loopSeconds: number;
   quantize: "bar" | "loop";
+  /** Whether the clock runs. While it stands nothing on this panel may count or light up. */
+  transport: boolean;
 }
 
 interface Props {
@@ -34,7 +36,8 @@ export function PositionPanel({ clock, score, compiled }: Props) {
   const barInLoop = clock.bars > 0 ? ((clock.bar - 1) % clock.bars) + 1 : clock.bar;
   const bar = withScore ? score.bar : barInLoop;
   const total = withScore ? score.barsTotal : clock.bars;
-  const beat = withScore ? score.beat || clock.beat : clock.beat;
+  // A standing clock lights no beat at all: "1" lit forever would read as a beat that hangs.
+  const beat = !clock.transport ? 0 : withScore ? score.beat || clock.beat : clock.beat;
   const section = withScore && compiled ? compiled.sections[score.section!] : null;
   const loopsUntilRelease = section ? !section.autorelease : false;
   const armed = score.armed !== null;
@@ -92,10 +95,17 @@ export function PositionPanel({ clock, score, compiled }: Props) {
         ) : (
           <>
             <span className="k">{T.loop}</span>
-            <span className="lv-chip run">
-              <Icon name="play" />
-              Free looping
-            </span>
+            {clock.transport ? (
+              <span className="lv-chip run">
+                <Icon name="play" />
+                Free looping
+              </span>
+            ) : (
+              <span className="lv-chip idle">
+                <Icon name="stop" />
+                {T.transportStopped}
+              </span>
+            )}
             <span className="lv-chip idle hide-xs">
               <Icon name={clock.quantize === "loop" ? "loop" : "bar"} />
               {clock.quantize === "loop" ? T.quantizeLoop : T.quantizeBar}

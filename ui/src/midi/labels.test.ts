@@ -13,6 +13,7 @@ describe("how an address reads in the binding list", () => {
   it("uses the words of the buttons for transport and global targets", () => {
     expect(targetLabel("transport.next", tracks)).toBe("Release");
     expect(targetLabel("transport.goto.3", tracks)).toBe("Go to section 3");
+    expect(targetLabel("transport.toggle", tracks)).toBe("Start/stop transport");
     expect(targetLabel("global.bus.monitor.gain", tracks)).toBe("Headphone volume");
   });
 

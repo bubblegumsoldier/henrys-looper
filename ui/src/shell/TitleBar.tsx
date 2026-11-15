@@ -11,7 +11,7 @@
 
 import type { ReactNode } from "react";
 import { midiApi } from "../api";
-import { GLOBAL, TRANSPORT } from "../midi/addresses";
+import { FREE_TRANSPORT, GLOBAL, TRANSPORT } from "../midi/addresses";
 import { setLearnMode, setMidiView, sayMidi, useLearnMode, useMidiView } from "../midi/store";
 import { IS_MAC } from "../platform";
 import { useStatusSlice } from "../status";
@@ -22,6 +22,7 @@ import { isDirty, useScoreFile } from "../scoreFile";
 import { run } from "./notes";
 import { api } from "../api";
 import {
+  freeTransport,
   scoreCanStart,
   scoreNext,
   scoreRewind,
@@ -57,6 +58,8 @@ interface Facts {
   overruns: number;
   bar: number;
   beat: number;
+  /** Whether the clock runs; while it stands the LCD stays at bar 1 and lights no beat. */
+  transport: boolean;
 }
 
 function pickFacts(s: LooperStatus): Facts {
@@ -72,6 +75,7 @@ function pickFacts(s: LooperStatus): Facts {
     overruns: s.fifo_overruns,
     bar: s.bar,
     beat: s.beat,
+    transport: s.transport,
   };
 }
 
@@ -87,7 +91,8 @@ function sameFacts(a: Facts, b: Facts): boolean {
     a.xruns === b.xruns &&
     a.overruns === b.overruns &&
     a.bar === b.bar &&
-    a.beat === b.beat
+    a.beat === b.beat &&
+    a.transport === b.transport
   );
 }
 
@@ -121,7 +126,7 @@ export function TitleBar({ mode, setupOpen, onMode, onSetup, enginePanelOpen, on
       {showTransport && (
         <>
           <span className="sep" />
-          <Transport score={score} />
+          {score.loaded ? <Transport score={score} /> : <FreeTransport facts={facts} />}
           <Lcd facts={facts} score={score} />
           <button
             className={`btn sq tb-click${facts.click ? " on" : ""}`}
@@ -254,13 +259,32 @@ function Transport({ score }: { score: ScoreView }) {
   );
 }
 
+/** Without a score: one button, Start/Stop of the clock - the same as the big one in Live. */
+function FreeTransport({ facts }: { facts: Facts }) {
+  return (
+    <div className="transport">
+      <button
+        className={`tp start${facts.transport ? " on" : ""}`}
+        data-midi={FREE_TRANSPORT}
+        disabled={!facts.running}
+        onClick={() => freeTransport(!facts.transport)}
+        title={`${facts.transport ? T.transportStop : T.transportStart} the clock · Space`}
+        aria-pressed={facts.transport}
+      >
+        <Icon name={facts.transport ? "stop" : "play"} />
+      </button>
+    </div>
+  );
+}
+
 function Lcd({ facts, score }: { facts: Facts; score: ScoreView }) {
   const dash = "–";
   const withScore = score.loaded && score.section !== null;
   const barInLoop = facts.bars > 0 ? ((facts.bar - 1) % facts.bars) + 1 : facts.bar;
   const bar = !facts.running ? dash : withScore ? score.bar : barInLoop;
   const of = !facts.running ? "" : withScore ? score.barsTotal : facts.bars;
-  const beat = facts.running ? (withScore ? score.beat : facts.beat) : 0;
+  // A standing clock lights no beat dot - nothing on the bar may blink while one arranges.
+  const beat = facts.running && facts.transport ? (withScore ? score.beat : facts.beat) : 0;
   const dots = facts.bpb > 0 ? facts.bpb : 4;
   return (
     <div className="lcd">
@@ -268,7 +292,17 @@ function Lcd({ facts, score }: { facts: Facts; score: ScoreView }) {
         <label>
           {withScore ? `${T.section} ${score.section! + 1} / ${score.sectionCount}` : score.loaded ? PHASE[score.phase as keyof typeof PHASE] ?? T.section : T.loop}
         </label>
-        <b>{withScore ? score.sectionId : score.loaded ? score.title : facts.running ? "free loop" : dash}</b>
+        <b>
+          {withScore
+            ? score.sectionId
+            : score.loaded
+              ? score.title
+              : !facts.running
+                ? dash
+                : facts.transport
+                  ? "free loop"
+                  : T.transportStopped.toLowerCase()}
+        </b>
       </div>
       <div>
         <label>{T.bar}</label>
@@ -280,7 +314,7 @@ function Lcd({ facts, score }: { facts: Facts; score: ScoreView }) {
       <div>
         <label>{T.beat}</label>
         <b>
-          {facts.running ? beat : dash}
+          {facts.running ? beat || 1 : dash}
           <span className="beats">
             {Array.from({ length: Math.min(dots, 12) }, (_, i) => (
               <i key={i} className={`${i === 0 ? "one" : ""}${i + 1 === beat && facts.running ? " on" : ""}`} />

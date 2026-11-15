@@ -146,6 +146,11 @@ export const api = {
 
   // --- global --------------------------------------------------------------
   clearAll: () => call<void>("clear_all"),
+  /**
+   * Start (`true`), stop (`false`) or toggle (`null`) the clock of free looping. Stopping keeps the
+   * loops; starting plays them from bar 1. Refused while a score is loaded.
+   */
+  transport: (run: boolean | null) => call<void>("transport", { run }),
   setClick: (on: boolean) => call<void>("set_click", { on }),
   /** Click volume, linear 0..4. On the monitor bus only. */
   clickGain: (gain: number) => call<void>("click_gain", { gain }),

@@ -156,6 +156,7 @@ export function actionLabel(address: string, fallback: string): string {
   if (address === "transport.start") return T.start;
   if (address === "transport.next") return T.release;
   if (address === "transport.stop_all") return T.stopAll;
+  if (address === "transport.toggle") return T.transportToggle;
   const go = /^transport\.goto\.(\d+)$/.exec(address);
   if (go) return `Go to section ${go[1]}`;
   if (GLOBAL_PART[address]) return GLOBAL_PART[address];

@@ -3,14 +3,16 @@
 //! With a score, the whole surface **is** the Release button (`transport.next`): ready to start,
 //! running and waiting for Release, a switch armed with its countdown, the end. Without a score the
 //! same place shows the free looper's next event - a take armed on some track, with its countdown -
-//! and the two buttons become the grid and the click.
+//! and the buttons become Start/Stop of the clock (`transport.toggle`, Space), the grid and the
+//! click.
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import { GLOBAL, TRANSPORT, quantizeAddress } from "../midi/addresses";
+import { FREE_TRANSPORT, GLOBAL, TRANSPORT, quantizeAddress } from "../midi/addresses";
 import { Icon } from "../shell/Icon";
 import { run } from "../shell/notes";
 import {
+  freeTransport,
   scoreCanStart,
   scoreNext,
   scoreRewind,
@@ -232,14 +234,29 @@ function FreePanel({ clock, tracks }: { clock: Clock; tracks: LooperTrackStatus[
 
   return (
     <div className="ctlcol">
-      <section className={`release${first ? " armed" : " free"}`}>
+      <section className={`release${first && clock.transport ? " armed" : " free"}`}>
         <div className="rh">
           <span className="lbl">
             <Icon name="loop" />
             {T.loop}
           </span>
         </div>
-        {first ? (
+        {!clock.transport ? (
+          <>
+            <div className="state">
+              <Icon name="stop" />
+              {T.transportStopped}
+            </div>
+            <div className="to">
+              <span>at</span>
+              {T.bar.toLowerCase()} 1
+            </div>
+            <div className="when">
+              Press <b>{T.transportStart}</b> or Space · <b>R</b> records from bar 1
+            </div>
+            <div className="countdown placeholder" />
+          </>
+        ) : first ? (
           <>
             <div className="state">
               <Icon name="armed" />
@@ -273,7 +290,20 @@ function FreePanel({ clock, tracks }: { clock: Clock; tracks: LooperTrackStatus[
           </>
         )}
       </section>
-      <div className="lv-row">
+      <div className="lv-row three">
+        <button
+          className={`bigbtn transport${clock.transport ? " running" : ""}`}
+          data-midi={FREE_TRANSPORT}
+          onClick={() => freeTransport(!clock.transport)}
+          title={
+            clock.transport
+              ? "Stop the clock · Space. The loops are kept and fall silent; a recording that has not reached its end is dropped, an overdub ends here."
+              : "Start the clock at bar 1 · Space. Every track on play starts from the top of its loop."
+          }
+        >
+          <Icon name={clock.transport ? "stop" : "start"} />
+          {clock.transport ? T.transportStop : T.transportStart}
+        </button>
         <button
           className="bigbtn"
           data-midi={quantizeAddress(other)}

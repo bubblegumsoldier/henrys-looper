@@ -1,14 +1,17 @@
 //! The score's transport as the new frame uses it: one flattened view of the runner, the three
 //! commands, and the keys the CLI has (Space or N = start/release, Shift+S = stop all).
 //!
+//! Without a score Space is the Start/Stop of free looping instead (`freeTransport`); N and
+//! Shift+S do nothing there. With a score loaded Space keeps its meaning exactly as before.
+//!
 //! The keys are installed by the frame only while the Arrangement placeholder is *not* showing:
 //! that one still embeds the score view with its own transport, which listens to the same keys, and
 //! one press must never reach the runner twice.
 
 import { useEffect } from "react";
-import { scoreApi } from "../api";
+import { api, scoreApi } from "../api";
 import { useStatusSlice } from "../status";
-import { say } from "./notes";
+import { run, say } from "./notes";
 import { confirmAction } from "../dialogs";
 import type { LooperStatus, Phase } from "../types";
 
@@ -106,6 +109,14 @@ export function scoreCanStart(v: ScoreView): boolean {
   return v.loaded && v.phase === "idle";
 }
 
+/** Start (`true`), stop (`false`) or toggle (`null`) the clock of free looping. */
+export const freeTransport = (on: boolean | null) => run(() => api.transport(on));
+
+/** What the free-looping keys need to know: is there an engine, and does its clock run. */
+function pickFree(s: LooperStatus): number {
+  return (s.running ? 1 : 0) + (s.transport ? 2 : 0);
+}
+
 export const scoreStart = () => say(() => scoreApi.start());
 export const scoreNext = () => say(() => scoreApi.next());
 export const scoreStopAll = () => say(() => scoreApi.stopAll());
@@ -136,12 +147,24 @@ export function useScoreKeys(enabled: boolean): void {
   const view = useScore();
   const runs = scoreRuns(view);
   const canStart = scoreCanStart(view);
+  const loaded = view.loaded;
+  const free = useStatusSlice(pickFree);
+  const engineOn = (free & 1) !== 0;
+  const ticking = (free & 2) !== 0;
   useEffect(() => {
     if (!enabled) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.altKey || e.metaKey || e.repeat) return;
       if (typing(e.target)) return;
       const key = e.key.toLowerCase();
+      if (!loaded) {
+        // Free looping: Space starts and stops the clock. Nothing else is the score's business.
+        if (key === " " && !e.shiftKey && engineOn) {
+          e.preventDefault();
+          freeTransport(!ticking);
+        }
+        return;
+      }
       if ((key === " " || key === "n") && !e.shiftKey) {
         e.preventDefault();
         if (runs) scoreNext();
@@ -155,5 +178,5 @@ export function useScoreKeys(enabled: boolean): void {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [enabled, runs, canStart]);
+  }, [enabled, runs, canStart, loaded, engineOn, ticking]);
 }

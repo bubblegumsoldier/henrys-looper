@@ -69,6 +69,12 @@ export const TRANSPORT = {
   stopAll: "transport.stop_all",
 } as const;
 
+/**
+ * Start/stop of free looping. Not part of the score's transport: it needs no score (and is refused
+ * while one is loaded). The engine side is `Target::Transport` in `engine/src/midi/target.rs`.
+ */
+export const FREE_TRANSPORT = "transport.toggle";
+
 /** Jump to a section. `section` is the 0-based index the block preview uses. */
 export function gotoAddress(section: number): string {
   return `transport.goto.${section + 1}`;

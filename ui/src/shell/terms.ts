@@ -36,6 +36,11 @@ export const T = {
 
   // --- transport -------------------------------------------------------------
   start: "Start",
+  /** The free-looping clock: the big button and its MIDI label. */
+  transportStart: "Start",
+  transportStop: "Stop",
+  transportToggle: "Start/stop transport",
+  transportStopped: "Stopped",
   release: "Release",
   stopAll: "Stop all",
   running: "Running",
