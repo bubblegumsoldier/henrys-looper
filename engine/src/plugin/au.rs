@@ -25,6 +25,7 @@ use super::cf::{self, CFStringRef, CFTypeRef};
 use super::editor::EditorWindow;
 use super::{Format, Kind, ParamInfo, PluginInfo, PluginInstance};
 use crate::engine::insert::InsertProcessor;
+use crate::engine::source::{BlockEvent, SourceProcessor, StereoOut};
 
 type OSStatus = i32;
 type AudioComponent = *mut c_void;
@@ -233,6 +234,14 @@ unsafe extern "C" {
         data: *mut AudioBufferList2,
     ) -> OSStatus;
     fn AudioUnitReset(unit: AudioUnit, scope: u32, element: u32) -> OSStatus;
+    /// MusicDevice.h. Schedules one MIDI message for the next render, `offset` frames into it.
+    fn MusicDeviceMIDIEvent(
+        unit: AudioUnit,
+        status: u32,
+        data1: u32,
+        data2: u32,
+        offset: u32,
+    ) -> OSStatus;
 }
 
 #[link(name = "objc")]
@@ -883,6 +892,63 @@ impl PluginInstance for AuPlugin {
         }))
     }
 
+    /// The instrument path: a `MusicDevice` has no audio input, so only the output format is set and
+    /// no render callback is installed. MIDI reaches it through `MusicDeviceMIDIEvent` on the audio
+    /// thread, right before each `AudioUnitRender` - the way AUGraph and JUCE drive one.
+    fn activate_instrument(
+        &mut self,
+        sample_rate: f64,
+        max_block: usize,
+    ) -> Result<Box<dyn SourceProcessor>, String> {
+        if self.info.kind != Kind::Instrument {
+            return Err(format!("\"{}\" is not an instrument.", self.info.name));
+        }
+        if self.processing.load(Ordering::Acquire) {
+            return Err("The plugin is already running.".to_string());
+        }
+        if self.initialized {
+            unsafe { AudioUnitUninitialize(self.unit) };
+            self.initialized = false;
+        }
+        self.sample_rate = sample_rate;
+        let outs = [2u32, 1]
+            .into_iter()
+            .find(|&o| self.set_format(kAudioUnitScope_Output, o))
+            .ok_or_else(|| {
+                format!(
+                    "\"{}\" plays neither stereo nor mono at {sample_rate} Hz.",
+                    self.info.name
+                )
+            })?;
+        let frames = max_block as u32;
+        unsafe {
+            AudioUnitSetProperty(
+                self.unit,
+                kAudioUnitProperty_MaximumFramesPerSlice,
+                kAudioUnitScope_Global,
+                0,
+                &frames as *const u32 as *const c_void,
+                4,
+            );
+        }
+        let status = unsafe { AudioUnitInitialize(self.unit) };
+        if status != 0 {
+            return Err(format!(
+                "\"{}\" could not be started (error {status}).",
+                self.info.name
+            ));
+        }
+        self.initialized = true;
+        unsafe { AudioUnitReset(self.unit, kAudioUnitScope_Global, 0) };
+        self.processing.store(true, Ordering::Release);
+        Ok(Box::new(AuInstrument {
+            unit: self.unit,
+            outs,
+            sample_time: 0.0,
+            processing: self.processing.clone(),
+        }))
+    }
+
     fn deactivate(&mut self) {
         if self.initialized {
             unsafe { AudioUnitUninitialize(self.unit) };
@@ -1082,6 +1148,93 @@ impl InsertProcessor for AuProcessor {
             let out_r = list.mBuffers[1].mData as *const f32;
             if out_r != right.as_ptr() && !out_r.is_null() {
                 unsafe { std::ptr::copy_nonoverlapping(out_r, right.as_mut_ptr(), n) };
+            }
+        }
+    }
+}
+
+/// The audio side of an Audio Unit instrument.
+struct AuInstrument {
+    unit: AudioUnit,
+    outs: u32,
+    sample_time: f64,
+    processing: std::sync::Arc<AtomicBool>,
+}
+
+// Driven from the audio thread only, between `activate_instrument` and the drop - as AuProcessor.
+unsafe impl Send for AuInstrument {}
+
+impl Drop for AuInstrument {
+    fn drop(&mut self) {
+        self.processing.store(false, Ordering::Release);
+    }
+}
+
+impl SourceProcessor for AuInstrument {
+    fn render(&mut self, events: &[BlockEvent], outs: &mut [StereoOut<'_>]) {
+        let Some(out) = outs.first_mut() else {
+            return;
+        };
+        let n = out.l.len().min(out.r.len());
+        if n == 0 {
+            return;
+        }
+        for e in events {
+            let offset = e.offset.min(n as u32 - 1);
+            // SAFETY: a plain call on a unit that is initialised for as long as this processor
+            // lives; the message bytes are passed by value.
+            unsafe {
+                MusicDeviceMIDIEvent(
+                    self.unit,
+                    u32::from(e.msg[0]),
+                    u32::from(e.msg[1]),
+                    u32::from(e.msg[2]),
+                    offset,
+                );
+            }
+        }
+        let bytes = (n * 4) as u32;
+        let mut list = AudioBufferList2 {
+            mNumberBuffers: self.outs,
+            mBuffers: [
+                AudioBuffer {
+                    mNumberChannels: 1,
+                    mDataByteSize: bytes,
+                    mData: out.l.as_mut_ptr() as *mut c_void,
+                },
+                AudioBuffer {
+                    mNumberChannels: 1,
+                    mDataByteSize: bytes,
+                    mData: out.r.as_mut_ptr() as *mut c_void,
+                },
+            ],
+        };
+        let stamp = AudioTimeStamp {
+            mSampleTime: self.sample_time,
+            mFlags: kAudioTimeStampSampleTimeValid,
+            ..Default::default()
+        };
+        let mut flags = 0u32;
+        let status =
+            unsafe { AudioUnitRender(self.unit, &mut flags, &stamp, 0, n as u32, &mut list) };
+        self.sample_time += n as f64;
+        if status != 0 {
+            out.l[..n].fill(0.0);
+            out.r[..n].fill(0.0);
+            return;
+        }
+        // A unit may answer with buffers of its own instead of filling ours.
+        let out_l = list.mBuffers[0].mData as *const f32;
+        if out_l != out.l.as_ptr() && !out_l.is_null() {
+            unsafe { std::ptr::copy_nonoverlapping(out_l, out.l.as_mut_ptr(), n) };
+        }
+        if self.outs == 1 {
+            let (l, r) = (&out.l[..n], &mut out.r[..n]);
+            r.copy_from_slice(l);
+        } else {
+            let out_r = list.mBuffers[1].mData as *const f32;
+            if out_r != out.r.as_ptr() && !out_r.is_null() {
+                unsafe { std::ptr::copy_nonoverlapping(out_r, out.r.as_mut_ptr(), n) };
             }
         }
     }

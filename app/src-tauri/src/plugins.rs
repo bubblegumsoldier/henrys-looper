@@ -819,6 +819,12 @@ impl Manager {
                     .unwrap_or_else(|| "it did not pass the scan.".to_string())
             ));
         }
+        if entry.info.kind == plugin::Kind::Instrument {
+            return Err(format!(
+                "\"{}\" is an instrument. Choose it as a track's input (Setup, Input: Instrument).",
+                entry.info.name
+            ));
+        }
         Ok(entry)
     }
 

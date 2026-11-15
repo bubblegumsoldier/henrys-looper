@@ -44,6 +44,7 @@ mod vst3;
 mod tests;
 
 use crate::engine::insert::InsertProcessor;
+use crate::engine::source::SourceProcessor;
 
 /// The plugin formats this host speaks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -62,8 +63,7 @@ impl Format {
     }
 }
 
-/// What a plugin is for. Only effects go into insert slots; instruments are listed so the UI can
-/// say "not yet" instead of hiding them.
+/// What a plugin is for. Effects go into insert slots, instruments into a track's source slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -128,7 +128,25 @@ pub trait PluginInstance {
         sample_rate: f64,
         max_block: usize,
     ) -> Result<Box<dyn InsertProcessor>, String>;
-    /// Stop audio. Only to be called once the processor from [`Self::activate`] is dropped.
+    /// Prepare an instrument for audio and hand out the processor that plays it on the audio
+    /// thread (`crate::engine::source`). Only instruments implement it.
+    fn activate_instrument(
+        &mut self,
+        sample_rate: f64,
+        max_block: usize,
+    ) -> Result<Box<dyn SourceProcessor>, String> {
+        let _ = (sample_rate, max_block);
+        Err(match (self.info().kind, self.info().format) {
+            (Kind::Instrument, Format::Vst3) => format!(
+                "\"{}\" is a VST3 instrument; those cannot be played yet - its Audio Unit \
+                 version can, if it has one.",
+                self.info().name
+            ),
+            _ => format!("\"{}\" is not an instrument.", self.info().name),
+        })
+    }
+    /// Stop audio. Only to be called once the processor from [`Self::activate`] (or
+    /// [`Self::activate_instrument`]) is dropped.
     fn deactivate(&mut self);
     fn has_editor(&self) -> bool;
     /// Open the plugin's own window, or bring it to the front. Main thread only.

@@ -51,7 +51,7 @@ pub enum Status {
     Crashed,
     /// Did not finish in time.
     Timeout,
-    /// An instrument: listed, not loadable into an insert slot.
+    /// An instrument that cannot be played yet (VST3 for now). Playable instruments are `ok`.
     Instrument,
 }
 
@@ -250,8 +250,10 @@ pub fn scan(exe: &Path, full: bool, mut progress: impl FnMut(&str)) -> Vec<Scann
     for candidate in candidates() {
         let key = candidate.key();
         let found = match old.entries.get(&key) {
-            Some(known) => known.clone(),
-            None => {
+            // Audio Unit instruments were listed as "not yet" before they could be played; probe
+            // them again instead of trusting that verdict.
+            Some(known) if !known.iter().any(was_unplayable_au) => known.clone(),
+            _ => {
                 progress(&candidate.label());
                 probe_in_child(exe, &candidate)
             }
@@ -265,6 +267,10 @@ pub fn scan(exe: &Path, full: bool, mut progress: impl FnMut(&str)) -> Vec<Scann
             .cmp(&(b.info.kind != Kind::Effect, b.info.name.to_lowercase(), b.info.format.label()))
     });
     out
+}
+
+fn was_unplayable_au(s: &Scanned) -> bool {
+    s.status == Status::Instrument && s.info.format == Format::Au
 }
 
 /// What the cache knows, without probing anything. For a fast start.
@@ -408,13 +414,7 @@ fn probe(kind: &str, target: &str) -> Report {
 /// Load one plugin, start it at 48 kHz and push a few blocks of noise through it.
 pub fn probe_one(info: PluginInfo) -> Scanned {
     if info.kind == Kind::Instrument {
-        return Scanned {
-            info,
-            status: Status::Instrument,
-            message: Some("Instruments cannot be loaded yet.".to_string()),
-            latency: 0,
-            params: 0,
-        };
+        return probe_instrument(info);
     }
     let result = (|| {
         let mut plugin = super::load(&info)?;
@@ -433,6 +433,77 @@ pub fn probe_one(info: PluginInfo) -> Scanned {
         }
         if l.iter().chain(r.iter()).any(|s| !s.is_finite()) {
             return Err("Produced invalid numbers (NaN) from plain noise.".to_string());
+        }
+        let latency = plugin.latency();
+        drop(processor);
+        plugin.deactivate();
+        Ok((params, latency))
+    })();
+    match result {
+        Ok((params, latency)) => Scanned {
+            info,
+            status: Status::Ok,
+            message: None,
+            latency,
+            params,
+        },
+        Err(e) => Scanned {
+            info,
+            status: Status::Failed,
+            message: Some(e),
+            latency: 0,
+            params: 0,
+        },
+    }
+}
+
+/// Load an instrument, start it at 48 kHz and play a chord through it. VST3 instruments are listed
+/// as "not yet".
+pub fn probe_instrument(info: PluginInfo) -> Scanned {
+    if info.format == Format::Vst3 {
+        return Scanned {
+            info,
+            status: Status::Instrument,
+            message: Some("VST3 instruments cannot be played yet.".to_string()),
+            latency: 0,
+            params: 0,
+        };
+    }
+    let result = (|| {
+        use crate::engine::source::{BlockEvent, StereoOut};
+        let mut plugin = super::load(&info)?;
+        let params = plugin.params().len();
+        let mut processor = plugin.activate_instrument(48_000.0, 512)?;
+        let mut l = vec![0.0f32; 512];
+        let mut r = vec![0.0f32; 512];
+        let chord = [60u8, 64, 67];
+        for block in 0..8 {
+            let mut events = Vec::new();
+            for (i, &note) in chord.iter().enumerate() {
+                match block {
+                    0 => events.push(BlockEvent {
+                        offset: i as u32,
+                        msg: [0x90, note, 90],
+                    }),
+                    5 => events.push(BlockEvent {
+                        offset: 0,
+                        msg: [0x80, note, 0],
+                    }),
+                    _ => {}
+                }
+            }
+            l.fill(0.0);
+            r.fill(0.0);
+            processor.render(
+                &events,
+                &mut [StereoOut {
+                    l: &mut l,
+                    r: &mut r,
+                }],
+            );
+            if l.iter().chain(r.iter()).any(|s| !s.is_finite()) {
+                return Err("Produced invalid numbers (NaN) from a plain chord.".to_string());
+            }
         }
         let latency = plugin.latency();
         drop(processor);

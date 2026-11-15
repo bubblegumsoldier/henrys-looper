@@ -419,3 +419,60 @@ fn scanned_entries_serialise_for_the_cache_and_the_ui() {
     let back: scan::Scanned = serde_json::from_str(&json).unwrap();
     assert_eq!(back, entry);
 }
+
+/// Apple's General MIDI synthesizer, the reference instrument: found as an instrument, it passes the
+/// scan's probe, and a note played into it at an offset comes out as sound from that offset on -
+/// silence before it, and silence before any note is played at all.
+#[cfg(target_os = "macos")]
+#[test]
+fn apples_dls_synth_plays_a_note_at_its_offset() {
+    use crate::engine::source::{BlockEvent, StereoOut};
+    let Some(info) = super::au::enumerate()
+        .into_iter()
+        .find(|i| i.id == "au:aumu:dls :appl")
+    else {
+        eprintln!("uebersprungen: DLSMusicDevice ist nicht installiert");
+        return;
+    };
+    assert_eq!(info.kind, Kind::Instrument);
+    let probed = scan::probe_one(info.clone());
+    assert_eq!(probed.status, scan::Status::Ok, "{:?}", probed.message);
+
+    let mut plugin = super::load(&info).expect("laedt");
+    let mut synth = plugin.activate_instrument(48_000.0, 512).expect("startet");
+    let mut l = vec![0.0f32; 256];
+    let mut r = vec![0.0f32; 256];
+    let mut render = |events: &[BlockEvent], l: &mut [f32], r: &mut [f32]| {
+        l.fill(0.0);
+        r.fill(0.0);
+        synth.render(events, &mut [StereoOut { l, r }]);
+    };
+    render(&[], &mut l, &mut r);
+    assert_eq!(rms(&l), 0.0, "ohne Note still");
+    render(
+        &[BlockEvent {
+            offset: 128,
+            msg: [0x90, 60, 110],
+        }],
+        &mut l,
+        &mut r,
+    );
+    assert!(l[..120].iter().all(|s| *s == 0.0), "vor dem Offset still");
+    let mut energy = rms(&l[128..]);
+    for _ in 0..8 {
+        render(&[], &mut l, &mut r);
+        energy = energy.max(rms(&l));
+    }
+    assert!(energy > 0.001, "die Note klingt: {energy}");
+    assert!(l.iter().chain(r.iter()).all(|s| s.is_finite()));
+    render(
+        &[BlockEvent {
+            offset: 0,
+            msg: [0xB0, 123, 0],
+        }],
+        &mut l,
+        &mut r,
+    );
+    drop(synth);
+    plugin.deactivate();
+}
