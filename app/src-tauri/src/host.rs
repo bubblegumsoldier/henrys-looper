@@ -1685,8 +1685,8 @@ struct Session {
     score_yaml: Option<String>,
     /// Tap tempo, whichever way the taps come in.
     taps: TapTempo,
-    /// End (bar 1) of a running free-looping count-in.
-    count_in: Option<u64>,
+    /// Start and end (bar 1) of a running free-looping count-in.
+    count_in: Option<(u64, u64)>,
     /// The engine's end of the MIDI routing queue (`looper_engine::engine::source`).
     feeds: FeedSender,
     /// Per track, in engine order: what plays it, if it is an instrument track.
@@ -2327,7 +2327,7 @@ impl Session {
             quantize: QuantizeName::from(self.scheduler.quantize),
             overdub_mode: self.config.overdub_mode,
             count_in_bars: self.config.count_in_bars,
-            counting_in: self.count_in.is_some_and(|end| status.pos < end),
+            counting_in: self.count_in.is_some_and(|(_, end)| status.pos < end),
             sample_rate: rate,
             latency_frames: self.info.latency_frames,
             click: status.click,
@@ -2348,7 +2348,15 @@ impl Session {
                     let ts = status.tracks().get(i).copied().unwrap_or_default();
                     // The count-in is measured against the position of this very snapshot, so the
                     // number on screen and the beat that is sounding belong together.
-                    let lead = self.scheduler.lead(i, status.pos);
+                    // During a count-in the grid already counts from bar 1 after it; the countdown
+                    // has to count the count-in's own beats instead.
+                    let mut sched = self.scheduler;
+                    if let Some((start, end)) = self.count_in
+                        && status.pos < end
+                    {
+                        sched.timeline = sched.timeline.with_zero(start);
+                    }
+                    let lead = sched.lead(i, status.pos);
                     let mut event = track_event(i, &ui.name, &ts, &ui.gains, rate, lead);
                     let timeline = &self.scheduler.timeline;
                     let bar = timeline.samples_per_beat() * timeline.beats_per_bar() as f64;
@@ -2663,7 +2671,7 @@ impl Session {
     /// so they agree even when the command arrives late and acts after `at`.
     /// Whether a free-looping count-in is still counting.
     fn counting_in(&self) -> bool {
-        self.count_in.is_some_and(|end| self.estimated_pos() < end)
+        self.count_in.is_some_and(|(_, end)| self.estimated_pos() < end)
     }
 
     fn start_transport_at(&mut self, at: u64) -> Result<(), String> {
@@ -2720,7 +2728,7 @@ impl Session {
             let end = self.scheduler.timeline.with_zero(at).bar_start(bars as u64);
             self.cmd.send(Command::CountIn { at, end })?;
             self.start_transport_at(end)?;
-            self.count_in = Some(end);
+            self.count_in = Some((at, end));
             self.begin_recording(RecordMode::Free, "Free play", end, 0, 0);
             return Ok(());
         }

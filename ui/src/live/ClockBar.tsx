@@ -100,7 +100,8 @@ function BpmField({ bpm, disabled, onBpm }: { bpm: number; disabled: boolean; on
       }}
       title="Click to type a tempo · MIDI Learn: map a knob to it"
     >
-      <b>{num(bpm)}</b> BPM
+      <b>{num(bpm)}</b>
+      <span className="cb-unit">BPM</span>
     </button>
   );
 }
@@ -126,6 +127,11 @@ export function ClockBar({ clock, free }: { clock: Clock; free: boolean }) {
 
   return (
     <div className={`clockbar${locked ? " locked" : ""}`}>
+      {locked && (
+        <span className="cb-lock" title={T.tempoLocked}>
+          <Icon name="lock" />
+        </span>
+      )}
       <div className="cb-group" title={lockTitle}>
         <button className="cb-btn" disabled={locked} onClick={(e) => step(e, -1)} title="−1 BPM · Shift −5" aria-label="Slower">
           <Icon name="minus" />
@@ -236,7 +242,7 @@ export function ClockBar({ clock, free }: { clock: Clock; free: boolean }) {
 
       <button className="cb-btn danger clear" data-midi={GLOBAL.clearAll} onClick={clearAllAsked} title="Delete every layer of every track · Shift+Backspace">
         <Icon name="trash" />
-        {T.clearAll}
+        <span>{T.clearAll}</span>
       </button>
       {locked && <div className="cb-note">{T.tempoLocked}</div>}
     </div>
