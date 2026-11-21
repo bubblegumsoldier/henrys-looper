@@ -32,6 +32,12 @@ mod scorestate;
 mod schedule;
 mod supervisor;
 
+/// The system allocator, counting allocations and frees inside the audio callback (and only
+/// there): always on, one thread-local read per allocation elsewhere (`looper_engine::rt`). The
+/// output callback reports what it counted with every late block, and the log says when it moved.
+#[global_allocator]
+static ALLOC: looper_engine::rt::CountingAlloc = looper_engine::rt::CountingAlloc;
+
 use tauri::{Emitter, Manager, State};
 
 use host::{Action, EngineHandle, READY_EVENT, ScoreAction};

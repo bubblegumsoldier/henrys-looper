@@ -695,11 +695,13 @@ impl Track {
             source_base: 0,
             restart_play: false,
             edge: edge_frames(sample_rate),
-            history: vec![0.0; 2 * EDGE_MAX],
+            history: crate::rt::resident_zeros(2 * EDGE_MAX),
             history_end: 0,
             history_from: 0,
             history_slot: 0,
-            pre_rolls: vec![0.0; MAX_LAYERS * PRE_SAMPLES],
+            // Written when a take begins - one slot per layer, so the slot of a track's fifth layer is
+            // first touched at its fifth take start. Resident now, not then (`crate::rt`).
+            pre_rolls: crate::rt::resident_zeros(MAX_LAYERS * PRE_SAMPLES),
             pre_free: (1u32 << MAX_LAYERS) - 1,
             fresh_take: None,
             sound_base: false,

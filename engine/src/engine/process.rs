@@ -127,7 +127,10 @@
 //! question, and on a two-output interface the honest answer is "the same socket" - see
 //! [`super::bus`], which says that out loud instead of quietly turning the click off.
 
+use std::time::Instant;
+
 use crate::capture::{CaptureEndpoint, CaptureSlot};
+use crate::load::{BlockProfile, Phase};
 
 use super::bus::{
     BUS_CHANNELS, BUS_COUNT, BUS_SAMPLES, Bus, BusOutput, BusRouting, MAX_BUS_GAIN, OUT_METERS,
@@ -328,6 +331,11 @@ pub struct EngineCore {
     gate_bar1: Option<u64>,
     /// The MIDI-loop stage (`super::midiloop`), if the host attached it.
     midi: Option<Box<midiproc::MidiLoops>>,
+    /// Where the current callback's time went (`crate::load::BlockProfile`), and the clock reading
+    /// the next phase is measured from. Started by [`Self::begin_profile`], handed out by
+    /// [`Self::take_profile`].
+    profile: BlockProfile,
+    lap: Instant,
 }
 
 impl EngineCore {
@@ -395,7 +403,36 @@ impl EngineCore {
             gate: true,
             gate_bar1: None,
             midi: None,
+            profile: BlockProfile::default(),
+            lap: Instant::now(),
         }
+    }
+
+    /// Start the profile of one callback (`crate::load::BlockProfile`). The app's output callback
+    /// calls it first thing; without it the phases simply add up across calls.
+    #[inline]
+    pub fn begin_profile(&mut self) {
+        self.profile = BlockProfile::default();
+        self.lap = Instant::now();
+    }
+
+    /// The time since the last lap belongs to `phase`. One clock read (the commpage on macOS).
+    #[inline]
+    fn lap(&mut self, phase: Phase) {
+        let now = Instant::now();
+        let ns = now.saturating_duration_since(self.lap).as_nanos() as u64;
+        self.profile.add_phase(phase, ns);
+        self.lap = now;
+    }
+
+    /// The profile of the callback since [`Self::begin_profile`], with the plugin time the racks
+    /// measured (which this takes, like [`Self::take_plugin_ns`]).
+    #[inline]
+    pub fn take_profile(&mut self) -> BlockProfile {
+        let plugin_ns = self.take_plugin_ns();
+        let mut profile = self.profile;
+        profile.plugin_ns = plugin_ns.min(u64::from(u32::MAX)) as u32;
+        profile
     }
 
     /// Give the engine its instrument slots and the MIDI event stage. Called on the control thread
@@ -517,6 +554,7 @@ impl EngineCore {
             track.fold_edges(self.out_pos, self.in_index);
             track.settle_play(self.out_pos);
         }
+        self.lap(Phase::Prepare);
         let in_frames = input.len() / self.input_channels;
         let out_frames = output.len() / BUS_SAMPLES;
 
@@ -529,25 +567,32 @@ impl EngineCore {
             rack.set_tap(tap);
         }
         self.render_sources(out_frames);
+        self.lap(Phase::Instruments);
         self.render_with_commands(input, in_frames, output, out_frames);
         if tap {
             self.capture_midi();
+            self.lap(Phase::Capture);
         }
         self.meter_buses(output);
+        self.lap(Phase::Status);
         self.record_input(input, in_frames);
         self.record_sources(out_frames);
+        self.lap(Phase::Record);
         if let Some(capture) = self.capture.as_deref_mut() {
             capture.end_block(self.out_pos + out_frames as u64);
         }
+        self.lap(Phase::Capture);
 
         self.out_pos += out_frames as u64;
         self.in_index += in_frames as u64;
         self.advance_midi();
+        self.lap(Phase::Record);
         self.since_status += out_frames as u64;
         if self.since_status >= self.status_interval {
             self.since_status = 0;
             self.publish_status();
         }
+        self.lap(Phase::Status);
     }
 
     /// Collect prepared buffers from the control thread. Bounded work: at most `spare_slots` pops
@@ -830,6 +875,7 @@ impl EngineCore {
             };
             if boundary > cursor {
                 self.render_source_piece(cursor, boundary);
+                self.lap(Phase::Instruments);
                 let start = self.out_pos + cursor as u64;
                 // Frame indices become sample offsets only here, on the way into the output slice.
                 if self.inserts.as_ref().is_some_and(|r| r.active()) {
@@ -849,6 +895,7 @@ impl EngineCore {
                         in_frames,
                     );
                 }
+                self.lap(Phase::Mix);
                 cursor = boundary;
             }
             match due {
@@ -875,7 +922,9 @@ impl EngineCore {
                     if self.drained_later(arrival, &cmd) {
                         continue;
                     }
+                    self.profile.note_command(cmd.kind());
                     self.apply(cmd);
+                    self.lap(Phase::Commands);
                 }
                 None => break,
             }
@@ -1144,6 +1193,7 @@ impl EngineCore {
         for bus in rack.bus_scratch.iter_mut() {
             bus.clear(n);
         }
+        let mut track_started = Instant::now();
         for (t, track) in self.tracks.iter_mut().enumerate() {
             // A reorder whose fade-out is done happens here, between two blocks of silence.
             rack.begin_track(t);
@@ -1213,6 +1263,10 @@ impl EngineCore {
                     capture.track_frame(t, start + i as u64, main, track);
                 }
             }
+            let now = Instant::now();
+            self.profile
+                .add_track(t, now.saturating_duration_since(track_started).as_nanos() as u64);
+            track_started = now;
         }
         for b in 0..BUS_COUNT {
             rack.process_bus(b, n);
@@ -1314,6 +1368,7 @@ impl EngineCore {
             self.out_peak[c] = self.out_peak[c].max(peak[c]);
             self.out_ratio[c] = self.out_ratio[c].min(ratio[c]);
         }
+        self.lap(Phase::Output);
     }
 
     /// Where each bus leaves the machine - what [`Self::place_output`] places by.

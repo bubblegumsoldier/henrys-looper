@@ -297,6 +297,55 @@ impl Command {
         }
     }
 
+    /// A small number per variant, for the block profile's "which commands were applied" mask
+    /// (`crate::load::BlockProfile`). Index into [`COMMAND_KINDS`].
+    pub fn kind(&self) -> usize {
+        match self {
+            Command::StartRecord { .. } => 0,
+            Command::StartOverdub { .. } => 1,
+            Command::StopRecord { .. } => 2,
+            Command::LatchOverdub { .. } => 3,
+            Command::StartPlay { .. } => 4,
+            Command::StopPlay { .. } => 5,
+            Command::RestartLoop { .. } => 6,
+            Command::CutTake { .. } => 7,
+            Command::MonitorFade { .. } => 8,
+            Command::ClearTrack { .. } => 9,
+            Command::ClearAll { .. } => 10,
+            Command::DropWaiting { .. } => 11,
+            Command::SetMonitor { .. } => 12,
+            Command::SetPan { .. } => 13,
+            Command::SetTrackGain { .. } => 14,
+            Command::SetTrackMute { .. } => 15,
+            Command::SetTrackSolo { .. } => 16,
+            Command::SetTrackSend { .. } => 17,
+            Command::SetBusGain { .. } => 18,
+            Command::SetBusOutput { .. } => 19,
+            Command::SetTrackLatency { .. } => 20,
+            Command::SetLayerMute { .. } => 21,
+            Command::SetLayerGain { .. } => 22,
+            Command::RemoveLayer { .. } => 23,
+            Command::UndoLayer { .. } => 24,
+            Command::SetLoopKind { .. } => 25,
+            Command::SetClick { .. } => 26,
+            Command::SetClickGain { .. } => 27,
+            Command::SetMonitorGain { .. } => 28,
+            Command::SetMonitorMute { .. } => 29,
+            Command::SetTempo { .. } => 30,
+            Command::SetFxBypass { .. } => 31,
+            Command::SetFxEnabled { .. } => 32,
+            Command::SetFxParam { .. } => 33,
+            Command::TouchFxEnabled { .. } => 34,
+            Command::TouchFxParam { .. } => 35,
+            Command::LoadFxPreset { .. } => 36,
+            Command::TransportStart { .. } => 37,
+            Command::CountIn { .. } => 38,
+            Command::ClickGate { .. } => 39,
+            Command::TransportStop => 40,
+            Command::Stop => 41,
+        }
+    }
+
     /// The track this command addresses, if it addresses one.
     pub fn track(&self) -> Option<usize> {
         match self {
@@ -345,6 +394,52 @@ impl Command {
         }
     }
 }
+
+/// The names of [`Command::kind`], in its order.
+pub const COMMAND_KINDS: [&str; 42] = [
+    "StartRecord",
+    "StartOverdub",
+    "StopRecord",
+    "LatchOverdub",
+    "StartPlay",
+    "StopPlay",
+    "RestartLoop",
+    "CutTake",
+    "MonitorFade",
+    "ClearTrack",
+    "ClearAll",
+    "DropWaiting",
+    "SetMonitor",
+    "SetPan",
+    "SetTrackGain",
+    "SetTrackMute",
+    "SetTrackSolo",
+    "SetTrackSend",
+    "SetBusGain",
+    "SetBusOutput",
+    "SetTrackLatency",
+    "SetLayerMute",
+    "SetLayerGain",
+    "RemoveLayer",
+    "UndoLayer",
+    "SetLoopKind",
+    "SetClick",
+    "SetClickGain",
+    "SetMonitorGain",
+    "SetMonitorMute",
+    "SetTempo",
+    "SetFxBypass",
+    "SetFxEnabled",
+    "SetFxParam",
+    "TouchFxEnabled",
+    "TouchFxParam",
+    "LoadFxPreset",
+    "TransportStart",
+    "CountIn",
+    "ClickGate",
+    "TransportStop",
+    "Stop",
+];
 
 /// Why the engine refused the last command it refused. Travels in the status snapshot so the
 /// control thread can print a German sentence instead of just a counter.
@@ -696,7 +791,9 @@ impl CommandReceiver {
 }
 
 pub fn command_channel(capacity: usize) -> (CommandSender, CommandReceiver) {
-    let (tx, rx) = RingBuffer::<Command>::new(capacity);
+    let (mut tx, rx) = RingBuffer::<Command>::new(capacity);
+    // Resident before the audio thread pops from it (`crate::rt::prefault_ring`).
+    crate::rt::prefault_ring(&mut tx);
     (CommandSender { tx }, CommandReceiver { rx })
 }
 
@@ -734,7 +831,10 @@ impl StatusReceiver {
 }
 
 pub fn status_channel(capacity: usize) -> (StatusSender, StatusReceiver) {
-    let (tx, rx) = RingBuffer::<Status>::new(capacity);
+    let (mut tx, rx) = RingBuffer::<Status>::new(capacity);
+    // ~2.4 KB per snapshot: without this the audio thread faults on every seventh push until the
+    // ring has gone round once (`crate::rt::prefault_ring`).
+    crate::rt::prefault_ring(&mut tx);
     (StatusSender { tx }, StatusReceiver { rx })
 }
 
@@ -789,7 +889,9 @@ impl BufferEndpoint {
 
 pub fn buffer_channel(install_capacity: usize, retire_capacity: usize) -> (BufferChannel, BufferEndpoint) {
     let (install_tx, install_rx) = RingBuffer::<Vec<f32>>::new(install_capacity);
-    let (retire_tx, retire_rx) = RingBuffer::<Vec<f32>>::new(retire_capacity);
+    let (mut retire_tx, retire_rx) = RingBuffer::<Vec<f32>>::new(retire_capacity);
+    // The audio thread pushes into the return queue (`crate::rt::prefault_ring`).
+    crate::rt::prefault_ring(&mut retire_tx);
     (
         BufferChannel {
             install_tx,
@@ -802,20 +904,9 @@ pub fn buffer_channel(install_capacity: usize, retire_capacity: usize) -> (Buffe
     )
 }
 
-/// A zeroed buffer whose memory really exists. `vec![0.0; n]` asks the system for zeroed pages,
-/// which it hands out lazily: the first write to each page then faults - in the audio thread,
-/// once per 16 KB of a take, wherever a take happens to cross a page. Writing one zero per page
-/// here makes every page resident before the buffer leaves the control thread. The writes go
-/// through `black_box`, so the compiler cannot prove them redundant and drop them.
-pub fn resident_zeros(len: usize) -> Vec<f32> {
-    let mut buffer = vec![0.0f32; len];
-    // 1024 floats = 4 KB, the smallest page size there is; on 16 KB pages this touches each four
-    // times, which costs nothing worth counting.
-    for i in (0..len).step_by(1024) {
-        *std::hint::black_box(&mut buffer[i]) = 0.0;
-    }
-    buffer
-}
+/// A zeroed layer buffer whose memory really exists - see [`crate::rt::resident_zeros`]. Without
+/// it the first write to each page of a take would fault in the audio thread, once per 16 KB.
+pub use crate::rt::resident_zeros;
 
 /// The control thread's stock of empty layer buffers, one stock per channel count.
 ///

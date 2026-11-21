@@ -79,3 +79,7 @@ mod midi_tests;
 mod output_tests;
 #[cfg(test)]
 mod clean_tests;
+#[cfg(test)]
+mod rt_tests;
+#[cfg(test)]
+mod fifo_tests;

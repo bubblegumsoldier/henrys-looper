@@ -505,9 +505,15 @@ impl Recorder {
 
     /// An audio overrun at engine position `at` (`crate::loadwatch`): a marker in the running
     /// recording's `session.json`, so a click in a file can be matched to it.
-    pub fn overrun(&self, at: u64, kind: &str, load_percent: f32) {
+    pub fn overrun(
+        &self,
+        at: u64,
+        kind: &str,
+        load_percent: f32,
+        detail: looper_engine::capture::session::OverrunDetail,
+    ) {
         if let Some(rec) = &self.active {
-            rec.overrun(at, kind, load_percent);
+            rec.overrun(at, kind, load_percent, detail);
         }
     }
 
