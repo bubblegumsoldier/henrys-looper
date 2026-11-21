@@ -1,0 +1,180 @@
+# Test data: the score of the owner's performance recording of 2026-11-21 14:57:33 - the run the
+# clicks were analysed on - copied without its `sheet:` block (no lyrics in the repository).
+# Used by `engine/src/engine/clean_tests.rs`.
+#
+# The Hardest Part (Olivia Dean) at 94 BPM: one guitar theme (4-bar loop), a bass line played on
+# the guitar, a second guitar on top in the chorus, the lead vocal recorded in chorus 1, backing vocals in chorus 2.
+#
+# Wiring:
+#   Input 1   microphone (mic, backing_vocals)
+#   Input 2   guitar (theme, bass, theme_b, bass_b, chorus_guitar - five tracks, same input)
+#   MIDI      MPD218, channel 10, plays the drums (SSDSampler5)
+#
+# Everything runs by itself: every section goes on after its bars. Nothing to press after Start.
+#
+#   intro 4 + B 1 | verse 8 + B 1 | chorus 10 | verse 8 + B 1 | chorus 10 | bridge 8 | chorus 10 | end
+#
+# A loop that comes back in after a pause starts from its top, so the section lengths need not be
+# multiples of the loop lengths.
+
+title: The Hardest Part
+bpm: 94
+time_signature: 4/4
+
+tracks:
+  theme: {input: 2}
+  bass: {input: 2}
+  theme_b: {input: 2}
+  bass_b: {input: 2}
+  chorus_guitar: {input: 2}
+  # The name "Drums" matters: your SSD5 kit is stored on this machine under that track name.
+  Drums: {input: instrument, midi: {device: MPD218 Port A, channel: 10}, loop: midi, grid: 1/8}
+  mic: {input: 1}
+  backing_vocals: {input: 1}
+
+sections:
+  # Intro, four bars: the theme is recorded - twice the two-bar figure, so there is room for a
+  # variation in the second half.
+  - id: intro
+    bars: 4
+    autorelease: true
+    tracks:
+      theme: record
+
+  # Intro, bar 5: the B part (one bar) is recorded. The theme is silent.
+  - id: intro_b
+    bars: 1
+    autorelease: true
+    tracks:
+      theme_b: record
+
+  # Verse 1, bars 1-4 (the first pass of the theme): the mic opens.
+  - id: verse_1
+    bars: 4
+    autorelease: true
+    tracks:
+      theme: play
+      mic: hear_through
+
+  # Verse 1, bars 5-8 (the second pass of the theme): the bass line is recorded, four bars.
+  - id: verse_1_bass
+    bars: 4
+    autorelease: true
+    tracks:
+      theme: play
+      bass: record
+      mic: hear_through
+
+  # Verse 1, bar 9: the B part from the loop - the way into the chorus. The bass line for B is
+  # recorded on top. Theme and its bass are silent.
+  - id: verse_1_b
+    bars: 1
+    autorelease: true
+    tracks:
+      theme_b: play
+      bass_b: record
+      mic: hear_through
+
+  # Chorus 1, ten bars: the chorus guitar is recorded over the first two bars and loops from then
+  # on; the lead vocal is recorded over the whole chorus (it comes back in chorus 2).
+  - id: chorus_1
+    bars: 10
+    autorelease: true
+    tracks:
+      theme: play
+      bass: play
+      chorus_guitar: {state: record, bars: 2}
+      mic: record
+
+  # Verse 2: like verse 1, nothing recorded.
+  - id: verse_2
+    bars: 8
+    autorelease: true
+    tracks:
+      # The chorus is ten bars, so the four-bar loops are in their middle here: start them from the top.
+      theme: {state: play, restart: true}
+      bass: {state: play, restart: true}
+      # Drums on the pads: the first four bars are recorded, then they loop.
+      Drums: {state: record, bars: 4}
+      mic: hear_through
+
+  # Verse 2, bar 9: the B part and its bass, both from the loops.
+  - id: verse_2_b
+    bars: 1
+    autorelease: true
+    tracks:
+      theme_b: play
+      bass_b: play
+      Drums: play
+      mic: hear_through
+
+  # Chorus 2: the lead vocal of chorus 1 plays, the backing vocals are recorded over all ten bars.
+  - id: chorus_2
+    bars: 10
+    autorelease: true
+    tracks:
+      theme: play
+      bass: play
+      chorus_guitar: play
+      mic: play
+      backing_vocals: record
+      # The drum loop has four bars and has just run nine: start it from the top.
+      Drums: {state: play, restart: true}
+
+  # Bridge: the loops are silent, guitar and voice live.
+  - id: bridge
+    bars: 8
+    autorelease: true
+    tracks:
+      # The chorus guitar's track with its loop silent: the guitar is heard live through its effects.
+      chorus_guitar: hear_through
+      mic: hear_through
+
+  # Chorus 3, bars 1-4: only the drums and all recorded vocals (lead from chorus 1, backing from
+  # chorus 2). Your live voice is heard as a third voice on top (overdub = heard and added as a layer).
+  - id: chorus_3
+    bars: 4
+    autorelease: true
+    tracks:
+      Drums: play
+      mic: play
+      backing_vocals: overdub
+
+  # Chorus 3, bars 5-10: everything comes back in at once.
+  - id: chorus_3_all
+    bars: 6
+    autorelease: true
+    tracks:
+      theme: play
+      bass: play
+      chorus_guitar: play
+      Drums: play
+      mic: play
+      backing_vocals: overdub
+
+  # To be continued. For now: everything stops.
+  - id: end
+    bars: 1
+    autorelease: false
+
+mixer:
+  tracks:
+    # Starting levels taken over from "Sketch 124"; adjust by ear.
+    theme: {gain: -2, preset: piezo_guitar}
+    # The guitar an octave down (Octaver). In the take of 2026-11-21 14:11 the bass was played about
+    # 17 dB softer than the theme and sat 21 dB under it in the mix - inaudible. So: a compressor
+    # that brings the soft notes up (12 dB make-up) and the fader up instead of down.
+    bass:
+      gain: 4
+      preset: bass_from_guitar
+      comp: {on: true, threshold: -35, ratio: 4, attack: 10, release: 120, knee: 6, makeup: 12}
+    theme_b: {gain: -2, preset: piezo_guitar}
+    bass_b:
+      gain: 4
+      preset: bass_from_guitar
+      comp: {on: true, threshold: -35, ratio: 4, attack: 10, release: 120, knee: 6, makeup: 12}
+    chorus_guitar: {gain: -4, preset: piezo_guitar}
+    # No built-in effects on the drums; SSD5 brings its own mix.
+    Drums: {gain: 0, instrument: "vst3:ABCDEF019182FAEB5374536C53534435"}
+    mic: {gain: 4, preset: voice}
+    backing_vocals: {gain: 0, preset: voice}
