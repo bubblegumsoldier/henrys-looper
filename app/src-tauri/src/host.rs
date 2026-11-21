@@ -2533,7 +2533,12 @@ impl Session {
         // whole time (the runner plans on it), but before the start and after "Stop all" nothing
         // is playing, and a display that counts bars of nothing is only a distraction. Display
         // only: the runner and the engine never see this.
-        let transport = status.transport && (self.runner.is_none() || self.score_is_playing());
+        // During the head start of a Start the engine still counts on the old grid; the new bar 1
+        // is a few milliseconds away, and until then the display stands on it.
+        let transport = status.transport
+            && self.runner.as_ref().is_none_or(|runner| {
+                self.score_is_playing() && status.pos >= runner.scheduler().timeline.zero()
+            });
         let (bar, beat, beat_offset) = if transport {
             (status.bar + 1, status.beat + 1, status.beat_offset)
         } else {
@@ -2765,9 +2770,11 @@ impl Session {
             let at = self.scheduler.soon(self.estimated_pos());
             self.start_transport_at(at)?;
         }
-        // ... but nothing of that clock may be heard until Start: the click window closes now and
-        // only the runner opens it, on the first bar of the count-in (and closes it again at the
-        // end or on "Stop all"). See "Nothing is heard of the clock" in the runner's module comment.
+        // ... but nothing of that clock may be heard until Start, and its phase means nothing: the
+        // click window closes now and only the runner opens it, on the first beat of the count-in
+        // (and closes it again at the end or on "Stop all"); Start makes the moment of the press
+        // bar 1 of the run instead of waiting for a bar line of this clock. See "Nothing is heard
+        // of the clock" and "Start means now" in the runner's module comment.
         self.cmd.send(CLOSED_CLICK_GATE)?;
         let mut runner =
             Runner::new(score.clone(), self.scheduler.timeline, self.info.buffer_frames)?;
@@ -2816,10 +2823,16 @@ impl Session {
         };
         let message = match action {
             ScoreAction::Start => {
+                let was_idle = runner.phase() == Phase::Idle;
                 let message = runner.start(est);
-                if runner.phase() == Phase::CountIn
+                if was_idle
+                    && runner.phase() == Phase::CountIn
                     && let Some((at, at_bar)) = runner.armed_at()
                 {
+                    // The start made the moment of the press bar 1 of the run (it sent the engine
+                    // a `TransportStart` for it); this side's mirror of the grid follows, so the
+                    // display, the recording and every later plan agree about where each bar is.
+                    self.scheduler.timeline = runner.scheduler().timeline;
                     let title = runner.score().title.clone();
                     let count_in = runner.count_in_bars();
                     self.begin_recording(RecordMode::Score, &title, at, at_bar, count_in);
