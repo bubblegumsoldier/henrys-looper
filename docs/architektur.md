@@ -695,23 +695,51 @@ Woher die Zahl kommt, in dieser Reihenfolge:
    Undo-Schritt wie Titel oder Tempo), „Load" übernimmt es;
 3. sonst `DEFAULT_COUNT_IN_BARS` = 2 (auch neue Partituren aus der Vorlage schreiben `count_in: 2`).
 
-Der Einzähler beginnt auf der ersten Taktgrenze, die die Kommando-Queue noch rechtzeitig
-erreicht, also ist der tatsächliche Vorlauf die volle Zahl Takte **plus** der Rest des
-angefangenen — nie weniger. Er läuft genau einmal, vor Sektion 0. Die Release-Fläche zählt ihn
-über alle Takte herunter („bar 1 in 2 bars" … „in 1 beat"), mit derselben Anzeige wie der
-Einzähler des freien Modus. Der freie Modus hat seine eigene Einstellung (Off/1/2 im LOOP-Feld,
+**Start heißt jetzt.** Der Einzähler wartet auf keine Taktgrenze: Der Moment des Drucks plus ein
+fester Vorlauf ist Schlag 1 des ersten Einzähler-Takts, und Takt 1 der ersten Sektion liegt genau
+`count_in` Takte später. Der Vorlauf ist der Kopfstart, den jedes zeitgestempelte Kommando
+braucht (`Scheduler::guard`, `Runner::start_lead`): vier Audio-Puffer plus 20 ms — bei 48 kHz
+31 ms mit 128er-Puffern, 41 ms mit 256ern. Derselbe Vorlauf wie beim Start des freien Modus; kürzer
+geht nicht sicher, denn das Kommando muss im Wartezimmer der Engine liegen, bevor das Sample
+gerendert wird, sonst fehlte der erste Schlag. Er hängt nicht davon ab, wo im Takt gedrückt wurde.
+
+Dafür setzt `Runner::start` die Eins neu: Er schickt `Command::TransportStart { at }` für genau
+dieses Sample (die Engine verschiebt `Timeline::zero` dorthin — die „verschiebbare Eins" des freien
+Modus) und verschiebt sein eigenes Raster ebenso; der Host übernimmt es in seinen Spiegel
+(Anzeige, Mitschnitt). Die Uhr hält dabei nie an und nichts Wartendes wird verworfen, anders als
+mit `TransportStop` (siehe unten). Loops, die `TransportStart` neu verankern müsste, gibt es nicht:
+Eine Partitur startet nur auf leeren Spuren — nach dem Laden (das auf belegte Spuren abgelehnt
+wird) oder nach „Back to start" (dessen `ClearAll` alles leert). Ein Start nach „Stop all" oder
+nach dem Ende wird wie bisher abgelehnt („Use Back to start …"); die Loops eines gestoppten Laufs
+bleiben bis dahin liegen, und der zweite Start nach „Back to start" ist ebenso sofort.
+
+Der Einzähler ist damit Takt 0 … `count_in`−1 des Laufs, Sektion 0 beginnt auf Takt `count_in`,
+und alles, was der Runner plant — Sektionsgrenzen, Autorelease, Release mit `quantize: bar|loop`,
+die vorhergesagte Loop-Geometrie `origin + n·loop_len`, `stack`/Latch, Klick, Plugin-Position,
+Mitschnitt-Anfang und Sektionsmarker —, liegt auf diesem Raster. Ein Lauf ist relativ zu seiner Eins
+sample-gleich, wann immer gedrückt wurde (Test `the_count_in_starts_right_away_wherever_the_button_is_pressed`,
+40 Druckzeitpunkte; im Simulator `the_first_click_follows_the_press_by_the_fixed_head_start_only`).
+Die Rundung der Taktgrenzen verschiebt sich jetzt nur noch mit der Länge des Einzählers, deshalb
+spielen die Regressionen von ce2eeb2 (80 Starts, auch die `stack`-Variante) jeden Einzähler von 1
+bis 8.
+
+Er läuft genau einmal, vor Sektion 0. Vor dem Start steht die Anzeige (Takt 1, Schlag 1, nichts
+zählt; während des Vorlaufs ebenso); nach dem Druck zählt die Release-Fläche genau die
+eingestellten Takte herunter („bar 1 in 2 bars" … „in 1 beat"), mit derselben Anzeige wie der
+Einzähler des freien Modus. Start-Knopf, Leertaste und MIDI `transport.start` gehen denselben Weg
+(`ScoreAction::Start`). Der freie Modus hat seine eigene Einstellung (Off/1/2 im LOOP-Feld,
 Vorgabe ebenfalls 2 Takte, eine gespeicherte Einstellung bleibt).
 
 ### Nichts zu hören, solange die Partitur nicht läuft
 
-Beim Laden startet der Host die Uhr der Engine und lässt sie laufen: Der Runner plant den
-Einzähler, Sektion 0 und jede Loop-Geometrie auf genau diesem Raster, und daran ändert sich
-nichts. Zu **hören** ist von dieser Uhr aber nur etwas, während die Partitur läuft. Dafür hat die
+Beim Laden startet der Host die Uhr der Engine und lässt sie laufen; ihre Phase im Leerlauf hat
+keine Bedeutung, denn der Start setzt die Eins neu (siehe „Einzähler"). Zu **hören** ist von
+dieser Uhr nur etwas, während die Partitur läuft. Dafür hat die
 Engine ein zeitgestempeltes Klickfenster (`Command::ClickGate`):
 
 * Der Host schließt es beim Laden (`runner::CLOSED_CLICK_GATE`) — geladen und bereit ist still,
   auch mit eingeschaltetem Klick.
-* Der Runner öffnet es beim Start auf der ersten Taktgrenze des Einzählers, sample-genau.
+* Der Runner öffnet es beim Start auf dem ersten Schlag des Einzählers (der neuen Eins), sample-genau.
 * Er schließt es auf dem Sample, auf dem die Partitur endet, bei „Stop all" (nie vor dem Öffnen,
   falls Stop innerhalb des Vorlaufs gedrückt wird) und noch einmal hinter dem `ClearAll` von
   „Back to start".
@@ -724,7 +752,8 @@ keinen Klick. Der Weg über ein echtes `TransportStop` im Leerlauf wurde verworf
 verwirft alle wartenden Kommandos (auch die Neutralisierer von „Stop all" und das `ClearAll` von
 „Back to start"), behandelt laufende Takes anders als der Runner, und das Ende der Partitur ließe
 sich nur einen Steuerschleifen-Takt zu spät stoppen — der Klick auf der folgenden Eins wäre zu
-hören. Das Fenster lässt jede Planung des Runners unberührt.
+hören. Das Fenster bleibt deshalb auch mit der neu gesetzten Eins nötig: Es hält die laufende Uhr
+im Leerlauf, nach „Stop all" und nach dem Ende stumm.
 
 ### Autorelease, Pending, Quantisierung
 
