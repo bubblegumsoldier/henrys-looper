@@ -26,19 +26,20 @@ use crate::midi::{Binding, ButtonMode, Control, Takeover, Target, TrackRef};
 
 mod mixer;
 
-const ROOT_FIELDS: [&str; 10] = [
+const ROOT_FIELDS: [&str; 11] = [
     "title",
     "bpm",
     "time_signature",
     "beats_per_bar",
     "count_in",
+    "monitor_fade",
     "tracks",
     "midi",
     "sections",
     "mixer",
     "sheet",
 ];
-const TRACK_FIELDS: [&str; 11] = [
+const TRACK_FIELDS: [&str; 12] = [
     "input",
     "midi",
     "pan",
@@ -50,6 +51,7 @@ const TRACK_FIELDS: [&str; 11] = [
     "loop",
     "grid",
     "skip_end",
+    "monitor_fade",
 ];
 const TRACK_MIDI_FIELDS: [&str; 4] = ["device", "channel", "notes", "transpose"];
 const CLIP_FIELDS: [&str; 6] = ["state", "grid", "restart", "bars", "monitor", "skip_end"];
@@ -696,6 +698,9 @@ impl Reader {
         let count_in = fields
             .get("count_in")
             .and_then(|node| self.read_count_in(node));
+        let monitor_fade = fields
+            .get("monitor_fade")
+            .and_then(|node| self.read_monitor_fade(node, "'monitor_fade'"));
         let tracks = fields
             .get("tracks")
             .and_then(|node| self.read_tracks(node))
@@ -732,6 +737,7 @@ impl Reader {
             time_signature,
             beats_per_bar,
             count_in,
+            monitor_fade,
             tracks,
             midi,
             sections,
@@ -901,7 +907,28 @@ impl Reader {
             Some(node) => self.read_pan(name, node),
             None => Some(0.0),
         };
+        // `monitor: true|false`, or `always`: heard from the moment the score is loaded.
+        let mut monitor_always = false;
         let monitor = match fields.get("monitor") {
+            Some(node) if node.as_str() == Some("always") => {
+                monitor_always = true;
+                if matches!(input, Some(InputSpec::Instrument)) {
+                    self.error_with(
+                        Some(node.pos),
+                        format!("'monitor: always' does nothing on the instrument track '{name}'."),
+                        "An instrument track is heard whenever it is played; 'monitor: false' silences it.",
+                    );
+                }
+                Some(true)
+            }
+            Some(node) if matches!(node.kind, NodeKind::Str(_)) => {
+                self.error_with(
+                    Some(node.pos),
+                    format!("'monitor' of Track '{name}' must be true, false or always."),
+                    "'always': the input is heard from the moment the score is loaded, not only where a section records or hears through.",
+                );
+                None
+            }
             Some(node) => self.as_bool(node, &format!("'monitor' of Track '{name}'")),
             None => Some(true),
         };
@@ -984,6 +1011,12 @@ impl Reader {
             }
             None => Some(None),
         };
+        let monitor_fade = match fields.get("monitor_fade") {
+            Some(node) => self
+                .read_monitor_fade(node, &format!("'monitor_fade' of Track '{name}'"))
+                .map(Some),
+            None => Some(None),
+        };
         let (input, input_right, instrument) = match input? {
             InputSpec::Channels(left, right) => (left, right, None),
             InputSpec::Instrument => (0, None, Some(midi?.unwrap_or_default())),
@@ -993,6 +1026,7 @@ impl Reader {
             input_right,
             pan: pan?,
             monitor: monitor?,
+            monitor_always,
             latency: latency?,
             latency_trim: latency_trim?,
             bus: bus?.name().to_string(),
@@ -1001,7 +1035,29 @@ impl Reader {
             loop_kind: loop_kind?,
             grid: grid?,
             skip_end: skip_end?,
+            monitor_fade: monitor_fade?,
         })
+    }
+
+    /// `monitor_fade: {in: 2, out: 1}` - beats (quarter notes, decimals allowed), 0 to 16 each.
+    fn read_monitor_fade(&mut self, node: &Node<'_>, what: &str) -> Option<super::model::MonitorFade> {
+        let entries = self.as_map(node, what)?;
+        let fields = self.index_fields(entries, &["in", "out"], &[], what);
+        let mut out = super::model::MonitorFade::default();
+        for (key, slot) in [("in", &mut out.fade_in), ("out", &mut out.fade_out)] {
+            let Some(node) = fields.get(key) else { continue };
+            let value = self.as_number(node, &format!("'{key}' of {what}"))?;
+            if !value.is_finite() || !(0.0..=16.0).contains(&value) {
+                self.error_with(
+                    Some(node.pos),
+                    format!("'{key}' of {what} must be between 0 and 16 beats, found {value}."),
+                    "Beats (quarter notes) over which the monitoring comes up before its section, or goes down after it.",
+                );
+                return None;
+            }
+            *slot = Some((value * 1000.0).round() as u32);
+        }
+        Some(out)
     }
 
     /// `skip_end: 2` / `1.5`: beats (quarter notes) at the end of a take that are not recorded.

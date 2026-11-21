@@ -86,6 +86,9 @@ pub struct DocTrack {
     pub pan: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor: Option<bool>,
+    /// `monitor: always` - heard from the moment the score is loaded (then `monitor` is `None`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub monitor_always: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -103,11 +106,43 @@ pub struct DocTrack {
     /// `skip_end: 2` - beats at the end of every record/overdub of this track that are not taken.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_end: Option<f64>,
+    /// `monitor_fade: {in: 2}` for this track, over the score's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_fade: Option<DocFade>,
     #[serde(default, skip_serializing_if = "Comments::is_empty")]
     pub comments: Comments,
     /// 1-based source line. Output only; ignored when a document comes back from the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<u32>,
+}
+
+/// `monitor_fade: {in: 2, out: 1}` as written, in beats.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DocFade {
+    #[serde(default, rename = "in", skip_serializing_if = "Option::is_none")]
+    pub fade_in: Option<f64>,
+    #[serde(default, rename = "out", skip_serializing_if = "Option::is_none")]
+    pub fade_out: Option<f64>,
+}
+
+impl DocFade {
+    fn render(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(v) = self.fade_in {
+            parts.push(format!("in: {}", num(v)));
+        }
+        if let Some(v) = self.fade_out {
+            parts.push(format!("out: {}", num(v)));
+        }
+        format!("{{{}}}", parts.join(", "))
+    }
+}
+
+/// `{in: 2, out: 1}` of a `monitor_fade:`; `None` for anything that is not a map.
+fn fade_of(node: &Node<'_>) -> Option<DocFade> {
+    let NodeKind::Map(fields) = &node.kind else { return None };
+    let get = |k: &str| fields.iter().find(|f| f.key.as_str() == Some(k)).and_then(|f| number(&f.value));
+    Some(DocFade { fade_in: get("in"), fade_out: get("out") })
 }
 
 impl DocTrack {
@@ -121,6 +156,7 @@ impl DocTrack {
             input_right: None,
             pan: None,
             monitor: None,
+            monitor_always: false,
             latency: None,
             latency_trim: None,
             bus: None,
@@ -128,6 +164,7 @@ impl DocTrack {
             loop_kind: None,
             grid: None,
             skip_end: None,
+            monitor_fade: None,
             comments: Comments::default(),
             line: None,
         }
@@ -333,6 +370,9 @@ pub struct ScoreDoc {
     /// `count_in: 2` - bars of click before the first section; `None` when the file does not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count_in: Option<u32>,
+    /// `monitor_fade: {in: 2, out: 1}` - beats; `None` when the file does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_fade: Option<DocFade>,
     #[serde(default)]
     pub tracks: Vec<DocTrack>,
     #[serde(default)]
@@ -551,6 +591,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
         time_signature: None,
         beats_per_bar: None,
         count_in: None,
+        monitor_fade: None,
         tracks: Vec::new(),
         midi: Vec::new(),
         sections: Vec::new(),
@@ -573,6 +614,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
             "time_signature" => doc.time_signature = text_of(value),
             "beats_per_bar" => doc.beats_per_bar = int(value).map(|v| v as u32),
             "count_in" => doc.count_in = int(value).map(|v| v as u32),
+            "monitor_fade" => doc.monitor_fade = fade_of(value),
             "tracks" => {
                 if let NodeKind::Map(entries) = &value.kind {
                     for track in entries {
@@ -596,10 +638,12 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                     "loop" => t.loop_kind = text_of(v),
                                     "grid" => t.grid = text_of(v),
                                     "pan" => t.pan = number(v),
+                                    "monitor" if v.as_str() == Some("always") => t.monitor_always = true,
                                     "monitor" => t.monitor = boolean(v),
                                     "latency" => t.latency = int(v).map(|i| i as u32),
                                     "latency_trim" => t.latency_trim = int(v).map(|i| i as i32),
                                     "skip_end" => t.skip_end = number(v),
+                                    "monitor_fade" => t.monitor_fade = fade_of(v),
                                     "bus" => t.bus = text_of(v),
                                     "monitor_bus" => t.monitor_bus = text_of(v),
                                     _ => {}
@@ -1443,6 +1487,9 @@ pub fn render_doc(doc: &ScoreDoc) -> String {
     if let Some(bars) = doc.count_in {
         w.line(0, &format!("count_in: {bars}"), &root("count_in"));
     }
+    if let Some(fade) = doc.monitor_fade {
+        w.line(0, &format!("monitor_fade: {}", fade.render()), &root("monitor_fade"));
+    }
 
     w.blank();
     if doc.tracks.is_empty() {
@@ -1818,7 +1865,9 @@ fn track_flow(track: &DocTrack) -> String {
     if let Some(pan) = track.pan {
         fields.push(format!("pan: {}", num(pan)));
     }
-    if let Some(monitor) = track.monitor {
+    if track.monitor_always {
+        fields.push("monitor: always".to_string());
+    } else if let Some(monitor) = track.monitor {
         fields.push(format!("monitor: {monitor}"));
     }
     if let Some(latency) = track.latency {
@@ -1841,6 +1890,9 @@ fn track_flow(track: &DocTrack) -> String {
     }
     if let Some(skip) = track.skip_end {
         fields.push(format!("skip_end: {}", num(skip)));
+    }
+    if let Some(fade) = track.monitor_fade {
+        fields.push(format!("monitor_fade: {}", fade.render()));
     }
     format!("{{{}}}", fields.join(", "))
 }
@@ -2083,6 +2135,7 @@ pub fn template_with(tracks: Vec<DocTrack>, instruments: Vec<(String, String)>) 
         time_signature: Some("4/4".to_string()),
         beats_per_bar: None,
         count_in: Some(crate::engine::runner::DEFAULT_COUNT_IN_BARS),
+        monitor_fade: None,
         tracks,
         midi: Vec::new(),
         sections: vec![intro, layer, outro],

@@ -60,6 +60,28 @@ pub struct ClipOptions {
     pub skip_end: Option<u32>,
 }
 
+/// `monitor_fade: {in: 2, out: 1}` - beats (quarter notes) over which a track's monitoring comes up
+/// before the section that switches it on, and goes down after the one that ends it. In thousandths
+/// of a quarter; `None` for a side the score does not set. Score-wide, and per track (which wins).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorFade {
+    #[serde(default, rename = "in", skip_serializing_if = "Option::is_none")]
+    pub fade_in: Option<u32>,
+    #[serde(default, rename = "out", skip_serializing_if = "Option::is_none")]
+    pub fade_out: Option<u32>,
+}
+
+impl MonitorFade {
+    /// This one, with what it leaves open taken from `base`.
+    pub fn over(self, base: Option<MonitorFade>) -> MonitorFade {
+        let base = base.unwrap_or_default();
+        MonitorFade {
+            fade_in: self.fade_in.or(base.fade_in),
+            fade_out: self.fade_out.or(base.fade_out),
+        }
+    }
+}
+
 impl ClipOptions {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
@@ -204,6 +226,12 @@ pub struct TrackSource {
     /// Default `true`.
     #[serde(default = "default_true")]
     pub monitor: bool,
+    /// `monitor: always` - the input is heard whenever a score is loaded (ready, count-in, every
+    /// section, the end), not only where a section asks for it. Yields to another track on the same
+    /// input that a section monitors (a take, `hear_through`, `play` with `monitor`), so the input
+    /// is never heard twice. "Stop all" switches it off with everything else. See `engine::runner`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub monitor_always: bool,
     /// Measured latency compensation of this input, in frames. Absent means "the engine's global
     /// default", which is right for everything hanging on the same converter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -240,6 +268,9 @@ pub struct TrackSource {
     /// are not recorded (see `ClipOptions::skip_end`, which overrides it). Thousandths of a quarter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_end: Option<u32>,
+    /// `monitor_fade: {in: 2}` for this track, over the score's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_fade: Option<MonitorFade>,
 }
 
 /// How an instrument track is played: which MIDI device, which channel, which keys.
@@ -414,6 +445,9 @@ pub struct ScoreSource {
     /// app's default (`engine::runner::DEFAULT_COUNT_IN_BARS`, two bars).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count_in: Option<u32>,
+    /// `monitor_fade: {in: 2, out: 1}` for every track; off when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_fade: Option<MonitorFade>,
     pub tracks: OrderedMap<TrackSource>,
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub midi: OrderedMap<MidiBindingSource>,
@@ -455,6 +489,9 @@ pub struct CompiledTrack {
     /// Position in the stereo field, -1.0 to +1.0.
     pub pan: f32,
     pub monitor: bool,
+    /// `monitor: always` (`TrackSource::monitor_always`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub monitor_always: bool,
     /// Measured latency compensation in frames; `None` means the engine's global default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency: Option<u32>,
@@ -479,6 +516,9 @@ pub struct CompiledTrack {
     /// The track's default `skip_end`, in thousandths of a quarter note (`TrackSource::skip_end`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skip_end: Option<u32>,
+    /// The track's own `monitor_fade`, before the score's (`CompiledScore::fade_of`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_fade: Option<MonitorFade>,
 }
 
 impl CompiledTrack {
@@ -581,6 +621,9 @@ pub struct CompiledScore {
     /// uses its default). A count-in set on the command line or in the window for one run wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count_in: Option<u32>,
+    /// The score's `monitor_fade`, before any track's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor_fade: Option<MonitorFade>,
     pub tracks: Vec<CompiledTrack>,
     #[serde(default)]
     pub midi: OrderedMap<CompiledMidiBinding>,
@@ -596,6 +639,14 @@ pub struct CompiledScore {
 }
 
 impl CompiledScore {
+    /// The monitor fade of track `t`: its own, over the score's; `(in, out)` in thousandths of a
+    /// quarter note, 0 for none.
+    pub fn fade_of(&self, t: usize) -> (u32, u32) {
+        let own = self.tracks.get(t).and_then(|t| t.monitor_fade).unwrap_or_default();
+        let fade = own.over(self.monitor_fade);
+        (fade.fade_in.unwrap_or(0), fade.fade_out.unwrap_or(0))
+    }
+
     /// The time signature in the form [`crate::engine::timeline::Timeline`] wants.
     pub fn signature(&self) -> TimeSignature {
         TimeSignature::new(self.beats_per_bar, self.beat_unit)

@@ -273,15 +273,32 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
             def.input.label(),
             def.input.channels().label(),
             pan_label(def.pan),
-            if track.monitor { "allowed" } else { "off" },
+            if track.monitor_always {
+                "always (from the load on)"
+            } else if track.monitor {
+                "allowed"
+            } else {
+                "off"
+            },
             effective,
             effective as f64 * 1000.0 / rate.max(1) as f64,
             latency_origin(def.latency, default_latency),
             def.loop_send.label(),
             def.monitor_send.label(),
-            match track.skip_end {
-                Some(milli) if milli > 0 => format!(", takes skip the last {} beats", beats_text(milli)),
-                _ => String::new(),
+            {
+                let mut extra = match track.skip_end {
+                    Some(milli) if milli > 0 => format!(", takes skip the last {} beats", beats_text(milli)),
+                    _ => String::new(),
+                };
+                let (fade_in, fade_out) = score.fade_of(track.index);
+                if fade_in > 0 || fade_out > 0 {
+                    extra.push_str(&format!(
+                        ", monitor fades in {} / out {} beats",
+                        beats_text(fade_in),
+                        beats_text(fade_out)
+                    ));
+                }
+                extra
             },
         );
     }

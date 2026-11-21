@@ -703,10 +703,12 @@ function TrackHead(p: HeadProps) {
                   ? "Heard whenever it is played, in every section"
                   : "This instrument is never heard live (monitor: false)"
                 : monitor
-                  ? "Monitoring allowed: you can hear this input live (needed for Record, Overdub and Monitor)"
+                  ? t.monitor_always
+                    ? "Monitoring always: heard from the load on, giving way to a monitored track on the same input"
+                    : "Monitoring allowed: you can hear this input live (needed for Record, Overdub and Monitor)"
                   : "Monitoring off for this track"
             }
-            onClick={() => p.edit((d) => ops.patchTrack(d, p.index, { monitor: monitor ? false : undefined }))}
+            onClick={() => p.edit((d) => ops.patchTrack(d, p.index, { monitor: monitor ? false : undefined, monitor_always: undefined }))}
           >
             <i className="ic ic-hear" />
             Monitor

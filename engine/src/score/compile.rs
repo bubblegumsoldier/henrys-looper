@@ -56,6 +56,7 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
             },
             pan: spec.pan,
             monitor: spec.monitor,
+            monitor_always: spec.monitor_always,
             // Passed through as written. Resolving `latency` against the engine's default cannot
             // happen here: the default belongs to the device the score is played on, which a
             // compiled score knows nothing about.
@@ -69,6 +70,7 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
             loop_kind: spec.loop_kind,
             grid: spec.grid.clone(),
             skip_end: spec.skip_end,
+            monitor_fade: spec.monitor_fade,
         })
         .collect();
 
@@ -146,6 +148,7 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
         beats_per_bar,
         beat_unit,
         count_in: source.count_in,
+        monitor_fade: source.monitor_fade,
         tracks,
         midi,
         mixer: source.mixer.clone(),

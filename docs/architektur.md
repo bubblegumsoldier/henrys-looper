@@ -908,6 +908,67 @@ restart, monitor`; im Arrangement „+ input" am Clip und *Hear the input over t
 Clip-Inspektor (nur bei Play, nicht bei Instrument-Tracks). Bewiesen in `score/clip_tests.rs` und
 `runner/overdub_tests.rs` (Loop lückenlos, Mithören an und wieder aus, keine Ebene dazu, Stop all).
 
+### Mithören von Anfang an (`monitor: always`)
+
+Der Besitzer will sich durch die App hören, sobald die Partitur geladen ist — beim Prüfen des
+Klangs vor Start, im Einzähler, in jeder Sektion —, nicht nur wo eine Sektion aufnimmt oder
+`hear_through` sagt. `tracks: {theme: {input: 2, monitor: always}}`. `monitor:` heißt sonst
+weiter „darf überhaupt mitgehört werden" (`true`, Standard) bzw. nie (`false`).
+
+**Modell: je Track, mit Vorrang je Eingang** (`runner::monitor_plan`). Erst bestimmt die Sektion,
+wer mithört (Takes, `hear_through`, `play` mit `monitor: true`; nie ein Track mit `monitor:
+false`). Dann bekommt jeder `always`-Track sein Mithören, **wenn kein schon mithörender Track einen
+seiner Eingangskanäle teilt**; von zwei `always`-Tracks auf einem Eingang gewinnt der erste. So
+hört er im Bass-Take die Kette des Basses, sonst die des `always`-Tracks — nie den Eingang doppelt.
+Erwogen und verworfen: ein Mithören je *Eingang* statt je Track. Das Mithören läuft aber durch die
+Effektkette und den Monitor-Bus eines Tracks — welcher Klang zu hören ist, *ist* die Wahl des
+Tracks; ein Eingangs-Modell müsste genau diese Wahl wieder einführen.
+
+| Phase | `always`-Track |
+|---|---|
+| geladen / „Back to start" | an (`setup_commands` schaltet ihn ein, das Bild des Runners weiß es) |
+| Einzähler, Sektionen | an, außer ein anderer Track auf seinem Eingang hört gerade mit |
+| Ende der Partitur | an |
+| „Stop all" | **aus** — die Notbremse macht alles still; „Back to start" schaltet ihn wieder ein |
+| Instrument-Track | **Fehler** — er ist ohnehin zu hören, solange er spielt |
+
+Der Wechsel zwischen zwei Tracks auf einem Eingang geschieht im selben Steuer-Takt (erst aus,
+dann an); mit `monitor_fade` (unten) wird er eine echte Überblendung. Die Stummschaltung bei
+eingebauten Lautsprechern wirkt in der Engine auf jedes Mithören, also auch hier. Anzeige:
+`score --check` „Monitor always (from the load on)"; Dokument `DocTrack.monitor_always`
+(`monitor: always`); im Arrangement wählt der Track-Inspektor *Allowed / Always / Off*. Bewiesen in
+`runner/monitor_tests.rs` (vor Start, Einzähler, Take auf demselben Eingang, nie beide zugleich,
+Stop all, Back to start, Fehler).
+
+### Das Mithören einblenden (`monitor_fade`)
+
+„Man sollte das Mithören kurz vorher einblenden können, von −∞ dB bis zum Zielpegel." `monitor_fade:
+{in: 2, out: 1}` in Schlägen (Vierteln, Dezimalen erlaubt, 0–16) — für die ganze Partitur und je
+Track (`tracks: {mic: {input: 1, monitor_fade: {in: 4}}}`, Seite für Seite über der Partitur).
+Ohne Angabe wie bisher: an der Grenze geschaltet.
+
+* **Engine:** `Command::MonitorFade { track, at, on, frames }`, zeitgestempelt. Ein schaltet das
+  Mithören bei `at` ein und bringt es über `frames` von Stille auf vollen Pegel; aus bringt es ab
+  `at` herunter und schaltet am Ende ab. Die Kurve ist quadratisch in der Amplitude (eine Gerade
+  klingt, als setze sie schlagartig ein). Nur das **Gehörte** wird geblendet
+  (`monitor_frame`); ein Take nimmt den Eingang trocken und voll auf — bewiesen: der Take nach einem
+  Einblenden ist ab seinem ersten Frame auf vollem Pegel. Ein `SetMonitor` beendet eine laufende
+  Blende.
+* **Runner** (`schedule_monitor_fades`, beim Armieren): Wer an der Grenze `at` angeht, beginnt
+  `in` Schläge davor — **nie früher als der Augenblick des Armierens plus Kopfstart**: nach einem
+  späten Release, oder wenn die Blende länger als der Einzähler ist, wird sie kürzer und ist
+  trotzdem genau auf der Grenze voll. Wer ausgeht, blendet ab `at` über `out` Schläge aus. Gibt ein
+  Track seinen Eingang an einen ab, der eingeblendet wird (`always` weicht einem Take), blendet er
+  über genau dieselbe Strecke aus — eine Überblendung. Diese Tracks schaltet der Runner an der
+  Grenze nicht mehr selbst, er führt nur sein Bild nach.
+* **„Stop all"** schickt jedem Track ein `SetMonitor { on: false }`, gleich was sein Bild sagt — eine
+  schon laufende Einblendung wird damit beendet, die wartenden holt `DropWaiting` zurück.
+
+Anzeige: `score --check` „monitor fades in 2 / out 1 beats" am Track; Dokument `monitor_fade` oben
+und am Track. Je Clip gibt es die Blende (noch) nicht, und im Arrangement wird sie nur im Text
+bearbeitet. Bewiesen in `runner/monitor_tests.rs` (Verlauf vor der Grenze, voll auf ihr, Ausblenden
+danach, Take trocken, nach Release, länger als der Einzähler, Stop all mitten in der Blende).
+
 ### Das Ende eines Takes auslassen (`skip_end`)
 
 Am Ende einer aufgenommenen Sektion singt oder spielt der Besitzer oft schon den Auftakt in den

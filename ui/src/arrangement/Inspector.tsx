@@ -767,12 +767,34 @@ function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, stale
         <div className="frow">
           <label>{t.instrument ? "Heard" : "Monitoring"}</label>
           <div>
-            <Toggle
-              on={monitor}
-              disabled={!editable}
-              label={t.instrument ? (monitor ? "Always" : "Never") : monitor ? "Allowed" : "Off"}
-              onChange={(on) => patch({ monitor: on ? undefined : false })}
-            />
+            {t.instrument ? (
+              <Toggle
+                on={monitor}
+                disabled={!editable}
+                label={monitor ? "Always" : "Never"}
+                onChange={(on) => patch({ monitor: on ? undefined : false })}
+              />
+            ) : (
+              <select
+                className="field sel"
+                value={t.monitor_always ? "always" : monitor ? "allowed" : "off"}
+                disabled={!editable}
+                title="Allowed: heard where a section records or hears through. Always: heard from the moment the score is loaded, count-in included; it gives way to another track on the same input while that one is monitored. Off: never heard live."
+                onChange={(e) =>
+                  patch(
+                    e.target.value === "always"
+                      ? { monitor: undefined, monitor_always: true }
+                      : e.target.value === "off"
+                        ? { monitor: false, monitor_always: undefined }
+                        : { monitor: undefined, monitor_always: undefined },
+                  )
+                }
+              >
+                <option value="allowed">Allowed</option>
+                <option value="always">Always</option>
+                <option value="off">Off</option>
+              </select>
+            )}
           </div>
         </div>
         <div className="hint">
@@ -780,7 +802,9 @@ function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, stale
             ? monitor
               ? "An instrument track is heard whenever it is played — in every section, whatever its clips say."
               : "This instrument is never heard live; its takes are still recorded and play back."
-            : monitor
+            : t.monitor_always
+              ? "You hear this input from the moment the score is loaded, count-in included. While another track on the same input is monitored (a take, Monitor), that one is heard instead - never both."
+              : monitor
               ? "You can hear this input live through the engine — Record, Overdub and Monitor need that."
               : "This input is never heard live. Record, Overdub and Monitor still work, but without hearing yourself."}
         </div>

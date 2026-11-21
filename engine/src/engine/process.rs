@@ -145,6 +145,34 @@ use super::source::{HostClock, SourceEndpoint, SourceRack, heard_at, place_event
 use super::timeline::Timeline;
 use super::track::{MAX_LAYERS, Track, TrackLatency};
 
+/// A monitor fade (`Command::MonitorFade`): from output position `from` to `to`, rising from silence
+/// to full level or falling to silence. Quadratic in amplitude - a straight line in amplitude
+/// sounds as if it jumped in at the start; the square comes up from "nothing" the way a fader does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MonitorRamp {
+    pub from: u64,
+    pub to: u64,
+    pub rising: bool,
+}
+
+impl MonitorRamp {
+    #[inline(always)]
+    pub fn gain_of(ramp: Option<MonitorRamp>, pos: u64) -> f32 {
+        let Some(r) = ramp else {
+            return 1.0;
+        };
+        let x = if pos <= r.from {
+            0.0
+        } else if pos >= r.to {
+            1.0
+        } else {
+            (pos - r.from) as f32 / (r.to - r.from) as f32
+        };
+        let level = if r.rising { x } else { 1.0 - x };
+        level * level
+    }
+}
+
 /// Frames of the fade that leads into a take's cut (`Command::CutTake`): 2 ms at 48 kHz - long
 /// enough not to click, far too short to be heard as a fade.
 pub const CUT_FADE: u64 = 96;
@@ -279,6 +307,8 @@ pub struct EngineCore {
     /// `Command::CutTake` per track: (start of the take it belongs to, position from which that
     /// take records silence). A take with another start ignores it - see [`Self::cut_gain`].
     pub(super) cuts: [Option<(u64, u64)>; MAX_TRACKS],
+    /// A running monitor fade per track (`Command::MonitorFade`) - see [`MonitorRamp`].
+    monitor_fades: [Option<MonitorRamp>; MAX_TRACKS],
     /// End of a running count-in (`Command::CountIn`): until then the click sounds whatever its
     /// switch says, and the loops stay held.
     count_in: Option<u64>,
@@ -347,6 +377,7 @@ impl EngineCore {
             instrument_delay: None,
             latch: Latches::default(),
             cuts: [None; MAX_TRACKS],
+            monitor_fades: [None; MAX_TRACKS],
             count_in: None,
             gate: true,
             gate_bar1: None,
@@ -451,6 +482,7 @@ impl EngineCore {
     /// every output callback calls right after this - placement, output meters and the safety
     /// limiter in one step.
     pub fn process(&mut self, input: &[f32], output: &mut [f32]) {
+        self.settle_monitor_fades();
         self.refill_spares();
         self.collect_commands();
         self.collect_inserts();
@@ -893,6 +925,7 @@ impl EngineCore {
     ) {
         let channels = self.input_channels;
         let monitor_gain = if self.monitor_muted { 0.0 } else { self.monitor_gain };
+        let fades = self.monitor_fades;
         // A standing transport has no beat to click on.
         let click = self.clicking();
         let click_gain = self.click_gain;
@@ -925,7 +958,8 @@ impl EngineCore {
                 let monitor = if track.is_instrument() {
                     instrument_frame(track, sources, t, frame)
                 } else {
-                    monitor_frame(track, input, frame, in_frames, channels, monitor_gain)
+                    let gain = monitor_gain * MonitorRamp::gain_of(fades.get(t).copied().flatten(), pos);
+                    monitor_frame(track, input, frame, in_frames, channels, gain)
                 };
                 let sent = track.render(pos, monitor, collapsed);
                 if let Some(capture) = capture.as_mut() {
@@ -989,6 +1023,7 @@ impl EngineCore {
         let n = out.len() / BUS_SAMPLES;
         let channels = self.input_channels;
         let monitor_gain = if self.monitor_muted { 0.0 } else { self.monitor_gain };
+        let fades = self.monitor_fades;
         let collapsed = self.routing.collapsed();
         let transport = self.plugin_transport(start);
         let sources = self.sources.as_deref();
@@ -1010,7 +1045,15 @@ impl EngineCore {
                     let monitor = if track.is_instrument() {
                         instrument_frame(track, sources, t, in_base + i)
                     } else {
-                        monitor_frame(track, input, in_base + i, in_frames, channels, monitor_gain)
+                        monitor_frame(
+                            track,
+                            input,
+                            in_base + i,
+                            in_frames,
+                            channels,
+                            monitor_gain
+                                * MonitorRamp::gain_of(fades.get(t).copied().flatten(), start + i as u64),
+                        )
                     };
                     let (wet, s) = track.render_unpanned(start + i as u64, monitor, collapsed);
                     spread = s;
@@ -1267,6 +1310,23 @@ impl EngineCore {
     /// a straight fade over [`CUT_FADE`] frames into the cut, so the layer does not end in a click.
     /// The silence is written, not skipped: the take keeps its length and its later frames are
     /// defined. Only the recording is touched - the monitored input is heard as it is.
+    /// Finish the monitor fades the output has passed: a fade-in is simply done, a fade-out
+    /// switches the monitoring off. Once per process call, so a faded-out track is off within one
+    /// block of the fade's end (it is silent from the end on either way).
+    fn settle_monitor_fades(&mut self) {
+        let now = self.out_pos;
+        for t in 0..self.tracks.len().min(MAX_TRACKS) {
+            if let Some(ramp) = self.monitor_fades[t]
+                && now >= ramp.to
+            {
+                if !ramp.rising {
+                    self.tracks[t].set_monitor(false);
+                }
+                self.monitor_fades[t] = None;
+            }
+        }
+    }
+
     #[inline]
     pub(super) fn cut_gain(&self, t: usize, start: u64, pos: u64) -> f32 {
         match self.cuts.get(t).copied().flatten() {
@@ -1388,12 +1448,34 @@ impl EngineCore {
             }
             Command::ClearAll { .. } => {
                 self.latch.all_off();
+                self.monitor_fades = [None; MAX_TRACKS];
                 for track in 0..self.tracks.len() {
                     self.clear_track(track);
                     self.tracks[track].restore_defaults();
                 }
             }
-            Command::SetMonitor { track, on } => self.tracks[track].set_monitor(on),
+            Command::SetMonitor { track, on } => {
+                self.monitor_fades[track] = None;
+                self.tracks[track].set_monitor(on);
+            }
+            Command::MonitorFade {
+                track,
+                at,
+                on,
+                frames,
+            } => {
+                if on {
+                    self.tracks[track].set_monitor(true);
+                }
+                // Only a track that is heard can fade out; one that is not stays as it is.
+                if on || self.tracks[track].monitor() {
+                    self.monitor_fades[track] = Some(MonitorRamp {
+                        from: at,
+                        to: at + frames.max(1),
+                        rising: on,
+                    });
+                }
+            }
             Command::SetPan { track, pan } => self.tracks[track].set_pan(pan),
             // The channel strip: a few stores and a new smoother target. Listening only - nothing
             // here reaches `record_input`, so a muted or soloed-away track records as before.

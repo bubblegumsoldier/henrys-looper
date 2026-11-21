@@ -239,6 +239,9 @@ struct Armed {
     /// what it will be once the change has happened (with `autorelease` that is the whole time a
     /// section plays), so [`Runner::stop_all`] reads what is true *now* from here.
     before: Vec<Now>,
+    /// Tracks whose monitoring this change switches with a timed fade (`monitor_fade`) rather than
+    /// at the boundary - [`Runner::tick`] leaves them to the engine and only updates its picture.
+    faded: Vec<bool>,
 }
 
 /// An `overdub` or `stack` that had no pass of its loop inside its section, so nothing was
@@ -408,6 +411,9 @@ pub struct Runner {
     /// Where the click window opens for the run that was started last (the first bar of the
     /// count-in); 0 before any start. A close must never land before it - see [`Runner::stop_all`].
     gate_open_at: u64,
+    /// The earliest position a fade scheduled by the change being armed may start at - see
+    /// [`Runner::schedule_monitor_fades`].
+    arm_floor: u64,
     /// Passes `place_pass` could not place - see [`Skipped`].
     skipped: Vec<Skipped>,
 }
@@ -477,6 +483,11 @@ impl Runner {
                 stack_from: 0,
             })
             .collect();
+        let mut tracks = tracks;
+        for (track, on) in tracks.iter_mut().zip(monitor_plan(&score, None)) {
+            // What `setup_commands` switches on: a `monitor: always` track, from the load on.
+            track.monitor = on;
+        }
         let bars = plans.iter().map(|p| p.bars).max().unwrap_or(1);
         // The score's own `count_in:` if it has one; the reader has checked the range already.
         let count_in_bars = score
@@ -498,6 +509,7 @@ impl Runner {
             out: Vec::new(),
             notices: Vec::new(),
             gate_open_at: 0,
+            arm_floor: 0,
             skipped: Vec::new(),
         })
     }
@@ -626,6 +638,7 @@ impl Runner {
             bar1: first,
         });
         self.gate_open_at = anchor;
+        self.arm_floor = anchor;
         self.arm(Target::Section(0), first, first_bar);
         self.message = format!(
             "Count-in: {} bar{} of click, then \"{}\".",
@@ -756,7 +769,12 @@ impl Runner {
             if now.sounding || now.take_end > est || now.stacking {
                 stopped += 1;
             }
-            self.set_monitor(track, false);
+            // Sent whatever the picture says: a monitor fade may already be running in the engine
+            // (it began before the boundary the picture switches on), and a `SetMonitor` ends it.
+            if !self.tracks[track].instrument {
+                self.out.push(Command::SetMonitor { track, on: false });
+                self.tracks[track].monitor = false;
+            }
             self.tracks[track].sounding = false;
             self.tracks[track].target = ScoreState::Stop;
             self.tracks[track].take_end = 0;
@@ -827,9 +845,12 @@ impl Runner {
             track.take_end = 0;
             track.take_end_bar = 0;
             track.stacking = false;
-            // A clear restores each track's start-up monitoring, which the caller then switches
-            // off again; the runner's picture is "off" either way.
+            // A clear restores each track's start-up monitoring, which the caller then puts back
+            // to the score's setup (`setup_commands`): off, except `monitor: always`.
             track.monitor = false;
+        }
+        for (track, on) in self.tracks.iter_mut().zip(monitor_plan(&self.score, None)) {
+            track.monitor = on;
         }
         self.out.clear();
         self.notices.clear();
@@ -874,7 +895,7 @@ impl Runner {
                     bars: self.plans[index].bars,
                 });
                 self.phase = Phase::Running;
-                self.apply_monitor(index);
+                self.apply_monitor(Some(index), &armed.faded);
                 self.message = format!(
                     "Section {}/{} \"{}\": {} bar{}{}.",
                     index + 1,
@@ -898,13 +919,13 @@ impl Runner {
                     } else {
                         Target::End
                     };
+                    self.arm_floor = self.sched.soon(pos);
                     self.arm(target, at, at_bar);
                 }
             }
             Target::End => {
-                for track in 0..self.tracks.len() {
-                    self.set_monitor(track, false);
-                }
+                // Only `monitor: always` stays heard after the end.
+                self.apply_monitor(None, &armed.faded);
                 self.current = None;
                 self.phase = Phase::Finished;
                 self.message = "End of the score - all tracks silent.".to_string();
@@ -1019,15 +1040,109 @@ impl Runner {
         self.out.push(Command::SetMonitor { track, on });
     }
 
-    fn apply_monitor(&mut self, index: usize) {
-        for track in 0..self.tracks.len() {
-            let state = self.plans[index].want[track];
-            // `{state: play, monitor: true}`: the loop plays and the input is heard on top.
-            let want = state.records()
-                || state == ScoreState::HearThrough
-                || (state == ScoreState::Play && self.plans[index].clips[track].monitor);
-            self.set_monitor(track, want);
+    /// The monitoring of section `index` (`None`: no section - the end), switched at the boundary.
+    /// A track in `faded` is already being switched by a timed fade in the engine
+    /// ([`Self::schedule_monitor_fades`]): only the picture follows.
+    fn apply_monitor(&mut self, index: Option<usize>, faded: &[bool]) {
+        let plan = monitor_plan(&self.score, index);
+        // Off first, then on: two tracks on one input trade places (a take takes over from the
+        // `always` track) within the same turn.
+        for pass_on in [false, true] {
+            for (track, on) in plan.iter().copied().enumerate() {
+                if on != pass_on {
+                    continue;
+                }
+                if faded.get(track).copied().unwrap_or(false) {
+                    if !self.tracks[track].instrument {
+                        self.tracks[track].monitor = on && self.tracks[track].can_monitor;
+                    }
+                } else {
+                    self.set_monitor(track, on);
+                }
+            }
         }
+    }
+
+    /// `monitor_fade`: for a change that lands at `at`, the tracks whose monitoring it switches get
+    /// a timed fade instead of the switch at the boundary. Coming on, the fade starts `in` beats
+    /// before `at` - but never before `floor`, the earliest moment a command can still reach the
+    /// engine (a Release pressed late, the count-in): then it is shorter and still full at `at`.
+    /// Going off, it starts at `at` and lasts `out` beats. A track that gives its input up to one
+    /// coming on on the same input (`monitor: always` yielding to a take) fades out over exactly the
+    /// other's fade-in - a cross-fade. Returns which tracks are faded.
+    fn schedule_monitor_fades(&mut self, target: Target, at: u64, floor: u64) -> Vec<bool> {
+        let n = self.tracks.len();
+        let mut faded = vec![false; n];
+        let now = monitor_plan(&self.score, self.current.map(|c| c.index));
+        let next = monitor_plan(
+            &self.score,
+            match target {
+                Target::Section(i) => Some(i),
+                Target::End => None,
+            },
+        );
+        let quarter = self.quarter_frames();
+        let frames = |milli: u32| (quarter * f64::from(milli) / 1000.0).round() as u64;
+        let channels = |t: usize| -> Vec<usize> {
+            match self.score.tracks[t].track_input() {
+                super::frame::TrackInput::Mono(c) => vec![c],
+                super::frame::TrackInput::Stereo { left, right } => vec![left, right],
+                super::frame::TrackInput::Instrument => Vec::new(),
+            }
+        };
+        let mut rising: Vec<Option<u64>> = vec![None; n];
+        for t in 0..n {
+            if self.tracks[t].instrument || !self.tracks[t].can_monitor || now[t] || !next[t] {
+                continue;
+            }
+            let (fade_in, _) = self.score.fade_of(t);
+            if fade_in == 0 {
+                continue;
+            }
+            let from = at.saturating_sub(frames(fade_in)).max(floor).min(at);
+            if from >= at {
+                continue;
+            }
+            self.out.push(Command::MonitorFade {
+                track: t,
+                at: from,
+                on: true,
+                frames: at - from,
+            });
+            rising[t] = Some(from);
+            faded[t] = true;
+        }
+        for t in 0..n {
+            if self.tracks[t].instrument || !now[t] || next[t] {
+                continue;
+            }
+            let mine = channels(t);
+            let handover = (0..n)
+                .filter(|&u| u != t && channels(u).iter().any(|c| mine.contains(c)))
+                .find_map(|u| rising[u]);
+            if let Some(from) = handover {
+                self.out.push(Command::MonitorFade {
+                    track: t,
+                    at: from,
+                    on: false,
+                    frames: at - from,
+                });
+                faded[t] = true;
+                continue;
+            }
+            let (_, fade_out) = self.score.fade_of(t);
+            if fade_out == 0 {
+                continue;
+            }
+            self.out.push(Command::MonitorFade {
+                track: t,
+                at,
+                on: false,
+                frames: frames(fade_out).max(1),
+            });
+            faded[t] = true;
+        }
+        faded
     }
 
     /// Where a change triggered now may take effect, on the grid the current section asks for.
@@ -1253,6 +1368,7 @@ impl Runner {
             None if current.index + 1 < self.plans.len() => Target::Section(current.index + 1),
             None => Target::End,
         };
+        self.arm_floor = self.sched.soon(est);
         self.arm(target, at, at_bar);
         let (bars, beats) = self.sched.distance(est, at);
         // Where the switch lands, said in the section's own terms. The absolute bar index is no
@@ -1285,11 +1401,14 @@ impl Runner {
             Target::Section(index) => self.schedule_section(index, at, at_bar),
             Target::End => self.schedule_silence(at),
         }
+        let floor = self.arm_floor;
+        let faded = self.schedule_monitor_fades(target, at, floor);
         self.armed = Some(Armed {
             target,
             at,
             at_bar,
             before,
+            faded,
         });
     }
 
@@ -1568,6 +1687,7 @@ fn lead_text(bars: u32, beats: u32) -> String {
 /// tracks back to the values they were *started* with.
 pub fn setup_commands(score: &CompiledScore) -> Vec<Command> {
     use super::bus::TrackSource;
+    let idle = monitor_plan(score, None);
     let mut out = Vec::with_capacity(score.tracks.len() * 5);
     for (track, spec) in score.tracks.iter().enumerate() {
         out.push(Command::SetPan {
@@ -1592,10 +1712,58 @@ pub fn setup_commands(score: &CompiledScore) -> Vec<Command> {
         // says monitor: false (the host starts the engine that way). The engine would ignore
         // the command anyway.
         if !spec.is_instrument() {
-            out.push(Command::SetMonitor { track, on: false });
+            out.push(Command::SetMonitor {
+                track,
+                on: idle[track],
+            });
         }
     }
     out
+}
+
+/// Which tracks are monitored - in section `section`, or with no section sounding (`None`: loaded,
+/// count-in, the end).
+///
+/// A section monitors a track it records on (`record`, `overdub`, `stack`), one it hears through,
+/// and one on `{state: play, monitor: true}` - unless the track says `monitor: false`. On top of
+/// that a `monitor: always` track is heard whenever none of those takes its input: tracks that
+/// share an input channel (five guitar tracks on input 2) never monitor it twice. So during the bass
+/// take the bass track's chain is heard, otherwise the `always` track's; of two `always` tracks on
+/// one input the first one wins. Instrument tracks keep the monitoring they were started with and
+/// are left out (`Runner::set_monitor`).
+pub fn monitor_plan(score: &CompiledScore, section: Option<usize>) -> Vec<bool> {
+    let n = score.tracks.len();
+    let mut on = vec![false; n];
+    if let Some(section) = section.and_then(|i| score.sections.get(i)) {
+        for (t, spec) in score.tracks.iter().enumerate() {
+            let state = section
+                .tracks
+                .get(&spec.name)
+                .copied()
+                .unwrap_or(ScoreState::Stop);
+            let heard = state.records()
+                || state == ScoreState::HearThrough
+                || (state == ScoreState::Play && section.clip(&spec.name).monitor);
+            on[t] = heard && spec.monitor && !spec.is_instrument();
+        }
+    }
+    let channels = |t: usize| -> Vec<usize> {
+        match score.tracks[t].track_input() {
+            super::frame::TrackInput::Mono(c) => vec![c],
+            super::frame::TrackInput::Stereo { left, right } => vec![left, right],
+            super::frame::TrackInput::Instrument => Vec::new(),
+        }
+    };
+    for t in 0..n {
+        let spec = &score.tracks[t];
+        if on[t] || !spec.monitor_always || spec.is_instrument() {
+            continue;
+        }
+        let mine = channels(t);
+        let taken = (0..n).any(|u| u != t && on[u] && channels(u).iter().any(|c| mine.contains(c)));
+        on[t] = !taken;
+    }
+    on
 }
 
 /// Check a score against the tracks an engine is **already** running with.
@@ -1657,3 +1825,6 @@ mod stop_tests;
 
 #[cfg(test)]
 mod overdub_tests;
+
+#[cfg(test)]
+mod monitor_tests;

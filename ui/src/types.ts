@@ -731,6 +731,8 @@ export interface CompiledScore {
   beat_unit: number;
   /** The score's `count_in:`, absent when it does not say. */
   count_in?: number;
+  /** `monitor_fade: {in: 2, out: 1}` - beats over which monitoring comes up before its section and goes down after it. */
+  monitor_fade?: DocFade;
   tracks: CompiledTrack[];
   midi: Record<string, { id: string }>;
   sections: CompiledSection[];
@@ -835,6 +837,10 @@ export interface DocTrack {
   pan?: number;
   /** Absent = true. */
   monitor?: boolean;
+  /** `monitor: always` - heard from the moment the score is loaded (then `monitor` is absent). */
+  monitor_always?: boolean;
+  /** `monitor_fade: {in, out}` for this track, in beats, over the score's. */
+  monitor_fade?: DocFade;
   /** Frames, 0..96000; absent = the engine's default. */
   latency?: number;
   /** Frames, -96000..96000; absent = 0. */
@@ -1212,4 +1218,10 @@ export interface NoticeEvent {
   /** `score` for the runner. */
   source: string;
   text: string;
+}
+
+/** `monitor_fade: {in: 2, out: 1}` as written, in beats (quarter notes). */
+export interface DocFade {
+  in?: number;
+  out?: number;
 }

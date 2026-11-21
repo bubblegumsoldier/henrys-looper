@@ -94,6 +94,17 @@ pub enum Command {
     /// monitored. The score's `skip_end` (a pickup into the next part sung at the end of a take).
     /// Sent right after the take's own commands, for the take's start; a later take ignores it.
     CutTake { track: usize, at: u64, from: u64 },
+    /// Fade this track's monitoring: `on` switches it on at `at` and brings the monitored input from
+    /// silence to full level over `frames`; off brings it down over `frames` from `at` and switches
+    /// it off at the end. Only what is **heard** is faded - a take records the input dry and at full
+    /// level. The score's `monitor_fade` (a voice that comes in before its section starts). A
+    /// `SetMonitor` for the track ends a running fade.
+    MonitorFade {
+        track: usize,
+        at: u64,
+        on: bool,
+        frames: u64,
+    },
     /// Throw this track's layers away; the buffers go back to the control thread.
     ClearTrack { track: usize, at: u64 },
     /// Reset every track to the state of a fresh start and return every buffer. Commands that were
@@ -249,6 +260,7 @@ impl Command {
             | Command::RestartLoop { at, .. }
             | Command::ClearTrack { at, .. }
             | Command::CutTake { at, .. }
+            | Command::MonitorFade { at, .. }
             | Command::ClearAll { at }
             | Command::DropWaiting { at }
             | Command::LatchOverdub { at, .. }
@@ -296,6 +308,7 @@ impl Command {
             | Command::RestartLoop { track, .. }
             | Command::ClearTrack { track, .. }
             | Command::CutTake { track, .. }
+            | Command::MonitorFade { track, .. }
             | Command::LatchOverdub { track, .. }
             | Command::SetMonitor { track, .. }
             | Command::SetPan { track, .. }
