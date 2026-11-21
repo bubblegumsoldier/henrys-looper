@@ -57,7 +57,11 @@ struct Stage {
 
 impl Stage {
     fn new(played: Played, mixer: bool) -> Self {
-        let score = compile_score(SCORE).expect("die Partitur uebersetzt");
+        Self::of(SCORE, played, mixer)
+    }
+
+    fn of(yaml: &str, played: Played, mixer: bool) -> Self {
+        let score = compile_score(yaml).expect("die Partitur uebersetzt");
         let timeline = Timeline::new(RATE, score.bpm, score.signature());
         let max_bars = score.sections.iter().map(|s| s.bars).max().unwrap();
         let mut offsets = vec![0u64];
@@ -396,6 +400,58 @@ fn the_owners_score_plays_without_a_single_click() {
     let raw = theme.layer(0).unwrap().channel(0, len);
     let jump = f64::from((raw[len as usize - 1] - raw[0]).abs());
     assert!(jump > 20.0 * max_curve, "the theme's raw seam is only {jump}");
+}
+
+/// `stack` - a new layer in every pass, each with its own seam and its pre-roll taken from the
+/// end of the pass before - on a two-bar loop that comes back re-anchored after a one-bar pause,
+/// plus an overdub cut short by its section: none of it clicks either.
+#[test]
+fn stacked_and_cut_short_layers_play_without_a_click() {
+    let yaml = "\
+bpm: 94
+tracks:
+  guitar: {input: 2}
+  voice: {input: 1}
+sections:
+  - id: take
+    bars: 2
+    autorelease: true
+    tracks:
+      guitar: record
+  - id: stack
+    bars: 6
+    autorelease: true
+    tracks:
+      guitar: stack
+      voice: record
+  - id: pause
+    bars: 1
+    autorelease: true
+    tracks:
+      voice: play
+  - id: back
+    bars: 3
+    autorelease: true
+    tracks:
+      guitar: play
+      voice: overdub
+  - id: end
+    bars: 2
+    autorelease: false
+    tracks:
+      guitar: play
+";
+    let mut stage = Stage::of(yaml, Box::new(low), false);
+    let from = stage.section(0);
+    let to = stage.section(4) + (stage.bar(2) - stage.bar(0));
+    stage.run_to(to);
+    assert!(stage.sim.core.track(0).layer_count() >= 3, "stacked layers");
+    let (max_step, max_curve) = bounds(4);
+    let ((step, at_step), (curve, at_curve)) = roughness(&stage, from, to);
+    let clicks = clicks(&stage, from, to, max_curve);
+    eprintln!("stack: step {step:.5} at {at_step}, curvature {curve:.6} at {at_curve}, {clicks} over");
+    assert!(step <= max_step, "step {step} at {at_step}");
+    assert!(curve <= max_curve, "click: curvature {curve} at {at_curve}");
 }
 
 /// "Stop all" pressed mid-chorus, mid-loop, mid-take: everything is silent from the sample it
