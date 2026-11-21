@@ -2323,6 +2323,68 @@ wird gezählt (Notice nach dem Lauf, `session.json`). Die WAV-Header werden jede
 nachgeführt: Nach einem Absturz ist jede Datei bis zur letzten Sekunde lesbar (nur `session.json`
 fehlt dann).
 
+### Nachträglich neu mischen: `looper-engine render` (gebaut 2026-11)
+
+```text
+looper-engine render "<Mitschnitt-Ordner>" --out <Ordner> [--score bearbeitet.yaml]
+    [--plugins <Partitur>.plugins.json] [--stems-from-recording Drums] [--only bass,bass_b]
+    [--no-plugins] [--plugin-bundle X.vst3] [--compare] [--block 128]
+```
+
+Jede Spur: trockener Stem → Kanalzug, wie ihn der `mixer:` der Partitur beschreibt (eingebaute
+Geräte, Plugins an ihren `before:`-Plätzen mit dem Zustand aus `score.plugins.json` bzw.
+`--plugins`, Fader, Pan) → `NN name.wav` in `--out`; die Summe in Spurreihenfolge ist `Mix.wav`.
+24 Bit, Samplerate des Mitschnitts. In den Mitschnitt-Ordner wird nie geschrieben.
+
+* **Kein Nachbau.** `render/strip.rs` betreibt einen `EngineCore` mit einer Spur; der trockene Stem
+  ist deren Eingang bei Mithören 1,0 (bitgleich: `0.0 + x = x`), die Kette wird über dieselben
+  Kommandos eingestellt wie beim Laden einer Partitur (`track_commands`), Plugins werden geladen,
+  bekommen ihren Zustand **vor** `activate` und sitzen über `InsertMsg::Install` im Rack - wie in
+  `plugins.rs` der App. Frame- oder Blockpfad, geteilte Kette, Fader-Glättung, Panorama: alles der
+  Live-Code. Eigener Code ist nur das Drumherum (Ordner lesen, Vorlauf, Summe, Vergleich).
+* **Latenz wie live:** der Eingang wird um `EngineCore::read_ahead_of` (Oktaver + nicht umgangene
+  Plugins) vorgelesen, genau wie der Loop live. Vor Takt 1 läuft Stille, länger als der längste
+  Schwanz der Kette: Schalter und Fader stehen, die Kette ist im Leerlauf wie nach einem Einzähler.
+* **Plugins:** Id aus der Partitur, Zustand aus der Datei (Reihenfolge, dann Id - dieselbe Regel
+  wie `scorestate::match_states`), `bypass: true` der Partitur = nicht im Signalweg (wie live).
+  Gefunden werden sie über `--plugin-bundle` oder den Scan-Cache (`plugins.json`, nur gelesen).
+  `--no-plugins` lässt jedes Insert mit einer lauten Warnung weg. Instrument-Spuren nehmen immer
+  ihren aufgenommenen Stem (das Instrument wird nicht geladen), ebenso jede Spur unter
+  `--stems-from-recording`. Main-Bus-Inserts stehen nicht in der Partitur und werden nicht
+  angewendet.
+* **`--compare`** vergleicht jeden gerenderten Stem (24-Bit-gerundet) mit dem aufgenommenen, über
+  den ganzen Take und je Sektion; `live` markiert Sektionen, in denen der Eingang der Spur zu hören
+  war.
+
+**Nulltest am Take „The Hardest Part“ (21.11.2026, 18:43)**, `bass`/`bass_b` (Oktaver + Kompressor,
+keine Plugins): wo der Loop spielt und der Oktaver dieselbe Vorgeschichte hat, ist der Render bis
+aufs letzte Bit der Stem (`bass`, Refrain 3: höchstens 1 LSB). Was nicht gleich ist, hat drei
+Ursachen, keine davon im Render:
+
+1. **Live-Durchgänge** (Aufnahme, Hear-through): der Saal hörte den Eingang um Roundtrip plus
+   Kettenlatenz später - gemessen 740 Frames = 596 + 144 (Oktaver). Der Render legt ihn aufs Raster.
+   Residuum dort um 0 dB; um 740 Frames verschoben −58 dB.
+2. **Der Oktaver hat ein Gedächtnis:** seine Sprungsuche läuft auf einer 4:1 dezimierten Kopie,
+   deren Phase die Zahl der seit dem Einschalten gerechneten Samples ist. Live hat er andere
+   Abschnitte gerechnet (Live-Durchgang verspätet, Kanten von Einsätzen, deren Befehl die
+   Vorlese-Strecke nicht ganz abdeckte - am Einsatz von Refrain 3 beginnt der Stem 10 Samples später
+   als der trockene Stem). Folge: `bass` in Refrain 1/Strophe 2/Refrain 2 −44 dB unter dem Stem,
+   in kurzen Stücken um einzelne Sprünge. Versuch: zwei Samples mehr vor dem Take machen genau diese
+   Abschnitte bitgleich (und verschieben die −44 dB in Refrain 3).
+3. **Rundung des trockenen Stems auf 24 Bit:** live hörte die Kette Floats. Auf einer Kette mit
+   Kompressor und Hall (`mic`, `voice`) bleiben rund −84 dB unter dem Stem; dieselben −84 dB
+   entstehen, wenn man den trockenen Stem um ±1 LSB verrauscht.
+
+Möglich, nicht gebaut: der Mitschnitt könnte als trockenen Stem genau das ablegen, was die Kette
+bekam (den vorgelesenen Wert, um die Vorlese-Strecke zurückversetzt), und der Oktaver könnte seine
+Dezimierphase am Signal statt an der Samplezahl festmachen - dann wäre auch Ursache 2 weg.
+
+Tests (`render/tests.rs`, synthetische Mitschnitte aus `Sim` mit Recorder): Loop-Wiedergabe
+bitgleich zum Live-Stem (Voice-Kette + Delay, Pan), Live-Durchgang um `R` versetzt bitgleich,
+Stille länger als der Hallschwanz, geänderte Partitur, Oktaver- und Plugin-Latenz auf dem Raster,
+kaputte Ordner, und das Test-VST3 des Repos (`tools/test-vst3-gain`): offline geladen, Zustand
+(Gain 0,5) aus der Einstellungsdatei, 64 Frames Latenz ausgeglichen - Ergebnis exakt die Hälfte.
+
 ## 17. Das Blatt: Text, Akkorde und Regie neben der Bühne
 
 Der Besitzer singt und spielt über seine Loops und muss dabei wissen, was gerade aufgenommen wird und
