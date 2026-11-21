@@ -21,6 +21,11 @@ pub struct Session {
     pub beats_per_bar: u32,
     pub beat_unit: u32,
     pub frames: u64,
+    /// The live engine's position of frame 0 - only its phase against the audio block is used.
+    #[serde(default)]
+    pub engine_position: u64,
+    #[serde(default)]
+    pub count_in_bars: u32,
     #[serde(default)]
     pub mix: Option<String>,
     pub tracks: Vec<SessionTrack>,

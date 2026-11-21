@@ -1,29 +1,25 @@
-//! Offline proofs for `render`: synthetic recordings made by the live engine (`Sim` with the
-//! recorder attached), rendered again from their dry stems, compared with what the live engine put
-//! into the stems. Everything lives in the system's temporary directory; no installed plugin is
-//! loaded - the plugin test uses the repository's own test VST3 (`tools/test-vst3-gain`).
+//! Offline proofs for `render`. The recordings are synthetic and made the way the app makes them:
+//! the score's runner driving the live engine, a played input on the device channels, the recorder
+//! attached (`perform` with [`Source::Played`]). The render then has only the folder - dry stems,
+//! `session.json`, `score.yaml` - and must play the same performance again. Everything lives in the
+//! system's temporary directory; no installed plugin is loaded (the plugin test uses the
+//! repository's own test VST3, `tools/test-vst3-gain`).
 
 use std::path::{Path, PathBuf};
 
+use super::perform::{Pass, PerformSpec, Source, perform, start_positions};
 use super::plugins::PluginFinder;
-use super::strip::{OfflineStrip, StripSpec};
 use super::*;
-use crate::capture::run::{self, MIN_SECONDS, Mode, RunInfo, RunTrack};
+use crate::capture::Layout;
 use crate::capture::session::{dry_file, stem_file};
-use crate::capture::wav::read_wav;
-use crate::capture::capture_channel;
-use crate::engine::command::{Command, TrackStatus};
-use crate::engine::insert::testing::Delay;
-use crate::engine::insert::{Insert, InsertPosition, InsertShared};
-use crate::engine::sim::{Played, Sim, SimSpec, TrackSpec};
-use crate::engine::timeline::Timeline;
-use crate::engine::fx::render::parse_entry;
-use crate::score::mixer::{TrackMix, track_commands};
+use crate::capture::wav::WavWriter;
+use crate::engine::frame::Channels;
+use crate::engine::insert::{Insert, InsertPosition, InsertShared, MAX_BLOCK};
+use crate::engine::timeline::{TimeSignature, Timeline};
 
 const RATE: u32 = 48_000;
+const R: u64 = 600;
 const BLOCK: usize = 128;
-/// The simulated roundtrip, which is also what the tracks compensate.
-const R: u64 = 827;
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -35,379 +31,260 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-fn timeline() -> Timeline {
-    Timeline::new(RATE, 120.0, TimeSignature::new(4, 4))
-}
-
-/// A phrase with notes and pauses - enough to move a compressor and fill a reverb - between
-/// `from` and `to` (input indices), silence elsewhere.
-fn phrase(from: u64, to: u64) -> impl Fn(u64) -> f32 {
-    move |k| {
-        if k < from || k >= to {
-            return 0.0;
-        }
-        let t = (k - from) as f64 / RATE as f64;
-        let note = (t * 4.0) as u64; // four notes a second
-        let within = t * 4.0 - note as f64;
-        let freq = [196.0, 247.0, 294.0, 330.0][(note % 4) as usize];
-        let env = (-(within * 6.0)).exp() * if note % 3 == 2 { 0.2 } else { 0.6 };
-        let x = (env * (2.0 * std::f64::consts::PI * freq * t).sin()) as f32;
-        // On the 24-bit grid already: the dry file then holds exactly the floats the live chain
-        // heard. (A real input is not on it, which costs a real take a residual around -84 dB on
-        // a compressed chain - see the module comment of `render`.)
-        to_i24(x) as f32 / 8_388_607.0
-    }
-}
-
-/// The score both the live run and the render use. Only `mixer:` and `pan` matter to the render.
-fn score_yaml(mixer_entry: &str, pan: f32) -> String {
+/// Three tracks, two on one input: a `monitor: always` guitar that gives way to the bass take
+/// (the hand-off), a voice heard through for one section, `monitor_fade` on everything.
+fn score_yaml(mixer: &str) -> String {
     format!(
-        "title: Render test\nbpm: 120\ntracks:\n  voice: {{input: 1, pan: {pan}}}\nsections:\n  - {{id: a, bars: 2}}\n  - {{id: b, bars: 4}}\n  - {{id: c, bars: 4}}\nmixer:\n  tracks:\n    voice: {mixer_entry}\n"
+        "title: Render test\nbpm: 120\nmonitor_fade: {{in: 2}}\ntracks:\n  guitar: {{input: 1, monitor: always}}\n  bass: {{input: 1}}\n  voice: {{input: 2, pan: -0.3}}\nsections:\n  - {{id: a, bars: 2, autorelease: true, tracks: {{guitar: record}}}}\n  - {{id: b, bars: 2, autorelease: true, tracks: {{guitar: play, bass: record}}}}\n  - {{id: c, bars: 2, autorelease: true, tracks: {{guitar: play, bass: play, voice: hear_through}}}}\n  - {{id: d, bars: 2, autorelease: true, tracks: {{guitar: play, bass: play}}}}\n  - {{id: e, bars: 1, autorelease: false}}\n{mixer}"
     )
+}
+
+const MIXER: &str = "mixer:\n  tracks:\n    guitar: {gain: 2, preset: piezo_guitar}\n    bass: {preset: bass_from_guitar, comp: {on: true, makeup: 6}}\n    voice: {gain: -3, preset: voice}\n";
+
+/// A phrase with notes and pauses, on the 24-bit grid (so a dry file holds exactly what the engine
+/// heard), between `from` and `to`.
+fn phrase(k: u64, from: u64, to: u64, base: f64) -> f32 {
+    if k < from || k >= to {
+        return 0.0;
+    }
+    let t = (k - from) as f64 / RATE as f64;
+    let note = (t * 4.0) as u64;
+    let within = t * 4.0 - note as f64;
+    let freq = base * [1.0, 1.26, 1.5, 1.68][(note % 4) as usize];
+    let env = (-(within * 5.0)).exp() * if note % 3 == 2 { 0.15 } else { 0.5 };
+    let x = (env * (2.0 * std::f64::consts::PI * freq * t).sin()) as f32;
+    to_i24(x) as f32 / 8_388_607.0
+}
+
+fn spec_for(yaml: &str, frames: u64) -> PerformSpec {
+    let score = compile_score(yaml).unwrap();
+    let n = score.tracks.len();
+    PerformSpec {
+        score,
+        sample_rate: RATE,
+        frames,
+        first_abs: 58_935_464,
+        count_in_bars: 2,
+        latency: vec![R; n],
+        block: BLOCK,
+        outputs: 2,
+        monitor_gain: 1.0,
+    }
 }
 
 struct Made {
     folder: PathBuf,
-    /// Musical positions of the take and of the loop playback, file frames.
-    take: (u64, u64),
-    playback: (u64, u64),
+    /// File frames where each section starts.
+    sections: Vec<u64>,
 }
 
-/// Record a synthetic performance with the live engine: one mono track whose chain the score's
-/// mixer entry sets, the phrase played and monitored through Main during bars 3-4 (taken as a
-/// loop), then - after twelve seconds of silence - the loop played back for two passes. Monitoring
-/// stays on (the input is silent after the take, and `x + 0.0` is `x`). Bar 1 is file frame 0.
-fn make_recording(dir: &Path, mixer_entry: &str, pan: f32) -> Made {
-    make_recording_at(dir, mixer_entry, pan, 10)
-}
-
-/// The same, with the loop played from bar `play + 1` on.
-fn make_recording_at(dir: &Path, mixer_entry: &str, pan: f32, play: u64) -> Made {
-    let tl = timeline();
-    // Zero-based bar indices: bar(0) is bar 1, file frame 0.
-    let bar = |n: u64| tl.bar_start(n);
-    let yaml = score_yaml(mixer_entry, pan);
-    let score = compile_score(&yaml).unwrap();
-    let entry = score.mixer.as_ref().unwrap().tracks.get("voice").unwrap().clone();
-    let mix: TrackMix = entry.resolve();
-    // Played only well inside the take, so the recorder's fades at its edges act on silence and
-    // the dry stem holds exactly what the live chain heard, R frames earlier.
-    let (take_from, take_to) = (bar(2), bar(4));
-    let p = phrase(take_from + R + 4_000, take_to + R - 4_000);
-    let played: Played = Box::new(move |k, ch| if ch == 0 { p(k) } else { 0.0 });
-    let mut sim = Sim::new(
-        SimSpec {
-            bpm: 120.0,
-            bars: 2,
-            block: BLOCK,
-            latency: R,
-            roundtrip: R,
-            tracks: vec![TrackSpec::on(0).monitoring().panned(pan)],
-            input_channels: 1,
-            loopback_channel: None,
-            ..Default::default()
-        },
-        played,
-    );
-    for cmd in track_commands(0, &mix, &TrackStatus::default()) {
-        sim.send(cmd);
-    }
-    let (mut port, endpoint) = capture_channel();
-    sim.core.attach_capture(endpoint);
-    let play_from = bar(play);
-    let play_to = bar(play + 4);
-    for cmd in [
-        Command::StartRecord { track: 0, at: take_from },
-        Command::StopRecord { track: 0, at: take_to },
-        Command::StartPlay { track: 0, at: play_from },
-        Command::StopPlay { track: 0, at: play_to },
-    ] {
-        sim.send(cmd);
-    }
-    let info = RunInfo {
-        title: "Render test".into(),
-        mode: Mode::Score,
-        folder: dir.join("rec"),
-        started_at: "2026-11-21 20:00:00".into(),
-        sample_rate: RATE,
-        bpm: 120.0,
-        beats_per_bar: 4,
-        beat_unit: 4,
-        count_in_bars: 0,
-        start: bar(0),
-        start_bar: 0,
-        tracks: vec![RunTrack {
-            name: "voice".into(),
-            channels: Channels::Mono,
-            latency_frames: R,
-        }],
-        dry: true,
-        max_block: BLOCK,
-        score_yaml: Some(yaml),
-        score_path: None,
-        min_seconds: MIN_SECONDS,
-        queue_seconds: 120.0,
-    };
-    let mut rec = run::Recording::start(info, &mut port).unwrap();
-    rec.note_take();
-    sim.run_to(bar(play + 7));
-    rec.stop(bar(play + 7));
-    let end = sim.pos() + 30 * RATE as u64;
-    while sim.pos() < end {
-        sim.step();
-        if rec.poll().is_some() {
-            break;
+/// Perform the score with a played input - guitar on input 1 from bar 1 on, the voice only inside
+/// section `c` - and write the folder the app's recorder would write.
+fn make_recording(dir: &Path, yaml: &str, live_inserts: Vec<Vec<(usize, Insert)>>) -> Made {
+    let tl = Timeline::new(RATE, 120.0, TimeSignature::new(4, 4));
+    let bar = tl.bar_start(1) - tl.bar_start(0);
+    let sections: Vec<u64> = [0, 2, 4, 6, 8].iter().map(|b| b * bar).collect();
+    let frames = 9 * bar + 2 * u64::from(RATE);
+    let spec = spec_for(yaml, frames);
+    let (_, _, first) = start_positions(&spec).unwrap();
+    let c = (sections[2], sections[3]);
+    let played = move |k: u64, ch: usize| -> f32 {
+        match ch {
+            0 => phrase(k, first + R, u64::MAX, 110.0),
+            1 => phrase(k, first + R + c.0 + 4_000, first + R + c.1 - 4_000, 220.0),
+            _ => 0.0,
         }
-    }
-    let outcome = rec.wait().cloned().expect("the writer finished");
-    assert!(outcome.kept, "{outcome:?}");
-    Made {
-        folder: outcome.folder.clone(),
-        take: (take_from, take_to),
-        playback: (play_from, play_to),
-    }
-}
-
-fn read(path: &Path) -> Vec<f32> {
-    read_wav(path).unwrap().1
-}
-
-fn quiet() -> Vec<u8> {
-    Vec::new()
-}
-
-/// The voice chain with a tempo delay on top: high-pass, EQ, compressor, delay, reverb - every
-/// stateful built-in effect except the octaver, which has its own test.
-const VOICE: &str = "{gain: -2, preset: voice, delay: {on: true, mix: 0.3}}";
-
-#[test]
-fn a_rendered_dry_stem_is_the_live_stem_wherever_the_loop_played() {
-    let dir = scratch("loop");
-    let made = make_recording(&dir, VOICE, 0.3);
-    let out = dir.join("out");
-    let mut log = quiet();
-    let report = render(
-        &RenderOpts {
-            recording: made.folder.clone(),
-            out: out.clone(),
-            compare: true,
-            ..Default::default()
+    };
+    let folder = dir.join("rec");
+    std::fs::create_dir_all(&folder).unwrap();
+    let names = ["guitar", "bass", "voice"];
+    let layout = Layout {
+        tracks: vec![Channels::Mono; 3],
+        dry: true,
+    };
+    let mut stems: Vec<WavWriter> =
+        (0..3).map(|t| WavWriter::create(&folder.join(stem_file(t, names[t])), 2, RATE).unwrap()).collect();
+    let mut drys: Vec<WavWriter> =
+        (0..3).map(|t| WavWriter::create(&folder.join(dry_file(t, names[t])), 1, RATE).unwrap()).collect();
+    let mut mix = WavWriter::create(&folder.join("Mix.wav"), 2, RATE).unwrap();
+    let mut sink = |_f: u64, sf: &[f32]| {
+        mix.sample(sf[0]).unwrap();
+        mix.sample(sf[1]).unwrap();
+        for t in 0..3 {
+            let so = layout.stem_offset(t);
+            stems[t].sample(sf[so]).unwrap();
+            stems[t].sample(sf[so + 1]).unwrap();
+            drys[t].sample(sf[layout.dry_offset(t).unwrap()]).unwrap();
+        }
+    };
+    let mut poll = || {};
+    perform(
+        &spec,
+        Pass::Audio {
+            source: Source::Played(&played),
+            inserts: live_inserts,
+            poll: &mut poll,
+            sink: &mut sink,
         },
-        None,
-        &mut log,
     )
     .unwrap();
-    let text = String::from_utf8_lossy(&log).to_string();
-    assert!(report.tracks[0].rendered, "{text}");
-
-    let rendered = read(&out.join(stem_file(0, "voice")));
-    let recorded = read(&made.folder.join(stem_file(0, "voice")));
-    assert_eq!(rendered.len(), recorded.len());
-    // The loop playback, from its first faded-in frame to the end of its last tail: the same file
-    // contents, bit for bit.
-    let (from, to) = (made.playback.0 - 2_000, made.playback.1 + 4 * RATE as u64);
-    let loop_part = Residual::of(&rendered, &recorded, from, to);
-    assert!(loop_part.stem_dbfs > -40.0, "the loop is audible: {loop_part:?}");
-    assert!(loop_part.bit_exact(), "loop playback: {}\n{text}", loop_part.text());
-
-    // The live pass: heard through Main R frames after it was played; the render puts it on the
-    // grid. Shifted by R, it is the same signal.
-    let (a, b) = made.take;
-    let mut worst = 0.0f32;
-    for i in (a as usize)..(b as usize + 2 * RATE as usize) {
-        for c in 0..2 {
-            let live = recorded[(i + R as usize) * 2 + c];
-            let grid = rendered[i * 2 + c];
-            worst = worst.max((live - grid).abs());
-        }
+    for w in stems.into_iter().chain(drys).chain([mix]) {
+        w.finish().unwrap();
     }
-    assert!(worst <= 1.5 / 8_388_607.0, "live pass, shifted by R: worst {worst}");
-    assert!(
-        Residual::of(&rendered, &recorded, a, b).rel_db.unwrap() > -20.0,
-        "unshifted, the live pass does not null - and must not be reported as if it did"
-    );
+    std::fs::write(folder.join("score.yaml"), yaml).unwrap();
+    let tracks: Vec<serde_json::Value> = (0..3)
+        .map(|t| {
+            serde_json::json!({
+                "number": t + 1, "name": names[t], "input_channels": 1,
+                "stem": stem_file(t, names[t]), "dry": dry_file(t, names[t]), "midi": null,
+                "latency_frames": R
+            })
+        })
+        .collect();
+    let markers: Vec<serde_json::Value> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .zip(&sections)
+        .map(|(id, f)| serde_json::json!({"frame": f, "section": id}))
+        .collect();
+    let session = serde_json::json!({
+        "format": "henrys-looper-recording", "version": 1, "title": "Render test",
+        "sample_rate": RATE, "bit_depth": 24, "bpm": 120.0, "beats_per_bar": 4, "beat_unit": 4,
+        "frames": frames, "engine_position": first, "count_in_bars": 2, "mix": "Mix.wav",
+        "tracks": tracks, "markers": markers, "score_copy": "score.yaml"
+    });
+    std::fs::write(folder.join("session.json"), serde_json::to_string_pretty(&session).unwrap())
+        .unwrap();
+    Made { folder, sections }
+}
 
-    // Mix.wav is the sum of the stems, and with one track that is the stem.
-    let mix = read(&out.join("Mix.wav"));
-    assert_eq!(mix, rendered);
+fn opts(rec: &Path, out: PathBuf) -> RenderOpts {
+    RenderOpts {
+        recording: rec.to_path_buf(),
+        out,
+        compare: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_performance_played_again_gives_the_same_files() {
+    let dir = scratch("same");
+    let made = make_recording(&dir, &score_yaml(MIXER), Vec::new());
+    let mut log = Vec::new();
+    let report = render(&opts(&made.folder, dir.join("out")), None, &mut log).unwrap();
+    let text = String::from_utf8_lossy(&log).to_string();
+    assert_eq!(report.weight_mismatches, 0, "{text}");
+    for tr in &report.tracks {
+        // The input was found again: the dry stems played again are the recorded ones, to the
+        // last step of the file. (One step where a weight below 1 divides the rounding of the
+        // file - inside the fades.)
+        let dry = tr.dry_check.unwrap();
+        assert!(dry.max_lsb <= 1, "{}: dry {}\n{text}", tr.name, dry.text());
+        // Everything after it - takes, loops, monitor fades, the hand-off, live passes one
+        // roundtrip late - comes out as recorded. Bit-exact where nothing amplifies that one
+        // step; behind a compressor and a reverb it stays under -80 dB.
+        let r = tr.residual.unwrap();
+        assert!(r.stem_dbfs > -60.0, "{}: something to compare", tr.name);
+        assert!(
+            r.bit_exact() || r.rel_db.unwrap() < -80.0,
+            "{}: {}\n{text}",
+            tr.name,
+            r.text()
+        );
+        assert!(tr.level_flags.is_empty(), "{}: {:?}", tr.name, tr.level_flags);
+    }
+    let mix = report.mix_residual.unwrap();
+    assert!(mix.bit_exact() || mix.rel_db.unwrap() < -80.0, "{}", mix.text());
+    assert!(report.mix_level_flags.is_empty());
+}
+
+#[test]
+fn a_missing_monitor_fade_is_caught_by_the_level_check() {
+    // The class of error a render that ignores the live gains makes: the monitored inputs 20 dB
+    // off. The stems still look alike as a whole - the windows say where they are not.
+    let dir = scratch("level");
+    let made = make_recording(&dir, &score_yaml(MIXER), Vec::new());
+    let mut o = opts(&made.folder, dir.join("out"));
+    o.monitor_db = -20.0;
+    let mut log = Vec::new();
+    let report = render(&o, None, &mut log).unwrap();
+    let voice = report.tracks.iter().find(|t| t.name == "voice").unwrap();
+    assert!(!voice.level_flags.is_empty(), "{}", String::from_utf8_lossy(&log));
+    let c = made.sections[2] as f64 / RATE as f64;
+    assert!(voice.level_flags.iter().all(|f| f.render_dbfs < f.recorded_dbfs));
+    assert!(voice.level_flags.iter().any(|f| f.at >= c));
+    assert!(String::from_utf8_lossy(&log).contains("differ by more than 3 dB"));
+    assert!(level_flagged(-40.0, -66.0) && !level_flagged(-40.0, -42.0) && !level_flagged(-95.0, -120.0));
 }
 
 #[test]
 fn an_edited_score_changes_only_what_it_changes() {
     let dir = scratch("edited");
-    let made = make_recording(&dir, VOICE, 0.0);
-    // The same mix with the reverb turned down.
+    let made = make_recording(&dir, &score_yaml(MIXER), Vec::new());
     let edited = dir.join("edited.yaml");
-    std::fs::write(
-        &edited,
-        score_yaml("{gain: -2, preset: voice, delay: {on: true, mix: 0.3}, reverb: {mix: 0.05}}", 0.0),
-    )
-    .unwrap();
-    let mut log = quiet();
-    render(
-        &RenderOpts {
-            recording: made.folder.clone(),
-            out: dir.join("same"),
-            ..Default::default()
-        },
-        None,
-        &mut log,
-    )
-    .unwrap();
-    render(
-        &RenderOpts {
-            recording: made.folder.clone(),
-            out: dir.join("less"),
-            score: Some(edited),
-            ..Default::default()
-        },
-        None,
-        &mut log,
-    )
-    .unwrap();
-    let same = read(&dir.join("same").join(stem_file(0, "voice")));
-    let less = read(&dir.join("less").join(stem_file(0, "voice")));
-    let recorded = read(&made.folder.join(stem_file(0, "voice")));
-    let (from, to) = (made.playback.0, made.playback.1);
-    assert!(Residual::of(&same, &recorded, from, to).bit_exact());
-    let changed = Residual::of(&less, &recorded, from, to);
-    assert!(
-        changed.rel_db.unwrap() > -40.0,
-        "less reverb is audibly different: {}",
-        changed.text()
-    );
-    // Before the first note both are silent.
-    assert!(less[..(made.take.0 as usize * 2)].iter().all(|s| *s == 0.0));
-}
-
-#[test]
-fn the_octaver_and_plugin_latency_are_read_ahead_as_live() {
-    // An octaver that only delays (dry 1, sub 0) and a plugin that only delays: what comes out
-    // must sit exactly where it went in, as the loop does live
-    // (`the_octavers_latency_is_made_up_for_on_the_loop`).
-    let entry = parse_entry("{octaver: {on: true, dry: 1, sub: 0}}").unwrap();
-    let spec = StripSpec {
-        sample_rate: RATE,
-        bpm: 120.0,
-        signature: TimeSignature::new(4, 4),
-        channels: Channels::Mono,
-        pan: 0.0,
-        mix: entry.resolve(),
-        block: BLOCK,
-    };
-    let mut strip = OfflineStrip::new(spec);
-    let shared = InsertShared::new(64);
-    strip
-        .install(vec![(
-            0,
-            Insert::new(Box::new(Delay::new(64)), shared).at(InsertPosition::before(FxSlot::Comp)),
-        )])
-        .unwrap();
-    strip.settle(RATE as u64);
-    let ahead = strip.read_ahead();
-    assert_eq!(ahead, 144 + 64, "octaver plus plugin");
-    let mut dry = vec![0.0f32; 4_000];
-    dry[1_000] = 0.5;
-    let out = strip.render(&dry, 4_000, ahead);
-    let peak = (0..4_000).max_by(|a, b| out[a * 2].abs().total_cmp(&out[b * 2].abs())).unwrap();
-    assert_eq!(peak, 1_000, "on the grid");
-    assert!((out[peak * 2] - 0.5).abs() < 1e-6 && (out[peak * 2 + 1] - 0.5).abs() < 1e-6);
-}
-
-#[test]
-fn a_track_that_was_silent_for_longer_than_its_tail_comes_back_as_live() {
-    // A long reverb, and a silence longer than its tail between the take and the playback: the
-    // chain goes idle - and freezes what is left of the tail, about 60 dB down - in the render at
-    // the same point of the signal as live. A render whose chain idled differently would bring
-    // that frozen tail back differently, some 60 dB under the music.
-    let dir = scratch("silent");
-    let entry = "{preset: voice, reverb: {size: 0.9, mix: 0.4}}";
-    let (chain, _) = chain_for(&parse_entry(entry).unwrap(), RATE);
-    let gap_bars = u64::from(chain.tail_samples()) / u64::from(2 * RATE) + 2;
-    let made = make_recording_at(&dir, entry, 0.0, 4 + gap_bars);
-    let mut log = quiet();
-    render(
-        &RenderOpts {
-            recording: made.folder.clone(),
-            out: dir.join("out"),
-            ..Default::default()
-        },
-        None,
-        &mut log,
-    )
-    .unwrap();
-    let rendered = read(&dir.join("out").join(stem_file(0, "voice")));
-    let recorded = read(&made.folder.join(stem_file(0, "voice")));
-    // The live pass and the whole silence after it, R frames apart: identical, idle point included.
-    let mut worst = 0;
-    for i in (made.take.0 as usize * 2)..((made.playback.0 as usize - 4_000) * 2) {
-        worst = worst.max((to_i24(recorded[i + 2 * R as usize]) - to_i24(rendered[i])).abs());
+    let less = MIXER.replace("voice: {gain: -3, preset: voice}", "voice: {gain: -3, preset: voice, reverb: {mix: 0.02}}");
+    std::fs::write(&edited, score_yaml(&less)).unwrap();
+    let mut o = opts(&made.folder, dir.join("out"));
+    o.score = Some(edited);
+    let mut log = Vec::new();
+    let report = render(&o, None, &mut log).unwrap();
+    for tr in &report.tracks {
+        let r = tr.residual.unwrap();
+        if tr.name == "voice" {
+            assert!(r.rel_db.unwrap() > -40.0, "less reverb is audible: {}", r.text());
+        } else {
+            assert!(r.bit_exact() || r.rel_db.unwrap() < -80.0, "{}: {}", tr.name, r.text());
+        }
     }
-    assert_eq!(worst, 0, "live pass and silence");
-    // The playback. Not bit-exact here, and not because of the engine: the loop fades in, the
-    // fade's samples lie between the steps of a 24-bit file, the live chain heard them unrounded,
-    // and a reverb this long carries the rounding on. What remains is far below a frozen tail.
-    let r = Residual::of(&rendered, &recorded, made.playback.0 - 2_000, recorded.len() as u64 / 2);
-    assert!(r.stem_dbfs > -40.0, "{}", r.text());
+}
+
+#[test]
+fn stems_from_the_recording_are_copied_and_summed() {
+    let dir = scratch("copy");
+    let made = make_recording(&dir, &score_yaml(MIXER), Vec::new());
+    let mut o = opts(&made.folder, dir.join("out"));
+    o.stems_from_recording = vec!["bass".into()];
+    let mut log = Vec::new();
+    let report = render(&o, None, &mut log).unwrap();
+    assert!(!report.tracks[1].rendered);
+    let name = stem_file(1, "bass");
+    assert_eq!(
+        std::fs::read(dir.join("out").join(&name)).unwrap(),
+        std::fs::read(made.folder.join(&name)).unwrap()
+    );
+    // The mix with the recorded stem in it: the same, up to the order of the additions and the
+    // one-step rounding of the other tracks.
+    let r = report.mix_residual.unwrap();
     assert!(r.rel_db.unwrap() < -80.0, "{}", r.text());
 }
 
 #[test]
 fn a_broken_folder_is_refused_with_one_clear_sentence() {
     let dir = scratch("broken");
-    let mut log = quiet();
-    let opts = |rec: PathBuf| RenderOpts {
-        recording: rec,
-        out: dir.join("out"),
-        ..Default::default()
-    };
-    let err = render(&opts(dir.join("nothing")), None, &mut log).err().unwrap();
+    let mut log = Vec::new();
+    let err = render(&opts(&dir.join("nothing"), dir.join("out")), None, &mut log).err().unwrap();
     assert!(err.contains("is not a folder"), "{err}");
     std::fs::create_dir_all(dir.join("empty")).unwrap();
-    let err = render(&opts(dir.join("empty")), None, &mut log).err().unwrap();
+    let err = render(&opts(&dir.join("empty"), dir.join("out")), None, &mut log).err().unwrap();
     assert!(err.contains("session.json"), "{err}");
 
-    let made = make_recording(&dir, VOICE, 0.0);
-    // Writing into the recording is refused.
-    let mut inside = opts(made.folder.clone());
-    inside.out = made.folder.join("render");
-    let err = render(&inside, None, &mut log).err().unwrap();
+    let made = make_recording(&dir, &score_yaml(MIXER), Vec::new());
+    let err = render(&opts(&made.folder, made.folder.join("render")), None, &mut log).err().unwrap();
     assert!(err.contains("never writes into a recording"), "{err}");
-    // A dry stem cut short.
-    let dry = made.folder.join(dry_file(0, "voice"));
-    let bytes = std::fs::read(&dry).unwrap();
-    std::fs::write(&dry, &bytes[..bytes.len() - 3_000]).unwrap();
-    let err = render(&opts(made.folder.clone()), None, &mut log).err().unwrap();
-    assert!(err.contains("cut short"), "{err}");
-    // An unknown track name.
-    let mut wrong = opts(made.folder.clone());
-    wrong.stems_from_recording = vec!["vocals".into()];
+    let mut wrong = opts(&made.folder, dir.join("out"));
+    wrong.only = vec!["vocals".into()];
     let err = render(&wrong, None, &mut log).err().unwrap();
     assert!(err.contains("no track \"vocals\""), "{err}");
-}
-
-#[test]
-fn stems_from_the_recording_are_copied_and_summed() {
-    let dir = scratch("copy");
-    let made = make_recording(&dir, VOICE, 0.0);
-    let mut log = quiet();
-    let report = render(
-        &RenderOpts {
-            recording: made.folder.clone(),
-            out: dir.join("out"),
-            stems_from_recording: vec!["voice".into()],
-            ..Default::default()
-        },
-        None,
-        &mut log,
-    )
-    .unwrap();
-    assert!(!report.tracks[0].rendered);
-    let name = stem_file(0, "voice");
-    assert_eq!(
-        std::fs::read(dir.join("out").join(&name)).unwrap(),
-        std::fs::read(made.folder.join(&name)).unwrap()
-    );
+    // A dry stem cut short.
+    let dry = made.folder.join(dry_file(2, "voice"));
+    let bytes = std::fs::read(&dry).unwrap();
+    std::fs::write(&dry, &bytes[..bytes.len() - 3_000]).unwrap();
+    let err = render(&opts(&made.folder, dir.join("out")), None, &mut log).err().unwrap();
+    assert!(err.contains("cut short"), "{err}");
+    // No score copy: the performance cannot be played again.
+    std::fs::remove_file(made.folder.join("score.yaml")).unwrap();
+    let err = render(&opts(&made.folder, dir.join("out")), None, &mut log).err().unwrap();
+    assert!(err.contains("no score copy"), "{err}");
 }
 
 // ---- plugins ---------------------------------------------------------------------------------
@@ -454,10 +331,20 @@ fn states_are_matched_in_order_then_by_id_and_never_twice() {
     );
 }
 
-/// The repository's test VST3: gain parameter, 64 frames of latency, state = the gain. Loaded
-/// offline, given the state from the settings file, run at its place in the chain with its latency
-/// made up - and the result is exactly half of the render without it. Proves the state restore
-/// (a default state would give gain 1) without any third-party plugin.
+#[test]
+fn a_skipped_plugin_keeps_its_latency_as_a_plain_delay() {
+    let mut d = plugins::StandIn::new(3);
+    use crate::engine::insert::InsertProcessor;
+    let (mut l, mut r) = (vec![1.0, 2.0, 3.0, 4.0, 5.0], vec![-1.0, -2.0, -3.0, -4.0, -5.0]);
+    d.process(&mut l, &mut r);
+    assert_eq!(l, vec![0.0, 0.0, 0.0, 1.0, 2.0]);
+    assert_eq!(r, vec![0.0, 0.0, 0.0, -1.0, -2.0]);
+}
+
+/// The repository's test VST3 (gain, 64 frames of latency, state = the gain) on the voice, live
+/// at gain 0.5. The render loads it offline, gives it the state from the settings file, runs it
+/// at its place with its latency - and the files are the same. With the default state (gain 1)
+/// they are not: the state really is restored.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_plugin_insert_is_loaded_offline_with_its_saved_state() {
@@ -465,67 +352,50 @@ fn a_plugin_insert_is_loaded_offline_with_its_saved_state() {
         return;
     };
     let info = crate::plugin::enumerate_vst3(&bundle).unwrap().remove(0);
-    // The state as the app would have saved it: gain 0.5.
-    let mut plugin = crate::plugin::load(&info).unwrap();
-    plugin.set_param(0, 0.5);
-    let state = plugin.save_state().unwrap();
-    drop(plugin);
+    let mut live = crate::plugin::load(&info).unwrap();
+    live.set_param(0, 0.5);
+    let state = live.save_state().unwrap();
+    let processor = live.activate(f64::from(RATE), MAX_BLOCK).unwrap();
+    let shared = InsertShared::new(live.latency());
+    let insert = Insert::new(processor, shared).at(InsertPosition::before(FxSlot::Comp));
 
     let dir = scratch("vst3");
-    let entry = format!(
-        "{{gain: -2, inserts: [{{plugin: \"{}\", before: octaver}}]}}",
-        info.id
+    let mixer = MIXER.replace(
+        "voice: {gain: -3, preset: voice}",
+        &format!("voice: {{gain: -3, preset: voice, inserts: [{{plugin: \"{}\", before: comp}}]}}", info.id),
     );
-    let made = make_recording(&dir, &entry, 0.0);
-    let sidecar = dir.join("my score.plugins.json");
-    std::fs::write(
-        &sidecar,
+    let made = make_recording(&dir, &score_yaml(&mixer), vec![Vec::new(), Vec::new(), vec![(0, insert)]]);
+    live.deactivate();
+    drop(live);
+    let sidecar = |state: &[u8]| {
         format!(
             "{{\"version\": 1, \"tracks\": {{\"voice\": {{\"inserts\": [{{\"plugin_id\": \"{}\", \
-             \"name\": \"Looper Test Gain\", \"slot\": 0, \"before\": \"octaver\", \"state\": \"{}\"}}]}}}}}}",
+             \"name\": \"Looper Test Gain\", \"slot\": 0, \"before\": \"comp\", \"state\": \"{}\"}}]}}}}}}",
             info.id,
-            base64(&state)
-        ),
-    )
-    .unwrap();
-    let mut log = quiet();
-    let with = render(
-        &RenderOpts {
-            recording: made.folder.clone(),
-            out: dir.join("with"),
-            plugins: Some(sidecar),
-            ..Default::default()
-        },
+            base64(state)
+        )
+    };
+    std::fs::write(made.folder.join("score.plugins.json"), sidecar(&state)).unwrap();
+    let mut log = Vec::new();
+    let report = render(
+        &opts(&made.folder, dir.join("with")),
         Some(PluginFinder::only(vec![info.clone()])),
         &mut log,
     )
     .unwrap();
-    let without = render(
-        &RenderOpts {
-            recording: made.folder.clone(),
-            out: dir.join("without"),
-            no_plugins: true,
-            ..Default::default()
-        },
-        None,
-        &mut log,
-    )
-    .unwrap();
     let text = String::from_utf8_lossy(&log).to_string();
-    assert_eq!(with.tracks[0].read_ahead, 64, "{text}");
-    assert_eq!(with.tracks[0].inserts_applied.len(), 1, "{text}");
-    assert!(!with.tracks[0].inserts_applied[0].contains("default state"), "{text}");
-    assert_eq!(without.tracks[0].inserts_skipped.len(), 1);
-    assert!(text.contains("SKIPPED (--no-plugins)"), "{text}");
+    let voice = &report.tracks[2];
+    assert_eq!(voice.inserts_applied.len(), 1, "{text}");
+    assert!(voice.inserts_applied[0].contains("latency 64"), "{text}");
+    assert!(voice.residual.unwrap().bit_exact(), "{}\n{text}", voice.residual.unwrap().text());
 
-    // Through a chain that is bypassed (fader only), the plugin is a gain of 0.5 behind a delay of
-    // 64 that the read-ahead takes back: exactly half, on the same frames.
-    let a = read(&dir.join("with").join(stem_file(0, "voice")));
-    let b = read(&dir.join("without").join(stem_file(0, "voice")));
-    let mut worst = 0.0f32;
-    for (x, y) in a.iter().zip(&b) {
-        worst = worst.max((x - 0.5 * y).abs());
-    }
-    assert!(worst <= 1.0 / 8_388_607.0, "half, on the grid: worst {worst}");
-    assert!(b.iter().any(|s| s.abs() > 0.01), "there is something to halve");
+    // The plugin's default state instead of the saved one: gain 1, audibly different.
+    let other = dir.join("default.plugins.json");
+    std::fs::write(&other, "{\"version\": 1, \"tracks\": {}}").unwrap();
+    let mut o = opts(&made.folder, dir.join("default"));
+    o.plugins = Some(other);
+    let report = render(&o, Some(PluginFinder::only(vec![info])), &mut log).unwrap();
+    let voice = &report.tracks[2];
+    assert!(voice.inserts_applied[0].contains("default state"));
+    assert!(voice.residual.unwrap().rel_db.unwrap() > -20.0);
 }

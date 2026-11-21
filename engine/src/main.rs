@@ -162,7 +162,7 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         stems_from_recording: Vec<String>,
 
-        /// Render only these tracks, comma-separated (no Mix.wav then)
+        /// Write only these stems, comma-separated (no Mix.wav then)
         #[arg(long, value_delimiter = ',')]
         only: Vec<String>,
 
@@ -178,9 +178,24 @@ enum Command {
         #[arg(long)]
         compare: bool,
 
-        /// Frames per process call, as the audio device would deliver them
+        /// Frames per process call, as the audio device delivered them live
         #[arg(long, default_value_t = looper_engine::render::DEFAULT_BLOCK)]
         block: usize,
+
+        /// Output channels of the interface the recording was made with (2: Main and Monitor are
+        /// one mix, so a monitored input reached Main). Not stored in a recording
+        #[arg(long, default_value_t = 2)]
+        outputs: usize,
+
+        /// Level of the monitored inputs in dB, when the score's mixer: does not set
+        /// buses.inputs. Not stored in a recording
+        #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
+        monitor_db: f64,
+
+        /// Also write the re-performance's own dry stems (to see where the input reconstruction
+        /// differs from the recording)
+        #[arg(long)]
+        write_dry: bool,
     },
 
     /// MIDI control (phase 5): list devices, show incoming events, learn buttons onto targets
@@ -264,6 +279,9 @@ fn main() -> ExitCode {
             plugin_bundle,
             compare,
             block,
+            outputs,
+            monitor_db,
+            write_dry,
         } => looper_engine::render::cmd_render(&looper_engine::render::RenderOpts {
             recording: recording.clone(),
             out: out.clone(),
@@ -275,6 +293,9 @@ fn main() -> ExitCode {
             plugin_bundles: plugin_bundle.clone(),
             compare: *compare,
             block: *block,
+            outputs: *outputs,
+            monitor_db: *monitor_db,
+            write_dry: *write_dry,
         }),
         Command::Midi { midi } => midi::cli::cmd_midi(midi),
         Command::Calibrate { dev, calibrate } => engine::calibrate::cmd_calibrate(dev, calibrate),

@@ -149,6 +149,11 @@ impl PluginFinder {
         }
     }
 
+    /// The latency the app's scan measured for `id` (at 48 kHz, in its default state), if known.
+    pub fn scanned_latency(&self, id: &str) -> Option<u32> {
+        self.cached.iter().find(|s| s.info.id == id).map(|s| s.latency)
+    }
+
     pub fn find(&self, id: &str) -> Result<PluginInfo, String> {
         if let Some(info) = self.extra.iter().find(|i| i.id == id) {
             return Ok(info.clone());
@@ -190,8 +195,16 @@ pub enum InsertPlan {
         shared: std::sync::Arc<InsertShared>,
         state_restored: bool,
     },
-    /// Not in the signal path, and why - said once per insert.
-    Skipped { name: String, why: String, bypassed: bool },
+    /// Not in the signal path, and why - said once per insert. `stand_in` is the latency the
+    /// plugin reported in the app's scan, kept as a plain delay at its place so the timing of the
+    /// track (the loop's read-ahead, when the live input is heard) stays as it was live.
+    Skipped {
+        name: String,
+        why: String,
+        bypassed: bool,
+        position: InsertPosition,
+        stand_in: Option<u32>,
+    },
 }
 
 /// A track's loaded inserts. Keeps the control side of every plugin alive while its processor runs
@@ -220,6 +233,24 @@ impl TrackInserts {
                     .map_err(|e| format!("{name} does not start: {e}"))?;
                 shared.set_latency(instance.latency());
                 out.push((*slot, Insert::new(processor, shared.clone()).at(*position)));
+            }
+        }
+        for (slot, plan) in self.plans.iter().enumerate() {
+            if let InsertPlan::Skipped {
+                stand_in: Some(frames),
+                position,
+                ..
+            } = plan
+                && *frames > 0
+            {
+                out.push((
+                    slot,
+                    Insert::new(
+                        Box::new(StandIn::new(*frames as usize)),
+                        InsertShared::new(*frames),
+                    )
+                    .at(*position),
+                ));
             }
         }
         Ok(out)
@@ -276,14 +307,26 @@ pub fn plan_inserts(
                 name,
                 why: "bypassed in the score, not in the signal path (as live)".to_string(),
                 bypassed: true,
+                position: line.position(),
+                stand_in: None,
             });
             continue;
         }
         if !load {
+            let stand_in = finder.and_then(|f| f.scanned_latency(&line.plugin));
             plans.push(InsertPlan::Skipped {
                 name,
-                why: "--no-plugins".to_string(),
+                why: match stand_in {
+                    Some(l) if l > 0 => format!(
+                        "--no-plugins; its scanned latency of {l} frames is kept as a plain delay"
+                    ),
+                    Some(_) => "--no-plugins; it reported no latency".to_string(),
+                    None => "--no-plugins; its latency is unknown (not in the scan cache), so this track's timing differs from live by it"
+                        .to_string(),
+                },
                 bypassed: false,
+                position: line.position(),
+                stand_in,
             });
             continue;
         }
@@ -310,4 +353,32 @@ pub fn plan_inserts(
         });
     }
     Ok(TrackInserts { plans })
+}
+
+/// A skipped plugin's latency, as a plain delay: both channels, `frames` late. Allocated here, on
+/// the control side.
+pub struct StandIn {
+    line: Vec<[f32; 2]>,
+    pos: usize,
+}
+
+impl StandIn {
+    pub fn new(frames: usize) -> Self {
+        Self {
+            line: vec![[0.0; 2]; frames.max(1)],
+            pos: 0,
+        }
+    }
+}
+
+impl crate::engine::insert::InsertProcessor for StandIn {
+    fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+        for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+            let out = self.line[self.pos];
+            self.line[self.pos] = [*l, *r];
+            self.pos = (self.pos + 1) % self.line.len();
+            *l = out[0];
+            *r = out[1];
+        }
+    }
 }

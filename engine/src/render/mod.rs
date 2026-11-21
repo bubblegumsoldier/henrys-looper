@@ -1,96 +1,131 @@
-//! `looper-engine render`: a finished recording mixed again, offline, from its dry stems - through
-//! the live engine's own channel strip.
+//! `looper-engine render`: a finished recording mixed again, offline - the performance played once
+//! more through the live engine, from the dry stems.
 //!
 //! ```text
 //! looper-engine render "<recording folder>" --out <folder> [--score edited.yaml] [--no-plugins]
 //! ```
 //!
-//! Per track: the dry stem (`NN name (dry).wav`) goes through the strip the score's `mixer:` entry
-//! describes - built-in effects in their fixed order, plugin inserts at their `before:` places,
-//! fader, pan - and comes out as `NN name.wav`; the stems are summed into `Mix.wav`, the way the
-//! Main bus sums them. With the score the recording was made with and the same plugin states the
-//! loop playback comes out as it was heard; with an edited copy (`--score`, e.g. less reverb) it
-//! comes out as it would have been heard.
+//! Out come `NN name.wav` per track and `Mix.wav`, as the recorder writes them. With the score the
+//! recording was made with and the same plugin states they are what was heard; with an edited copy
+//! (`--score`, e.g. less reverb) what would have been heard.
 //!
 //! # What is the live code, and what is not
 //!
-//! The strip is not a copy of the engine: it **is** the engine ([`strip::OfflineStrip`] runs an
-//! [`crate::engine::process::EngineCore`] with one track), put into its state by the same commands
-//! a loaded score sends ([`crate::score::mixer::track_commands`]), with plugins loaded, given their
-//! state and started the way the app starts them. What this module adds is only the plumbing around
-//! it: reading the folder, feeding the dry file in as the track's input, the read-ahead, the sum.
+//! Nothing between a dry stem and a stem is computed here. [`perform`] starts an
+//! [`crate::engine::process::EngineCore`] with every track of the recording's score, loads it the
+//! way the app loads a score (setup, the recorded compensation, the `mixer:`), loads the plugins
+//! with their saved state, and lets the score's [`crate::engine::runner::Runner`] run the sections
+//! on the recording's timeline - count-in, takes, loop playback, monitoring, `monitor_fade`, the
+//! hand-off between tracks sharing an input. The input the engine gets is the musician's,
+//! reconstructed from the dry stems (see `perform`); the stems and the mix come out of the recorder
+//! (`crate::capture`) attached to that engine - the same tap as live. What this module adds is the
+//! plumbing: reading the folder, two passes, writing files, comparing.
 //!
-//! # What cannot come out the same
+//! # What cannot come out the same, and why
 //!
-//! * **Live passes.** While a track recorded, overdubbed or heard through, the room heard its input
-//!   through the effects one roundtrip late, plus the chain's own latency (or, where the input did
-//!   not reach Main, the stem got it without effects - the "live complement"). The dry stem holds
-//!   that input latency-aligned, so the render puts it, with effects, on the grid - where the loop
-//!   playback of the same pass sits. That is the better take, and it is not what was heard;
-//!   `--compare` marks those sections `live`. (Measured on a real take: the bass's live pass is in
-//!   the stem 740 frames after the render, 596 roundtrip plus 144 octaver.)
-//! * **The 24-bit dry file.** The live chain heard floats; the file holds them rounded to 24 bit.
-//!   Most of the music is on that grid anyway, but fades are not, and a compressor or a long reverb
-//!   carries the rounding on: around -84 dB under the stem on the voice chain of a real take.
-//! * **The octaver's history.** Its splice search runs on a 4:1 decimated copy whose phase is the
-//!   number of samples it has processed since it was switched on - so its output depends, a few
-//!   milliseconds at a time, on everything it heard before, including live passes that reached it
-//!   late. Where that count differs from live the stem differs by about -44 dB (short stretches
-//!   around splices); where it agrees the render is exact to the last bit.
-//! * **Main bus inserts** live in the app's plugin rack, not in the score; the score format has no
-//!   place for them, so `Mix.wav` is the plain sum of the stems (`contents.mix` without bus inserts).
-//! * **Instrument tracks** keep their recorded stem (the instrument is not loaded).
-//! * Whatever was in a chain before bar 1 (a count-in heard through a reverb) is not in the dry
-//!   files; the render starts from a chain that waited in silence. Plugins are told the same tempo
-//!   and time signature as live, but their transport position counts from the render's own start.
+//! * **Instrument tracks** keep their recorded stem: the instrument plugin is not loaded.
+//! * **Two settings are not in a recording**: how many outputs the interface had (with two, a
+//!   monitored input reaches Main; `--outputs`) and the level of the monitored inputs when the
+//!   score does not set `mixer.buses.inputs` (`--monitor-db`). Both are assumed and printed.
+//! * **The 24-bit dry file.** The live engine heard floats; the file holds them rounded. A
+//!   compressor or a long reverb carries the rounding on (around -84 dB on a voice chain).
+//! * **Before bar 1** nothing is in the files: what a chain heard during the count-in (a
+//!   `monitor: always` guitar through its reverb) is missing at the start.
+//! * **The octaver's history** (its splice search runs on a decimated copy whose phase is the count
+//!   of samples it processed) and **commands that arrived late live** (a loop entry 10 samples late)
+//!   are not in the recording; where they mattered the stem differs by around -44 dB.
+//! * Main bus inserts are not in the score and are not applied.
+//!
+//! `--compare` measures all of it against the recorded files: per section, and per quarter second
+//! in level - a window that differs by more than 3 dB is listed.
 
+pub mod perform;
 pub mod plugins;
 pub mod recording;
-pub mod strip;
 
 #[cfg(test)]
 mod tests;
 
-use std::io::Write;
+use std::io::{BufReader, Read as _, Write};
 use std::path::{Path, PathBuf};
 
-use crate::capture::wav::{WavWriter, to_i24};
+use crate::capture::Layout;
+use crate::capture::wav::{HEADER_BYTES, WavWriter, to_i24};
 use crate::engine::fx::FxSlot;
-use crate::engine::fx::render::chain_for;
-use crate::engine::frame::Channels;
-use crate::engine::timeline::TimeSignature;
-use crate::score::mixer::{TrackMixSource, gain_to_db, preset_name};
+use crate::score::mixer::{TrackMixSource, db_to_gain, gain_to_db, preset_name};
 use crate::score::{CompiledScore, TrackState, compile_score};
 
-use plugins::{InsertPlan, PluginFinder, Sidecar, plan_inserts, read_sidecar};
+use perform::{Pass, PerformSpec, perform};
+use plugins::{InsertPlan, PluginFinder, Sidecar, TrackInserts, plan_inserts, read_sidecar};
 use recording::Recording;
-use strip::{OfflineStrip, StripSpec};
 
 /// Frames per process call, as the app runs by default (architecture section 18).
 pub const DEFAULT_BLOCK: usize = 128;
 
+/// A window of the level check, seconds.
+pub const LEVEL_WINDOW_SECS: f64 = 0.25;
+/// Level difference that gets a window listed, dB.
+pub const LEVEL_TOLERANCE_DB: f64 = 3.0;
+/// Windows where both are quieter than this are not listed, dBFS.
+pub const LEVEL_FLOOR_DBFS: f64 = -80.0;
+
 /// Options of `render`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct RenderOpts {
     pub recording: PathBuf,
     pub out: PathBuf,
-    /// An edited copy of the score; its `mixer:` section (and the tracks' `pan`) is what is
-    /// rendered. Default: the score copy in the recording.
+    /// An edited copy of the score; its `mixer:` section and the tracks' `pan` are rendered. The
+    /// sections, tracks and timing always come from the score copy in the recording.
     pub score: Option<PathBuf>,
     /// The plugin settings file. Default: the copy in the recording.
     pub plugins: Option<PathBuf>,
     /// Tracks whose recorded stem is taken as it is.
     pub stems_from_recording: Vec<String>,
-    /// Only these tracks (no `Mix.wav` then).
+    /// Only these stems are written (no `Mix.wav` then).
     pub only: Vec<String>,
     /// Leave every plugin insert out (one warning per insert).
     pub no_plugins: bool,
     /// `.vst3` bundles to find plugins in, before the scan cache.
     pub plugin_bundles: Vec<PathBuf>,
-    /// Compare every rendered stem with the recorded one.
+    /// Compare every written stem and the mix with the recorded ones.
     pub compare: bool,
     /// Frames per process call; 0 = [`DEFAULT_BLOCK`].
     pub block: usize,
+    /// Output channels of the interface the recording was made with (not stored in a recording).
+    pub outputs: usize,
+    /// Level of the monitored inputs in dB, when the score does not set `mixer.buses.inputs`.
+    pub monitor_db: f64,
+    /// Also write the re-performance's own dry stems, to see where the input reconstruction
+    /// differs from the recording.
+    pub write_dry: bool,
+}
+
+impl Default for RenderOpts {
+    fn default() -> Self {
+        Self {
+            recording: PathBuf::new(),
+            out: PathBuf::new(),
+            score: None,
+            plugins: None,
+            stems_from_recording: Vec::new(),
+            only: Vec::new(),
+            no_plugins: false,
+            plugin_bundles: Vec::new(),
+            compare: false,
+            block: DEFAULT_BLOCK,
+            outputs: 2,
+            monitor_db: 0.0,
+            write_dry: false,
+        }
+    }
+}
+
+/// A listed window of the level check: start in seconds, render and recorded level in dBFS.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LevelFlag {
+    pub at: f64,
+    pub render_dbfs: f64,
+    pub recorded_dbfs: f64,
 }
 
 /// What became of one track.
@@ -98,16 +133,20 @@ pub struct RenderOpts {
 pub struct TrackReport {
     pub name: String,
     pub file: String,
+    /// False when the recorded stem was taken.
     pub rendered: bool,
-    /// Read-ahead the engine applied (octaver plus plugins), frames.
-    pub read_ahead: u64,
     pub inserts_applied: Vec<String>,
     pub inserts_skipped: Vec<String>,
     pub peak: f32,
-    /// With `--compare`: the rendered stem against the recorded one over the whole take.
+    /// The re-performance's dry stem against the recorded one: how well the input was
+    /// reconstructed. `None` for a track without one.
+    pub dry_check: Option<Residual>,
+    /// With `--compare`: the stem against the recorded one over the whole take.
     pub residual: Option<Residual>,
     /// With `--compare`, per section: (section, whether this track's input was live there).
     pub sections: Vec<(String, bool, Residual)>,
+    /// With `--compare`: windows whose level differs by more than [`LEVEL_TOLERANCE_DB`].
+    pub level_flags: Vec<LevelFlag>,
 }
 
 /// What the render did.
@@ -116,12 +155,20 @@ pub struct RenderReport {
     pub tracks: Vec<TrackReport>,
     pub mix: Option<PathBuf>,
     pub mix_residual: Option<Residual>,
+    pub mix_level_flags: Vec<LevelFlag>,
+    /// Frames whose recorder weight differed between the two passes (must be 0).
+    pub weight_mismatches: u64,
 }
 
 /// `render` subcommand.
 pub fn cmd_render(opts: &RenderOpts) -> Result<(), String> {
     let mut out = std::io::stdout();
     render(opts, None, &mut out).map(|_| ())
+}
+
+fn read_score(path: &Path) -> Result<CompiledScore, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    compile_score(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// The whole render. `finder` replaces the plugin lookup (tests); `None` builds it from the
@@ -150,34 +197,24 @@ pub fn render(
         ));
     }
 
-    // The score: the edited copy, or the one the recording was made with.
-    let score_path = match &opts.score {
-        Some(p) => p.clone(),
-        None => rec.score_copy().ok_or_else(|| {
-            format!(
-                "{} has no score copy (score.yaml); name the score with --score.",
-                rec.dir.display()
-            )
-        })?,
-    };
-    let score = read_score(&score_path)?;
-    // Section states for `--compare` come from the score the recording was made with.
-    let recorded_score = match (&opts.score, rec.score_copy()) {
-        (None, _) => Some(score.clone()),
-        (Some(_), Some(copy)) => read_score(&copy).ok(),
-        (Some(_), None) => None,
-    };
-    let mixer = score.mixer.clone().unwrap_or_default();
-
-    // The plugin settings: named, or the copy in the recording.
-    let sidecar_path = opts.plugins.clone().or_else(|| rec.sidecar_copy());
-    let sidecar: Option<Sidecar> = match &sidecar_path {
-        Some(p) => Some(read_sidecar(p)?),
-        None => None,
-    };
-
-    // Names on the command line must be tracks of the recording.
+    // The score the recording was made with: its sections and timing are what is performed.
+    let recorded_path = rec.score_copy().ok_or_else(|| {
+        format!(
+            "{} has no score copy (score.yaml). The render plays the score again and needs the one \
+             the recording was made with.",
+            rec.dir.display()
+        )
+    })?;
+    let recorded = read_score(&recorded_path)?;
     let names: Vec<&str> = session.tracks.iter().map(|t| t.name.as_str()).collect();
+    let score_names: Vec<&str> = recorded.tracks.iter().map(|t| t.name.as_str()).collect();
+    if names != score_names {
+        return Err(format!(
+            "session.json lists the tracks {} but its score.yaml {}; the folder is inconsistent.",
+            names.join(", "),
+            score_names.join(", ")
+        ));
+    }
     for name in opts.stems_from_recording.iter().chain(&opts.only) {
         if !names.contains(&name.as_str()) {
             return Err(format!(
@@ -186,269 +223,491 @@ pub fn render(
             ));
         }
     }
+    // What is rendered: the recorded score with the edited one's mixer and pans.
+    let mut score = recorded.clone();
+    if let Some(path) = &opts.score {
+        let edited = read_score(path)?;
+        score.mixer = edited.mixer.clone();
+        for t in score.tracks.iter_mut() {
+            match edited.tracks.iter().find(|e| e.name == t.name) {
+                Some(e) => t.pan = e.pan,
+                None => writeln!(log, "note: {} has no track \"{}\"; its pan is kept", path.display(), t.name)
+                    .unwrap_or(()),
+            }
+        }
+    }
+    let mixer = score.mixer.clone().unwrap_or_default();
+    let inputs_from_score = mixer.buses.as_ref().and_then(|b| b.inputs);
+
+    let sidecar_path = opts.plugins.clone().or_else(|| rec.sidecar_copy());
+    let sidecar: Option<Sidecar> = match &sidecar_path {
+        Some(p) => Some(read_sidecar(p)?),
+        None => None,
+    };
 
     writeln!(
         log,
-        "Rendering \"{}\" ({} tracks, {:.1} s at {} Hz, {} BPM)\n  score:   {}\n  plugins: {}\n  out:     {}",
+        "Rendering \"{}\" ({} tracks, {:.1} s at {} Hz, {} BPM) - the score played again\n  score:   {}{}\n  plugins: {}\n  out:     {}\n  assumed: {} output channels{}; monitored inputs at {} (neither is stored in a recording)",
         session.title,
         session.tracks.len(),
         frames as f64 / rate as f64,
         rate,
         session.bpm,
-        score_path.display(),
+        recorded_path.display(),
+        opts.score.as_ref().map(|p| format!(" (mixer and pan from {})", p.display())).unwrap_or_default(),
         match (&sidecar_path, opts.no_plugins) {
             (_, true) => "none (--no-plugins)".to_string(),
             (Some(p), _) => p.display().to_string(),
             (None, _) => "no settings file - plugins start in their default state".to_string(),
         },
-        opts.out.display()
+        opts.out.display(),
+        opts.outputs.max(2),
+        if opts.outputs <= 2 { " (one mix: a monitored input reaches Main)" } else { "" },
+        match inputs_from_score {
+            Some(db) => format!("{db:+.1} dB (score)"),
+            None => format!("{:+.1} dB (--monitor-db)", opts.monitor_db),
+        },
     )
     .ok();
 
+    // Per track: plugins, the dry stem, whether the recorded stem is taken instead.
     let mut finder = finder;
-    let signature = TimeSignature::new(session.beats_per_bar, session.beat_unit);
-    let mut mix: Option<Vec<f32>> = opts.only.is_empty().then(|| vec![0.0f32; frames as usize * 2]);
-    let mut report = RenderReport::default();
-
-    for t in &session.tracks {
-        if !opts.only.is_empty() && !opts.only.contains(&t.name) {
-            continue;
-        }
-        let compiled = score.tracks.iter().find(|c| c.name == t.name);
-        let entry = mixer.tracks.get(&t.name).cloned();
-        let instrument = compiled.is_some_and(|c| c.is_instrument())
-            || entry.as_ref().is_some_and(|e| e.instrument.is_some())
-            || t.midi.is_some();
-        let asked = opts.stems_from_recording.contains(&t.name);
-        let label = format!("{:02} {}", t.number, t.name);
-
-        let (stem, mut tr) = if asked || instrument {
-            let stem = rec.read(&t.stem, 2)?;
-            std::fs::copy(rec.dir.join(&t.stem), opts.out.join(&t.stem))
-                .map_err(|e| format!("{}: {e}", opts.out.join(&t.stem).display()))?;
-            let why = if asked {
-                "--stems-from-recording".to_string()
-            } else {
-                "instrument track: its sound comes from its instrument plugin, which is not loaded"
-                    .to_string()
-            };
-            writeln!(log, "{label}: recorded stem taken as it is ({why})").ok();
-            let peak = peak_of(&stem);
-            (
-                stem,
-                TrackReport {
-                    name: t.name.clone(),
-                    file: t.stem.clone(),
-                    rendered: false,
-                    read_ahead: 0,
-                    inserts_applied: Vec::new(),
-                    inserts_skipped: Vec::new(),
-                    peak,
-                    residual: None,
-                    sections: Vec::new(),
-                },
-            )
+    let n = session.tracks.len();
+    let mut plans: Vec<TrackInserts> = Vec::with_capacity(n);
+    let mut dry: Vec<Vec<f32>> = Vec::with_capacity(n);
+    let mut taken: Vec<Option<Vec<f32>>> = Vec::with_capacity(n);
+    for (t, st) in session.tracks.iter().enumerate() {
+        let ct = &recorded.tracks[t];
+        let entry = mixer.tracks.get(&st.name).cloned();
+        let instrument = ct.is_instrument();
+        let asked = opts.stems_from_recording.contains(&st.name);
+        let lines = if instrument {
+            Vec::new()
         } else {
-            let dry_name = t.dry.as_deref().ok_or_else(|| {
+            entry.as_ref().and_then(|e| e.inserts.clone()).unwrap_or_default()
+        };
+        let side = sidecar.as_ref().and_then(|s| s.tracks.get(&st.name));
+        // With --no-plugins the scan cache is still read (never written): for the latencies.
+        let needs = lines.iter().any(|l| !l.bypass.unwrap_or(false));
+        if needs && finder.is_none() {
+            finder = Some(PluginFinder::new(&opts.plugin_bundles)?);
+        }
+        let plan = plan_inserts(&lines, side, finder.as_ref(), !opts.no_plugins).map_err(|e| {
+            format!(
+                "Track \"{}\": {e}. Render without plugins with --no-plugins, or take this \
+                 track's recorded stem with --stems-from-recording {}.",
+                st.name, st.name
+            )
+        })?;
+        plans.push(plan);
+        if instrument {
+            dry.push(Vec::new());
+        } else {
+            let name = st.dry.as_deref().ok_or_else(|| {
                 format!(
-                    "Track \"{}\" has no dry stem in this recording (dry stems were switched off). \
-                     Take its recorded stem with --stems-from-recording {}.",
-                    t.name, t.name
+                    "Track \"{}\" has no dry stem in this recording (dry stems were switched off); \
+                     the performance cannot be played again without it.",
+                    st.name
                 )
             })?;
-            let dry = rec.read(dry_name, t.input_channels)?;
-            let source = entry.clone().unwrap_or_default();
-            if entry.is_none() {
-                writeln!(
-                    log,
-                    "{label}: note - the score's mixer: has no entry for this track; rendered as a \
-                     fresh track (dry, 0 dB)"
+            dry.push(rec.read(name, st.input_channels)?);
+        }
+        taken.push(if instrument || asked { Some(rec.read(&st.stem, 2)?) } else { None });
+    }
+
+    let spec = PerformSpec {
+        score: score.clone(),
+        sample_rate: rate,
+        frames,
+        first_abs: session.engine_position,
+        count_in_bars: session.count_in_bars.max(1),
+        latency: session.tracks.iter().map(|t| t.latency_frames).collect(),
+        block,
+        outputs: opts.outputs.max(2),
+        monitor_gain: db_to_gain(opts.monitor_db, crate::engine::command::MAX_LEVEL_GAIN),
+    };
+
+    // First pass: the recorder's weights, from silence.
+    let weights = perform(&spec, Pass::Weights)?.weights;
+
+    // Second pass: the reconstructed input, the plugins, the recorder.
+    let mut installs = Vec::with_capacity(n);
+    for plan in plans.iter_mut() {
+        installs.push(plan.start(f64::from(rate))?);
+    }
+    let layout = Layout {
+        tracks: recorded.tracks.iter().map(|t| t.track_input().channels()).collect(),
+        dry: true,
+    };
+    let write = |t: usize| opts.only.is_empty() || opts.only.contains(&session.tracks[t].name);
+    let mut writers: Vec<Option<WavWriter>> = Vec::with_capacity(n);
+    for (t, st) in session.tracks.iter().enumerate() {
+        writers.push(if write(t) && taken[t].is_none() {
+            let path = opts.out.join(&st.stem);
+            Some(WavWriter::create(&path, 2, rate).map_err(|e| format!("{}: {e}", path.display()))?)
+        } else {
+            None
+        });
+    }
+    let mut dry_writers: Vec<Option<WavWriter>> = Vec::with_capacity(n);
+    for (t, st) in session.tracks.iter().enumerate() {
+        dry_writers.push(match (&st.dry, opts.write_dry && write(t) && !dry[t].is_empty()) {
+            (Some(name), true) => {
+                let path = opts.out.join(name);
+                Some(
+                    WavWriter::create(&path, st.input_channels as u16, rate)
+                        .map_err(|e| format!("{}: {e}", path.display()))?,
                 )
-                .ok();
             }
-            let pan = compiled.map_or(0.0, |c| c.pan);
-            let lines = source.inserts.clone().unwrap_or_default();
-            let side = sidecar.as_ref().and_then(|s| s.tracks.get(&t.name));
-            let needs_finder = !opts.no_plugins && lines.iter().any(|l| !l.bypass.unwrap_or(false));
-            if needs_finder && finder.is_none() {
-                finder = Some(PluginFinder::new(&opts.plugin_bundles)?);
+            _ => None,
+        });
+    }
+    let mix_name = session.mix.clone().unwrap_or_else(|| "Mix.wav".to_string());
+    let mut mix_writer = if opts.only.is_empty() {
+        let path = opts.out.join(&mix_name);
+        Some(WavWriter::create(&path, 2, rate).map_err(|e| format!("{}: {e}", path.display()))?)
+    } else {
+        None
+    };
+    let window = ((rate as f64 * LEVEL_WINDOW_SECS) as u64).max(1);
+    let sections = rec.sections();
+    let mut compare: Vec<Option<Compare>> = Vec::with_capacity(n);
+    for (t, st) in session.tracks.iter().enumerate() {
+        compare.push(if opts.compare && writers[t].is_some() {
+            Some(Compare::new(&rec.dir.join(&st.stem), window, &sections)?)
+        } else {
+            None
+        });
+    }
+    let mut mix_compare = if opts.compare && mix_writer.is_some() {
+        Compare::new(&rec.dir.join(&mix_name), window, &sections).ok()
+    } else {
+        None
+    };
+    let mut dry_check: Vec<ResidualAcc> = vec![ResidualAcc::default(); n];
+    let mut peaks = vec![0.0f32; n];
+    let mut failure: Option<String> = None;
+    let dry_ref = &dry;
+    let taken_ref = &taken;
+    let mut sink = |f: u64, sf: &[f32]| {
+        let fi = f as usize;
+        let mut mix = [sf[0], sf[1]];
+        for t in 0..n {
+            let so = layout.stem_offset(t);
+            let mut stem = [sf[so], sf[so + 1]];
+            if let Some(rec_stem) = &taken_ref[t] {
+                // The recorded stem replaces this track's, in the mix as well.
+                let r = [rec_stem[fi * 2], rec_stem[fi * 2 + 1]];
+                mix[0] += r[0] - stem[0];
+                mix[1] += r[1] - stem[1];
+                stem = r;
             }
-            let mut inserts = plan_inserts(&lines, side, finder.as_ref(), !opts.no_plugins)
-                .map_err(|e| {
-                    format!(
-                        "Track \"{}\": {e}. Render without plugins with --no-plugins, or take this \
-                         track's recorded stem with --stems-from-recording {}.",
-                        t.name, t.name
-                    )
-                })?;
-            let spec = StripSpec {
-                sample_rate: rate,
-                bpm: session.bpm,
-                signature,
-                channels: if t.input_channels == 2 { Channels::Stereo } else { Channels::Mono },
-                pan,
-                mix: source.resolve(),
-                block,
-            };
-            let result = render_track(&spec, &source, &dry, frames, &mut inserts);
-            inserts.stop();
-            let (stem, ahead) = result?;
-            write_stem(&opts.out.join(&t.stem), &stem, rate)?;
-            let mut applied = Vec::new();
-            let mut skipped = Vec::new();
-            for plan in &inserts.plans {
-                match plan {
-                    InsertPlan::Loaded {
-                        name,
-                        position,
-                        state_restored,
-                        ..
-                    } => applied.push(format!(
-                        "{name} before {}{}",
-                        position.name().unwrap_or("the end"),
-                        if *state_restored { "" } else { " (default state: none saved)" }
-                    )),
-                    InsertPlan::Skipped { name, why, bypassed } => {
-                        if !bypassed {
-                            writeln!(
-                                log,
-                                "{label}: WARNING - plugin insert {name} SKIPPED ({why}). This \
-                                 stem is NOT what was heard."
-                            )
-                            .ok();
-                        }
-                        skipped.push(format!("{name} ({why})"));
+            if let Some(d) = layout.dry_offset(t)
+                && !dry_ref[t].is_empty()
+            {
+                let ch = layout.tracks[t].count();
+                for c in 0..ch {
+                    dry_check[t].add(sf[d + c], dry_ref[t][fi * ch + c]);
+                    if let Some(w) = dry_writers[t].as_mut()
+                        && let Err(e) = w.sample(sf[d + c])
+                    {
+                        failure.get_or_insert(e.to_string());
                     }
                 }
             }
-            let peak = peak_of(&stem);
-            writeln!(
-                log,
-                "{label}: {} | fader {} | pan {} | inserts: {} | read-ahead {ahead} | peak {}",
-                describe_chain(&source),
-                db_text(source.resolve().gain, source.resolve().mute),
-                pan_text(pan),
-                inserts_text(&applied, &skipped),
-                dbfs(peak)
-            )
-            .ok();
-            (
-                stem,
-                TrackReport {
-                    name: t.name.clone(),
-                    file: t.stem.clone(),
-                    rendered: true,
-                    read_ahead: ahead,
-                    inserts_applied: applied,
-                    inserts_skipped: skipped,
-                    peak,
-                    residual: None,
-                    sections: Vec::new(),
-                },
-            )
-        };
-
-        if opts.compare && tr.rendered {
-            let recorded = rec.read(&t.stem, 2)?;
-            let whole = Residual::of(&stem, &recorded, 0, frames);
-            writeln!(log, "    compare with the recorded stem, whole take: {}", whole.text()).ok();
-            tr.residual = Some(whole);
-            for (section, from, to) in rec.sections() {
-                let live = recorded_score
-                    .as_ref()
-                    .is_some_and(|s| live_in(s, &section, &t.name));
-                let r = Residual::of(&stem, &recorded, from, to);
-                writeln!(
-                    log,
-                    "      {section:<16} {:<5} {}",
-                    if live { "live" } else { "" },
-                    r.text()
-                )
-                .ok();
-                tr.sections.push((section, live, r));
+            if let Some(w) = writers[t].as_mut() {
+                peaks[t] = peaks[t].max(stem[0].abs()).max(stem[1].abs());
+                if let Err(e) = w.sample(stem[0]).and_then(|_| w.sample(stem[1])) {
+                    failure.get_or_insert(e.to_string());
+                }
+                if let Some(c) = compare[t].as_mut() {
+                    c.add(f, stem);
+                }
             }
         }
-
-        if let Some(mix) = mix.as_mut() {
-            // Track by track, from silence, in track order - how the Main bus sums.
-            for (m, s) in mix.iter_mut().zip(&stem) {
-                *m += *s;
+        if let Some(w) = mix_writer.as_mut()
+            && let Err(e) = w.sample(mix[0]).and_then(|_| w.sample(mix[1]))
+        {
+            failure.get_or_insert(e.to_string());
+        }
+        if let Some(c) = mix_compare.as_mut() {
+            c.add(f, mix);
+        }
+    };
+    let mut poll = {
+        let plans = &mut plans;
+        move || {
+            for p in plans.iter_mut() {
+                p.poll_latency();
             }
+        }
+    };
+    let second = perform(
+        &spec,
+        Pass::Audio {
+            source: perform::Source::Recording {
+                dry: &dry,
+                weights: &weights,
+            },
+            inserts: installs,
+            poll: &mut poll,
+            sink: &mut sink,
+        },
+    );
+    drop(poll);
+    for plan in plans.iter_mut() {
+        plan.stop();
+    }
+    let second = second?;
+    for w in dry_writers.into_iter().flatten() {
+        w.finish().map_err(|e| e.to_string())?;
+    }
+    if let Some(e) = failure {
+        return Err(format!("writing the stems: {e}"));
+    }
+
+    let mut report = RenderReport {
+        weight_mismatches: second.weight_mismatches,
+        ..Default::default()
+    };
+    for (t, st) in session.tracks.iter().enumerate() {
+        let label = format!("{:02} {}", st.number, st.name);
+        if !write(t) {
+            continue;
+        }
+        if taken[t].is_some() {
+            std::fs::copy(rec.dir.join(&st.stem), opts.out.join(&st.stem))
+                .map_err(|e| format!("{}: {e}", opts.out.join(&st.stem).display()))?;
+            let why = if recorded.tracks[t].is_instrument() {
+                "instrument track: its sound comes from its instrument plugin, which is not loaded"
+            } else {
+                "--stems-from-recording"
+            };
+            writeln!(log, "{label}: recorded stem taken as it is ({why})").ok();
+            report.tracks.push(TrackReport {
+                name: st.name.clone(),
+                file: st.stem.clone(),
+                rendered: false,
+                inserts_applied: Vec::new(),
+                inserts_skipped: Vec::new(),
+                peak: 0.0,
+                dry_check: None,
+                residual: None,
+                sections: Vec::new(),
+                level_flags: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(w) = writers[t].take() {
+            w.finish().map_err(|e| format!("{}: {e}", st.stem))?;
+        }
+        let source = mixer.tracks.get(&st.name).cloned().unwrap_or_default();
+        let (applied, skipped) = describe_inserts(&plans[t], &label, log);
+        let dry_res = (!dry[t].is_empty()).then(|| dry_check[t].finish());
+        writeln!(
+            log,
+            "{label}: {} | fader {} | pan {} | inserts: {} | peak {}",
+            describe_chain(&source),
+            db_text(source.resolve().gain, source.resolve().mute),
+            pan_text(score.tracks[t].pan),
+            inserts_text(&applied, &skipped),
+            dbfs(peaks[t]),
+        )
+        .ok();
+        if let Some(r) = &dry_res {
+            writeln!(log, "    input reconstruction (dry stem played again vs recorded): {}", r.text()).ok();
+        }
+        let mut tr = TrackReport {
+            name: st.name.clone(),
+            file: st.stem.clone(),
+            rendered: true,
+            inserts_applied: applied,
+            inserts_skipped: skipped,
+            peak: peaks[t],
+            dry_check: dry_res,
+            residual: None,
+            sections: Vec::new(),
+            level_flags: Vec::new(),
+        };
+        if let Some(c) = compare[t].take() {
+            let done = c.finish();
+            print_compare(log, "stem", &done, |s| live_in(&recorded, s, &st.name));
+            tr.residual = Some(done.whole);
+            tr.sections = done.sections;
+            tr.level_flags = done.flags;
         }
         report.tracks.push(tr);
     }
-
-    match mix {
-        Some(mix) => {
-            let name = session.mix.clone().unwrap_or_else(|| "Mix.wav".to_string());
-            let path = opts.out.join(&name);
-            write_stem(&path, &mix, rate)?;
-            writeln!(log, "{name}: sum of the stems | peak {}", dbfs(peak_of(&mix))).ok();
-            if opts.compare
-                && let Ok(recorded) = rec.read(&name, 2)
-            {
-                let r = Residual::of(&mix, &recorded, 0, frames);
-                writeln!(log, "    compare with the recorded mix: {}", r.text()).ok();
-                report.mix_residual = Some(r);
-            }
-            report.mix = Some(path);
+    if let Some(w) = mix_writer.take() {
+        w.finish().map_err(|e| format!("{mix_name}: {e}"))?;
+        let path = opts.out.join(&mix_name);
+        writeln!(log, "{mix_name}: the Main bus as the recorder takes it").ok();
+        if let Some(c) = mix_compare.take() {
+            let done = c.finish();
+            print_compare(log, "mix", &done, |_| false);
+            report.mix_residual = Some(done.whole);
+            report.mix_level_flags = done.flags;
         }
-        None => {
-            writeln!(log, "Mix.wav not written: --only renders single tracks.").ok();
-        }
+        report.mix = Some(path);
+    } else {
+        writeln!(log, "Mix.wav not written: --only writes single stems.").ok();
+    }
+    if report.weight_mismatches > 0 {
+        writeln!(
+            log,
+            "WARNING: the recorder's weights differed between the two passes on {} frames; the \
+             input there is not reconstructed exactly.",
+            report.weight_mismatches
+        )
+        .ok();
     }
     Ok(report)
 }
 
-fn read_score(path: &Path) -> Result<CompiledScore, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    compile_score(&text).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// One track through its strip: the engine built from `spec`, the plugins started and installed,
-/// silence until everything is at rest, the read-ahead as the engine has it, then the dry file.
-fn render_track(
-    spec: &StripSpec,
-    source: &TrackMixSource,
-    dry: &[f32],
-    frames: u64,
-    inserts: &mut plugins::TrackInserts,
-) -> Result<(Vec<f32>, u64), String> {
-    let mut strip = OfflineStrip::new(*spec);
-    strip.install(inserts.start(f64::from(spec.sample_rate))?)?;
-    // Longer than the chain's longest tail, so a chain that waited in silence is idle (as one that
-    // waited through a count-in is), and at least a second for the fader and switch fades.
-    let (chain, _) = chain_for(source, spec.sample_rate);
-    let settle = u64::from(chain.tail_samples()) + u64::from(spec.sample_rate);
-    strip.settle(settle);
-    // The host polls the plugins' latency; one more block lets the engine take it over.
-    inserts.poll_latency();
-    strip.settle(spec.block as u64);
-    let ahead = strip.read_ahead();
-    let stem = strip.render(dry, frames, ahead);
-    drop(strip);
-    Ok((stem, ahead))
-}
-
-fn write_stem(path: &Path, samples: &[f32], rate: u32) -> Result<(), String> {
-    let err = |e: std::io::Error| format!("{}: {e}", path.display());
-    let mut w = WavWriter::create(path, 2, rate).map_err(err)?;
-    for &s in samples {
-        w.sample(s).map_err(err)?;
+fn describe_inserts(plan: &TrackInserts, label: &str, log: &mut dyn Write) -> (Vec<String>, Vec<String>) {
+    let mut applied = Vec::new();
+    let mut skipped = Vec::new();
+    for p in &plan.plans {
+        match p {
+            InsertPlan::Loaded {
+                name,
+                position,
+                state_restored,
+                shared,
+                ..
+            } => applied.push(format!(
+                "{name} before {}, latency {}{}",
+                position.name().unwrap_or("the end"),
+                shared.latency(),
+                if *state_restored { "" } else { " (default state: none saved)" }
+            )),
+            InsertPlan::Skipped { name, why, bypassed, .. } => {
+                if !bypassed {
+                    writeln!(
+                        log,
+                        "{label}: WARNING - plugin insert {name} SKIPPED ({why}). This stem is NOT \
+                         what was heard."
+                    )
+                    .ok();
+                }
+                skipped.push(format!("{name} ({why})"));
+            }
+        }
     }
-    w.finish().map_err(err)?;
-    Ok(())
+    (applied, skipped)
 }
 
-fn peak_of(samples: &[f32]) -> f32 {
-    samples.iter().fold(0.0f32, |p, s| p.max(s.abs()))
+fn print_compare(log: &mut dyn Write, what: &str, c: &Compared, live: impl Fn(&str) -> bool) {
+    writeln!(log, "    compare with the recorded {what}, whole take: {}", c.whole.text()).ok();
+    for (section, _, r) in &c.sections {
+        writeln!(
+            log,
+            "      {section:<16} {:<5} {}",
+            if live(section) { "live" } else { "" },
+            r.text()
+        )
+        .ok();
+    }
+    if c.flags.is_empty() {
+        writeln!(
+            log,
+            "    level check: no {LEVEL_WINDOW_SECS} s window differs by more than {LEVEL_TOLERANCE_DB} dB"
+        )
+        .ok();
+    } else {
+        writeln!(
+            log,
+            "    level check: {} window(s) of {LEVEL_WINDOW_SECS} s differ by more than {LEVEL_TOLERANCE_DB} dB:",
+            c.flags.len()
+        )
+        .ok();
+        for f in c.flags.iter().take(200) {
+            writeln!(
+                log,
+                "      {:8.2} s  render {:7.1} dBFS  recorded {:7.1} dBFS  ({:+.1} dB)",
+                f.at,
+                f.render_dbfs,
+                f.recorded_dbfs,
+                f.render_dbfs - f.recorded_dbfs
+            )
+            .ok();
+        }
+        if c.flags.len() > 200 {
+            writeln!(log, "      ... and {} more", c.flags.len() - 200).ok();
+        }
+    }
 }
 
+// ---- comparing -------------------------------------------------------------------------------
 
-/// A rendered stereo signal against a recorded one over frames `[from, to)`. The rendered one is
-/// quantised to 24 bit first, as the recorder would have written it, so "bit-exact" means the same
-/// file contents.
+/// A recorded 24-bit stereo WAV read frame by frame.
+struct WavStream {
+    reader: BufReader<std::fs::File>,
+    buf: [u8; 6],
+}
+
+impl WavStream {
+    fn open(path: &Path) -> Result<Self, String> {
+        let mut file =
+            std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut head = [0u8; HEADER_BYTES as usize];
+        file.read_exact(&mut head).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            reader: BufReader::with_capacity(1 << 18, file),
+            buf: [0; 6],
+        })
+    }
+
+    fn next(&mut self) -> [f32; 2] {
+        if self.reader.read_exact(&mut self.buf).is_err() {
+            return [0.0; 2];
+        }
+        let s = |b: &[u8]| (i32::from_le_bytes([0, b[0], b[1], b[2]]) >> 8) as f32 / 8_388_607.0;
+        [s(&self.buf[0..3]), s(&self.buf[3..6])]
+    }
+}
+
+/// Residual of a rendered signal against a recorded one, accumulated sample by sample. The
+/// rendered one is quantised to 24 bit first, as it is written, so "bit-exact" means the same file
+/// contents.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ResidualAcc {
+    diff: f64,
+    reference: f64,
+    max: i32,
+    n: u64,
+}
+
+impl ResidualAcc {
+    pub fn add(&mut self, rendered: f32, recorded: f32) {
+        let (qa, qb) = (to_i24(rendered), to_i24(recorded));
+        self.max = self.max.max((qa - qb).abs());
+        let d = f64::from(qa - qb) / 8_388_607.0;
+        let r = f64::from(qb) / 8_388_607.0;
+        self.diff += d * d;
+        self.reference += r * r;
+        self.n += 1;
+    }
+
+    pub fn finish(&self) -> Residual {
+        let n = self.n.max(1) as f64;
+        let dbfs = |e: f64| if e == 0.0 { f64::NEG_INFINITY } else { 10.0 * (e / n).log10() };
+        Residual {
+            rel_db: (self.reference > 0.0).then(|| {
+                if self.diff == 0.0 {
+                    f64::NEG_INFINITY
+                } else {
+                    10.0 * (self.diff / self.reference).log10()
+                }
+            }),
+            residual_dbfs: dbfs(self.diff),
+            stem_dbfs: dbfs(self.reference),
+            max_lsb: self.max as u32,
+        }
+    }
+}
+
+/// The result of comparing two signals.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Residual {
     /// RMS of the difference relative to the recorded signal, dB; `None` when that is silent.
@@ -462,32 +721,15 @@ pub struct Residual {
 }
 
 impl Residual {
+    /// `a` rendered, `b` recorded, stereo interleaved, over frames `[from, to)`.
     pub fn of(a: &[f32], b: &[f32], from: u64, to: u64) -> Self {
+        let mut acc = ResidualAcc::default();
         let lo = from as usize * 2;
         let hi = (to as usize * 2).min(a.len()).min(b.len()).max(lo);
-        let mut diff = 0.0f64;
-        let mut reference = 0.0f64;
-        let mut max = 0i32;
         for i in lo..hi {
-            let (qa, qb) = (to_i24(a[i]), to_i24(b[i]));
-            max = max.max((qa - qb).abs());
-            let d = f64::from(qa - qb) / 8_388_607.0;
-            let r = f64::from(qb) / 8_388_607.0;
-            diff += d * d;
-            reference += r * r;
+            acc.add(a[i], b[i]);
         }
-        let n = (hi - lo).max(1) as f64;
-        let dbfs = |energy: f64| {
-            if energy == 0.0 { f64::NEG_INFINITY } else { 10.0 * (energy / n).log10() }
-        };
-        Self {
-            rel_db: (reference > 0.0).then(|| {
-                if diff == 0.0 { f64::NEG_INFINITY } else { 10.0 * (diff / reference).log10() }
-            }),
-            residual_dbfs: dbfs(diff),
-            stem_dbfs: dbfs(reference),
-            max_lsb: max as u32,
-        }
+        acc.finish()
     }
 
     pub fn bit_exact(&self) -> bool {
@@ -512,8 +754,113 @@ impl Residual {
     }
 }
 
+/// Level of an energy sum over `n` samples, dBFS, floored at -120.
+fn level_db(energy: f64, n: u64) -> f64 {
+    if energy <= 0.0 || n == 0 {
+        return -120.0;
+    }
+    (10.0 * (energy / n as f64).log10()).max(-120.0)
+}
+
+/// Whether two window levels differ enough to be listed.
+pub fn level_flagged(render_dbfs: f64, recorded_dbfs: f64) -> bool {
+    (render_dbfs - recorded_dbfs).abs() > LEVEL_TOLERANCE_DB
+        && render_dbfs.max(recorded_dbfs) > LEVEL_FLOOR_DBFS
+}
+
+/// A stereo signal compared frame by frame with a recorded file: whole, per section, and per
+/// window in level.
+struct Compare {
+    recorded: WavStream,
+    whole: ResidualAcc,
+    sections: Vec<(String, u64, u64, ResidualAcc)>,
+    window: u64,
+    win_a: f64,
+    win_b: f64,
+    win_n: u64,
+    win_start: u64,
+    rate: f64,
+    flags: Vec<LevelFlag>,
+}
+
+struct Compared {
+    whole: Residual,
+    sections: Vec<(String, bool, Residual)>,
+    flags: Vec<LevelFlag>,
+}
+
+impl Compare {
+    fn new(path: &Path, window: u64, sections: &[(String, u64, u64)]) -> Result<Self, String> {
+        Ok(Self {
+            recorded: WavStream::open(path)?,
+            whole: ResidualAcc::default(),
+            sections: sections
+                .iter()
+                .map(|(s, a, b)| (s.clone(), *a, *b, ResidualAcc::default()))
+                .collect(),
+            window,
+            win_a: 0.0,
+            win_b: 0.0,
+            win_n: 0,
+            win_start: 0,
+            rate: window as f64 / LEVEL_WINDOW_SECS,
+            flags: Vec::new(),
+        })
+    }
+
+    fn add(&mut self, f: u64, rendered: [f32; 2]) {
+        let recorded = self.recorded.next();
+        for c in 0..2 {
+            self.whole.add(rendered[c], recorded[c]);
+            for (_, a, b, acc) in self.sections.iter_mut() {
+                if f >= *a && f < *b {
+                    acc.add(rendered[c], recorded[c]);
+                }
+            }
+            let qa = f64::from(to_i24(rendered[c])) / 8_388_607.0;
+            self.win_a += qa * qa;
+            self.win_b += f64::from(recorded[c]) * f64::from(recorded[c]);
+        }
+        self.win_n += 2;
+        if self.win_n >= 2 * self.window {
+            self.close_window();
+            self.win_start = f + 1;
+        }
+    }
+
+    fn close_window(&mut self) {
+        if self.win_n == 0 {
+            return;
+        }
+        let (a, b) = (level_db(self.win_a, self.win_n), level_db(self.win_b, self.win_n));
+        if level_flagged(a, b) {
+            self.flags.push(LevelFlag {
+                at: self.win_start as f64 / self.rate,
+                render_dbfs: a,
+                recorded_dbfs: b,
+            });
+        }
+        self.win_a = 0.0;
+        self.win_b = 0.0;
+        self.win_n = 0;
+    }
+
+    fn finish(mut self) -> Compared {
+        self.close_window();
+        Compared {
+            whole: self.whole.finish(),
+            sections: self
+                .sections
+                .iter()
+                .map(|(s, _, _, acc)| (s.clone(), false, acc.finish()))
+                .collect(),
+            flags: self.flags,
+        }
+    }
+}
+
 /// Whether `track`'s live input was heard in `section`: a take, hear-through, `monitor: true`, or
-/// `monitor: always` while nothing else on its input records.
+/// `monitor: always`.
 fn live_in(score: &CompiledScore, section: &str, track: &str) -> bool {
     let Some(s) = score.sections.iter().find(|s| s.id == section) else {
         return false;
@@ -523,10 +870,7 @@ fn live_in(score: &CompiledScore, section: &str, track: &str) -> bool {
         state,
         Some(TrackState::Record | TrackState::Overdub | TrackState::Stack | TrackState::HearThrough)
     );
-    let always = score
-        .tracks
-        .iter()
-        .any(|t| t.name == track && t.monitor_always);
+    let always = score.tracks.iter().any(|t| t.name == track && t.monitor_always);
     takes || s.clip(track).monitor || always
 }
 
@@ -541,7 +885,11 @@ fn describe_chain(source: &TrackMixSource) -> String {
     if mix.bypass || on.is_empty() {
         format!("preset {preset}: no built-in effects")
     } else {
-        format!("preset {preset}{}: {}", if source.has_effect_lines() { " (+ overrides)" } else { "" }, on.join(", "))
+        format!(
+            "preset {preset}{}: {}",
+            if source.has_effect_lines() { " (+ overrides)" } else { "" },
+            on.join(", ")
+        )
     }
 }
 
@@ -549,8 +897,7 @@ fn db_text(gain: f32, mute: bool) -> String {
     if mute {
         return "muted".to_string();
     }
-    let db = gain_to_db(gain);
-    format!("{db:+.1} dB")
+    format!("{:+.1} dB", gain_to_db(gain))
 }
 
 fn pan_text(pan: f32) -> String {

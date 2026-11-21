@@ -203,6 +203,20 @@ const SCHEDULED_SLOTS: usize = 64;
 /// has always used for "left and right".
 pub const OUT_CHANNELS: usize = BUS_CHANNELS;
 
+/// What the recorder works out per frame, for an offline re-performance (`crate::render`): the
+/// loop playback each track's dry stem gets at a musical position, and the weight its live input
+/// gets there. Attached only by the offline renderer - pushing into these vectors may allocate,
+/// which no audio callback can afford and none ever does, because the app never attaches one.
+#[derive(Debug, Default)]
+pub struct Probe {
+    /// `(track, position, Track::play_frame(position))` - the loop part of the dry stem, taken
+    /// where the recorder takes it.
+    pub loops: Vec<(usize, u64, Frame)>,
+    /// `(track, input index k, weight)` - how much of the live input frame `k` the dry stem gets
+    /// (at musical position `k - R`): 1 while the track records or monitors, faded at the edges.
+    pub weights: Vec<(usize, u64, f32)>,
+}
+
 /// Everything the engine needs to exist. Assembled by the control thread.
 pub struct EngineConfig {
     pub timeline: Timeline,
@@ -331,6 +345,9 @@ pub struct EngineCore {
     gate_bar1: Option<u64>,
     /// The MIDI-loop stage (`super::midiloop`), if the host attached it.
     midi: Option<Box<midiproc::MidiLoops>>,
+    /// Offline only (`crate::render`): what the recorder works out per frame, handed out. `None`
+    /// in the app and every live use.
+    probe: Option<Box<Probe>>,
     /// Where the current callback's time went (`crate::load::BlockProfile`), and the clock reading
     /// the next phase is measured from. Started by [`Self::begin_profile`], handed out by
     /// [`Self::take_profile`].
@@ -403,6 +420,7 @@ impl EngineCore {
             gate: true,
             gate_bar1: None,
             midi: None,
+            probe: None,
             profile: BlockProfile::default(),
             lap: Instant::now(),
         }
@@ -499,6 +517,16 @@ impl EngineCore {
     /// the audio callback; the rack's scratch blocks are allocated here.
     pub fn attach_inserts(&mut self, endpoint: InsertEndpoint) {
         self.inserts = Some(Box::new(InsertRack::new(endpoint)));
+    }
+
+    /// Offline only: start handing out what the recorder works out per frame ([`Probe`]).
+    pub fn attach_probe(&mut self) {
+        self.probe = Some(Box::default());
+    }
+
+    /// What the probe collected since the last call.
+    pub fn take_probe(&mut self) -> Probe {
+        self.probe.as_deref_mut().map(std::mem::take).unwrap_or_default()
     }
 
     /// Give the engine its recorder slot. Control thread, before the engine moves into the audio
@@ -1102,6 +1130,7 @@ impl EngineCore {
         let mut capture = self.capture.as_deref_mut().and_then(CaptureSlot::session);
         let sources = self.sources.as_deref();
         let in_index = self.in_index;
+        let mut probe = self.probe.as_deref_mut();
 
         for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
             let pos = start + i as u64;
@@ -1125,6 +1154,9 @@ impl EngineCore {
                     monitor_frame(track, input, frame, in_frames, channels, gain, in_index)
                 };
                 let sent = track.render(pos, monitor, collapsed);
+                if let Some(probe) = probe.as_mut() {
+                    probe.loops.push((t, pos, track.play_frame(pos)));
+                }
                 if let Some(capture) = capture.as_mut() {
                     let main = sent[Bus::Main.index()];
                     capture.track_frame(t, pos, main, track);
@@ -1198,6 +1230,7 @@ impl EngineCore {
         // of this piece; the plugins are told where it stands at the first one.
         rack.set_transport(transport);
         let mut capture = self.capture.as_deref_mut().and_then(CaptureSlot::session);
+        let mut probe = self.probe.as_deref_mut();
         for bus in rack.bus_scratch.iter_mut() {
             bus.clear(n);
         }
@@ -1269,6 +1302,9 @@ impl EngineCore {
                 track.note_strip_peak(monitor);
                 if let Some(capture) = capture.as_mut() {
                     capture.track_frame(t, start + i as u64, main, track);
+                }
+                if let Some(probe) = probe.as_mut() {
+                    probe.loops.push((t, start + i as u64, track.play_frame(start + i as u64)));
                 }
             }
             let now = Instant::now();
@@ -1465,7 +1501,7 @@ impl EngineCore {
     ///   the way the loop will play it.
     fn capture_live(&mut self, t: usize, pos: u64, k: u64, frame: Frame, wrote: bool, collapsed: bool) {
         let fresh = self.tracks[t].take_fresh_take();
-        if self.capture.is_none() {
+        if self.capture.is_none() && self.probe.is_none() {
             return;
         }
         let track = &self.tracks[t];
@@ -1486,6 +1522,9 @@ impl EngineCore {
             0.0
         };
         let weight = take + (1.0 - take) * monitor;
+        if let Some(probe) = self.probe.as_deref_mut() {
+            probe.weights.push((t, k, weight));
+        }
         let reach = crate::capture::live_reach(track, collapsed, k);
         let before = self.live_weight[t];
         self.live_weight[t] = weight;
