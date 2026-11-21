@@ -7,6 +7,7 @@
 //!     ├─ Grid         ruler + heads + lanes            ┐ both edit through docStore.edit(op)
 //!     ├─ Inspector    the selection's fields            ┘
 //!     ├─ TextView     CodeMirror + block preview + messages (docStore.setText)
+//!     ├─ SheetEditor  the sheet (lyrics, chords, stage directions) + its preview (docStore.edit)
 //!     └─ statusbar
 //! ```
 //!
@@ -25,6 +26,7 @@ import * as ops from "./ops";
 import { secondsPerBar, totalBars } from "./resolve";
 import { NONE, moveFocus, prune, type Selection } from "./selection";
 import { TextView } from "./TextView";
+import { SheetEditor } from "../sheet/SheetEditor";
 import type { ScoreActions } from "./scoreActions";
 import { useScoreFile } from "../scoreFile";
 import { docStore, useDoc, useEngineTracks, useRun } from "./useDoc";
@@ -34,7 +36,7 @@ import { ChannelPanel, Mixer, MixerToggle, mixerEditorClass, selectChannelByName
 import { mixerState } from "../mixer/store";
 import { currentStatus, useStatusSlice } from "../status";
 
-type View = "grid" | "text";
+type View = "grid" | "text" | "sheet";
 type TrackTab = "track" | "channel";
 
 const PHASE_WORD: Record<string, string> = {
@@ -406,6 +408,10 @@ export function Arrangement({ onGoto, actions }: Props) {
               <i className="ic ic-code" />
               Text (YAML)
             </button>
+            <button className={view === "sheet" ? "on" : undefined} onClick={() => setView("sheet")} title="Lyrics, chords and stage directions - shown beside the Live stage">
+              <i className="ic ic-sheet" />
+              Sheet
+            </button>
           </div>
           <div className="sep" />
           {view === "grid" ? (
@@ -486,7 +492,9 @@ export function Arrangement({ onGoto, actions }: Props) {
               </span>
               {banner}
               <div className="grow" />
-              <span className="lbl">Both views edit the same score — changes show up in the grid at once.</span>
+              <span className="lbl">
+                {view === "text" ? "Both views edit the same score — changes show up in the grid at once." : "Saved with the score as sheet: — shown beside the Live stage (key L)."}
+              </span>
               <div className="sep" />
               <FileMenu actions={actions} />
               <button className="btn s" onClick={() => void actions.save()} title={`Save (${MOD_LABEL}+S)`}>
@@ -565,6 +573,16 @@ export function Arrangement({ onGoto, actions }: Props) {
               </div>
             )}
           </div>
+        ) : view === "sheet" ? (
+          <SheetEditor
+            doc={doc}
+            text={state.text}
+            score={state.score}
+            errors={errors}
+            notes={state.notes ?? []}
+            editable={editable}
+            edit={(op) => !locked && docStore.edit(op)}
+          />
         ) : (
           <TextView
             text={state.text}
@@ -596,6 +614,12 @@ export function Arrangement({ onGoto, actions }: Props) {
               </span>
               {run.armed && run.armedText && <span className="armedtxt">{run.armedText}</span>}
             </>
+          ) : view === "sheet" ? (
+            <span>
+              {state.score?.sheet
+                ? `Sheet · ${plural(state.score.sheet.items.filter((i) => i.kind === "line").length, "line")} · ${Math.round(state.score.sheet.total * 100) / 100} bars`
+                : "Sheet · none yet"}
+            </span>
           ) : (
             <>
               <span>

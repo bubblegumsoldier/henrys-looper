@@ -28,6 +28,7 @@
 //! selected track's effect chain in or out, I opens its details. X, V and D wait for one more digit
 //! - `X 3` switches the compressor, `V 1` loads "Voice", `D 2` sets the delay to a dotted eighth,
 //! exactly as in the CLI. Space/N and Shift+S belong to the score transport (see `scoreTransport`).
+//! L shows or hides the sheet beside the stage (`sheet/SheetSidebar`).
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { api } from "../api";
@@ -44,6 +45,8 @@ import { clearAllAsked } from "./ClockBar";
 import { TrackDetail, type TrackActions } from "./TrackDetail";
 import { DELAY_NOTES, FX_NAME, FX_PRESETS, FX_SLOT_ORDER } from "../mixer/fxModel";
 import { channelActions } from "../mixer/actions";
+import { SheetSidebar } from "../sheet/SheetSidebar";
+import { toggleSheet } from "../sheet/layout";
 import type { LooperStatus, LooperTrackStatus, ScoreState } from "../types";
 
 type Chord = "x" | "v" | "d";
@@ -301,6 +304,12 @@ function Stage({ onOpenArrangement }: Props) {
         run(() => api.tapTempo());
         return;
       }
+      // L: the sheet beside the stage (lyrics, chords, stage directions).
+      if (key === "l") {
+        e.preventDefault();
+        toggleSheet();
+        return;
+      }
       const track = list[current];
       if (!track) return;
       switch (key) {
@@ -366,71 +375,74 @@ function Stage({ onOpenArrangement }: Props) {
   const detailTrack = detail !== null ? tracks[detail] : undefined;
 
   return (
-    <div className="live-wrap">
-      <div
-        className={`live tiles-${layout}${detailTrack ? " with-drawer" : ""}`}
-        ref={root}
-        style={{ "--beat-dur": `${beatDur}s`, "--n-tracks": Math.max(count, 1), "--cols": Math.ceil(count / 2) } as CSSProperties}
-      >
-        <div className="lv-top">
-          <PositionPanel clock={clock} score={score} compiled={compiled} />
-          <ReleasePanel score={score} compiled={compiled} clock={clock} tracks={tracks} />
-        </div>
-
-        <ArrangementStrip score={score} compiled={compiled} onOpenArrangement={onOpenArrangement} />
-
-        <div className="tiles">
-          {tracks.map((t) => {
-            const writing = t.state === "recording" || t.state === "overdub";
-            return (
-              <TrackTile
-                key={t.index}
-                track={t}
-                selected={t.index === selected}
-                onSelect={setSelected}
-                onDetail={(i) => setDetail((d) => (d === i ? null : i))}
-                actions={actions}
-                next={nextStates[t.index] ?? null}
-                barInLoop={writing ? t.take_bar || barInLoop : 0}
-                loopBars={t.loop_bars || clock.bars}
-                latchMode={latchMode}
-              />
-            );
-          })}
-          {count === 0 && <div className="panel tiles-empty">No tracks. Add some in {T.setup}.</div>}
-        </div>
-
-        {chordShown && (
-          <div className="chord" aria-live="polite">
-            <kbd>{chordShown.toUpperCase()}</kbd>
-            <b>{CHORDS[chordShown].title}</b>
-            <span className="dim">
-              Track {selected + 1}
-              {tracks[selected] ? ` · ${tracks[selected].name}` : ""}
-            </span>
-            <ol>
-              {CHORDS[chordShown].options.map((option, n) => (
-                <li key={option}>
-                  <kbd>{n + 1}</kbd> {option}
-                </li>
-              ))}
-            </ol>
-            <span className="dim">
-              <kbd>Esc</kbd> cancel
-            </span>
+    <div className="live-shell">
+      <div className="live-wrap">
+        <div
+          className={`live tiles-${layout}${detailTrack ? " with-drawer" : ""}`}
+          ref={root}
+          style={{ "--beat-dur": `${beatDur}s`, "--n-tracks": Math.max(count, 1), "--cols": Math.ceil(count / 2) } as CSSProperties}
+        >
+          <div className="lv-top">
+            <PositionPanel clock={clock} score={score} compiled={compiled} />
+            <ReleasePanel score={score} compiled={compiled} clock={clock} tracks={tracks} />
           </div>
-        )}
 
-        {detailTrack && (
-          <TrackDetail
-            track={detailTrack}
-            color={trackColor(detailTrack.index)}
-            actions={actions}
-            defaultLatency={clock.latency}
-            onClose={() => setDetail(null)}
-          />
-        )}
+          <ArrangementStrip score={score} compiled={compiled} onOpenArrangement={onOpenArrangement} />
+
+          <div className="tiles">
+            {tracks.map((t) => {
+              const writing = t.state === "recording" || t.state === "overdub";
+              return (
+                <TrackTile
+                  key={t.index}
+                  track={t}
+                  selected={t.index === selected}
+                  onSelect={setSelected}
+                  onDetail={(i) => setDetail((d) => (d === i ? null : i))}
+                  actions={actions}
+                  next={nextStates[t.index] ?? null}
+                  barInLoop={writing ? t.take_bar || barInLoop : 0}
+                  loopBars={t.loop_bars || clock.bars}
+                  latchMode={latchMode}
+                />
+              );
+            })}
+            {count === 0 && <div className="panel tiles-empty">No tracks. Add some in {T.setup}.</div>}
+          </div>
+
+          {chordShown && (
+            <div className="chord" aria-live="polite">
+              <kbd>{chordShown.toUpperCase()}</kbd>
+              <b>{CHORDS[chordShown].title}</b>
+              <span className="dim">
+                Track {selected + 1}
+                {tracks[selected] ? ` · ${tracks[selected].name}` : ""}
+              </span>
+              <ol>
+                {CHORDS[chordShown].options.map((option, n) => (
+                  <li key={option}>
+                    <kbd>{n + 1}</kbd> {option}
+                  </li>
+                ))}
+              </ol>
+              <span className="dim">
+                <kbd>Esc</kbd> cancel
+              </span>
+            </div>
+          )}
+
+          {detailTrack && (
+            <TrackDetail
+              track={detailTrack}
+              color={trackColor(detailTrack.index)}
+              actions={actions}
+              defaultLatency={clock.latency}
+              onClose={() => setDetail(null)}
+            />
+          )}
+        </div>
       </div>
+      <SheetSidebar onOpenArrangement={onOpenArrangement} />
     </div>
   );
 }

@@ -736,6 +736,42 @@ export interface CompiledScore {
   sections: CompiledSection[];
   /** The `mixer:` section as written; absent when the score has none. */
   mixer?: MixerSource;
+  /** The `sheet:`, parsed by the engine (`score/sheet.rs`); absent when the score has none. */
+  sheet?: CompiledSheet;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The sheet: lyrics, chords and stage directions. Mirrors `looper_engine::score::sheet`. The UI
+// does not parse a sheet; it gets this with the compiled score and only computes where it stands.
+// ---------------------------------------------------------------------------------------------
+
+/** A chord and the column (in characters) it stands on. */
+export interface SheetChord {
+  name: string;
+  col: number;
+}
+
+/** One element of the sheet, in written order. `line` is 1-based inside the sheet text; bars are
+ *  on the sheet's own timeline, from 0. */
+export type SheetItem =
+  /** `# Name @section_id`: `at` is the bar the part begins on. */
+  | { kind: "part"; name: string; section?: string; at: number; line: number }
+  /** `> text`: in force from `start`; `bars` is 0 unless the direction has a `|N`. */
+  | { kind: "direction"; text: string; rec: boolean; bars: number; start: number; line: number }
+  | { kind: "line"; text: string; chords: SheetChord[]; bars: number; start: number; line: number };
+
+/** The stretch of the sheet that belongs to one section: `[start, end)` in bars. */
+export interface SheetSpan {
+  start: number;
+  end: number;
+}
+
+export interface CompiledSheet {
+  items: SheetItem[];
+  /** Length of the whole sheet in bars. */
+  total: number;
+  /** One per section, in section order. */
+  spans: SheetSpan[];
 }
 
 /**
@@ -985,6 +1021,8 @@ export interface ScoreDoc {
   sections: DocSection[];
   /** Fader, mute, effects and bus levels kept with the song; absent when the score has none. */
   mixer?: DocMixer;
+  /** `sheet: |` - lyrics, chords, stage directions, exactly as written; absent when there is none. */
+  sheet?: string;
   /** Comment lines above the first key / after the last element. */
   header?: string[];
   footer?: string[];

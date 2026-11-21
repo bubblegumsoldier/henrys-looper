@@ -1,0 +1,122 @@
+/* =============================================================================================
+   Henrys Looper — das Blatt (Text, Akkorde, Regieanweisungen): Seitenleiste im Live-Modus und
+   Vorschau im Arrangement. Nur Tokens. Anweisungen: gelb wie "armiert" (etwas ist zu tun),
+   mit REC rot wie Aufnahme; Akkorde in der Akzentfarbe, der klingende Akkord voll.
+   ============================================================================================= */
+
+/* --- Live: Bühne + Seitenleiste ------------------------------------------------------------ */
+.live-shell { display: grid; grid-template-columns: minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
+.live-shell > .live-wrap { min-width: 0; }
+
+.sheet-rail {
+  display: flex; flex-direction: column; align-items: center; gap: 10px; width: 34px; padding: 14px 0;
+  background: var(--bg-1); border: 0; border-left: 1px solid var(--line-2); color: var(--tx-3);
+  font: var(--fw-semibold) var(--fs-12)/1 var(--font-ui); letter-spacing: var(--tracking-caps); text-transform: uppercase; cursor: pointer;
+}
+.sheet-rail span { writing-mode: vertical-rl; }
+.sheet-rail kbd { font: var(--fw-semibold) var(--fs-10)/1 var(--font-mono); color: var(--tx-4); border: 1px solid var(--line-3); border-radius: var(--r-1); padding: 2px 3px; }
+.sheet-rail:hover { color: var(--tx-1); background: var(--bg-2); }
+.sheet-rail .ic { --ic: 16px; }
+
+.sheet-side {
+  position: relative; display: flex; flex-direction: column; min-height: 0;
+  width: var(--sheet-w, 40vw); min-width: 260px; max-width: 70vw;
+  background: var(--bg-1); border-left: 1px solid var(--line-2);
+}
+.sheet-resize { position: absolute; left: -3px; top: 0; bottom: 0; width: 7px; cursor: col-resize; z-index: 3; }
+.sheet-resize:hover, .sheet-resize:active { background: var(--accent-line); }
+
+.sheet-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 16px; border-bottom: 1px solid var(--line-2); color: var(--tx-2); font-size: var(--fs-13); }
+.sheet-head > .ic { --ic: 16px; color: var(--tx-3); }
+.sheet-head b { font-weight: var(--fw-semibold); color: var(--tx-1); }
+.sheet-head .grow { flex: 1; }
+.sheet-btn {
+  height: 26px; min-width: 30px; padding: 0 8px; border-radius: var(--r-2); border: 1px solid var(--line-3);
+  background: var(--bg-3); color: var(--tx-2); font: var(--fw-semibold) var(--fs-12)/1 var(--font-ui); cursor: pointer; box-shadow: var(--sh-ctl);
+}
+.sheet-btn:hover { background: var(--bg-4); color: var(--tx-1); }
+.sheet-btn .ic { --ic: 13px; }
+
+/* NOW / NEXT: steht fest über dem Blatt */
+.sheet-now { padding: 12px 18px; border-bottom: 1px solid var(--line-2); background: var(--bg-2); font-family: var(--font-mono); }
+.sheet-now .row { display: flex; gap: 12px; align-items: baseline; min-width: 0; }
+.sheet-now .row + .row { margin-top: 4px; }
+.sheet-now .k { flex: none; width: 44px; color: var(--tx-3); font-size: var(--fs-12); letter-spacing: .08em; }
+.sheet-now .v { min-width: 0; font-size: 19px; font-weight: var(--fw-semibold); color: var(--tx-1); overflow-wrap: anywhere; }
+.sheet-now .v.rec { color: var(--st-rec); }
+.sheet-now .next .v { font-size: 14px; font-weight: var(--fw-regular); color: var(--tx-2); }
+.sheet-now .next .v.rec { color: #ff9ba5; }
+.sheet-beats { margin-left: auto; display: flex; gap: 5px; align-self: center; flex: none; }
+.sheet-beats i { width: 9px; height: 9px; border-radius: 50%; background: var(--line-3); }
+.sheet-beats i.on { background: var(--tx-1); }
+.sheet-beats i.on:first-child { background: var(--st-armed); }
+
+.sheet-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; padding: 4px 24px 50vh; outline: none; }
+
+.sheet-empty { padding: 18px; color: var(--tx-2); font-size: var(--fs-13); line-height: 1.5; overflow: auto; }
+.sheet-empty b { color: var(--tx-1); font-size: var(--fs-15); }
+.sheet-empty pre { margin: 10px 0; padding: 10px 12px; background: var(--bg-inset); border-radius: var(--r-2); color: var(--tx-2); font: var(--fs-12)/1.5 var(--font-mono); white-space: pre; overflow: auto; }
+.sheet-empty code { font: var(--fs-12) var(--font-mono); color: var(--tx-1); }
+.sheet-empty .dim { color: var(--tx-3); }
+.sheet-empty .linkish { color: var(--accent); background: none; border: 0; padding: 0; font: inherit; cursor: pointer; text-decoration: underline; }
+
+/* --- Das Blatt selbst (Live und Vorschau) ---------------------------------------------------- */
+.sheet-scroll, .sheet-preview { font: var(--sheet-fs, 18px)/1.4 var(--font-mono); color: var(--tx-1); }
+
+.sh-part { display: flex; align-items: center; gap: 10px; margin: 28px 0 12px; color: var(--tx-3); font: var(--fw-semibold) var(--fs-13)/1.2 var(--font-ui); letter-spacing: .02em; }
+.sh-part::after { content: ""; flex: 1; border-top: 1px dashed var(--line-4); }
+.sh-anchor { font: var(--fs-11) var(--font-mono); color: var(--tx-4); }
+
+.sh-dir {
+  position: relative; overflow: hidden; margin: 10px 0 8px; padding: 7px 12px; border-radius: var(--r-2);
+  border: 1px solid var(--st-armed-line); border-left: 4px solid var(--st-armed); background: var(--st-armed-soft);
+  color: var(--st-armed); font: var(--fw-medium) max(14px, calc(var(--sheet-fs, 18px) * 0.8))/1.35 var(--font-ui); white-space: pre-wrap;
+  transition: opacity var(--dur-2), box-shadow var(--dur-2);
+}
+.sh-dir.rec { border-color: var(--st-rec-line); border-left-color: var(--st-rec); background: var(--st-rec-soft); color: #ff9ba5; }
+.sh-dir.active { box-shadow: 0 0 0 1px currentColor; }
+.sh-bars { float: right; margin-left: 12px; color: var(--tx-3); font-size: .85em; }
+
+.sh-ln {
+  position: relative; padding: 4px 10px 6px; margin: 0 -10px; border-left: 3px solid transparent; border-radius: var(--r-1);
+  width: max-content; min-width: calc(100% + 20px); transition: opacity var(--dur-2), background var(--dur-2);
+}
+.sh-ln.cur { background: var(--bg-3); border-left-color: var(--tx-1); }
+.sh-dir.past, .sh-ln.past { opacity: .35; }
+
+/* Akkorde: genau auf ihrer Spalte (left in ch, gemessen in der Monospace-Schrift der Zeile) */
+.sh-ch { position: relative; height: 1.75em; }
+.sh-chip { position: absolute; top: 0; }
+.sh-chip b {
+  display: inline-block; padding: .15em .45em; border-radius: var(--r-2); white-space: nowrap;
+  background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent-line); color: var(--tx-1);
+  font: var(--fw-bold) .8em/1.2 var(--font-ui);
+}
+.sh-chip.on b { background: var(--accent); color: var(--tx-inv); box-shadow: 0 0 0 2px rgba(142, 162, 255, .35); }
+.sh-tx { white-space: pre; min-height: 1.4em; }
+
+/* Fortschritt: --p von 0 bis 1, gesetzt je Bild */
+.sh-prog { display: block; height: 3px; margin-top: 4px; border-radius: 2px; background: var(--tx-1); transform-origin: left; transform: scaleX(var(--p, 0)); visibility: hidden; }
+.sh-ln.cur .sh-prog { visibility: visible; }
+.sh-dir .sh-prog { position: absolute; left: 0; bottom: 0; width: 100%; margin: 0; background: currentColor; }
+.sh-dir.cur .sh-prog { visibility: visible; }
+
+/* --- Arrangement: Editor + Vorschau ---------------------------------------------------------- */
+.sheet-edit { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); min-height: 0; background: var(--bg-0); }
+.sheet-edit .src { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line-2); }
+.sheet-edit .cap { padding: 8px 14px; border-bottom: 1px solid var(--line-2); color: var(--tx-3); font-size: var(--fs-12); line-height: 1.5; }
+.sheet-edit .cap code { color: var(--tx-1); font: var(--fs-11) var(--font-mono); }
+.sheet-edit textarea {
+  flex: 1; min-height: 0; resize: none; border: 0; outline: 0; padding: 14px 16px; tab-size: 4;
+  background: var(--bg-inset); color: var(--tx-1); font: var(--fs-13)/1.5 var(--font-mono); white-space: pre; overflow: auto;
+}
+.sheet-edit textarea:disabled { color: var(--tx-3); }
+.sheet-edit .issues { border-top: 1px solid var(--line-2); max-height: 30%; overflow: auto; font-size: var(--fs-12); }
+.sheet-edit .issues button { display: block; width: 100%; text-align: left; padding: 6px 14px; border: 0; background: none; color: var(--tx-2); font: inherit; cursor: pointer; }
+.sheet-edit .issues button:hover { background: var(--bg-2); }
+.sheet-edit .issues .err { color: var(--err); }
+.sheet-edit .issues .note { color: var(--warn); }
+.sheet-preview { overflow: auto; min-height: 0; padding: 4px 24px 40px; }
+.sheet-preview .sh-part, .sheet-preview .sh-dir, .sheet-preview .sh-ln { cursor: pointer; }
+.sheet-preview .sh-ln:hover { background: var(--bg-2); }
+.sheet-preview-empty { padding: 24px; color: var(--tx-3); font: var(--fs-13)/1.5 var(--font-ui); }
