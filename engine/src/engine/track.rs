@@ -125,6 +125,9 @@ pub const EDGE_MS: f64 = 10.0;
 /// pre-roll every layer keeps and the input history every track keeps.
 pub const EDGE_MAX: usize = 1024;
 
+/// Samples one layer's pre-roll takes: `EDGE_MAX` stereo frames.
+const PRE_SAMPLES: usize = 2 * EDGE_MAX;
+
 /// Switches of a track's audibility that can be pending at once. Arming happens at most one fade
 /// length ahead, so more than two never overlap in practice; a full set folds its oldest.
 const MAX_SWITCHES: usize = 4;
@@ -397,9 +400,9 @@ pub struct Layer {
     muted: bool,
     seam: u64,
     end: u64,
-    /// Interleaved stereo: `pre[2k], pre[2k+1]` is the input `edge - k` frames before the take's
-    /// first frame (`edge` = the track's fade length). Zero until the take writes its first frame.
-    pre: [f32; 2 * EDGE_MAX],
+    /// Which of the track's pre-roll slots is this layer's (`Track::pre_rolls`). Kept outside the
+    /// layer so a layer stays a few dozen bytes: the mix walks every layer every frame.
+    pre_slot: usize,
     pre_ready: bool,
     /// Frames this layer's take wrote, and the index of the last one - what `end` comes from.
     written: u64,
@@ -407,7 +410,7 @@ pub struct Layer {
 }
 
 impl Layer {
-    fn new(store: LayerStore, channels: Channels) -> Self {
+    fn new(store: LayerStore, channels: Channels, pre_slot: usize) -> Self {
         Self {
             store,
             channels,
@@ -415,7 +418,7 @@ impl Layer {
             muted: false,
             seam: 0,
             end: 0,
-            pre: [0.0; 2 * EDGE_MAX],
+            pre_slot,
             pre_ready: false,
             written: 0,
             last: 0,
@@ -430,9 +433,11 @@ impl Layer {
 
     /// One frame of this layer at loop index `i`, split into the part that belongs to the pass
     /// containing `i` (its body, faded out before an early end) and the lead-in of the pass that
-    /// begins at the seam, plus how far ahead that seam is. Silent on a MIDI layer.
+    /// begins at the seam, plus how far ahead that seam is. Silent on a MIDI layer. `pre` is the
+    /// layer's pre-roll: interleaved stereo, `pre[2k], pre[2k+1]` the input `edge - k` frames
+    /// before the take's first frame.
     #[inline(always)]
-    fn parts(&self, i: u64, len: u64, fade: u64, edge: u64) -> (Frame, Frame, u64) {
+    fn parts(&self, i: u64, len: u64, fade: u64, edge: u64, pre: &[f32]) -> (Frame, Frame, u64) {
         let samples = self.samples();
         let n = self.channels.count();
         let base = i as usize * n;
@@ -443,12 +448,16 @@ impl Layer {
             l
         };
         let mut body = Frame::new(l * self.gain, r * self.gain);
+        let to_seam = ahead_to(self.seam, i, len);
+        if to_seam > fade && self.end == self.seam {
+            // Everywhere but the last fade before the seam of a whole pass: the sample itself.
+            return (body, Frame::SILENT, to_seam);
+        }
         let to_end = ahead_to(self.end, i, len);
         if self.end != self.seam && to_end <= fade {
             let g = fade_out(fade - to_end, fade);
             body = Frame::new(body.l * g, body.r * g);
         }
-        let to_seam = ahead_to(self.seam, i, len);
         let lead = if to_seam <= fade {
             let k = (edge - to_seam) as usize;
             let g = fade_in(fade - to_seam, fade) * self.gain;
@@ -457,7 +466,8 @@ impl Layer {
             if self.end == self.seam {
                 body = Frame::new(body.l * fo, body.r * fo);
             }
-            Frame::new(self.pre[2 * k] * g, self.pre[2 * k + 1] * g)
+            let at = |n: usize| pre.get(n).copied().unwrap_or(0.0);
+            Frame::new(at(2 * k) * g, at(2 * k + 1) * g)
         } else {
             Frame::SILENT
         };
@@ -625,6 +635,12 @@ pub struct Track {
     /// One past the newest position in `history`, and the first one of the unbroken run it holds.
     history_end: u64,
     history_from: u64,
+    /// Slot of `history_end` in `history`, counted along so the per-frame path has no division.
+    history_slot: usize,
+    /// The pre-roll of every layer, `MAX_LAYERS` slots of [`PRE_SAMPLES`], allocated here; bit `n`
+    /// of `pre_free` says slot `n` is unused.
+    pre_rolls: Vec<f32>,
+    pre_free: u32,
     /// Set when a take has just written its first frame (its start), until the engine asks.
     fresh_take: Option<u64>,
     /// Audibility of the loop before the first pending switch (playing and not held).
@@ -679,6 +695,9 @@ impl Track {
             history: vec![0.0; 2 * EDGE_MAX],
             history_end: 0,
             history_from: 0,
+            history_slot: 0,
+            pre_rolls: vec![0.0; MAX_LAYERS * PRE_SAMPLES],
+            pre_free: (1u32 << MAX_LAYERS) - 1,
             fresh_take: None,
             sound_base: false,
             switches: [Switch {
@@ -1318,6 +1337,7 @@ impl Track {
     /// * **Re-anchoring at `P`** - the old grid fades out and the new one fades in over the same
     ///   frames before `P`, each with the start/stop rule above, so the new top plays untouched.
     /// * **Late or untimed** changes ("Stop all", the transport) fade from where they act.
+    #[inline]
     pub fn play_frame(&self, pos: u64) -> Frame {
         let len = self.grid.loop_len;
         if len == 0 || self.layers.is_empty() || self.midi_loop {
@@ -1378,12 +1398,45 @@ impl Track {
     fn sum_layers(&self, origin: u64, pos: u64, part: Part, fade: u64) -> Frame {
         let len = self.grid.loop_len;
         let i = loop_index(pos, origin, len);
+        if part == Part::Steady {
+            // The common case, kept as lean as the plain read it replaced: one comparison per
+            // layer decides whether this index is in its seam fade at all.
+            let n = self.channels.count();
+            let base = i as usize * n;
+            let (mut left, mut right) = (0.0f32, 0.0f32);
+            for layer in &self.layers {
+                if layer.muted {
+                    continue;
+                }
+                if layer.end == layer.seam && ahead_to(layer.seam, i, len) > fade {
+                    let samples = layer.samples();
+                    let l = samples.get(base).copied().unwrap_or(0.0) * layer.gain;
+                    left += l;
+                    right += if n == 2 {
+                        samples.get(base + 1).copied().unwrap_or(0.0) * layer.gain
+                    } else {
+                        l
+                    };
+                } else {
+                    let pre = self.pre_of(layer.pre_slot);
+                    let (body, lead, _) = layer.parts(i, len, fade, self.edge, pre);
+                    let v = body.added(lead);
+                    left += v.l;
+                    right += v.r;
+                }
+            }
+            return match self.channels {
+                Channels::Mono => Frame::mono(left),
+                Channels::Stereo => Frame::new(left, right),
+            };
+        }
         let mut out = Frame::SILENT;
         for layer in &self.layers {
             if layer.muted {
                 continue;
             }
-            let (body, lead, to_seam) = layer.parts(i, len, fade, self.edge);
+            let (body, lead, to_seam) =
+                layer.parts(i, len, fade, self.edge, self.pre_of(layer.pre_slot));
             let v = match part {
                 Part::Steady => body.added(lead),
                 Part::Gain(g) => scaled(body.added(lead), g),
@@ -1421,7 +1474,8 @@ impl Track {
     fn layer_parts(&self, layer: usize, idx: u64) -> (Frame, Frame) {
         match self.layers.get(layer) {
             Some(l) if !l.muted => {
-                let (body, lead, _) = l.parts(idx, self.grid.loop_len, self.fade_len(), self.edge);
+                let pre = self.pre_of(l.pre_slot);
+                let (body, lead, _) = l.parts(idx, self.grid.loop_len, self.fade_len(), self.edge, pre);
                 (body, lead)
             }
             _ => (Frame::SILENT, Frame::SILENT),
@@ -1436,16 +1490,39 @@ impl Track {
         }
     }
 
+    /// A free pre-roll slot for a new layer, zeroed - in the audio thread, but bounded: one fade
+    /// of samples. There is always one, since a track never holds more than `MAX_LAYERS` layers.
+    fn claim_pre(&mut self) -> usize {
+        let slot = (self.pre_free.trailing_zeros() as usize).min(MAX_LAYERS - 1);
+        self.pre_free &= !(1 << slot);
+        let base = slot * PRE_SAMPLES;
+        self.pre_rolls[base..base + 2 * self.edge as usize].fill(0.0);
+        slot
+    }
+
+    #[inline(always)]
+    fn pre_of(&self, slot: usize) -> &[f32] {
+        let base = slot * PRE_SAMPLES;
+        &self.pre_rolls[base..base + PRE_SAMPLES]
+    }
+
     /// Remember one input frame at musical position `pos` - every frame this track could record,
     /// whether a take runs or not, so a take that begins finds what led into it.
     #[inline(always)]
     pub fn remember(&mut self, pos: u64, frame: Frame) {
         if pos != self.history_end {
+            // A jump (the first frame, a changed compensation): start a new run. The slot of a
+            // position is `pos % edge`; in a run it simply counts up.
             self.history_from = pos;
+            self.history_slot = (pos % self.edge) as usize;
         }
-        let slot = (pos % self.edge) as usize * 2;
+        let slot = self.history_slot * 2;
         self.history[slot] = frame.l;
         self.history[slot + 1] = frame.r;
+        self.history_slot += 1;
+        if self.history_slot as u64 == self.edge {
+            self.history_slot = 0;
+        }
         self.history_end = pos + 1;
     }
 
@@ -1459,7 +1536,10 @@ impl Track {
     #[inline]
     pub fn pre_roll(&self, layer: usize, k: usize) -> Frame {
         match self.layers.get(layer) {
-            Some(l) => Frame::new(l.pre[2 * k], l.pre[2 * k + 1]),
+            Some(l) => {
+                let pre = self.pre_of(l.pre_slot);
+                Frame::new(pre[2 * k], pre[2 * k + 1])
+            }
             None => Frame::SILENT,
         }
     }
@@ -1574,6 +1654,7 @@ impl Track {
         // A re-anchoring armed for later belongs to the run that has just been replaced.
         self.grid.restart = None;
         self.restart_play = false;
+        self.restart_fade = None;
     }
 
     #[inline]
@@ -1741,8 +1822,9 @@ impl Track {
                 };
                 if p >= self.history_from && p < self.history_end {
                     let slot = (p % edge) as usize * 2;
-                    layer.pre[2 * k as usize] = self.history[slot];
-                    layer.pre[2 * k as usize + 1] = self.history[slot + 1];
+                    let at = layer.pre_slot * PRE_SAMPLES + 2 * k as usize;
+                    self.pre_rolls[at] = self.history[slot];
+                    self.pre_rolls[at + 1] = self.history[slot + 1];
                 }
             }
             self.fresh_take = Some(pos);
@@ -1769,8 +1851,9 @@ impl Track {
     pub fn begin_loop_take(&mut self, start: u64, store: impl Into<LayerStore>) {
         let store = store.into();
         self.check_store(&store);
-        self.playing = false;
-        self.layers.push(Layer::new(store, self.channels));
+        self.set_playing(false);
+        let slot = self.claim_pre();
+        self.layers.push(Layer::new(store, self.channels, slot));
         self.grid.begin_loop(start, self.layers.len() - 1);
     }
 
@@ -1778,7 +1861,8 @@ impl Track {
     pub fn begin_overdub_take(&mut self, start: u64, store: impl Into<LayerStore>) {
         let store = store.into();
         self.check_store(&store);
-        self.layers.push(Layer::new(store, self.channels));
+        let slot = self.claim_pre();
+        self.layers.push(Layer::new(store, self.channels, slot));
         self.grid.begin_overdub(start, self.layers.len() - 1);
     }
 
@@ -1899,6 +1983,7 @@ impl Track {
     /// Emptying a track resets its geometry: the next take defines a new loop.
     pub fn pop_layer(&mut self) -> Option<LayerStore> {
         let layer = self.layers.pop()?;
+        self.pre_free |= 1 << layer.pre_slot;
         if self.layers.is_empty() {
             self.grid.reset();
             self.set_playing(false);
@@ -1914,6 +1999,7 @@ impl Track {
         // Moves at most `MAX_LAYERS` small headers - a memmove of a few hundred bytes, no
         // allocation and no deallocation.
         let layer = self.layers.remove(index);
+        self.pre_free |= 1 << layer.pre_slot;
         if self.layers.is_empty() {
             self.grid.reset();
             self.set_playing(false);

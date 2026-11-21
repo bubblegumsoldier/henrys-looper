@@ -1020,7 +1020,8 @@ fn record_layers(bars: u32, count: usize, gap: u64) -> (Sim, u64, u64) {
     (sim, origin, len)
 }
 
-/// Three layers on one track: the output is the sample-by-sample sum of the three buffers.
+/// Three layers on one track: the output is the sample-by-sample sum of the three layers as they
+/// are heard (each with its seam crossfade, `Track::steady_layer`).
 #[test]
 fn three_layers_play_back_as_their_exact_sum() {
     let (mut sim, origin, len) = record_layers(4, 3, 0);
@@ -2262,9 +2263,8 @@ fn a_centred_mono_track_is_equally_loud_on_both_sides_and_hard_left_silences_the
         at: origin + len,
     });
     sim.run_to(origin + len + R + 4 * BLOCK as u64);
-    let content = layer_content(&sim, 0, 0);
 
-    // Centre: both sides carry the loop, bit for bit.
+    // Centre: both sides carry the loop as it is heard, bit for bit.
     let centre_from = origin + 2 * len;
     sim.run_to(centre_from + len + BLOCK as u64);
     let mut loud = 0usize;

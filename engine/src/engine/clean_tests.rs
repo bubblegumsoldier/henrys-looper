@@ -426,5 +426,244 @@ fn stop_all_fades_out_and_is_silent_on_its_sample() {
     }
 }
 
+/// The fades, spelled out on one loop: which samples they touch and what they blend with.
+///
+/// A one-bar loop of the counting input (every sample names its input frame) is recorded, played,
+/// re-anchored in the middle and stopped on its seam. Checked against the formula, independently
+/// of the engine's own code:
+///
+/// * the pre-roll is exactly the input of the `edge` frames before the take's first frame;
+/// * a start on the seam fades in the pre-roll over the `edge` frames before it - nothing before
+///   that - and the first frame plays untouched;
+/// * every pass is the take sample for sample, except its last `edge` frames, which crossfade
+///   (raised cosine, amplitude-complementary) into the pre-roll; the next pass begins untouched;
+/// * a re-anchoring fades the old position out and the new top's pre-roll in over the frames
+///   before it, and the new top plays untouched;
+/// * a stop on the seam lets the pass fade out through its own seam fade and is silent from the
+///   seam on - the pre-roll of a pass nobody hears is not added.
+#[test]
+fn the_fades_touch_only_the_frames_before_each_edge() {
+    use super::timeline::TimeSignature;
+    use super::track::{edge_frames, fade_in, fade_out};
+    let timeline = Timeline::new(RATE, 94.0, TimeSignature::new(4, 4));
+    let len = timeline.span_bars(0, 1);
+    let edge = edge_frames(RATE);
+    assert_eq!(edge as f64, FADE);
+    let mut sim = Sim::new(
+        SimSpec {
+            bpm: 94.0,
+            bars: 1,
+            latency: LATENCY,
+            roundtrip: LATENCY,
+            tracks: vec![TrackSpec::on(1)],
+            input_channels: 2,
+            loopback_channel: None,
+            ..Default::default()
+        },
+        Box::new(counting),
+    );
+    let start = timeline.bar_start(2);
+    let end = start + len;
+    sim.send(Command::StartRecord { track: 0, at: start });
+    sim.send(Command::StopRecord { track: 0, at: end });
+    sim.send(Command::StartPlay { track: 0, at: end });
+    let restart = end + 2 * len + 1_234;
+    sim.send(Command::RestartLoop {
+        track: 0,
+        at: restart,
+        play: false,
+    });
+    let stop = restart + 2 * len;
+    sim.send(Command::StopPlay { track: 0, at: stop });
+    sim.run_to(stop + len);
+
+    let track = sim.core.track(0);
+    assert_eq!(track.loop_len(), len);
+    let take = track.layer(0).unwrap().channel(0, len);
+    // Musical position m was played at input frame m + R; the pre-roll precedes the take's start.
+    let pre: Vec<f32> = (0..edge).map(|j| counting(start - edge + j + LATENCY, 1)).collect();
+    for (j, &p) in pre.iter().enumerate() {
+        assert_eq!(track.pre_roll(0, j).l, p, "pre-roll frame {j}");
+    }
+    let out = |p: u64| sim.bus(Bus::Main, p).l;
+    // A pass's own sample at index i, with its seam crossfade.
+    let heard = |i: u64| -> f32 {
+        if i >= len - edge {
+            let d = i - (len - edge);
+            take[i as usize] * fade_out(d, edge) + pre[d as usize] * fade_in(d, edge)
+        } else {
+            take[i as usize]
+        }
+    };
+
+    // The start on the seam at `end`.
+    assert_eq!(out(end - edge - 1), 0.0, "silent before the fade-in");
+    for d in 0..edge {
+        assert_eq!(out(end - edge + d), pre[d as usize] * fade_in(d, edge), "fade-in {d}");
+    }
+    // Two passes, every sample.
+    for p in end..restart - edge {
+        assert_eq!(out(p), heard((p - end) % len), "pass sample at {p}");
+    }
+    assert_eq!(out(end), take[0], "the first frame untouched");
+    assert_eq!(out(end + len), take[0], "every pass begins untouched");
+
+    // The re-anchoring: old position fades out, the new top's pre-roll fades in.
+    for d in 0..edge {
+        let p = restart - edge + d;
+        let old = heard((p - end) % len) * fade_out(d, edge);
+        let new = pre[d as usize] * fade_in(d, edge);
+        let got = out(p);
+        assert!((got - (old + new)).abs() < 1e-6, "re-anchor fade {d}: {got} vs {}", old + new);
+    }
+    for p in restart..stop - edge {
+        assert_eq!(out(p), heard((p - restart) % len), "new grid at {p}");
+    }
+    assert_eq!(out(restart), take[0], "the new top untouched");
+
+    // The stop on the seam: the last pass runs out through its seam fade - without the pre-roll.
+    for d in 0..edge {
+        let i = len - edge + d;
+        assert_eq!(out(stop - edge + d), take[i as usize] * fade_out(d, edge), "fade-out {d}");
+    }
+    for p in stop..stop + len {
+        assert_eq!(out(p), 0.0, "silent from the stop on, at {p}");
+    }
+}
+
+/// The recording's stems are as clean as the room: the dry stem reads the loop through the same
+/// faded playback as the mix, and the live part of a stem fades in and out with monitoring and at
+/// a take's edges. Every stem of the whole score, dry and processed, stays inside the bound for
+/// the few signals one stem carries (loop, live input, and a fade between them).
+#[test]
+fn the_stems_of_the_owners_score_have_no_click_either() {
+    use crate::capture::{CaptureSpec, Layout, Read, capture_channel, capture_pair};
+    let mut stage = Stage::new(Box::new(low), false);
+    let from = stage.section(0);
+    let layout = Layout {
+        tracks: stage
+            .score()
+            .tracks
+            .iter()
+            .map(|t| t.track_input().channels())
+            .collect(),
+        dry: true,
+    };
+    let (session, mut reader) = capture_pair(&CaptureSpec {
+        start: from,
+        layout: layout.clone(),
+        sample_rate: RATE,
+        max_block: BLOCK as usize,
+        max_latency: LATENCY,
+        queue_seconds: 400.0,
+    });
+    let (mut port, endpoint) = capture_channel();
+    stage.sim.core.attach_capture(endpoint);
+    port.install(session).unwrap();
+    stage.run_all();
+    let mut frames = Vec::new();
+    while let Read::Frames(_) = reader.read(&mut frames, 1 << 20) {}
+    let width = layout.width();
+    let total = frames.len() / width;
+    assert!(total as u64 > stage.section(12) - from - 100_000, "{total} frames captured");
+
+    let (max_step, max_curve) = bounds(3);
+    let mut worst = (0.0f64, String::new());
+    for (t, track) in stage.score().tracks.iter().enumerate() {
+        if track.is_instrument() {
+            continue;
+        }
+        let stem = layout.stem_offset(t);
+        let dry = layout.dry_offset(t).unwrap();
+        for (what, offset) in [("stem", stem), ("stem R", stem + 1), ("dry", dry)] {
+            let v = |i: usize| f64::from(frames[i * width + offset]);
+            for i in 2..total {
+                let step = (v(i) - v(i - 1)).abs();
+                let curve = (v(i) - 2.0 * v(i - 1) + v(i - 2)).abs();
+                assert!(step <= max_step, "{} {what}: step {step} at frame {i}", track.name);
+                if curve > worst.0 {
+                    worst = (curve, format!("{} {what} at frame {i}", track.name));
+                }
+            }
+        }
+    }
+    eprintln!("stems: largest curvature {:.6} ({}), bound {max_curve:.6}", worst.0, worst.1);
+    assert!(worst.0 <= max_curve, "click in {}: {}", worst.1, worst.0);
+}
+
+/// What loop playback costs the callback: eight mono tracks with four layers each, all playing
+/// a one-bar loop of low-frequency material at 94 BPM (a seam crossfade every 2.55 s on every
+/// layer), 128-frame blocks. Prints nanoseconds per frame for the whole engine block (the
+/// simulation's own bookkeeping included, the same before and after) - run it in release:
+///
+/// ```text
+/// cargo test --release -p looper-engine --lib bench_loop_playback -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn bench_loop_playback() {
+    use super::timeline::TimeSignature;
+    let timeline = Timeline::new(RATE, 94.0, TimeSignature::new(4, 4));
+    let bar = timeline.span_bars(0, 1);
+    let tracks = (0..8).map(|_| TrackSpec::on(1)).collect();
+    let mut sim = Sim::new(
+        SimSpec {
+            bpm: 94.0,
+            bars: 1,
+            latency: LATENCY,
+            roundtrip: LATENCY,
+            tracks,
+            input_channels: 2,
+            loopback_channel: None,
+            spare_slots: 8,
+            ..Default::default()
+        },
+        Box::new(low),
+    );
+    let start = timeline.bar_start(1);
+    for t in 0..8 {
+        sim.send(Command::StartRecord { track: t, at: start });
+        sim.send(Command::StopRecord { track: t, at: start + bar });
+        sim.send(Command::StartPlay { track: t, at: start + bar });
+    }
+    for n in 1..4u64 {
+        sim.run_to(start + n * bar - 4 * u64::from(BLOCK));
+        for t in 0..8 {
+            sim.send(Command::StartOverdub { track: t, at: start + n * bar });
+            sim.send(Command::StopRecord { track: t, at: start + (n + 1) * bar });
+        }
+    }
+    sim.run_to(start + 5 * bar);
+    for t in 0..8 {
+        assert_eq!(sim.core.track(t).layer_count(), 4);
+    }
+    let blocks = 4_000u64;
+    let mut seam_blocks = Vec::new();
+    let mut other_blocks = Vec::new();
+    let t0 = std::time::Instant::now();
+    for _ in 0..blocks {
+        // Blocks that end in the last fade before the common seam of all 32 layers.
+        let into = (sim.pos() + u64::from(BLOCK) - start) % bar;
+        let at_seam = into >= bar - 480 || into < u64::from(BLOCK);
+        let b0 = std::time::Instant::now();
+        sim.run_blocks(1);
+        let d = b0.elapsed().as_nanos() as f64;
+        if at_seam { seam_blocks.push(d) } else { other_blocks.push(d) }
+    }
+    let ns = t0.elapsed().as_nanos() as f64 / (blocks * u64::from(BLOCK)) as f64;
+    let budget = 1e9 / f64::from(RATE);
+    let median = |v: &mut Vec<f64>| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2] / f64::from(BLOCK)
+    };
+    eprintln!(
+        "loop playback, 8 tracks x 4 layers: {ns:.1} ns/frame = {:.2} % of the callback budget; \
+         median block {:.1} ns/frame, in the fade before a seam of all 32 layers {:.1} ns/frame",
+        ns / budget * 100.0,
+        median(&mut other_blocks),
+        median(&mut seam_blocks)
+    );
+}
+
 #[allow(dead_code)]
 fn _unused(_: Command) {}

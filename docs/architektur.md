@@ -267,7 +267,8 @@ Puffer-Allokation  ◄─── Status/Retire ──────     Sample-Posi
 **Im Audio-Callback niemals:** allozieren, sperren, loggen, formatieren, Dateien anfassen.
 Nur Atomics, vorab allozierte Puffer und lock-freie Queues (`rtrb`).
 
-Puffer werden im **Steuer-Thread** alloziert und genullt, wandern über eine Install-Queue in
+Puffer werden im **Steuer-Thread** alloziert, genullt und einmal je Speicherseite beschrieben
+(sonst blendet das System die Seiten erst beim ersten Schreiben im Audio-Thread ein), wandern über eine Install-Queue in
 den Audio-Thread (der einen Vorrat hält) und über eine Retire-Queue zurück. Entfernte Layer
 werden nicht im Callback freigegeben.
 
@@ -825,7 +826,8 @@ Oktaver von `bass_from_guitar`!) um `playback_advance` vorausgelesen, die Aufnah
 hinterher. Deshalb geht jede Position durch `LoopGrid::origin_at(pos)`: vor `at` der alte, ab `at`
 der neue Ursprung — beim Lesen (`Track::read`), beim Schreiben (`write_index`) und beim Abspielen
 der MIDI-Ebenen. Das Kommando wirkt **früh**, sobald der Vorauslesezeiger `at` erreicht
-(`EngineCore::next_due` zieht die Vorauslese des Tracks ab); `play: true` lässt den Track ab `at`
+(`EngineCore::next_due` zieht die Vorauslese des Tracks ab; bei einem Audio-Loop zusätzlich die
+10 ms, über die altes und neues Raster überblenden, Abschnitt 18); `play: true` lässt den Track ab `at`
 auf der Leseachse klingen (`Track::sounds_at`), das `StartPlay` für dieselbe Sample folgt wie
 immer. So beginnt ein vorausgelesener Loop mit seinem ersten Frame, statt die ersten
 `playback_advance` Frames — den Anschlag auf der Eins — zu verlieren. Der nächste Neuanfang faltet
@@ -1971,7 +1973,7 @@ gewählte Ordner. Einstellungen in `recording.json` im Konfigurationsordner
 | Datei | Inhalt |
 |---|---|
 | `01 voice.wav` | Stem, stereo: Beitrag der Spur zum Main-Bus – nach eingebauter FX-Kette, Plugin-Inserts, Fader, Mute/Solo, Pan; vor Main-Bus-Inserts und Main-Lautstärke. Plus Live-Ergänzung (s. u.) |
-| `01 voice (dry).wav` | Loop-Wiedergabe (hörbare Ebenen mit Ebenen-Gain) + roher Live-Eingang während Record/Overdub/Hear-through; vor allem anderen, ohne Monitor-Lautstärke. Kanalzahl der Spur (mono bleibt mono). Abschaltbar |
+| `01 voice (dry).wav` | Loop-Wiedergabe (hörbare Ebenen mit Ebenen-Gain, **mit denselben Blenden wie hörbar**, Abschnitt 18) + roher Live-Eingang während Record/Overdub/Hear-through (an seinen Kanten ebenso geblendet); vor allem anderen, ohne Monitor-Lautstärke. Kanalzahl der Spur (mono bleibt mono). Abschaltbar |
 | `Mix.wav` | Main-Bus nach seinen Inserts, vor der Main-Lautstärke, **ohne Klick** (auch bei zusammengelegten Bussen) |
 | `score.yaml` | Kopie der geladenen Partitur (nur Partitur-Lauf) |
 | `session.json` | Titel, Modus, Startzeit, BPM, Taktart, Samplerate, Länge, Spuren (mit `midi: null` als Platz für spätere `.mid`-Dateien), Sektionsmarker (Frame, Sekunden, Takt ab 1, Sektions-Id), Aussetzer-Zähler, Klartext-Erklärung der Dateien |
@@ -2079,6 +2081,195 @@ des Blatts darunter (Klick springt zur Zeile, Klick in der Vorschau ebenso).
 | `engine/src/score/doc.rs` | `ScoreDoc.sheet`, Block-Skalar schreiben, `#` im Block ist kein Kommentar |
 | `ui/src/sheet/position.ts` | Status → Stelle auf dem Blatt, NOW/NEXT |
 | `ui/src/sheet/SheetSidebar.tsx`, `SheetView.tsx`, `SheetEditor.tsx` | Seitenleiste, Seite, Editor |
+
+## 18. Kein Knacksen: Blenden an jeder Kante eines Loops
+
+Ein Take beginnt und endet mitten in dem, was gespielt wird; sein erstes und sein letztes Sample
+treffen sich fast nie. Ein Loop spielt aber bei jedem Durchlauf das eine direkt nach dem anderen.
+Roh abgespielt ist das an **jeder Naht** eine Stufe von einem Sample auf das nächste — und mit dem
+tieffrequenten Anteil einer Piezo-Gitarre ein deutlich hörbares Knacken, alle vier Takte. Dasselbe
+an jedem **Einsatz** (von exakt 0 auf den ersten Wert), jedem **Stopp** (vom laufenden Wert auf 0),
+jedem **Neuanfang** (`RestartLoop`: von einer Stelle des Loops auf seinen Anfang) und beim
+**Mithören**, das bisher hart ein- und ausgeschaltet wurde. Gefunden im Mitschnitt „The Hardest
+Part" vom 2026-11-21 (Theme +0,0027 → −0,0319 an jeder Naht, im Mix +0,0667 → +0,0203); der
+Regressionstest unten zählt im Stand davor **78 Knackstellen** in einem Durchlauf der Partitur,
+jetzt **0**.
+
+Bis dahin gab es Blenden nur in der Effektkette (Schalter und Bypass, 20–80 ms, Abschnitt 9) und
+am Kanalzug (Fader, Mute, Solo, 10 ms). Keine davon lag auf dem Weg des Loops selbst: die Summe der
+Ebenen ging ungeblendet in die Kette.
+
+### Die Regel: Blenden liegen vor der Kante, der erste Frame bleibt unberührt
+
+Alle Blenden sind **10 ms** lang (`track::EDGE_MS`, 480 Frames bei 48 kHz), Form: halbe
+Kosinus-Periode, amplitudenkomplementär (`fade_in + fade_out = 1`). Warum so:
+
+* **10 ms** decken die tiefen Frequenzen ab, um die es geht: Eine Stufe, die über 480 Frames
+  verteilt wird, hat oberhalb von ~100 Hz keine Energie mehr. Kürzer (1–3 ms) macht aus dem Klick
+  einen Tupfer; länger verwischt mehr vom Loop, ohne mehr zu nützen.
+* **Amplitudenkomplementär statt gleicher Leistung**, weil das, was knackt, tieffrequent ist — und
+  das ist auf beiden Seiten einer Naht über wenige Millisekunden fast dasselbe Signal. Zwei
+  korrelierte Signale mit gleicher Leistung überblendet wölben sich um bis zu 3 dB auf: ein Wummern
+  an jeder Naht. Für unkorrelierte Anteile ergibt die Amplitudenblende eine Delle von höchstens
+  3 dB für ein paar Millisekunden, die man nicht hört.
+* **Kosinus statt Gerade**, weil er an beiden Enden ohne Knick ansetzt.
+
+**Wo** geblendet wird, ist die eigentliche Entscheidung: **vor** der Kante. Der erste Frame eines
+Durchlaufs, eines Einsatzes, eines Neuanfangs ist der Anschlag auf der Eins — der klingt
+unverändert, sample-genau dort, wo er immer lag. Was angepasst wird, sind die 10 ms davor: das
+Ausklingen am Ende eines Durchlaufs, die Stille vor einem Einsatz.
+
+### Woher das Material vor der Kante kommt: der Vorlauf jeder Ebene
+
+Eine Naht ist nur dann sauber zu überblenden, wenn man weiß, was **vor** dem ersten Sample des
+Takes gespielt wurde — das ist das Signal, das physikalisch stetig in ihn hineinläuft. Dafür
+merkt sich jeder Track die letzten 10 ms seines Eingangs (`Track::remember`, ein Ring je Track,
+im Steuer-Thread alloziert, jedes Eingangs-Frame, ob ein Take läuft oder nicht). Schreibt ein
+Take sein erstes Frame, kopiert die Ebene diese 480 Frames als ihren **Vorlauf**
+(`Track::write`). Dazu merkt sich jede Ebene ihre **Naht** (der Loop-Index ihres ersten Frames: 0
+beim Take, der den Loop festlegt, die Rasterstelle bei einem Overdub) und ihr **Ende** (die Naht,
+oder bei einem vorzeitig beendeten Overdub der Index nach dem letzten Frame).
+
+Abgespielt (`Track::play_frame`, `Layer::parts`) wird jede Ebene dann so:
+
+| Stelle | was klingt |
+|---|---|
+| die letzten 10 ms vor der Naht | eigener Inhalt × `fade_out` + Vorlauf × `fade_in` — beim letzten Frame vor der Naht ist man fast ganz im Vorlauf, und der läuft in das erste Frame hinein |
+| ab der Naht | der Take, Sample für Sample |
+| die letzten 10 ms vor dem Ende eines kurzen Overdubs | eigener Inhalt × `fade_out` (dahinter ist die Ebene still) |
+
+Jede Ebene hat ihre eigene Naht; Overdubs, `stack`-Durchläufe und Ebenen auf einem neu verankerten
+Raster sind damit ohne Sonderfall abgedeckt (der Index einer Ebene ändert sich beim Neuanfang
+nicht, nur wann er klingt). Der Vorlauf eines `stack`-Durchlaufs ist das Ende des vorigen — die
+Eingabe läuft ja durch. Der Vorlauf eines Takes, der aus der Stille beginnt, ist eben diese Stille
+mit dem, was die Gitarre gerade summt; das Ende des Loops blendet dann sanft dorthin aus.
+
+### Einsatz, Stopp, Neuanfang: Befehle, die eine Blende früher wirken
+
+Damit ein Einsatz **vor** seiner Position einblenden und ein Stopp **auf** seiner Position still
+sein kann, muss der Track sie 10 ms im Voraus kennen. `EngineCore::due` lässt deshalb vier
+Befehle auf Audio-Loops früher wirken:
+
+| Befehl | wirkt | was er dann tut |
+|---|---|---|
+| `StartPlay` / `StopPlay` | 10 ms früher | merkt einen Wechsel der Hörbarkeit für genau seine Position vor (`Track::arm_playing`) |
+| `RestartLoop` | 10 ms plus Vorauslese früher | wie bisher `LoopGrid::restart`, dazu das Blendfenster |
+| `StopRecord` | 10 ms früher, nie vor Beginn seines Takes | setzt die Loop-Länge wie bisher — nur früher, damit ein Einsatz genau am Take-Ende schon blenden kann. Die Aufnahme endet weiter auf dem Sample: es ist eine Position |
+
+Was geschieht, steht in einer kleinen Liste je Track (`Switch`, höchstens vier, nichts alloziert)
+und wird pro Position ausgewertet — dieselbe Funktion für den Mix (mit Vorauslese) und den
+trockenen Stem (ohne):
+
+* **Einsatz an `P`** — die 10 ms vor `P` blenden ein, was in `P` hineinführt. Eine Ebene, deren
+  Naht `P` ist (ein Loop, der vorn beginnt — nach einem Take, mit `restart`, oder einfach auf
+  seinem Raster), steuert dort **nur ihren Vorlauf** bei: vom vorigen Durchlauf, den niemand hörte,
+  sickert nichts durch. Jede andere Ebene blendet mit ihrem eigenen Inhalt ein.
+* **Stopp an `P`** — ab `P` still, die 10 ms davor blenden aus. Liegt `P` auf der Naht, läuft der
+  Durchlauf durch seine eigene Nahtblende aus, ohne den Vorlauf des nächsten, der nicht kommt.
+* **Neuanfang an `P`** — altes Raster aus, neues ein, über dieselben 10 ms vor `P`, jedes nach der
+  Regel oben; der neue Anfang klingt unberührt.
+* Kommt ein Befehl zu spät für die volle Blende, wird sie verkürzt; liegt seine Position schon
+  hinter dem Lesezeiger, blendet er **ab** dort.
+* **Ungetimte und späte Wechsel** blenden ab dem Sample, an dem sie wirken: das `Stop` der Engine,
+  Transport-Stopp und -Start (die Eins kann nicht vor sich selbst einblenden), das Halten beim
+  Einzähler.
+* **„Stop all"** ist ein getimtes `StopPlay` auf `Scheduler::soon` — es blendet also davor aus und
+  ist **ab genau dem Sample still**, das der Runner meldet (Test
+  `stop_all_fades_out_and_is_silent_on_its_sample`, und alle Tests in `runner/stop_tests.rs`
+  unverändert grün).
+
+**Der Wartesaal bleibt gültig.** Ein Befehl, der früher wirkt, hat den Wartesaal früher verlassen.
+Ein später geschickter Ablass (`DropWaiting` von „Stop all", `ClearAll`, Transport-Stopp) hätte ihn
+dort noch gefunden — deshalb trägt jeder Befehl seine Ankunftsnummer, und ein vorgezogener Befehl,
+den ein später geschickter Ablass mit erfasst, wird verworfen (`EngineCore::drained_later`). Ohne
+das könnte ein Einsatz, der 5 ms nach dem Stopp-Sample geplant war, „Stop all" überleben.
+
+**MIDI-Loops** sind unverändert: keine Samples, keine Blende, keine verschobenen Zeiten.
+
+### Mithören
+
+`SetMonitor` hat keinen Zeitstempel (Abschnitt 10). Statt hart zu schalten, blendet das Mithören
+jetzt über 10 ms, gerechnet in Eingangs-Frames ab dem Frame, mit dem der Befehl wirkt
+(`Track::monitor_level`). Dieselbe Kurve gewichtet das Live-Signal im Stem. Im Mitschnitt waren das
+die Klicks bei 12,77 s und 109,80 s (Mikrofon an).
+
+### Die Stems hören, was der Saal hört
+
+Der trockene Stem las den Loop bisher direkt aus den Ebenen, an der Blende vorbei. Jetzt liest er
+ihn über dieselbe Funktion wie der Mix — **Stems enthalten den geblendeten Loop**, so wie er zu
+hören war. Das Live-Signal im Stem (Abschnitt 16) bekommt dieselben Kanten: Es blendet mit dem
+Mithören, am Ende eines Takes, den der Loop übernimmt, blendet es über die letzten 10 ms aus —
+genau dort, wo der Loop seinen Vorlauf einblendet (die Nahtblende, im Stem) —, und ein Take, der
+aus der Stille beginnt, bekommt seinen Vorlauf vor dem ersten Frame eingeblendet. Ob das
+Live-Signal schon über Main im Stem steht, wird jetzt für das Eingangs-Frame selbst entschieden
+(`capture::live_reach`), nicht für den Moment, in dem es `R` Frames später einsortiert wird — vorher
+landeten die letzten Frames eines Takes, nach dem das Mithören abgeschaltet wurde, doppelt im Stem.
+
+### Was nicht geblendet wird
+
+* Inhalt, der verschwindet: Löschen, Undo, Entfernen einer Ebene und ein neuer Take auf einem
+  spielenden Track (`StartRecord` räumt die alten Ebenen sofort ab). Was nicht mehr da ist, kann
+  nicht ausblenden. In keiner Partitur des Besitzers kommt das unter Klang vor.
+* Ebene stumm/laut, Ebenen-Lautstärke, globales Mithör-Stumm (`SetMonitorMute`) — wie bisher
+  Schritte, bewusst ungeglättet (Abschnitt 6).
+* Loops unter 80 ms (8 Blendlängen): keine Blende. Baut kein Musiker, nur Tests, die Loops Sample
+  für Sample lesen.
+
+### Kosten
+
+Echtzeit-sicher: nichts alloziert (Ring und Vorlauf-Speicher je Track im Steuer-Thread, 16 Slots à
+1024 Stereo-Frames), keine Sperre, keine Latenz. Gemessen mit `bench_loop_playback`
+(`cargo test --release -p looper-engine --lib bench_loop_playback -- --ignored --nocapture`, acht
+Tracks mit je vier Ebenen auf einem Ein-Takt-Loop, ganzer Engine-Block samt Simulation): **137 →
+183 ns je Frame**, also 0,66 % → 0,88 % des Callback-Budgets; in den Blöcken, in denen alle 32
+Ebenen gleichzeitig vor ihrer Naht blenden, rund 250 ns je Frame (1,2 %). Gemessen auf dem
+Entwicklungsrechner, während die App lief — die Zahlen schwanken um ±15 %.
+
+### Was der Knackser in `theme_b` war
+
+Im selben Mitschnitt sprang `03 theme_b (dry).wav` bei 10,3454 s um 0,06 in einem Sample, und der
+Loop wiederholte den Sprung bei jedem Durchlauf. Das ist **kein** Fehler beim Schreiben der Ebene:
+Das gemithörte Live-Signal derselben Spur (`03 theme_b.wav`, `Mix.wav`) springt identisch,
+**genau `R` = 596 Frames später** — dort, wo das Mithören dasselbe Eingangs-Frame ungeschoben
+ausgibt — und dieses Sample liegt exakt auf einer 128er-Blockgrenze der Engine. Der Eingang
+selbst hatte dort einen Schnitt: ein verlorener Treiber-Zyklus (CoreAudio-Overload oder ein
+Überlauf des Eingangs-FIFO); `session.json` zählt für den Lauf zwei solche Aussetzer. Der Vergleich
+„Stem bei 10,3454 s glatt" sah auf das falsche Sample, weil der Stem das Live-Signal ohne
+Kompensation trägt. Bewiesen wird die Engine-Seite durch
+`every_take_of_the_owners_score_is_the_input_shifted_by_the_latency`: dieselbe Partitur, ein
+Eingang, der seine Frame-Nummern trägt, und alle neun Takes sind Sample für Sample der Eingang,
+um `R` verschoben — kein Frame fehlt, keiner doppelt. Nebenbei werden neue Ebenen-Puffer jetzt im
+Steuer-Thread einmal je Speicherseite beschrieben (`command::resident_zeros`): `vec![0.0; n]` liefert
+Seiten, die erst beim ersten Schreiben eingeblendet werden — im Audio-Thread, alle 16 KB eines
+Takes. Ob das den Aussetzer verursacht hat, lässt sich aus der Aufnahme nicht sagen; es ist eine
+Ursache weniger.
+
+### Tests
+
+| Test | beweist |
+|---|---|
+| `clean_tests::every_take_of_the_owners_score_is_the_input_shifted_by_the_latency` | alle Takes der Partitur sample-genau = Eingang um `R` verschoben (auch kurze Overdubs) |
+| `clean_tests::theme_b_is_continuous_across_the_spot_of_the_owners_click` | die eine Stelle aus dem Mitschnitt |
+| `clean_tests::the_fades_touch_only_the_frames_before_each_edge` | Vorlauf = Eingang vor dem Take; Naht, Einsatz, Neuanfang, Stopp Sample für Sample gegen die Formel; erster Frame unberührt |
+| `clean_tests::the_owners_score_plays_without_a_single_click` | ganze Partitur mit 41/73-Hz-Material: Main hat keine Stufe und keine Krümmung über der Schranke, die aus Steigung und Krümmung des Eingangs plus einer Blende folgt (0 statt 78 Stellen) |
+| `clean_tests::stop_all_fades_out_and_is_silent_on_its_sample` | „Stop all" in drei Sektionen: blendet, ab dem Stopp-Sample digital still |
+| `clean_tests::the_stems_of_the_owners_score_have_no_click_either` | jeder Stem und jeder trockene Stem der Partitur ebenso |
+
+Geänderte bestehende Tests, jeweils weil sie den Loop Sample für Sample mit dem Ebeneninhalt
+verglichen und die letzten 10 ms vor der Naht jetzt geblendet sind: in `tests.rs` die Summen-,
+Stumm-, Entfernen-, Stereo-, Panorama-, Bypass- und Mithör-Tests (sie vergleichen jetzt mit
+`Track::steady_layer`, dem Inhalt mit Nahtblende; außerhalb der Blende unverändert exakt),
+`loop_seam_loses_and_repeats_nothing` und `start_play_acts_exactly_at_its_sample` (rechnen die
+Blende ausdrücklich nach), `clear_stop_and_monitor_do_what_they_say` (Mithören blendet aus),
+`output_tests` (dasselbe), `transport_tests::stop_keeps_the_loops_and_start_plays_them_from_the_top`
+(Transport-Stopp und -Start blenden ab ihrem Sample), `restart_tests::the_chorus_sounds_with_the_first_bar_of_both_loops`
+(der Takt davor ist still bis auf die Einblendung) und die goldenen Hashes in
+`runner/golden_tests.rs`: gegen den Stand davor Sample für Sample verglichen, unterscheiden sich
+nur Läufe von 480–484 Frames vor Nähten, Einsätzen, Stopps, Neuanfängen und nach
+Mithör-Schaltern, 0,2 % aller Frames.
+
+**Nichts wird über Sitzungen hinweg gespeichert**: Ebenen leben nur im Speicher der laufenden
+Engine; ein Loop von vor dieser Änderung kann also nicht auftauchen.
 
 ## 13. Arbeitsweise
 

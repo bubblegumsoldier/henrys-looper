@@ -1345,6 +1345,7 @@ impl EngineCore {
             0.0
         };
         let weight = take + (1.0 - take) * monitor;
+        let reach = crate::capture::live_reach(track, collapsed, k);
         let before = self.live_weight[t];
         self.live_weight[t] = weight;
         let Some(capture) = self.capture.as_deref_mut().and_then(CaptureSlot::session) else {
@@ -1361,10 +1362,10 @@ impl EngineCore {
                 };
                 let g = fade_in(j, edge) * (1.0 - before);
                 let v = track.pre_roll(layer, j as usize);
-                capture.live_frame(t, p, Frame::new(v.l * g, v.r * g), track, 1.0, collapsed);
+                capture.live_frame(t, p, Frame::new(v.l * g, v.r * g), track, 1.0, reach);
             }
         }
-        capture.live_frame(t, pos, frame, track, weight, collapsed);
+        capture.live_frame(t, pos, frame, track, weight, reach);
     }
 
     /// The take part of [`Self::record_input`] for one track and one input frame at musical
