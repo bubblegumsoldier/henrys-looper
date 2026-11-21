@@ -2252,6 +2252,7 @@ Ursache weniger.
 | `clean_tests::theme_b_is_continuous_across_the_spot_of_the_owners_click` | die eine Stelle aus dem Mitschnitt |
 | `clean_tests::the_fades_touch_only_the_frames_before_each_edge` | Vorlauf = Eingang vor dem Take; Naht, Einsatz, Neuanfang, Stopp Sample für Sample gegen die Formel; erster Frame unberührt |
 | `clean_tests::the_owners_score_plays_without_a_single_click` | ganze Partitur mit 41/73-Hz-Material: Main hat keine Stufe und keine Krümmung über der Schranke, die aus Steigung und Krümmung des Eingangs plus einer Blende folgt (0 statt 78 Stellen) |
+| `clean_tests::stacked_and_cut_short_layers_play_without_a_click` | `stack` (Vorlauf jedes Durchlaufs = Ende des vorigen), Wiederkehr nach Pause neu verankert, gekürzter Overdub (vorher 26 Stellen über der Schranke, jetzt 0) |
 | `clean_tests::stop_all_fades_out_and_is_silent_on_its_sample` | „Stop all" in drei Sektionen: blendet, ab dem Stopp-Sample digital still |
 | `clean_tests::the_stems_of_the_owners_score_have_no_click_either` | jeder Stem und jeder trockene Stem der Partitur ebenso |
 
