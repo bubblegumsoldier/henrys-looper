@@ -22,8 +22,9 @@ export interface FxActions {
 export type LoadablePreset = Exclude<FxPresetName, "custom">;
 
 /**
- * The three chains a user can ask for, in the order the buttons stand in. The digit is what the
- * keyboard chord `V` of the Live view expects, so a button and the key never disagree.
+ * The four chains a user can ask for, in the order the buttons stand in. The digit is what the
+ * keyboard chord `V` of the Live view expects, so a button and the key never disagree. "Bass" came
+ * last, so the digits of the three older ones did not move.
  */
 export const FX_PRESETS: { name: LoadablePreset; label: string; hint: string }[] = [
   {
@@ -37,6 +38,11 @@ export const FX_PRESETS: { name: LoadablePreset; label: string; hint: string }[]
     hint: "100 Hz high-pass, -4 dB on the quack band at 3 kHz, 2.5:1, 10 % reverb",
   },
   { name: "dry", label: "Dry", hint: "Everything off, chain bypassed - passed through bit for bit" },
+  {
+    name: "bass_from_guitar",
+    label: "Bass",
+    hint: "Single notes on the guitar, one octave down and voiced as a bass: octaver with drive, 2.5 kHz low-pass, 4:1 compression",
+  },
 ];
 
 /** What a preset is called on screen, including the reported `custom`. */
@@ -64,8 +70,9 @@ export function shownPreset(fx: Pick<FxStatus, "preset" | "effects">): FxPresetN
   return fx.preset;
 }
 
-/** One letter per effect, in signal order: the `H E C D R` strip. */
+/** One letter per effect, in signal order: the `O H E C D R` strip. */
 export const FX_LETTER: Record<FxSlotName, string> = {
+  octaver: "O",
   high_pass: "H",
   eq: "E",
   comp: "C",
@@ -73,8 +80,9 @@ export const FX_LETTER: Record<FxSlotName, string> = {
   reverb: "R",
 };
 
-/** English names of the five effects; the engine's own `label` is German. */
+/** English names of the six effects. */
 export const FX_NAME: Record<FxSlotName, string> = {
+  octaver: "Octaver",
   high_pass: "High-pass",
   eq: "EQ",
   comp: "Compressor",
@@ -84,6 +92,7 @@ export const FX_NAME: Record<FxSlotName, string> = {
 
 /** Short names for the chain buttons, where a whole word does not fit. */
 export const FX_SHORT: Record<FxSlotName, string> = {
+  octaver: "Oct.",
   high_pass: "High-p.",
   eq: "EQ",
   comp: "Comp",
@@ -92,7 +101,7 @@ export const FX_SHORT: Record<FxSlotName, string> = {
 };
 
 /** In signal order, so the digit of the keyboard chord `X` is the position in the chain. */
-export const FX_SLOT_ORDER: FxSlotName[] = ["high_pass", "eq", "comp", "delay", "reverb"];
+export const FX_SLOT_ORDER: FxSlotName[] = ["octaver", "high_pass", "eq", "comp", "delay", "reverb"];
 
 /** The note values the tempo-synchronous delay knows, in the order the chord `D` numbers them. */
 export const DELAY_NOTES: { name: DelayNoteName; label: string }[] = [
@@ -138,6 +147,43 @@ export interface ParamSpec {
 
 /** Chain-wide knobs, by the name `fx_set` takes. Band knobs are in `BAND_PARAMS`. */
 export const FX_PARAMS: Record<Exclude<FxParamName, "band_hz" | "band_q" | "band_gain_db">, ParamSpec & { address: string }> = {
+  octaver_dry: {
+    label: "Dry",
+    min: 0,
+    max: 1,
+    def: 1,
+    format: asPercent,
+    address: "octaver.dry",
+    title: "The original signal. Delayed by the octaver's latency, so it stays together with the octave.",
+  },
+  octaver_sub: {
+    label: "Sub",
+    min: 0,
+    max: 1,
+    def: 1,
+    format: asPercent,
+    address: "octaver.sub",
+    title: "The octave below. Made for single notes - chords come out smeared.",
+  },
+  octaver_tone_hz: {
+    label: "Tone",
+    min: 100,
+    max: 8000,
+    def: 2000,
+    log: true,
+    format: asHz,
+    address: "octaver.tone",
+    title: "Low-pass on the octave, 12 dB per octave.",
+  },
+  octaver_drive: {
+    label: "Drive",
+    min: 0,
+    max: 1,
+    def: 0,
+    format: asPercent,
+    address: "octaver.drive",
+    title: "Saturation of the octave, the same at every playing level. Gives a bass the harmonics small speakers need.",
+  },
   high_pass_hz: {
     label: "Cutoff",
     min: 20,

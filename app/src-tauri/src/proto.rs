@@ -1186,6 +1186,7 @@ pub fn track_event(
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FxSlotName {
+    Octaver,
     HighPass,
     Eq,
     Comp,
@@ -1196,6 +1197,7 @@ pub enum FxSlotName {
 impl From<FxSlot> for FxSlotName {
     fn from(slot: FxSlot) -> Self {
         match slot {
+            FxSlot::Octaver => FxSlotName::Octaver,
             FxSlot::HighPass => FxSlotName::HighPass,
             FxSlot::Eq => FxSlotName::Eq,
             FxSlot::Comp => FxSlotName::Comp,
@@ -1208,6 +1210,7 @@ impl From<FxSlot> for FxSlotName {
 impl From<FxSlotName> for FxSlot {
     fn from(name: FxSlotName) -> Self {
         match name {
+            FxSlotName::Octaver => FxSlot::Octaver,
             FxSlotName::HighPass => FxSlot::HighPass,
             FxSlotName::Eq => FxSlot::Eq,
             FxSlotName::Comp => FxSlot::Comp,
@@ -1226,6 +1229,7 @@ pub enum FxPresetName {
     Dry,
     Voice,
     PiezoGuitar,
+    BassFromGuitar,
     Custom,
 }
 
@@ -1235,6 +1239,7 @@ impl From<FxPreset> for FxPresetName {
             FxPreset::Dry => FxPresetName::Dry,
             FxPreset::Voice => FxPresetName::Voice,
             FxPreset::PiezoGuitar => FxPresetName::PiezoGuitar,
+            FxPreset::BassFromGuitar => FxPresetName::BassFromGuitar,
             FxPreset::Custom => FxPresetName::Custom,
         }
     }
@@ -1246,6 +1251,7 @@ impl From<FxPresetName> for FxPreset {
             FxPresetName::Dry => FxPreset::Dry,
             FxPresetName::Voice => FxPreset::Voice,
             FxPresetName::PiezoGuitar => FxPreset::PiezoGuitar,
+            FxPresetName::BassFromGuitar => FxPreset::BassFromGuitar,
             FxPresetName::Custom => FxPreset::Custom,
         }
     }
@@ -1324,6 +1330,10 @@ impl From<DelayNoteName> for DelayNote {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FxParamName {
+    OctaverDry,
+    OctaverSub,
+    OctaverToneHz,
+    OctaverDrive,
     HighPassHz,
     BandHz,
     BandQ,
@@ -1378,6 +1388,10 @@ impl FxParamName {
             });
         }
         Ok(match self {
+            FxParamName::OctaverDry => FxParam::OctaverDry(v),
+            FxParamName::OctaverSub => FxParam::OctaverSub(v),
+            FxParamName::OctaverToneHz => FxParam::OctaverToneHz(v),
+            FxParamName::OctaverDrive => FxParam::OctaverDrive(v),
             FxParamName::HighPassHz => FxParam::HighPassHz(v),
             FxParamName::CompThresholdDb => FxParam::CompThresholdDb(v),
             FxParamName::CompRatio => FxParam::CompRatio(v),
@@ -1419,11 +1433,20 @@ pub struct FxEvent {
     pub preset: FxPresetName,
     /// German word for the preset, ready to print.
     pub preset_label: String,
-    /// `HEK-R`: one letter per effect that is on, a dash for one that is off. Always five
+    /// `-HEC-R`: one letter per effect that is on, a dash for one that is off. Always six
     /// characters, in signal order.
     pub letters: String,
     /// On/off per effect, in signal order, next to the name the commands use.
     pub effects: Vec<FxEffectEvent>,
+    /// Frames the chain delays the track by right now (the octaver's latency while it is in the
+    /// path, else 0). The engine reads the loop that much early; the live input is late by it.
+    pub latency_frames: u32,
+    pub latency_ms: f64,
+
+    pub octaver_dry: f32,
+    pub octaver_sub: f32,
+    pub octaver_tone_hz: f32,
+    pub octaver_drive: f32,
 
     pub high_pass_hz: f32,
     pub bands: Vec<BandEvent>,
@@ -1479,6 +1502,12 @@ pub fn fx_event(fx: &FxStatus, sample_rate: u32) -> FxEvent {
                 on: s.enabled[slot.index()],
             })
             .collect(),
+        latency_frames: fx.latency_frames(sample_rate),
+        latency_ms: fx.latency_frames(sample_rate) as f64 * 1000.0 / rate,
+        octaver_dry: s.octaver.dry,
+        octaver_sub: s.octaver.sub,
+        octaver_tone_hz: s.octaver.tone_hz,
+        octaver_drive: s.octaver.drive,
         high_pass_hz: s.high_pass_hz,
         bands: s
             .bands
@@ -2245,6 +2274,7 @@ mod tests {
     #[test]
     fn every_effect_enum_travels_as_snake_case_in_both_directions() {
         for (slot, wire, label) in [
+            (FxSlot::Octaver, "octaver", "Octaver"),
             (FxSlot::HighPass, "high_pass", "High-pass"),
             (FxSlot::Eq, "eq", "EQ"),
             (FxSlot::Comp, "comp", "Compressor"),
@@ -2261,6 +2291,7 @@ mod tests {
             (FxPreset::Dry, "dry", "dry"),
             (FxPreset::Voice, "voice", "voice"),
             (FxPreset::PiezoGuitar, "piezo_guitar", "guitar"),
+            (FxPreset::BassFromGuitar, "bass_from_guitar", "bass"),
             (FxPreset::Custom, "custom", "custom"),
         ] {
             let name: FxPresetName = preset.into();
@@ -2302,14 +2333,17 @@ mod tests {
         assert_eq!(event.preset_label, FxPreset::Voice.label());
         let letters: String = FxSlot::all()
             .iter()
-            .map(|s| if *s == FxSlot::Delay { '-' } else { s.letter() })
+            .map(|s| if matches!(*s, FxSlot::Delay | FxSlot::Octaver) { '-' } else { s.letter() })
             .collect();
-        assert_eq!(event.letters, letters, "Delay ist in diesem Preset aus");
-        assert_eq!(event.effects.len(), 5);
-        assert_eq!(event.effects[0].name, FxSlotName::HighPass);
-        assert_eq!(event.effects[0].label, FxSlot::HighPass.label());
-        assert!(event.effects[0].on);
-        assert!(!event.effects[3].on, "Delay aus");
+        assert_eq!(event.letters, letters, "Delay und Oktaver sind in diesem Preset aus");
+        assert_eq!(event.effects.len(), 6);
+        assert_eq!(event.effects[0].name, FxSlotName::Octaver);
+        assert!(!event.effects[0].on, "kein Oktaver in der Stimme");
+        assert_eq!(event.effects[1].name, FxSlotName::HighPass);
+        assert_eq!(event.effects[1].label, FxSlot::HighPass.label());
+        assert!(event.effects[1].on);
+        assert!(!event.effects[4].on, "Delay aus");
+        assert_eq!(event.latency_frames, 0, "ohne Oktaver keine Latenz");
 
         assert_eq!(event.high_pass_hz, 80.0);
         assert_eq!(event.bands.len(), 3);
@@ -2334,7 +2368,17 @@ mod tests {
         let idle = fx_event(&FxStatus::default(), RATE);
         assert!(idle.bypass);
         assert_eq!(idle.preset, FxPresetName::Dry);
-        assert_eq!(idle.letters, "-----");
+        assert_eq!(idle.letters, "------");
+
+        // The bass preset: octaver in, its latency reported.
+        let mut chain = looper_engine::engine::fx::Chain::new(RATE);
+        chain.load_preset(FxPreset::BassFromGuitar);
+        let bass = fx_event(&chain.status(), RATE);
+        assert_eq!(bass.preset, FxPresetName::BassFromGuitar);
+        assert!(bass.effects[0].on);
+        assert_eq!(bass.octaver_dry, 0.0);
+        assert_eq!(bass.latency_frames, chain.latency());
+        assert!(bass.latency_frames > 0);
     }
 
     /// The generic knob command: a name plus a value, and the three band-scoped names additionally

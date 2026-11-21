@@ -40,12 +40,19 @@ function chain(patch: Partial<FxStatus>): FxStatus {
     preset_label: "",
     letters: "",
     effects: [
+      { name: "octaver", label: "", on: false },
       { name: "high_pass", label: "", on: false },
       { name: "eq", label: "", on: true },
       { name: "comp", label: "", on: false },
       { name: "delay", label: "", on: false },
       { name: "reverb", label: "", on: false },
     ],
+    latency_frames: 0,
+    latency_ms: 0,
+    octaver_dry: 1,
+    octaver_sub: 1,
+    octaver_tone_hz: 2000,
+    octaver_drive: 0,
     high_pass_hz: 80,
     bands: [
       { index: 0, number: 1, kind: "peak", hz: 1000, q: 1, gain_db: 6 },
@@ -84,8 +91,8 @@ describe("EQ curve", () => {
 
   it("draws the high-pass -3 dB at its cutoff", () => {
     const fx = chain({});
-    fx.effects[0].on = true;
-    fx.effects[1].on = false;
+    fx.effects[1].on = true;
+    fx.effects[2].on = false;
     expect(at(responseDb(fx, 48000, 600), 80)).toBeCloseTo(-3, 0);
   });
 

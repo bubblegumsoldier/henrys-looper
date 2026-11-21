@@ -167,6 +167,7 @@ const PRESET_ADDRESS: Record<LoadablePreset, string> = {
   dry: "trocken",
   voice: "stimme",
   piezo_guitar: "gitarre",
+  bass_from_guitar: "bass",
 };
 
 export function fxPresetAddress(track: number, preset: LoadablePreset): string {

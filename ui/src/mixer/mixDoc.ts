@@ -10,6 +10,7 @@ export const MIX_FIELDS = [
   "mute",
   "preset",
   "bypass",
+  "octaver",
   "high_pass",
   "eq",
   "band1",

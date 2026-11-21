@@ -52,6 +52,26 @@ function ParamKnob({ track, name, value, actions }: { track: number; name: keyof
   );
 }
 
+export function OctaverEditor({ track, fx, actions }: EditorProps) {
+  return (
+    <>
+      <div className="kn-row">
+        <ParamKnob track={track} name="octaver_dry" value={fx.octaver_dry} actions={actions} />
+        <ParamKnob track={track} name="octaver_sub" value={fx.octaver_sub} actions={actions} />
+        <ParamKnob track={track} name="octaver_tone_hz" value={fx.octaver_tone_hz} actions={actions} />
+        <ParamKnob track={track} name="octaver_drive" value={fx.octaver_drive} actions={actions} />
+      </div>
+      <div className="kn-note">
+        One octave down, for single notes.{" "}
+        {fx.latency_frames > 0
+          ? `Latency ${fx.latency_frames} samples (${fx.latency_ms.toFixed(1)} ms): `
+          : "Adds about 3 ms of latency while on: "}
+        the loop is played that much earlier so it stays on the beat; what you play live is heard that much later.
+      </div>
+    </>
+  );
+}
+
 export function HighPassEditor({ track, fx, actions }: EditorProps) {
   const sampleRate = useStatusSlice((s) => s.sample_rate);
   return (

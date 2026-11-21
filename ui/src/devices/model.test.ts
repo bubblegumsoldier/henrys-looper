@@ -38,6 +38,7 @@ describe("device column", () => {
   it("lists the devices in signal order: instrument, built-in, plug-ins", () => {
     expect(deviceOrder({ instrument: true, builtin: true, plugins: [0, 3] })).toEqual([
       "instrument",
+      "octaver",
       "high_pass",
       "eq",
       "comp",

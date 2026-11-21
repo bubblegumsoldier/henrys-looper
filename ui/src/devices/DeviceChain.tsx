@@ -37,7 +37,7 @@ import type { FxSlotName, FxStatus } from "../types";
 import { FX_NAME, FX_SLOT_ORDER, fxOn, type FxActions } from "../mixer/fxModel";
 import { curvePath, responseDb } from "../mixer/EqGraph";
 import { InstrumentPicker, NoteLed } from "../mixer/InstrumentSlot";
-import { CompEditor, CompReduction, DelayEditor, EqEditor, HighPassEditor, PresetPicker, ReverbEditor } from "./editors";
+import { CompEditor, CompReduction, DelayEditor, EqEditor, HighPassEditor, OctaverEditor, PresetPicker, ReverbEditor } from "./editors";
 import { FORMAT, PluginPicker, attempt } from "./PluginPicker";
 import { builtinSummary, defaultDevice, deviceOrder, pluginId, pluginSummary, type DeviceId, type Owner } from "./model";
 import { openDevice, useOpenDevice } from "./store";
@@ -231,6 +231,7 @@ function BuiltinRow({ slot, track, fx, open, onToggle }: { slot: FxSlotName; tra
       onToggle={onToggle}
       title={`${FX_NAME[slot]} - click to ${open ? "fold" : "edit"}`}
     >
+      {slot === "octaver" && <OctaverEditor {...editor} />}
       {slot === "high_pass" && <HighPassEditor {...editor} />}
       {slot === "eq" && <EqEditor {...editor} />}
       {slot === "comp" && <CompEditor {...editor} on={on} />}

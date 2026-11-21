@@ -152,6 +152,8 @@ function fxSignature(fx: FxStatus | undefined): string {
   // A status from before the chain existed (or a hand-made one from the console) has no `fx`.
   if (!fx) return "";
   let sig = `~${fx.bypass ? 1 : 0}${fx.preset}${fx.letters}~${fx.high_pass_hz}`;
+  // The octaver's knobs, and the latency that follows its switch.
+  sig += `~${fx.octaver_dry}:${fx.octaver_sub}:${fx.octaver_tone_hz}:${fx.octaver_drive}:${fx.latency_frames}`;
   for (const b of fx.bands) sig += `~${b.kind}:${b.hz}:${b.q}:${b.gain_db}`;
   sig +=
     `~${fx.comp_threshold_db}:${fx.comp_ratio}:${fx.comp_attack_ms}` +

@@ -432,6 +432,39 @@ fn a_mixer_entry_written_by_the_app_is_rendered_canonically_and_compiles() {
     assert_eq!(back.settings, tweaked);
 }
 
+/// The bass preset with a turned octaver knob: written as the preset plus an `octaver` line, read
+/// back as the same chain - the round trip load -> window -> `mixer:` the app relies on.
+#[test]
+fn an_octaver_line_is_written_and_read_back() {
+    use crate::engine::fx::FxPreset;
+    use crate::score::mixer::TrackMixSource;
+    let mut doc = parse_doc(HENRY).expect("liest sich");
+    let mut bass = FxPreset::BassFromGuitar.settings();
+    bass.octaver.tone_hz = 1_800.0;
+    bass.octaver.drive = 0.5;
+    let first = doc.tracks[0].name.clone();
+    doc.mixer = Some(DocMixer {
+        buses: None,
+        tracks: vec![DocMixerTrack::new(
+            first.clone(),
+            TrackMixSource::from_state(1.0, false, false, FxPreset::Custom, &bass),
+        )],
+        field_comments: OrderedMap::new(),
+    });
+    let outcome = render_doc_outcome(&doc);
+    assert!(outcome.ok, "{:?}\n{}", outcome.errors, outcome.yaml);
+    assert!(
+        outcome.yaml.ends_with(&format!(
+            "mixer:\n  tracks:\n    {first}:\n      gain: 0\n      preset: bass_from_guitar\n      octaver: {{tone: 1800, drive: 0.5}}\n"
+        )),
+        "{}",
+        outcome.yaml
+    );
+    let mixer = outcome.score.expect("kompiliert").mixer.expect("mixer");
+    let back = mixer.tracks.get(&first).expect("eintrag").resolve();
+    assert_eq!(back.settings, bass);
+}
+
 #[test]
 fn a_mixer_entry_for_an_unknown_track_names_its_element() {
     let o = edited(|d| d.mixer.as_mut().unwrap().tracks[1].track = "klavir".into());

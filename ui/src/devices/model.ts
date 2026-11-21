@@ -5,7 +5,7 @@
 //!
 //! ```text
 //!  [Instrument]                         instrument tracks only
-//!  High-pass → EQ → Compressor → Delay → Reverb      built in, fixed order (the engine's)
+//!  Octaver → High-pass → EQ → Compressor → Delay → Reverb   built in, fixed order (the engine's)
 //!  Plug-in 1 … 8                         after the built-in chain, reorderable among themselves
 //!  + Add plugin
 //! ```
@@ -58,6 +58,8 @@ export const activeBands = (fx: Pick<FxStatus, "bands">) => fx.bands.filter((b) 
 /** The summary right of a built-in device's name. */
 export function builtinSummary(fx: FxStatus, slot: FxSlotName): string {
   switch (slot) {
+    case "octaver":
+      return `sub ${pct(fx.octaver_sub)} · dry ${pct(fx.octaver_dry)}`;
     case "high_pass":
       return asHz(fx.high_pass_hz);
     case "eq": {

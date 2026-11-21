@@ -55,10 +55,10 @@ export interface LayerStatus {
 // back into the command that changes it, so nothing here has to know a number's meaning.
 
 /** One switchable position in the chain, in signal order. */
-export type FxSlotName = "high_pass" | "eq" | "comp" | "delay" | "reverb";
+export type FxSlotName = "octaver" | "high_pass" | "eq" | "comp" | "delay" | "reverb";
 
 /** A ready-made chain. `custom` is reported, never sent - it means a knob has been moved. */
-export type FxPresetName = "dry" | "voice" | "piezo_guitar" | "custom";
+export type FxPresetName = "dry" | "voice" | "piezo_guitar" | "bass_from_guitar" | "custom";
 
 /** What one EQ band does. */
 export type BandKindName = "peak" | "low_shelf" | "high_shelf";
@@ -68,6 +68,10 @@ export type DelayNoteName = "quarter" | "dotted_eighth" | "eighth" | "triplet_ei
 
 /** Every numeric knob of a chain, by the name `fx_set` expects. */
 export type FxParamName =
+  | "octaver_dry"
+  | "octaver_sub"
+  | "octaver_tone_hz"
+  | "octaver_drive"
   | "high_pass_hz"
   | "band_hz"
   | "band_q"
@@ -110,10 +114,22 @@ export interface FxStatus {
   preset: FxPresetName;
   /** German word for the preset, ready to print. */
   preset_label: string;
-  /** `HEC-R`: one letter per effect that is on, a dash for one that is off. Always five characters. */
+  /** `-HEC-R`: one letter per effect that is on, a dash for one that is off. Always six characters. */
   letters: string;
   /** On/off per effect, in signal order. */
   effects: FxEffectStatus[];
+  /**
+   * Frames the chain delays the track by right now: the octaver's latency while it is in the path,
+   * else 0. The engine reads the loop that much early; the live input is late by it.
+   */
+  latency_frames: number;
+  latency_ms: number;
+
+  /** Octaver levels 0..1, tone (low-pass on the octave) in Hz, drive 0..1. */
+  octaver_dry: number;
+  octaver_sub: number;
+  octaver_tone_hz: number;
+  octaver_drive: number;
 
   high_pass_hz: number;
   bands: FxBandStatus[];
@@ -892,10 +908,11 @@ export interface TrackMix {
   /** Channel fader, dB. */
   gain?: number;
   mute?: boolean;
-  /** `dry` | `voice` | `piezo_guitar`; absent = dry. */
+  /** `dry` | `voice` | `piezo_guitar` | `bass_from_guitar`; absent = dry. */
   preset?: string;
   /** Whole chain out; absent = out exactly when no effect is on. */
   bypass?: boolean;
+  octaver?: { on?: boolean; dry?: number; sub?: number; tone?: number; drive?: number };
   high_pass?: { on?: boolean; hz?: number };
   eq?: { on?: boolean };
   band1?: MixBand;

@@ -1575,6 +1575,10 @@ impl ParamState for SessionState<'_> {
 /// Where one effect knob currently stands. The mirror image of [`FxKnob::to_param`].
 fn knob_value(settings: &looper_engine::engine::fx::ChainSettings, knob: FxKnob) -> f32 {
     match knob {
+        FxKnob::OctaverDry => settings.octaver.dry,
+        FxKnob::OctaverSub => settings.octaver.sub,
+        FxKnob::OctaverToneHz => settings.octaver.tone_hz,
+        FxKnob::OctaverDrive => settings.octaver.drive,
         FxKnob::HighPassHz => settings.high_pass_hz,
         FxKnob::BandHz(band) => settings.bands[band].hz,
         FxKnob::BandQ(band) => settings.bands[band].q,
