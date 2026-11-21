@@ -881,10 +881,11 @@ async fn mixer_apply(
 async fn score_load(
     yaml: String,
     count_in: Option<u32>,
+    reset: Option<bool>,
     engine: State<'_, EngineHandle>,
 ) -> Result<ScoreLoaded, String> {
     let handle = engine.inner().clone();
-    offload(move || handle.score_load(yaml, count_in)).await
+    offload(move || handle.score_load(yaml, count_in, reset.unwrap_or(false))).await
 }
 
 /// Start the count-in and arm the first section.
@@ -909,7 +910,8 @@ async fn score_goto(section: usize, engine: State<'_, EngineHandle>) -> Result<S
     score_act(engine, ScoreAction::Goto(section)).await
 }
 
-/// Stop every track and end the run. An armed change is neutralised where it lands.
+/// Stop every track and end the run. Everything the run still had waiting in the engine (an armed
+/// change among it) is called back.
 #[tauri::command]
 async fn score_stop_all(engine: State<'_, EngineHandle>) -> Result<String, String> {
     score_act(engine, ScoreAction::StopAll).await

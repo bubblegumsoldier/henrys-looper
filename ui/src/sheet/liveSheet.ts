@@ -1,7 +1,7 @@
 //! Which sheet the Live view shows.
 //!
 //! The runner plays the score that was loaded; the sheet is only text beside it. So an edit to the
-//! sheet in the Arrangement should show on stage without a Reload (which needs empty tracks): when
+//! sheet in the Arrangement should show on stage without a Reload (which resets every track): when
 //! the open document has the same sections as the loaded score - same ids, bars and autorelease,
 //! i.e. the spans mean the same - its sheet is shown, otherwise the loaded score's own.
 

@@ -25,6 +25,7 @@ import { docStore, useDoc } from "./useDoc";
 import { docCountIn, setDocCountIn, withoutCountIn } from "./countIn";
 import { compareDisk } from "./diskWatch";
 import { markLoaded, mixIsLoaded, setLoadedTextCheck, withoutMixer } from "../mixer/scoreMix";
+import { reloadEverything } from "./reload";
 
 export interface ScoreActions {
   recent: RecentFile[];
@@ -98,12 +99,13 @@ const loadedListeners = new Set<() => void>();
  * does not run). The Load button and the reload after the app opened (`shell/reloadScore.ts`) both
  * come through here. Rejects with the runner's sentence.
  */
-export async function loadOpenScore(): Promise<void> {
+export async function loadOpenScore(reset = false): Promise<void> {
   await docStore.flush();
   await docStore.settled();
   const text = scoreFile().text;
-  // No count-in of its own: the score's `count_in:` is what the runner takes.
-  const loaded = await scoreApi.load(text);
+  // No count-in of its own: the score's `count_in:` is what the runner takes. `reset`: Reload -
+  // the Rust side resets everything first (see `reload.ts`).
+  const loaded = await scoreApi.load(text, undefined, reset);
   loadedText = text;
   // The host has applied the score's `mixer:`; from now on fader and section move together.
   markLoaded();
@@ -174,7 +176,7 @@ export function useScoreActions(): ScoreActions {
     };
   }, [checkDisk]);
 
-  const openPath = useCallback(async (path: string) => {
+  const openPath = useCallback(async (path: string): Promise<boolean> => {
     try {
       const opened = await filesApi.open(path);
       kept = null;
@@ -182,9 +184,11 @@ export function useScoreActions(): ScoreActions {
       updateScoreFile({ text: opened.yaml, path: opened.path, name: opened.name, savedText: opened.yaml });
       setRecent(opened.recent);
       note(`Opened ${opened.name}.`);
+      return true;
     } catch (e) {
       fail((e as Error).message);
       filesApi.forget(path).then(setRecent).catch(() => undefined);
+      return false;
     }
   }, []);
 
@@ -225,9 +229,38 @@ export function useScoreActions(): ScoreActions {
     }
   }, [checkDisk]);
 
+  /** Reset everything and load the score again - see `reload.ts`. */
+  const reloadAndLoad = useCallback(async () => {
+    const file = scoreFile();
+    await reloadEverything({
+      file: { path: file.path, dirty: isDirty(), keptMine: kept !== null },
+      peek: (path) => filesApi.peek(path).catch(() => null),
+      adopt: (text) => {
+        if (text === scoreFile().text) return;
+        kept = null;
+        setDiskText(null);
+        updateScoreFile({ text, savedText: text });
+      },
+      loadWithReset: () => loadOpenScore(true),
+    });
+  }, []);
+
+  /**
+   * The bar's "Reload from disk": the file as it is on disk now - and when a score is in the
+   * runner, everything is reset and the file is loaded again, the same as the Reload button.
+   */
   const reloadFromDisk = useCallback(async () => {
     const path = scoreFile().path;
-    if (path) await openPath(path);
+    if (!path || !(await openPath(path))) return;
+    if (currentStatus().score === null) return;
+    setLoading(true);
+    try {
+      await loadOpenScore(true);
+    } catch (e) {
+      fail((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
   }, [openPath]);
 
   const keepMine = useCallback(() => {
@@ -290,14 +323,16 @@ export function useScoreActions(): ScoreActions {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      // The listeners of `loadOpenScore` bump `loadedRev`.
-      await loadOpenScore();
+      // The listeners of `loadOpenScore` bump `loadedRev`. With a score in the runner this is
+      // Reload: everything is reset and the score loaded again, without asking (the owner's wish).
+      if (currentStatus().score !== null) await reloadAndLoad();
+      else await loadOpenScore();
     } catch (e) {
       fail((e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [reloadAndLoad]);
 
   // The mix and the count-in are kept in step with the engine both ways, so following them does
   // not make the loaded score stale - a mix that differs from what the engine got from here does

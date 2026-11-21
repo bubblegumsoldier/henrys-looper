@@ -139,6 +139,14 @@ pub const CLOSED_CLICK_GATE: Command = Command::ClickGate {
     bar1: 0,
 };
 
+/// What "Reload" in the Arrangement sends first: a fresh start of every track, **now**, whatever
+/// plays, records or waits. Timestamp 0 is long past, so the engine acts on it in its next block,
+/// and it drops everything that was waiting (the run's sections, takes, a stop's own commands) the
+/// way every `ClearAll` does. Untimed setup sent after it - the new score's tempo, its track setup,
+/// the closed click window - acts after it, in the same block: so the tempo change is never
+/// refused for a loop that is about to be cleared.
+pub const RELOAD_CLEAR: Command = Command::ClearAll { at: 0 };
+
 /// The refusal every by-hand transport action gets while a score is playing.
 ///
 /// It lives here, next to the runner whose rule it is, because it has to be **one** sentence for

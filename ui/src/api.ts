@@ -299,9 +299,13 @@ export const scoreApi = {
    * tracks differ from the engine's, the engine is rebuilt with the score's tracks (short audio
    * gap; `engine` in the answer is then the new `EngineInfo`). Tempo, time signature, layer length
    * and every track's pan, buses and latency then come from the score.
+   *
+   * `reset`: the Arrangement's Reload - whatever plays, records or is recorded is reset first
+   * (score stopped, every track cleared, a running recording finished), without asking, and the
+   * engine is rebuilt if the tracks differ. A score that does not compile resets nothing.
    */
-  load: (yaml: string, countIn?: number) =>
-    call<ScoreLoaded>("score_load", { yaml, count_in: countIn ?? null }),
+  load: (yaml: string, countIn?: number, reset?: boolean) =>
+    call<ScoreLoaded>("score_load", { yaml, count_in: countIn ?? null, reset: reset ?? false }),
   /** Count-in, then the first section. */
   start: () => call<string>("score_start"),
   /** The release button. Pressing it twice skips nothing. */

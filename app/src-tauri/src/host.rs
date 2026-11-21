@@ -59,7 +59,7 @@ use looper_engine::engine::process::{
     spare_slots_for, total_channels,
 };
 use looper_engine::engine::runner::{
-    CLOSED_CLICK_GATE, MAX_COUNT_IN_BARS, Phase, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
+    CLOSED_CLICK_GATE, MAX_COUNT_IN_BARS, Phase, RELOAD_CLEAR, Runner, TRANSPORT_BELONGS_TO_SCORE, check_tracks, setup_commands,
 };
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
 use looper_engine::engine::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
@@ -427,7 +427,8 @@ enum Request {
     /// What the running engine opened, or `None` - for a page that was reloaded while it runs.
     Info(Sender<Result<Option<EngineInfo>, String>>),
     Act(Action, Sender<Result<(), String>>),
-    ScoreLoad(String, Option<u32>, Sender<Result<ScoreLoaded, String>>),
+    /// A score to load; `true`: Reload - reset everything first (see `Session::reset_for_reload`).
+    ScoreLoad(String, Option<u32>, bool, Sender<Result<ScoreLoaded, String>>),
     ScoreAct(ScoreAction, Sender<Result<String, String>>),
     Calibrate(Box<CalibrateConfig>, Sender<Result<CalibrateOutcome, String>>),
     /// End the recording to disk that is running now.
@@ -539,8 +540,15 @@ impl EngineHandle {
         self.call(|reply| Request::Act(action, reply))
     }
 
-    pub fn score_load(&self, yaml: String, count_in: Option<u32>) -> Result<ScoreLoaded, String> {
-        self.call(|reply| Request::ScoreLoad(yaml, count_in, reply))
+    /// Load a score. `reset`: the Arrangement's Reload - whatever plays, records or is recorded is
+    /// reset first, without asking (a file that does not compile resets nothing).
+    pub fn score_load(
+        &self,
+        yaml: String,
+        count_in: Option<u32>,
+        reset: bool,
+    ) -> Result<ScoreLoaded, String> {
+        self.call(|reply| Request::ScoreLoad(yaml, count_in, reset, reply))
     }
 
     pub fn score_act(&self, action: ScoreAction) -> Result<String, String> {
@@ -918,7 +926,7 @@ fn handle(
             let mut result = ensure(session, midi, sup, app, Trigger::Demand, compiled.as_ref())
                 .and_then(|()| session.as_ref().map(|s| s.info.clone()).ok_or_else(|| NO_ENGINE.to_string()));
             if let (Ok(_), Some(yaml)) = (&result, score) {
-                match load_score_onto(session, midi, app, &yaml, None, sup.monitor_consent) {
+                match load_score_onto(session, midi, app, &yaml, None, false, sup.monitor_consent) {
                     Ok(loaded) => log!("Score loaded again: {}", loaded.message),
                     Err(e) => {
                         log!("Score not loaded again: {e}");
@@ -998,7 +1006,7 @@ fn handle(
             }
             let _ = reply.send(result);
         }
-        Request::ScoreLoad(yaml, count_in, reply) => {
+        Request::ScoreLoad(yaml, count_in, reset, reply) => {
             // No engine yet: it is started with the score's tracks right away. A score that does
             // not compile starts nothing - the answer is the list of what is wrong with it.
             let started = if session.is_none() {
@@ -1009,7 +1017,9 @@ fn handle(
                 Ok(())
             };
             let result = started
-                .and_then(|()| load_score_onto(session, midi, app, &yaml, count_in, sup.monitor_consent));
+                .and_then(|()| {
+                    load_score_onto(session, midi, app, &yaml, count_in, reset, sup.monitor_consent)
+                });
             match &result {
                 Ok(loaded) => {
                     log!("Score loaded: {}", loaded.message);
@@ -1639,12 +1649,18 @@ fn load_score_onto(
     app: &AppHandle,
     yaml: &str,
     count_in: Option<u32>,
+    reset: bool,
     consent: bool,
 ) -> Result<ScoreLoaded, String> {
     let Some(active) = session.as_mut() else {
         return Err(NO_ENGINE.to_string());
     };
+    // A file that does not compile changes nothing - not even on Reload: the running state is not
+    // thrown away for a score that cannot take its place.
     let score = compile_score(yaml).map_err(|error| render_issues(&error))?;
+    if reset {
+        active.reset_for_reload();
+    }
     let fits = check_tracks(&score, &active.defs).and_then(|()| {
         match instrument_mismatch(&score, &active.instrument_inputs) {
             Some(why) => Err(why),
@@ -1657,13 +1673,13 @@ fn load_score_onto(
             ..loaded
         });
     };
-    if active.score_is_playing() {
+    if !reset && active.score_is_playing() {
         return Err(format!(
             "{mismatch} A score is playing - press \"Stop all\" first; the engine can only be \
              rebuilt with the score's tracks while nothing plays."
         ));
     }
-    if let Some(busy) = active.first_non_empty_track() {
+    if let Some(busy) = active.first_non_empty_track().filter(|_| !reset) {
         return Err(format!(
             "The score's tracks differ from the running engine's, and rebuilding the engine would \
              throw away what track \"{busy}\" holds. Clear all tracks first, then load again. \
@@ -2137,6 +2153,9 @@ struct Session {
     /// back to the pan, buses and latency it was *started* with, so the score's own setup is sent
     /// again once the engine has passed this position - not before, or the clear would undo it.
     reapply_at: Option<u64>,
+    /// After a Reload's fresh start (`reset_for_reload`): snapshots from before this position were
+    /// taken before the clear acted, so they say nothing about whether a track is empty.
+    cleared_from: Option<u64>,
     /// What this session was started with - the base for rebuilding it around a score's tracks.
     config: StartConfig,
     /// Whether the transport runs, as this thread last told the engine. Mirrored rather than read
@@ -2555,6 +2574,7 @@ impl Session {
             message: None,
             stopped: false,
             reapply_at: None,
+            cleared_from: None,
             config: started_with,
             transport: false,
             mix_backlog: VecDeque::new(),
@@ -3312,8 +3332,42 @@ impl Session {
     }
 
     /// The name of the first track that holds something, for the refusal above.
-    fn first_non_empty_track(&self) -> Option<String> {
+    /// "Reload" in the Arrangement: everything back to a fresh start, at once and without asking -
+    /// the owner's wish ("reset everything, then load again"). Whatever plays stops, whatever
+    /// records is dropped, every loop is cleared and everything the run still had waiting in the
+    /// engine is called back ([`RELOAD_CLEAR`]); the runner is forgotten. A performance recording
+    /// is finished where the reset happens, as "Stop all" finishes it, so it is saved, not lost.
+    ///
+    /// Called only once the new file has compiled; `load_score` follows right away and finds the
+    /// session empty - the snapshots still in flight from before the clear are not asked
+    /// ([`Self::reported`]).
+    fn reset_for_reload(&mut self) {
+        let est = self.estimated_pos();
+        self.recorder.end(est);
+        if let Err(e) = self.cmd.send(RELOAD_CLEAR) {
+            self.message = Some(e);
+        }
+        self.runner = None;
+        self.scheduler.disarm_all();
+        self.count_in = None;
+        self.reapply_at = None;
+        for ui in self.tracks.iter_mut() {
+            ui.gains.clear();
+        }
+        self.cleared_from = Some(self.scheduler.soon(est));
+    }
+
+    /// The newest snapshot, unless it was taken before a Reload's clear acted.
+    fn reported(&self) -> Option<Status> {
         let (status, _) = self.last?;
+        match self.cleared_from {
+            Some(from) if status.pos < from => None,
+            _ => Some(status),
+        }
+    }
+
+    fn first_non_empty_track(&self) -> Option<String> {
+        let status = self.reported()?;
         status
             .tracks()
             .iter()
@@ -4392,8 +4446,8 @@ impl Session {
         bars: u32,
     ) -> Result<(), String> {
         let busy = self
-            .last
-            .map(|(s, _)| s.tracks().iter().any(|t| t.state != TrackState::Empty))
+            .reported()
+            .map(|s| s.tracks().iter().any(|t| t.state != TrackState::Empty))
             .unwrap_or(false);
         if busy {
             return Err(Refusal::Tempo

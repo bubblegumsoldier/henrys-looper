@@ -607,3 +607,100 @@ fn a_score_loaded_after_stop_all_in_the_count_in_is_not_touched_by_the_old_run()
     stage.runner = Runner::new(score, timeline, BLOCK).expect("Runner");
     start_again_and_check_the_intro(&mut stage);
 }
+
+// ---------------------------------------------------------------------------------------------
+// "Reload" in the Arrangement: reset everything, then load the file again
+// ---------------------------------------------------------------------------------------------
+
+/// What the host sends for a Reload, in its order (`Session::reset_for_reload` and `load_score`
+/// in the app): the fresh start [`RELOAD_CLEAR`], the new score's tempo, its track setup, the loop
+/// kind of the drums, the closed click window - and a new runner. `bpm` lets the reloaded file
+/// differ from the one that was playing.
+fn reload(stage: &mut Stage, bpm: f64) {
+    let yaml = SCORE.replace("bpm: 94", &format!("bpm: {bpm}"));
+    let score = compile_score(&yaml).expect("die neue Fassung uebersetzt");
+    let timeline = Timeline::new(RATE, score.bpm, score.signature());
+    let max_bars = score.sections.iter().map(|s| s.bars).max().unwrap();
+    let layer_frames = loop_capacity(&timeline, max_bars);
+    stage.sim.send(RELOAD_CLEAR);
+    stage.sim.send(Command::SetTempo {
+        bpm: score.bpm,
+        signature: score.signature(),
+        layer_frames,
+    });
+    stage.sim.set_layer_frames(layer_frames as usize);
+    for cmd in setup_commands(&score) {
+        stage.sim.send(cmd);
+    }
+    stage.sim.send(Command::SetLoopKind {
+        track: stage.drums,
+        midi: true,
+    });
+    stage.sim.send(CLOSED_CLICK_GATE);
+    stage.runner = Runner::new(score, timeline, BLOCK).expect("Runner");
+    stage.stopped = true;
+}
+
+/// After a Reload: within two blocks every track is empty and silent, nothing of the old run acts
+/// any more (a few bars of nothing), the new tempo is taken without a refusal, no note hangs - and
+/// the reloaded score plays from its start like a freshly loaded one.
+fn check_fresh_after_reload(stage: &mut Stage, bpm: f64) {
+    let from = stage.sim.pos() + 2 * u64::from(BLOCK);
+    let until = from + 12 * BAR;
+    stage.run_to(until);
+    assert_eq!(stage.first_sound(from, until), None, "nichts klingt nach dem Reload");
+    let status = stage.sim.latest_status().unwrap();
+    assert_eq!(status.refusal, crate::engine::command::Refusal::None);
+    assert_eq!(status.bpm, bpm);
+    assert!(
+        status.tracks().iter().all(|t| t.state == TrackState::Empty && !t.playing),
+        "{:?}",
+        status.tracks().iter().map(|t| t.state).collect::<Vec<_>>()
+    );
+    assert!(stage.hanging().is_empty(), "{:?}", stage.hanging());
+    assert!(stage.note_ons(from, until).is_empty());
+    assert_eq!(stage.runner.phase(), Phase::Idle);
+    start_again_and_check_the_intro(stage);
+}
+
+/// Reload while the score plays: a bar into chorus 2, six loops sounding, backing vocals recording.
+#[test]
+fn reload_while_the_score_plays_resets_everything_and_loads_again() {
+    let mut stage = Stage::new(false);
+    stage.run_to(stage.section(CHORUS_2) + BAR + 1_000);
+    assert_eq!(stage.busy_tracks().len(), 6);
+    reload(&mut stage, 94.0);
+    check_fresh_after_reload(&mut stage, 94.0);
+}
+
+/// Reload after "Stop all", with every loop of the run still recorded - and the file on disk now
+/// at another tempo, which a load onto recorded loops would refuse.
+#[test]
+fn reload_with_recorded_loops_and_a_new_tempo() {
+    let mut stage = Stage::new(false);
+    stage.run_to(stage.section(BRIDGE) + 1_000);
+    stage.stop_all();
+    stage.run_to(stage.sim.pos() + BAR);
+    assert!(
+        stage
+            .sim
+            .latest_status()
+            .unwrap()
+            .tracks()
+            .iter()
+            .filter(|t| t.state != TrackState::Empty)
+            .count()
+            >= 6
+    );
+    reload(&mut stage, 100.0);
+    check_fresh_after_reload(&mut stage, 100.0);
+}
+
+/// Reload in the middle of the drum take (a MIDI loop recording, pads being hit).
+#[test]
+fn reload_during_the_drum_take_leaves_no_note_hanging() {
+    let mut stage = Stage::new(false);
+    stage.run_to(stage.section(VERSE_2) + BAR + 20_000);
+    reload(&mut stage, 94.0);
+    check_fresh_after_reload(&mut stage, 94.0);
+}

@@ -132,6 +132,9 @@ const COUNT_IN_TITLE =
 
 /** Count-in and Load: hands the score to the runner. */
 function LoadControls({ actions, ok, locked }: { actions: ScoreActions; ok: boolean; locked: boolean }) {
+  // With a score in the runner the button is Reload: it resets everything and loads again, also
+  // while the score plays - so it is not locked with the editor.
+  const inRunner = useStatusSlice((s) => s.score !== null);
   return (
     <>
       <span className="lbl" title={COUNT_IN_TITLE}>
@@ -153,16 +156,16 @@ function LoadControls({ actions, ok, locked }: { actions: ScoreActions; ok: bool
       </span>
       <button
         className={`btn s${actions.stale ? " accent" : ""}`}
-        disabled={!ok || locked || actions.loading}
+        disabled={!ok || (locked && !inRunner) || actions.loading}
         onClick={() => void actions.load()}
         title={
-          actions.stale
-            ? "The score changed since it was loaded — load it again. Needs empty tracks; starts the engine if it is not running."
+          inRunner
+            ? "Reload: stops the score, clears every track and loads the file again as it is on disk (unsaved typing here is kept and loaded). A file with errors changes nothing."
             : "Load the score into the runner. Needs empty tracks; starts the engine if it is not running."
         }
       >
         <i className="ic ic-target" />
-        {actions.stale ? "Reload" : "Load"}
+        {inRunner ? "Reload" : "Load"}
       </button>
     </>
   );
@@ -176,7 +179,7 @@ function DiskBar({ actions }: { actions: ScoreActions }) {
       <span>
         <b>{actions.diskChanged}</b> was changed on disk since it was opened here.
       </span>
-      <button className="btn s accent" onClick={() => void actions.reloadFromDisk()} title="Open the file as it is on disk now. Changes made here since are lost.">
+      <button className="btn s accent" onClick={() => void actions.reloadFromDisk()} title="Open the file as it is on disk now; changes made here since are lost. With a score loaded, the score is stopped, every track cleared and the file loaded again.">
         Reload from disk
       </button>
       <button className="btn s" onClick={actions.keepMine} title="Keep the text here. The next save writes over the file on disk.">

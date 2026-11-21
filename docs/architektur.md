@@ -1847,6 +1847,22 @@ vom Öffnen/Speichern. Weicht er ab, erscheint im Arrangement die Leiste „… 
 mit „Reload from disk“ und „Keep mine“; ⌘S schreibt bis dahin nicht darüber. „Keep mine“ gilt für
 genau diesen Stand der Datei, eine weitere Änderung wird wieder gemeldet.
 
+*Reload setzt alles zurück — ohne Rückfrage (Wunsch des Besitzers).* Liegt eine Partitur im
+Runner, heißt der Knopf „Reload“ (auch während sie spielt, das Arrangement ist dann sonst
+gesperrt) und tut in einem Schritt: Datei so lesen, wie sie auf der Platte steht (ungespeichertes
+Tippen hier und „Keep mine“ gehen vor, die werden nie verworfen; `ui/src/arrangement/reload.ts`),
+dann `score_load` mit `reset: true`. Der Host übersetzt zuerst; **eine Datei mit Fehlern setzt
+nichts zurück**, es kommt nur die Fehlermeldung. Erst danach `Session::reset_for_reload`: ein
+laufender Mitschnitt wird beendet und gespeichert (wie bei „Stop all"), `runner::RELOAD_CLEAR`
+(`ClearAll { at: 0 }`: jede Spur leer, alles Wartende verworfen, sofort), Runner, Scheduler-Pending
+und Einzähler vergessen; die Status-Schnappschüsse von vor dem Clear zählen für „Spur nicht leer"
+und den Tempowechsel nicht. Dann das gewöhnliche Laden (Tempo, Setup, Mixer, Blatt) — bei anderer
+Spurliste mit Neuaufbau der Engine, ebenfalls ohne Rückfrage. Ergebnis: wie frisch geladen, bereit
+zum Spielen. „Reload from disk“ in der Leiste tut dasselbe, wenn eine Partitur geladen ist (sonst
+öffnet es nur die Datei). Das erste „Load“ ohne geladene Partitur bleibt wie es war: nur auf leere
+Spuren. Bewiesen in `runner/stop_tests.rs` (Reload während des Spiels, nach Stop all mit allen
+Loops und neuem Tempo, mitten im Drum-Take) und `reload.test.ts`.
+
 *Undo/Redo — Entscheidung.* Mix-Änderungen sind Schritte in derselben Historie wie Rasteränderungen
 (`docStore.ts`), eine Geste (eine Fader-Fahrt) ist **ein** Schritt. Undo/Redo und Tippen im
 `mixer:`-Block bewegen die Engine mit (`mixer_apply`): der Abschnitt der geladenen Partitur und
@@ -2047,7 +2063,7 @@ Scrollbalken oder Pfeiltasten im Blatt pausieren es für vier Sekunden.
 
 **Welches Blatt.** Die Live-Ansicht zeigt das Blatt der geladenen Partitur — oder das des geöffneten
 Dokuments, solange dessen Sektionen (Ids, Takte, Autorelease) mit der geladenen übereinstimmen. So
-erscheint eine Textkorrektur sofort auf der Bühne, ohne Reload (der leere Spuren bräuchte).
+erscheint eine Textkorrektur sofort auf der Bühne, ohne Reload (der jede Spur zurücksetzt).
 
 **Bedienung.** Seitenleiste rechts in der Live-Ansicht, Taste `L` oder die schmale Leiste am Rand;
 Breite (Anteil am Fenster) am linken Rand ziehen, Schrift A−/A+; beides und offen/zu in
