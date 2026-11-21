@@ -776,7 +776,12 @@ impl EngineCore {
                 Some((index, _)) => {
                     // `remove` on a `Vec` of `Copy` commands is a memmove of a few dozen bytes.
                     let cmd = self.scheduled.remove(index);
-                    if matches!(cmd, Command::ClearAll { .. } | Command::TransportStop) {
+                    if matches!(
+                        cmd,
+                        Command::ClearAll { .. }
+                            | Command::TransportStop
+                            | Command::DropWaiting { .. }
+                    ) {
                         // "Like freshly started" includes the waiting room: everything still in it
                         // that was sent *before* the clear (the lower slots - arrival order is kept)
                         // belongs to the state being thrown away. Without this a take's `StartPlay`
@@ -784,6 +789,7 @@ impl EngineCore {
                         // sent after the clear stays. `drain` on a `Vec` of `Copy` values moves
                         // memory and allocates nothing. A transport stop drops them for the same
                         // reason: a play or a take end armed for bar 9 has no bar 9 to happen in.
+                        // `DropWaiting` is exactly this drop and nothing else - "Stop all".
                         self.scheduled.drain(..index);
                     }
                     self.apply(cmd);
@@ -1499,6 +1505,8 @@ impl EngineCore {
                 self.gate_bar1 = open.then_some(bar1);
             }
             Command::TransportStop => self.stop_transport(),
+            // The waiting room was emptied where it was taken out of it.
+            Command::DropWaiting { .. } => {}
             Command::Stop => {
                 self.latch.all_off();
                 for track in 0..self.tracks.len() {

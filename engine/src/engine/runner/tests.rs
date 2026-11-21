@@ -570,7 +570,8 @@ fn stop_all_silences_everything_and_ends_the_run() {
     assert!(
         drive.commands[before..].iter().all(|c| matches!(
             c,
-            Command::StopPlay { .. }
+            Command::DropWaiting { .. }
+                | Command::StopPlay { .. }
                 | Command::StopRecord { .. }
                 | Command::SetMonitor { on: false, .. }
                 | Command::ClickGate { open: false, .. }
@@ -581,10 +582,12 @@ fn stop_all_silences_everything_and_ends_the_run() {
     assert!(drive.release().contains("has ended"));
 }
 
-/// Stopping while a change is armed cannot recall the armed commands, so it neutralises them where
-/// they land - and says so.
+/// Stopping while a change is armed calls the armed commands back - all of them, with one
+/// `DropWaiting` at the sample the stop takes effect, before anything else it sends - and says so.
+/// Nothing is answered where it would have landed any more: the stop sends nothing timed for the
+/// armed boundary.
 #[test]
-fn stopping_while_a_change_is_armed_neutralises_it_where_it_lands() {
+fn stopping_while_a_change_is_armed_calls_it_back() {
     let mut drive = Drive::new(HENRY);
     // Inside section 1, which has `autorelease` - so section 2 is already armed and its overdub is
     // already in the engine.
@@ -593,20 +596,15 @@ fn stopping_while_a_change_is_armed_neutralises_it_where_it_lands() {
     let (armed_at, _) = drive.runner.armed_at().expect("Sektion 2 ist armiert");
 
     let before = drive.commands.len();
+    let soon = drive.runner.scheduler().soon(drive.pos);
     let message = drive.stop_all();
-    assert!(message.contains("armed switch"), "{message}");
+    assert!(message.contains("is called back"), "{message}");
     let after: Vec<Command> = drive.commands[before..].to_vec();
+    assert_eq!(after[0], Command::DropWaiting { at: soon }, "{after:?}");
     assert!(
-        after.contains(&Command::ClearTrack {
-            track: 1,
-            at: armed_at
-        }),
-        "die schon abgeschickte Ebene wird an ihrer eigenen Position unschaedlich gemacht: {after:?}"
+        after.iter().all(|c| c.at().is_none_or(|at| at < armed_at)),
+        "nichts mehr fuer die armierte Grenze: {after:?}"
     );
-    assert!(after.contains(&Command::StopPlay {
-        track: 0,
-        at: armed_at
-    }));
     assert_eq!(drive.runner.phase(), Phase::Stopped);
 }
 

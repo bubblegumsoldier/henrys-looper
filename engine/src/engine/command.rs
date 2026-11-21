@@ -94,6 +94,13 @@ pub enum Command {
     /// sent before it and are still waiting for their time are dropped with it - a fresh start has
     /// nothing scheduled.
     ClearAll { at: u64 },
+    /// Call back everything that was sent before it and is still waiting at `at`: those commands
+    /// never act. Nothing else changes - no track is stopped, cleared or reset by this alone. The
+    /// score's emergency brake ("Stop all", `Runner::stop_all`): a run schedules its sections,
+    /// takes and re-anchorings bars ahead, and a stop has to take all of that back at once rather
+    /// than answer every waiting command with a counter-command where it lands. What is sent after
+    /// it (the stop itself) stays. Timed, so whatever was due before `at` still happens in order.
+    DropWaiting { at: u64 },
     /// Input monitoring (hearing yourself through the engine) for one track, independent of whether
     /// that track is playing.
     SetMonitor { track: usize, on: bool },
@@ -236,6 +243,7 @@ impl Command {
             | Command::RestartLoop { at, .. }
             | Command::ClearTrack { at, .. }
             | Command::ClearAll { at }
+            | Command::DropWaiting { at }
             | Command::LatchOverdub { at, .. }
             | Command::TransportStart { at }
             | Command::CountIn { at, .. }
@@ -300,6 +308,7 @@ impl Command {
             | Command::TouchFxParam { track, .. }
             | Command::LoadFxPreset { track, .. } => Some(*track),
             Command::ClearAll { .. }
+            | Command::DropWaiting { .. }
             | Command::SetClick { .. }
             | Command::SetClickGain { .. }
             | Command::SetMonitorGain { .. }

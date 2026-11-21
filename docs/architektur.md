@@ -1014,8 +1014,8 @@ jede. Bei geschlossenem Fenster hören gehostete Plugins „steht, Position 0"; 
 Takt 1 der ersten Sektion zu (im Einzähler negativ, wie beim Einzähler des freien Modus). Der
 Mitschnitt ist nicht betroffen: Er beginnt ohnehin auf Takt 1 der ersten Sektion und enthält
 keinen Klick. Der Weg über ein echtes `TransportStop` im Leerlauf wurde verworfen: Ein Stopp
-verwirft alle wartenden Kommandos (auch die Neutralisierer von „Stop all" und das `ClearAll` von
-„Back to start"), behandelt laufende Takes anders als der Runner, und das Ende der Partitur ließe
+verwirft alle wartenden Kommandos (auch das Schließen des Fensters durch „Stop all" und das
+`ClearAll` von „Back to start"), behandelt laufende Takes anders als der Runner, und das Ende der Partitur ließe
 sich nur einen Steuerschleifen-Takt zu spät stoppen — der Klick auf der folgenden Eins wäre zu
 hören. Das Fenster bleibt deshalb auch mit der neu gesetzten Eins nötig: Es hält die laufende Uhr
 im Leerlauf, nach „Stop all" und nach dem Ende stumm.
@@ -1073,9 +1073,36 @@ Regel steht für die spätere Oberfläche.
 
 Aus demselben Grund kann ein **armierter** Wechsel nicht umgelenkt werden: Seine Kommandos liegen
 schon mit Zeitstempel im Wartezimmer des Audio-Threads und sind nicht zurückzuholen. `goto` wird
-deshalb abgelehnt, solange etwas armiert ist, und sagt das auch. `stop_all` kann nicht ablehnen und
-macht den armierten Wechsel stattdessen dort unschädlich, wo er landet (`ClearTrack` für Tracks, auf
-denen er einen Take gestartet hätte, `StopPlay` für den Rest) — mit Meldung.
+deshalb abgelehnt, solange etwas armiert ist, und sagt das auch.
+
+**„Stop all" ist die Notbremse und holt alles zurück.** `Runner::stop_all` kann nicht ablehnen. Es
+schickt als Erstes `Command::DropWaiting { at: soon }`: Auf der Sample, auf der der Stopp wirkt
+(Kopfstart `Scheduler::soon`, 31 ms bei 128er-Puffern), verwirft die Engine alles, was vorher
+geschickt wurde und noch wartet — den armierten Wechsel, Take-Enden samt ihrem `StartPlay`,
+Neuverankerungen, Overdubs auf späteren Rasterpunkten. Was danach kommt, bleibt: `StopPlay` für
+**jede** Spur auf `soon`, Latch aus, Mithören aus (sofort), Klickfenster zu, und für einen laufenden
+Take ein `StopRecord` auf der nächsten Taktgrenze (oder auf seinem eigenen Ende, wenn das früher
+liegt) — er wird sauber geschlossen, ist aber nicht zu hören. Zugesagt ist damit: ab `soon` sind
+beide Busse digital still (bis auf die Ausklänge der Effektketten — Hall, Delay, die 144 Samples
+Latenz des Octavers —, die nur abklingen), keine Loop-Note eines MIDI-Loops kommt mehr, keine hängt,
+und Anzeige und Engine-Status sagen „gestoppt". Die Zahl in „Stopped all (N tracks)" ist die der
+Spuren, die beim Druck klangen oder aufnahmen.
+
+Früher beantwortete `stop_all` jedes wartende Kommando mit einem Gegenkommando, wo es landet. Das
+übersah Fälle, und einer davon war der Fehler des Besitzers („manchmal läuft nach Stop all alles
+weiter"): Mit `autorelease` ist die Folgesektion ab dem ersten Sample einer Sektion geplant, und
+das Bild des Runners beschreibt dann schon sie — jede Spur, die *dort* schweigt, galt als „klingt
+nicht" und spielte bis zur Grenze weiter (in „The Hardest Part" einen Takt nach Beginn von
+`chorus_2`: „Stopped all (1 track)", fünf Loops liefen neun Takte weiter). „Manchmal", weil es nur
+die Spuren traf, die in der Folgesektion verstummen. Ebenso übersehen: das `StartPlay` am Ende eines
+`{state: record, bars: N}`, wenn dieselbe Spur in der Folgesektion wieder aufnimmt, und ein Overdub,
+der erst auf einem späteren Rasterpunkt beginnt; und nach einem Stopp im Einzähler schnitt das noch
+wartende `StopRecord` des alten Laufs den ersten Take einer neu geladenen Partitur ab. Bewiesen in
+`runner/stop_tests.rs` mit der Partitur des Besitzers (ohne `sheet:`, `engine/tests/data/`):
+96 Druckzeitpunkte über alle Sektionen und den Einzähler (früh, ein Takt, Mitte, letzter Takt, kurz
+vor der Grenze, im Vorlesefenster des Octavers, auf der Grenze), mit und ohne Mixer, mit einem
+MIDI-Loop auf dem Instrument; dazu „Back to start" danach und das Laden nach einem Stopp im
+Einzähler. Vor der Korrektur klang es nach 37 der 96 Drücke weiter.
 
 ### CLI
 

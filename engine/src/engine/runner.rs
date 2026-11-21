@@ -226,9 +226,20 @@ struct Armed {
     target: Target,
     at: u64,
     at_bar: u64,
-    /// Tracks this change starts a take on. Needed only by [`Runner::stop_all`], which has to
-    /// neutralise commands the audio thread already holds.
-    takes: Vec<usize>,
+    /// Every track as it was **before** this change was scheduled - i.e. as it is while the
+    /// current section sounds. Scheduling a change rewrites the runner's picture of each track to
+    /// what it will be once the change has happened (with `autorelease` that is the whole time a
+    /// section plays), so [`Runner::stop_all`] reads what is true *now* from here.
+    before: Vec<Now>,
+}
+
+/// One track as the sounding section has it - see [`Armed::before`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Now {
+    sounding: bool,
+    /// End of the take running in that section, 0 for none.
+    take_end: u64,
+    stacking: bool,
 }
 
 /// The runner's own picture of one track.
@@ -616,16 +627,48 @@ impl Runner {
         self.message.clone()
     }
 
-    /// Stop every track and end the run.
+    /// Stop every track and end the run - the emergency brake.
+    ///
+    /// What it guarantees, from the sample it takes effect on (`soon`, the head start every
+    /// command needs - 31 ms at 128 frames): every loop is silent, every monitored input is off,
+    /// the click is closed, and nothing the run had scheduled acts any more - not the armed
+    /// section, not the end of a take, not a re-anchoring, not the `StartPlay` a take leaves
+    /// behind. That last part is one command, [`Command::DropWaiting`]: the run schedules bars
+    /// ahead (a whole section ahead with `autorelease`), and calling all of it back is the only
+    /// answer that cannot miss a case. Answering each waiting command with a counter-command where
+    /// it lands - what this did before - missed several: with `autorelease` the runner's picture
+    /// already describes the *armed* section, so every track that falls silent there was "not
+    /// sounding" and kept playing until the boundary (the owner's "Stopped all (1 track)" in a
+    /// chorus with six tracks playing); and a take that ends inside its section, or an overdub
+    /// that starts on a later grid point, was never answered at all.
+    ///
+    /// The one thing deliberately left running is a take: it is closed on the next bar line (or
+    /// at its own end, if that comes first) rather than cut at an arbitrary sample, and nothing
+    /// of it is heard - its track is stopped, its monitor off.
     pub fn stop_all(&mut self, est: u64) -> String {
         let soon = self.sched.soon(est);
         let bar = self.sched.next_bar(est);
+        // Scheduling a change rewrites the picture of every track to what it will be once the
+        // change has happened; what is true *now* is what the change found.
+        let (playing_now, landed) = match &self.armed {
+            Some(armed) => (armed.before.clone(), armed.at <= soon),
+            None => (self.now(), true),
+        };
+        // An armed change that lands before the stop takes effect does happen (it was due before
+        // the call-back), and so do the takes it starts: those are the ones to close.
+        let taking = if landed { self.now() } else { playing_now.clone() };
+
+        // Everything the run still has waiting in the engine: gone, at the very sample the stop
+        // takes effect. Whatever is sent below comes after it and stays.
+        self.out.push(Command::DropWaiting { at: soon });
+
         let mut stopped = 0usize;
         for track in 0..self.tracks.len() {
             let name = self.tracks[track].name.clone();
-            // A running stack: no further pass, and the one that runs is closed on the bar line
-            // like any other take.
-            let stacking = self.tracks[track].stacking;
+            let take_end = taking[track].take_end;
+            let running_take = take_end > soon;
+            let stacking = taking[track].stacking || playing_now[track].stacking;
+            // A running stack: no further pass.
             if stacking {
                 self.out.push(Command::LatchOverdub {
                     track,
@@ -633,27 +676,24 @@ impl Runner {
                     at: soon,
                 });
             }
-            // A take that is still running is closed on the bar line rather than left open; the
-            // loop it defines is short, but the musician asked for silence.
-            let take_end = self.tracks[track].take_end;
-            if take_end > bar || stacking {
+            // A take that is still running is closed on the bar line rather than left open (its
+            // own end was called back with everything else); the loop it defines is short, but the
+            // musician asked for silence. A take that ends before that bar line keeps its end.
+            if running_take {
+                self.out.push(Command::StopRecord {
+                    track,
+                    at: take_end.min(bar),
+                });
+            } else if stacking {
                 self.out.push(Command::StopRecord { track, at: bar });
             }
-            if self.tracks[track].sounding || take_end != 0 {
-                let plan = self.sched.stop_play_at(track, &name, soon);
-                self.push(plan);
+            // Every track is stopped, sounding or not - whatever the picture says, the engine is
+            // silent after this.
+            let plan = self.sched.stop_play_at(track, &name, soon);
+            self.push(plan);
+            let now = playing_now[track];
+            if now.sounding || now.take_end > est || now.stacking {
                 stopped += 1;
-            }
-            // Every take was scheduled as `StartRecord, StopRecord, StartPlay` in one go, and the
-            // last two are in the engine already, stamped for the take's planned end. Cutting the
-            // take short does not recall them, so the track would start playing again on its own
-            // at that sample. A `StopPlay` at the very same position, sent after them, keeps it
-            // silent - commands due at one position run in the order they were sent.
-            if take_end != 0 {
-                self.out.push(Command::StopPlay {
-                    track,
-                    at: take_end,
-                });
             }
             self.set_monitor(track, false);
             self.tracks[track].sounding = false;
@@ -662,30 +702,12 @@ impl Runner {
             self.tracks[track].stacking = false;
         }
 
-        // An armed change cannot be recalled, so it is neutralised where it lands: a track it would
-        // have started a take on is cleared at that very sample (which is what `record` was going to
-        // do to it anyway), every other one is stopped again.
         let note = match self.armed.take() {
-            Some(armed) => {
-                for track in 0..self.tracks.len() {
-                    if armed.takes.contains(&track) {
-                        self.out.push(Command::ClearTrack {
-                            track,
-                            at: armed.at,
-                        });
-                    } else {
-                        self.out.push(Command::StopPlay {
-                            track,
-                            at: armed.at,
-                        });
-                    }
-                }
-                format!(
-                    " The armed switch to \"{}\" was already in the engine; it is silenced where it lands.",
-                    self.target_label(armed.target),
-                )
-            }
-            None => String::new(),
+            Some(armed) if !landed => format!(
+                " The switch to \"{}\" that was armed is called back.",
+                self.target_label(armed.target),
+            ),
+            _ => String::new(),
         };
         // The click falls silent with the loops. Never before the window opened: pressed within the
         // head start of a Start, the opening is still waiting in the engine and would otherwise act
@@ -1096,28 +1118,36 @@ impl Runner {
 
     /// Schedule everything a target needs at `at` and remember it as armed.
     fn arm(&mut self, target: Target, at: u64, at_bar: u64) {
-        let takes = match target {
+        let before = self.now();
+        match target {
             Target::Section(index) => self.schedule_section(index, at, at_bar),
-            Target::End => {
-                self.schedule_silence(at);
-                Vec::new()
-            }
-        };
+            Target::End => self.schedule_silence(at),
+        }
         self.armed = Some(Armed {
             target,
             at,
             at_bar,
-            takes,
+            before,
         });
     }
 
-    /// The whole translation from target states to commands. Returns the tracks a take was
-    /// scheduled on.
-    fn schedule_section(&mut self, index: usize, start: u64, start_bar: u64) -> Vec<usize> {
+    /// Every track as the runner's picture has it at this moment, before anything new is armed.
+    fn now(&self) -> Vec<Now> {
+        self.tracks
+            .iter()
+            .map(|t| Now {
+                sounding: t.sounding,
+                take_end: t.take_end,
+                stacking: t.stacking,
+            })
+            .collect()
+    }
+
+    /// The whole translation from target states to commands.
+    fn schedule_section(&mut self, index: usize, start: u64, start_bar: u64) {
         let plan = self.plans[index].clone();
         self.sched.bars = plan.bars;
         let end = self.sched.timeline.bar_start(start_bar + plan.bars as u64);
-        let mut takes = Vec::new();
 
         for track in 0..self.tracks.len() {
             let want = plan.want[track];
@@ -1160,7 +1190,6 @@ impl Runner {
                     // The take's own `StartPlay` at `end` leaves the track playing, which is what a
                     // section that loops needs and what the next section then finds.
                     t.sounding = true;
-                    takes.push(track);
                 }
                 ScoreState::Overdub => {
                     // A further layer belongs on the **track's own** grid, `origin + n * loop_len`,
@@ -1214,7 +1243,6 @@ impl Runner {
                     t.take_end = take_end;
                     t.take_end_bar = take_end_bar;
                     t.sounding = true;
-                    takes.push(track);
                 }
                 ScoreState::Stack if self.tracks[track].stacking => {
                     // stack -> stack: the latch simply keeps going.
@@ -1265,7 +1293,6 @@ impl Runner {
                     t.sounding = true;
                     t.stacking = true;
                     t.stack_from = take_start;
-                    takes.push(track);
                 }
                 ScoreState::Play => {
                     // The one case that must produce nothing: a track that is already sounding.
@@ -1285,7 +1312,6 @@ impl Runner {
             }
             self.tracks[track].target = want;
         }
-        takes
     }
 
     /// Whether the section starting on bar `start_bar` re-anchors `track`'s loop - the rule of
@@ -1442,3 +1468,6 @@ mod restart_tests;
 
 #[cfg(test)]
 mod golden_tests;
+
+#[cfg(test)]
+mod stop_tests;
