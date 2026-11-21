@@ -105,11 +105,13 @@ fn an_instrument_track_compiles_with_its_midi_routing() {
             &[
                 InsertLine {
                     plugin: "au:aufx:dely:appl".into(),
-                    bypass: Some(false)
+                    bypass: Some(false),
+                    before: None,
                 },
                 InsertLine {
                     plugin: "vst3:0123ABCD".into(),
-                    bypass: None
+                    bypass: None,
+                    before: None,
                 },
             ][..]
         )
@@ -360,4 +362,83 @@ fn transpose_is_part_of_the_midi_field() {
     assert_eq!(doc.tracks[0].midi.as_ref().unwrap().transpose, Some(12));
     let rendered = crate::score::doc::render_doc(&doc);
     assert!(rendered.contains("transpose: 12"), "{rendered}");
+}
+
+// ---- plugins inside the built-in chain (`before:`) ------------------------------------------
+
+const PLACED: &str = "bpm: 100\ntracks:\n  voice: {input: 1}\nsections:\n  - id: a\n    bars: 1\n\n\
+    mixer:\n  tracks:\n    voice:\n      inserts: [{plugin: vst3:IRDX, before: octaver}, \
+    {plugin: vst3:DEESS, bypass: true, before: comp}, {plugin: au:aufx:dely:appl}]\n";
+
+/// `before:` names the built-in effect a plugin sits in front of; absent is the end, as in every
+/// score written before positions existed.
+#[test]
+fn inserts_can_sit_in_front_of_a_built_in_effect() {
+    use crate::engine::fx::FxSlot;
+    use crate::engine::insert::InsertPosition;
+    let score = compile_score(PLACED).expect("compiles");
+    let inserts = score.mixer.as_ref().unwrap().tracks.get("voice").unwrap().inserts.clone().unwrap();
+    let positions: Vec<InsertPosition> = inserts.iter().map(InsertLine::position).collect();
+    assert_eq!(
+        positions,
+        vec![
+            InsertPosition::before(FxSlot::Octaver),
+            InsertPosition::before(FxSlot::Comp),
+            InsertPosition::END
+        ]
+    );
+    assert_eq!(inserts[1].bypass, Some(true));
+
+    // An old score: no `before`, everything at the end.
+    let old = compile_score(KEYS).unwrap();
+    let keys = old.mixer.as_ref().unwrap().tracks.get("keys").unwrap();
+    assert!(keys.inserts.as_ref().unwrap().iter().all(|i| i.position() == InsertPosition::END));
+}
+
+#[test]
+fn a_placed_insert_round_trips_through_the_document_and_json() {
+    let doc = parse_doc(PLACED).expect("parses");
+    let text = render_doc(&doc);
+    assert!(
+        text.contains(
+            "      inserts: [{plugin: vst3:IRDX, before: octaver}, {plugin: vst3:DEESS, bypass: true, \
+             before: comp}, {plugin: au:aufx:dely:appl}]\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(compiled(&text), compiled(PLACED));
+    assert_eq!(render_doc(&parse_doc(&text).unwrap()), text);
+
+    // The wire format (`mixer_take`, `mixer_apply`): `before` only when set, an old entry reads.
+    let line = InsertLine {
+        plugin: "vst3:IRDX".into(),
+        bypass: None,
+        before: Some("eq".into()),
+    };
+    let json = serde_json::to_string(&line).unwrap();
+    assert_eq!(json, r#"{"plugin":"vst3:IRDX","before":"eq"}"#);
+    assert_eq!(serde_json::from_str::<InsertLine>(&json).unwrap(), line);
+    let old: InsertLine = serde_json::from_str(r#"{"plugin":"x","bypass":true}"#).unwrap();
+    assert_eq!(old.before, None);
+}
+
+/// A name that is no built-in effect, and a list out of signal order, are errors with a line.
+#[test]
+fn a_wrong_position_is_an_error_with_its_line() {
+    let wrong = PLACED.replace("before: comp", "before: chorus");
+    let (line, message) = one_issue(&wrong);
+    assert_eq!(line, 11);
+    assert!(message.contains("'chorus' is not one of the allowed words"), "{message}");
+
+    let swapped = PLACED.replace(
+        "[{plugin: vst3:IRDX, before: octaver}, {plugin: vst3:DEESS, bypass: true, before: comp}",
+        "[{plugin: vst3:DEESS, bypass: true, before: comp}, {plugin: vst3:IRDX, before: octaver}",
+    );
+    let (_, message) = one_issue(&swapped);
+    assert!(message.contains("plugin 2 of") && message.contains("in signal order"), "{message}");
+    let after_end = PLACED.replace(
+        "{plugin: au:aufx:dely:appl}]",
+        "{plugin: au:aufx:dely:appl}, {plugin: x, before: eq}]",
+    );
+    assert_eq!(issues(&after_end).len(), 1, "nothing may follow the end inside the chain");
 }

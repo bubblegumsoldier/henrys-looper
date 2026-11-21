@@ -138,7 +138,10 @@ use super::command::{
     StatusSender, TrackStatus,
 };
 use super::frame::{Channels, Frame};
-use super::insert::{InsertEndpoint, InsertRack, MAX_BLOCK, PluginTransport, Spread};
+use super::fx::FX_SLOTS;
+use super::insert::{
+    InsertEndpoint, InsertPosition, InsertRack, MAX_BLOCK, PluginTransport, Spread,
+};
 use super::latch::{Latches, Verdict};
 use super::metro::Metronome;
 use super::source::{HostClock, SourceEndpoint, SourceRack, heard_at, place_event};
@@ -1142,6 +1145,11 @@ impl EngineCore {
             bus.clear(n);
         }
         for (t, track) in self.tracks.iter_mut().enumerate() {
+            // A reorder whose fade-out is done happens here, between two blocks of silence.
+            rack.begin_track(t);
+            // Plugins between the built-in effects: the chain is run in segments around them
+            // (`render_split_chain`), so the frame loop only gathers what goes into it.
+            let split = rack.track_splits_chain(t);
             let mut spread = Spread::Shared;
             {
                 let scratch = &mut rack.track_scratch[t];
@@ -1160,7 +1168,11 @@ impl EngineCore {
                             in_index,
                         )
                     };
-                    let (wet, s) = track.render_unpanned(start + i as u64, monitor, collapsed);
+                    let (wet, s) = if split {
+                        track.render_sources(start + i as u64, monitor, collapsed)
+                    } else {
+                        track.render_unpanned(start + i as u64, monitor, collapsed)
+                    };
                     spread = s;
                     for (b, block) in scratch.iter_mut().enumerate() {
                         block.l[i] = wet[b].l;
@@ -1168,14 +1180,20 @@ impl EngineCore {
                     }
                 }
             }
-            // One instance per slot: it processes the Main signal. When both buses carry the same
-            // signal, the result serves both; when they differ, Monitor goes without the plugins.
-            rack.process_track(t, Bus::Main.index(), n);
-            if spread == Spread::Shared {
-                let [main, monitor] = &mut rack.track_scratch[t];
-                monitor.l[..n].copy_from_slice(&main.l[..n]);
-                monitor.r[..n].copy_from_slice(&main.r[..n]);
+            if split {
+                render_split_chain(track, rack, t, n, spread);
+            } else {
+                // One instance per slot: it processes the Main signal. When both buses carry the
+                // same signal, the result serves both; when they differ, Monitor goes without the
+                // plugins.
+                rack.process_track(t, Bus::Main.index(), n);
+                if spread == Spread::Shared {
+                    let [main, monitor] = &mut rack.track_scratch[t];
+                    monitor.l[..n].copy_from_slice(&main.l[..n]);
+                    monitor.r[..n].copy_from_slice(&main.r[..n]);
+                }
             }
+            rack.fade_track(t, n);
             // Fader and panner, frame by frame: the fader's smoother advances once per frame and
             // serves both buses, exactly as in the frame path.
             let [scratch_main, scratch_monitor] = &rack.track_scratch[t];
@@ -2249,6 +2267,71 @@ fn meter_value(v: f32) -> f32 {
 /// out on a mono track, the recorded pair on a stereo one, silence when monitoring is off or the
 /// input FIFO ran short.
 #[inline(always)]
+/// The built-in chain and the plugin inserts of one track in signal order, for a track whose
+/// plugins do not all sit at the end of the chain (`super::insert`, "Where they sit").
+///
+/// The track's scratch blocks hold what goes into each bus's chain ([`Track::render_sources`]).
+/// The Main chain runs in segments - the consecutive built-in effects with no plugin between them
+/// - and the plugins of each position run over the block between two segments; the plugins at the
+/// end come last. The other bus is what [`Track::render_unpanned`] makes of it: the same signal
+/// when both buses hear the same sources, its own chain without plugins when they differ, silence
+/// when there is one way out. All of it over blocks that exist already; nothing is allocated.
+fn render_split_chain(track: &mut Track, rack: &mut InsertRack, t: usize, n: usize, spread: Spread) {
+    let main = Bus::Main.index();
+    let mut layout = 0x80u8;
+    for k in 0..FX_SLOTS {
+        if rack.track_has_inserts_at(t, InsertPosition::from_index(k)) {
+            layout |= 1 << k;
+        }
+    }
+    track.chain_mut(main).begin_segments(layout);
+    let mut from = 0;
+    for k in 0..=FX_SLOTS {
+        let plugins_here = k < FX_SLOTS && layout & (1 << k) != 0;
+        if !plugins_here && k < FX_SLOTS {
+            continue;
+        }
+        if k > from {
+            let block = &mut rack.track_scratch[t][main];
+            track
+                .chain_mut(main)
+                .process_segment(&mut block.l[..n], &mut block.r[..n], from, k);
+        }
+        if plugins_here {
+            rack.process_track_at(t, main, n, InsertPosition::from_index(k));
+        }
+        from = k;
+    }
+    track.chain_mut(main).end_segments();
+    rack.process_track_at(t, main, n, InsertPosition::END);
+
+    let other = Bus::Monitor.index();
+    match spread {
+        Spread::Split => {
+            let block = &mut rack.track_scratch[t][other];
+            let chain = track.chain_mut(other);
+            for i in 0..n {
+                let wet = chain.process(Frame::new(block.l[i], block.r[i]));
+                block.l[i] = wet.l;
+                block.r[i] = wet.r;
+            }
+        }
+        Spread::Shared | Spread::Collapsed => {
+            let chain = track.chain_mut(other);
+            for _ in 0..n {
+                chain.process(Frame::SILENT);
+            }
+            let [m, o] = &mut rack.track_scratch[t];
+            if spread == Spread::Shared {
+                o.l[..n].copy_from_slice(&m.l[..n]);
+                o.r[..n].copy_from_slice(&m.r[..n]);
+            } else {
+                o.clear(n);
+            }
+        }
+    }
+}
+
 fn monitor_frame(
     track: &Track,
     input: &[f32],

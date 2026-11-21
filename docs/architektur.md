@@ -568,7 +568,9 @@ was neben den Ebenen-Puffern nicht ins Gewicht fällt.
 ### Reihenfolge und Presets
 
 Oktaver, Hochpass, drei Bänder parametrischer EQ, Kompressor, Delay, Hall - die Reihenfolge aus
-dem Plan, mit dem Oktaver davor (Begründung unten). Das oberste EQ-Band ist als Kuhschwanz
+dem Plan, mit dem Oktaver davor (Begründung unten). Die Reihenfolge der eingebauten Geräte ist
+fest; Plugins lassen sich seit 2026-11 vor jedes von ihnen setzen (Abschnitt 14, „Plugins in der
+Kette“). Das oberste EQ-Band ist als Kuhschwanz
 ausgelegt: "Luft" ist das ganze obere Ende, nicht eine Frequenz. Der Kompressor hat ein weiches
 Knie (6 bis 8 dB), weil eine Stimme *an* der Schwelle lebt und ein hartes Knie mehrmals pro Sekunde
 umschalten würde.
@@ -1872,9 +1874,10 @@ und Apples mitgelieferte Effekte sind auf jedem Mac echte Testobjekte. CLAP (`cl
 möglich, aber nicht gebaut: hier ist kein CLAP-Plugin installiert, und die großen Bibliotheken
 liefern es nicht (Abschnitt 8).
 
-**Lage im Signalweg.** Acht Insert-Slots je Track **nach der eingebauten Kette und vor Fader und
-Panorama**, acht je Bus über der Summe der Tracks, **vor** dem Klick (der bleibt außerhalb jedes
-Plugins). Aufgenommen wird weiter trocken. Eine Instanz je Slot; hören Main und Monitor
+**Lage im Signalweg.** Acht Insert-Slots je Track **an beliebiger Stelle der eingebauten Kette,
+vor Fader und Panorama** (seit 2026-11, siehe „Plugins in der Kette“ unten; ohne Angabe nach der
+eingebauten Kette, wie zuvor), acht je Bus über der Summe der Tracks, **vor** dem Klick (der bleibt
+außerhalb jedes Plugins). Aufgenommen wird weiter trocken. Eine Instanz je Slot; hören Main und Monitor
 verschiedene Quellen (4+ Ausgänge, Loop und Mithören getrennt), rechnen die Inserts auf Main —
 Monitor bekommt dann die eingebaute Kette ohne Plugins. Bekannte Grenze.
 
@@ -1931,6 +1934,69 @@ Ziffern, Punkt, Leerzeichen), wird als Position geschrieben. Schon gelernte Bele
 `track.<n>.insert…` bleiben positionsbezogen wie alle `track.<n>.*`-Adressen: nach einem
 Umordnen greifen sie auf den Slot der Spur, die jetzt an Position `n` steht (oder ins Leere).
 Wer das nicht will, lernt sie einmal neu.
+
+**Plugins in der Kette** (gebaut 2026-11). Ein Impulsantwort-Lader (Gitarrenbox) gehört vor EQ,
+Kompressor und Hall, auf das trockene Signal — bis dahin konnte ein Plugin nur hinter dem Hall
+sitzen. Jetzt ist die Spalte eines Tracks **eine geordnete Liste**:
+
+```
+[IR-Lader] ─► Oktaver ─► Hochpass ─► [De-Esser] ─► EQ ─► Kompressor ─► Delay ─► Hall ─► [Delay-Plugin] ─► Fader/Panorama
+```
+
+* *Entscheidung: die eingebauten Geräte behalten ihre feste Reihenfolge*, jedes Plugin bekommt
+  einen Platz **vor** einem von ihnen oder **hinter** allen (`InsertPosition`, 0 = vor dem Oktaver
+  … 6 = Ende). Frei umsortierbare eingebaute Geräte fielen nicht von selbst mit ab: die Presets
+  und die Begründungen der Reihenfolge (Oktaver vorn, Delay vor dem Hall, Abschnitt 9) würden
+  bedeutungslos, die Kette hat *einen* Bypass mit *einer* Überblendung und einen Leerlauf-Detektor
+  am Eingang, und die Parameter-Kommandos adressieren die Geräte über ihren festen Index. Für den
+  Wunsch („IR vor alles“) reichen Plätze zwischen den Geräten vollständig.
+* *Slot-Reihenfolge ist Signal-Reihenfolge.* Der Host hält die Slots eines Tracks nach Platz
+  sortiert (`in_signal_order`, eine Verschiebung, die das bräche, wird abgelehnt). Der Audio-Thread
+  rechnet nach (Platz, Slot), braucht die Sortierung also nicht.
+* *Echtzeit.* Liegt ein Plugin innerhalb der Kette, rechnet der Blockpfad die eingebaute Kette in
+  **Segmenten** (`Chain::process_segment`: die aufeinanderfolgenden Geräte zwischen zwei
+  Plugin-Plätzen, je über den ganzen Block, dazwischen die Plugins dieses Platzes) — nichts wird
+  alloziert, die Blöcke gibt es schon. Ohne ein solches Plugin bleibt der Pfad exakt der alte
+  (Test `an_identity_plugin_anywhere_changes_nothing`: ein Identitäts-Plugin an jedem der sieben
+  Plätze ergibt bitgleich dasselbe wie am Ende, mit Voice-Preset, Mithören und getrennten Bussen).
+  Der Ketten-Bypass blendet je Segment über, mit demselben Faktor je Frame — eingeschwungen ist
+  das exakt die ganze Kette, während der 25-ms-Überblendung eine andere, ebenso klickfreie
+  Überblendung. Der Leerlauf-Detektor schaut auf den Eingang jedes Segments (ein Hall hinter einem
+  ausklingenden IR-Plugin darf nicht abgeschnitten werden); die Zähler beginnen neu, sobald sich
+  die Aufteilung ändert. Die Ein/Aus-Überblendungen der eingebauten Geräte sind unverändert, ein
+  Plugin-Bypass schaltet wie bisher hart.
+* *Latenz* ist die Summe von allem, was gehört wird, egal wo es sitzt (Oktaver + Plugins; Test
+  `latencies_add_up_wherever_the_plugins_sit`); der Loop wird um genau so viel vorgelesen.
+* *Umordnen während der Musik.* Ein Platzwechsel ändert das Signal hinter dem Einfügepunkt von
+  einem Sample aufs nächste — ein Knack. Darum geht jedes `Move`/`Place` eines hörbaren Track-Racks
+  durch einen **Dip**: der Track blendet in 256 Frames (5 ms) aus, die Slots wechseln in der Stille,
+  er blendet wieder ein (`REORDER_FADE`; Test `moving_a_plugin_while_it_plays_dips_instead_of_clicking`:
+  kein Sprung größer als eine Rampenstufe). Ein zweites Umordnen wartet in der Queue, bis das erste
+  durch ist. Laden, Entfernen und Bus-Umordnen bleiben sofort, wie bisher.
+* *Nur ein Signal.* Bei getrennten Bussen (Abschnitt 12) bekommt Monitor weiter die eingebaute
+  Kette ohne Plugins, jetzt in ganzer Länge.
+* *MIDI.* Eingebaute Geräte heißen in Adressen nach Namen (`fx.reverb.mix`), Plugins nach Slot
+  (`insert.<n>`). Ein Plugin nur über eingebaute Geräte hinweg zu ziehen ändert seinen Slot nicht
+  (`placeDrop` im UI behält den Slot, wann immer das reicht) — gelernte Belegungen bleiben gültig,
+  eine Belegung auf den Hall erst recht. Wer die Plugins **untereinander** umordnet, verschiebt ihre
+  Slots, wie schon vorher.
+* *Datei.* `plugin-rack.json` bekommt je Slot `before` (fehlt = Ende); eine alte Datei liest sich
+  mit allen Plugins am Ende — genau wie vorher —, Version bleibt 2 (ein älteres Programm ignoriert
+  das Feld). In der Partitur: `inserts: [{plugin: …, before: eq}]`, Abschnitt 15.
+* *UI.* Eine Liste ohne „Built-in“/„Plug-ins“-Trenner; eine Plugin-Zeile lässt sich über und unter
+  jede eingebaute Zeile ziehen (obere Hälfte einer Zeile = davor, „+ Add plugin“ = ans Ende). Ein
+  neues Plugin kommt ans Ende.
+
+**Kopieren.** „Copy to…“ in einer aufgeklappten Plugin-Zeile legt eine Kopie — dasselbe Plugin,
+sein vollständiger Zustand (derselbe Chunk wie im Rack), Bypass und Platz — auf eine andere Spur
+oder einen Bus (dort am Ende); eine zweite, unabhängige Instanz, geladen auf dem Hauptthread wie
+jedes Laden, mit dem Zustand **vor** dem Start, hinter den Plugins, die schon an diesem Platz sitzen
+(`plugin_copy`). Dasselbe für Instrumente (`instrument_copy`, nur auf Instrument-Spuren, ersetzt
+das dortige). „Copy chain to…“ im Kopf einer Spur kopiert die **ganze Kette**: die eingebauten
+Geräte mit allen Werten über dieselben Kommandos wie ein `mixer:`-Eintrag (Fader, Mute und
+Instrument des Ziels bleiben), dann ersetzt es die Plugins des Ziels durch Kopien (`chain_copy`).
+Alles zählt als menschliche Änderung: die offene Partitur schreibt den Eintrag des Ziels zurück.
+Eine Tastenkonvention für Kopieren/Einfügen hat die App nicht; es gibt nur die Knöpfe.
 
 **Nicht gebaut.** Instrumente (werden gelistet, nicht geladen), Sidechain, MIDI an Plugins,
 Latenzausgleich über Busse hinweg, Windows-Host (kompiliert, sagt „nur macOS“).
@@ -2058,8 +2124,18 @@ mixer:
     keys:
       gain: -3
       instrument: "au:aumu:dls :appl"                          # Plugin-Id
-      inserts: [{plugin: "au:aufx:dely:appl", bypass: false}]  # Slot-Reihenfolge
+      inserts: [{plugin: "au:aufx:dely:appl", bypass: false}]  # Signal-Reihenfolge
+    guitar:
+      inserts: [{plugin: "vst3:…IRDX…", before: octaver}, {plugin: "au:aufx:dely:appl"}]
 ```
+
+* `before:` (seit 2026-11) nennt das eingebaute Gerät, **vor** dem das Plugin sitzt (`octaver`,
+  `high_pass`, `eq`, `comp`, `delay`, `reverb`); **fehlt es, sitzt das Plugin hinter der ganzen
+  eingebauten Kette** — dort, wo jedes Plugin einer älteren Partitur saß, die sich also unverändert
+  liest und klingt. Die Liste ist in Signal-Reihenfolge: ein Plugin darf nicht weiter vorn sitzen
+  als das davor genannte, sonst Fehler mit Zeile; ein unbekannter Name ebenso (mit Vorschlag). Der
+  Rückweg schreibt `before` nur, wenn es etwas sagt. Gleiche Plugins in gleicher Reihenfolge an
+  anderen Plätzen werden beim Anwenden nur verschoben, nicht neu geladen.
 
 * `input: instrument` macht die Spur zur Instrument-Spur (immer stereo, `monitor_bus` ohne
   Angabe `main+monitor`, kein gemessenes `latency` — die Kompensation ist automatisch, nur
@@ -2071,8 +2147,9 @@ mixer:
   heißt (nicht Standardwert): eine Partitur von vor dieser Änderung nimmt niemandem das Klavier
   oder den Hall weg. `inserts: []` leert die Slots ausdrücklich; der Rückweg schreibt `[]`, wenn
   ein Mensch den letzten Effekt einer Spur entfernt hat.
-* Die Zustände bleiben lokal nach Spurname: `instruments.json` (jetzt mit einem „Regal“ der
-  zuletzt von einer Spur genommenen Instrumente samt Zustand, höchstens 32) und
+* Die Zustände stehen **neben der Partitur** (seit 2026-11, unten „Die Plugin-Einstellungen
+  gehören zum Stück“); lokal nach Spurname bleiben sie als Rückfall: `instruments.json` (mit
+  einem „Regal“ der zuletzt von einer Spur genommenen Instrumente samt Zustand, höchstens 32) und
   `plugin-rack.json`.
 
 *Laden* (`Session::queue_mix` → `app/src-tauri/src/pluginmix.rs` → Hauptthread): Sitzt das
@@ -2114,6 +2191,67 @@ Meldung), nie ein Fehler; die Bedienelemente dafür gibt es noch nicht.
 Meldung ab (sie hostet keine Instrumente und hört auf kein Keyboard); `--check` zeigt sie samt
 MIDI-Routing.
 
+**Die Plugin-Einstellungen gehören zum Stück** (gebaut 2026-11, `app/src-tauri/src/scorestate.rs`).
+Vorher lagen die Zustände nur lokal nach Spurname: zwei Stücke mit einer Spur „theme“ teilten
+(und überschrieben) sich die Einstellungen, und auf einem anderen Rechner kam ein Stück ohne sie an.
+
+*Format und Ort.* Neben der Partitur, gefunden über den Namen: `The Hardest Part.yaml` →
+`The Hardest Part.plugins.json`. Die YAML verweist nicht darauf und bleibt lesbar; ein
+Zustand ist ein undurchsichtiger Chunk (bei einem Sampler Megabytes), der in handgeschriebenes YAML
+nicht gehört. Eine JSON-Datei statt eines Ordners mit Binärdateien, weil sie sich **atomar**
+ersetzen lässt (temporäre Datei, dann umbenennen) — base64 kostet ein Drittel mehr Platz.
+
+```json
+{ "version": 1,
+  "tracks": {
+    "guitar": { "inserts": [ {"plugin_id": "vst3:…", "name": "IRDX Studio", "slot": 0,
+                              "before": "octaver", "state": "<base64>"},
+                             {"plugin_id": "au:aufx:dely:appl", "name": "AUDelay", "slot": 1,
+                              "bypass": true, "state": "<base64>"} ] },
+    "keys":   { "instrument": {"plugin_id": "au:aumu:dls :appl", "name": "DLSMusicDevice",
+                               "state": "<base64>"} } } }
+```
+
+*Lesen.* `score_load` bekommt vom UI den Pfad der Datei (`null` bei einer ungespeicherten
+Partitur). Die Datei daneben wird gelesen; beim Anwenden des `mixer:` nimmt jeder Manager die
+Zustände seiner Spur **einmal**: nach Reihenfolge, dann nach Id, **nie den Zustand eines anderen
+Plugins** (`match_states`). Sitzt dasselbe Plugin schon auf der Spur, bekommt es den Zustand
+(`load_state` auf das laufende Plugin, wie das Kommando `plugin_state_set`); sonst wird es mit ihm
+geladen, vor dem Start. Was die Datei nicht hat, kommt wie bisher aus den lokalen Dateien (der
+Zustand, den das Plugin auf einer Spur dieses Namens zuletzt hatte) — **bestehende Setups behalten
+beim ersten Laden nach dem Update ihren Klang**, das nächste Speichern schreibt ihn in die Datei.
+Nach dem Anwenden wird der Rest verworfen (`finish_load`, in der Hauptthread-Queue hinter den
+Managern), damit ein späteres Undo im `mixer:` keine Zustände aus der Datei zieht.
+
+*Schreiben — wann.* Plugin-Zustände ändern sich im Fenster des Plugins, ohne dass die App es
+merkt; geschrieben wird darum zu Zeitpunkten, die „behalten“ bedeuten, nie im Hintergrund:
+**⌘S / Save As der geladenen Partitur** (das UI sagt mit `loaded: true`, dass das gespeicherte
+Dokument das geladene ist; bei Save As danach neben der neuen Datei), **Laden einer anderen
+Partitur** (vorher die Zustände der bisherigen) und **Beenden der App**. Jedes Schreiben wird mit
+dem vorhandenen Inhalt zusammengeführt (`merge`): ein Plugin, das seinen Zustand nicht liefert,
+behält den der Datei; eine Spur, deren Plugins hier fehlen, behält ihren Eintrag; Spuren, die die
+laufende Engine nicht hat, bleiben stehen. Eine unlesbare alte Datei wird als `….plugins.json.bak`
+aufgehoben. Ein Fehler beim Schreiben der Zustände lässt das Speichern der Partitur gelingen
+(nur im Log).
+
+*Reload* liest die Datei neu: was seit dem letzten Speichern im Plugin gedreht wurde, ist weg —
+wie alles andere seit dem Speichern, das ist die Bedeutung von Reload. Es wird vorher **nicht**
+geschrieben (sonst wäre der Dreh gerettet und der Reload wirkungslos); halb angewendet wird nichts:
+eine Partitur mit Fehlern setzt nichts zurück und liest keine Zustände, ein abgelehntes Laden
+lässt die bisherige Partitur die aktuelle.
+
+*Ohne Datei.* Eine nie gespeicherte Partitur und der freie Modus ohne Partitur verhalten sich wie
+bisher (nur lokal nach Spurname). Ein Mitschnitt legt die Datei, wie zuletzt gespeichert, als
+`score.plugins.json` neben `score.yaml` (Abschnitt 16).
+
+*Kopieren und Plätze* laufen durch: die Datei hat `before` und `bypass` je Slot; eine Kopie (`Copy
+to…`) ist eine gewöhnliche Belegung der Zielspur und wird beim nächsten Speichern mitgeschrieben.
+
+*Tests* (Stellvertreter-Plugins, keine installierten): `scorestate::tests` (Ort, atomarer
+Rundlauf, kaputte Datei, Zusammenführen ohne Verlust, Zuordnung nach Reihenfolge und Id, einmalige
+Übergabe) und `plugins::tests::a_scores_plugin_settings_travel_with_it` (auf einem „Rechner“
+erfasst, auf einem anderen angewendet, Reload über einem Dreh, Undo ohne Dateizugriff).
+
 ## 16. Mitschnitt der Performance als Stems
 
 Jeder Durchlauf wird auf Platte geschrieben, als Stems für eine DAW. Code: `engine/src/capture/`
@@ -2138,6 +2276,7 @@ gewählte Ordner. Einstellungen in `recording.json` im Konfigurationsordner
 | `01 voice (dry).wav` | Loop-Wiedergabe (hörbare Ebenen mit Ebenen-Gain, **mit denselben Blenden wie hörbar**, Abschnitt 19) + roher Live-Eingang während Record/Overdub/Hear-through (an seinen Kanten ebenso geblendet); vor allem anderen, ohne Monitor-Lautstärke. Kanalzahl der Spur (mono bleibt mono). Abschaltbar |
 | `Mix.wav` | Main-Bus nach seinen Inserts, vor der Main-Lautstärke, **ohne Klick** (auch bei zusammengelegten Bussen) |
 | `score.yaml` | Kopie der geladenen Partitur (nur Partitur-Lauf) |
+| `score.plugins.json` | Kopie der Plugin-Einstellungen der Partitur, wie zuletzt gespeichert (nur Partitur-Lauf aus einer Datei, die eine hat; Abschnitt 15) |
 | `session.json` | Titel, Modus, Startzeit, BPM, Taktart, Samplerate, Länge, Spuren (mit `midi: null` als Platz für spätere `.mid`-Dateien), Sektionsmarker (Frame, Sekunden, Takt ab 1, Sektions-Id), Aussetzer-Zähler, Klartext-Erklärung der Dateien |
 
 Alle Dateien: 24 Bit PCM, Samplerate der Engine, gleich lang, Frame 0 = Takt 1. Über 4 GB wird
@@ -2442,6 +2581,21 @@ landeten die letzten Frames eines Takes, nach dem das Mithören abgeschaltet wur
   Schritte, bewusst ungeglättet (Abschnitt 6).
 * Loops unter 80 ms (8 Blendlängen): keine Blende. Baut kein Musiker, nur Tests, die Loops Sample
   für Sample lesen.
+
+### Mit Plugins in der Kette
+
+Plugins dürfen überall zwischen den eingebauten Geräten sitzen (`InsertPosition`, Abschnitt 14);
+die Kette wird dann in Segmenten gerechnet (`render_split_chain`). Für die Blenden ändert das
+nichts: Der Loop wird um die Summe aller gehörten Latenzen vorausgelesen, und jede Blende —
+Naht, Einsatz, Stopp, Neuanfang — liegt auf genau dieser Leseachse; beide Wege lesen den Loop
+über `Track::play_frame` (`render_sources`), und die Stems werden in beiden nach dem Fader
+abgegriffen. Das Umstellen eines Plugins im Lauf taucht den Track kurz ab (256 Frames aus, 256
+ein); die Kurve ist jetzt dieselbe halbe Kosinus-Periode wie alle Blenden hier — als gerade
+Rampe hatte sie an ihren Ecken auf tieffrequentem Material geknackt. Bewiesen mit
+`clean_tests::plugins_with_latency_and_a_plugin_move_do_not_click` (Verzögerungs-Plugins mit
+300 Frames Latenz vor dem ersten Gerät, 211 hinter dem letzten, eines im Lauf umgestellt; vorher
+3 Stellen über der Schranke, jetzt 0). Die Plugin-Zeit der Lastanzeige zählt Plugins an jeder
+Stelle.
 
 ### Kosten
 

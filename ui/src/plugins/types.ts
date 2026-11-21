@@ -4,6 +4,8 @@
 //! `bus.monitor`. A **slot** is 0-based on the wire and shown 1-based. Parameter values are always
 //! **normalised 0..1**; `text` is the plugin's own display of the value.
 
+import type { FxSlotName } from "../types";
+
 export type PluginFormat = "vst3" | "au";
 export type PluginKind = "effect" | "instrument" | "other";
 /** How the scan's child-process probe went. Only `ok` can be loaded into a slot. */
@@ -65,6 +67,8 @@ export interface SlotView {
   bypass_address: string;
   /** Name of the track the slot belongs to; null on a bus. Slots belong to names, not positions. */
   track: string | null;
+  /** The built-in effect the plugin sits in front of; null (or absent) = after the built-in chain. */
+  before?: FxSlotName | null;
 }
 
 /** A slot whose track is not in the running engine: kept, and back as soon as the track is. */

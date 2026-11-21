@@ -800,3 +800,59 @@ fn bench_loop_playback() {
 
 #[allow(dead_code)]
 fn _unused(_: Command) {}
+
+/// Plugins with latency anywhere in the chain (`plugin-chain`): the loop is read ahead by the
+/// whole chain latency, and every fade - seams, starts, stops, re-anchors - is placed on that read
+/// axis, so it still lands right; the split chain render taps the stems where the plain one does.
+/// A delay plugin of 300 frames sits in front of the built-in devices on the theme and the bass,
+/// one of 211 frames behind them on the chorus guitar, and halfway through the song the theme's
+/// plugin is moved behind the chain while it plays (the 256-frame dip of a reorder).
+#[test]
+fn plugins_with_latency_and_a_plugin_move_do_not_click() {
+    use super::insert::testing::Delay;
+    use super::insert::{Insert, InsertMsg, InsertPosition, InsertShared, InsertTarget, insert_channel};
+    use super::fx::FxSlot;
+    let mut stage = Stage::of(SCORE, Box::new(low), false);
+    let (mut tx, endpoint) = insert_channel(32);
+    stage.sim.core.attach_inserts(endpoint);
+    let track_of = |stage: &Stage, name: &str| {
+        stage.score().tracks.iter().position(|t| t.name == name).unwrap()
+    };
+    let front = InsertPosition::before(FxSlot::Octaver);
+    for (name, latency, position) in [
+        ("theme", 300usize, front),
+        ("bass", 300, front),
+        ("chorus_guitar", 211, InsertPosition::END),
+    ] {
+        let t = track_of(&stage, name);
+        tx.send(InsertMsg::Install {
+            target: InsertTarget::Track(t),
+            slot: 0,
+            insert: Insert::new(Box::new(Delay::new(latency)), InsertShared::new(latency as u32))
+                .at(position),
+        })
+        .unwrap();
+    }
+    let from = stage.section(0);
+    let theme = track_of(&stage, "theme");
+    stage.run_to(stage.section(5) + 30_000);
+    assert_eq!(stage.sim.core.track(theme).playback_advance(), 300, "read ahead by the plugin");
+    tx.send(InsertMsg::Place {
+        target: InsertTarget::Track(theme),
+        from: 0,
+        to: 0,
+        position: InsertPosition::END,
+    })
+    .unwrap();
+    stage.run_all();
+    let to = stage.sim.pos();
+    let (max_step, max_curve) = bounds(signals(&stage));
+    let ((step, at_step), (curve, at_curve)) = roughness(&stage, from, to);
+    let clicks = clicks(&stage, from, to, max_curve);
+    eprintln!(
+        "plugins: step {step:.5} at {at_step}, curvature {curve:.6} at {at_curve} (bound \
+         {max_curve:.6}), {clicks} over"
+    );
+    assert!(step <= max_step, "step {step} at {at_step}");
+    assert!(curve <= max_curve, "click: curvature {curve} at {at_curve} over {max_curve}");
+}

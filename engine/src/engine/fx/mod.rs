@@ -681,6 +681,15 @@ pub struct Chain {
     silence_run: u32,
     /// After this many silent samples nothing can come out any more and the chain goes idle.
     tail_samples: u32,
+    /// Silence counters of a chain split by plugins, one per segment start; see
+    /// [`Chain::begin_segments`].
+    seg_silence: [u32; FX_SLOTS],
+    /// How the chain was split in the last block it was split in.
+    seg_layout: u8,
+    /// The bypass crossfade at the start of the current block of segment passes, and where the
+    /// last pass left it.
+    seg_bypass: Smoothed,
+    seg_bypass_end: Option<Smoothed>,
 }
 
 impl Chain {
@@ -718,6 +727,10 @@ impl Chain {
             preset: FxPreset::Dry,
             silence_run: u32::MAX,
             tail_samples: sample_rate,
+            seg_silence: [0; FX_SLOTS],
+            seg_layout: 0,
+            seg_bypass: Smoothed::new(0.0, BYPASS_MS, sample_rate),
+            seg_bypass_end: None,
         };
         // The two tails switch more slowly than the filters do - see TAIL_SWITCH_MS.
         chain.slot_mix[FxSlot::Delay.index()] = Smoothed::new(0.0, TAIL_SWITCH_MS, sample_rate);
@@ -1106,65 +1119,128 @@ impl Chain {
         }
 
         let mut y = x;
-
-        // 0. Octaver, first - see the module comment. It is the one effect that delays its whole
-        //    output, dry share included, so everything behind it stays aligned with it.
-        let m = self.slot_mix[FxSlot::Octaver.index()].next();
-        if m > 0.0 {
-            let w = self.octaver.process(y);
-            y = blend(y, w, m);
-        }
-
-        // 1. High-pass, one filter instance per channel.
-        let m = self.slot_mix[FxSlot::HighPass.index()].next();
-        if m > 0.0 {
-            let w = Frame {
-                l: self.hp[0].process(y.l),
-                r: self.hp[1].process(y.r),
-            };
-            y = blend(y, w, m);
-        }
-
-        // 2. Three EQ bands. A band at 0 dB is a wire, so it is not computed at all.
-        let m = self.slot_mix[FxSlot::Eq.index()].next();
-        if m > 0.0 {
-            let mut w = y;
-            for i in 0..EQ_BANDS {
-                if !self.set.bands[i].is_flat() {
-                    w = Frame {
-                        l: self.bands[i][0].process(w.l),
-                        r: self.bands[i][1].process(w.r),
-                    };
-                }
-            }
-            y = blend(y, w, m);
-        }
-
-        // 3. Compressor - one detector, one gain, both channels. See `dynamics`.
-        let m = self.slot_mix[FxSlot::Comp.index()].next();
-        if m > 0.0 {
-            let w = self.comp.process(y);
-            y = blend(y, w, m);
-        }
-
-        // 4. Delay - after the compressor, so the repeats are not themselves compressed and the
-        //    tail keeps the dynamics of the note it came from.
-        let m = self.slot_mix[FxSlot::Delay.index()].next();
-        if m > 0.0 {
-            let w = self.delay.process(y);
-            y = blend(y, w, m);
-        }
-
-        // 5. Reverb, last, so it hears the delay's repeats as well - which is what puts them in
-        //    the same room instead of in front of it.
-        let m = self.slot_mix[FxSlot::Reverb.index()].next();
-        if m > 0.0 {
-            let w = self.reverb.process(y);
-            y = blend(y, w, m);
+        for stage in 0..FX_SLOTS {
+            y = self.stage(stage, y);
         }
 
         let b = self.bypass_mix.next();
         blend(x, y, b)
+    }
+
+    /// One built-in effect, `stage` being its [`FxSlot::index`]: its wet share advances one
+    /// sample, and a switched-off effect is skipped rather than multiplied by zero.
+    #[inline(always)]
+    fn stage(&mut self, stage: usize, y: Frame) -> Frame {
+        let m = self.slot_mix[stage].next();
+        if m <= 0.0 {
+            return y;
+        }
+        let w = match stage {
+            // 0. Octaver, first - see the module comment. It is the one effect that delays its
+            //    whole output, dry share included, so everything behind it stays aligned with it.
+            0 => self.octaver.process(y),
+            // 1. High-pass, one filter instance per channel.
+            1 => Frame {
+                l: self.hp[0].process(y.l),
+                r: self.hp[1].process(y.r),
+            },
+            // 2. Three EQ bands. A band at 0 dB is a wire, so it is not computed at all.
+            2 => {
+                let mut w = y;
+                for i in 0..EQ_BANDS {
+                    if !self.set.bands[i].is_flat() {
+                        w = Frame {
+                            l: self.bands[i][0].process(w.l),
+                            r: self.bands[i][1].process(w.r),
+                        };
+                    }
+                }
+                w
+            }
+            // 3. Compressor - one detector, one gain, both channels. See `dynamics`.
+            3 => self.comp.process(y),
+            // 4. Delay - after the compressor, so the repeats are not themselves compressed and
+            //    the tail keeps the dynamics of the note it came from.
+            4 => self.delay.process(y),
+            // 5. Reverb, last, so it hears the delay's repeats as well - which is what puts them
+            //    in the same room instead of in front of it.
+            _ => self.reverb.process(y),
+        };
+        blend(y, w, m)
+    }
+
+    // ---- a chain split by plugins ------------------------------------------------------------
+    //
+    // A plugin insert may sit between two built-in effects (`engine::insert`, "Where they sit").
+    // The chain is then run as **segments** - consecutive stages with no plugin between them - over
+    // a whole block each, with the plugins run over the same block in between. Three things of
+    // [`Chain::process`] need care when one frame is spread over several passes:
+    //
+    // * The whole-chain bypass crossfade is applied **per segment**, `blend(segment in, segment
+    //   out, b)`, with the same `b` for the same frame in every segment: every segment starts from
+    //   the crossfade as it stood at the start of the block. Settled (0 or 1) this is exactly the
+    //   whole-chain result; while it moves it is a different, equally click-free fade.
+    // * Idle detection looks at each segment's own input - a plugin in front of a reverb may ring
+    //   on after the track went silent - with one silence counter per segment start. The counters
+    //   start over whenever the way the chain is split changes, so a stale count never cuts a tail.
+    // * A wet share advances once per frame as before: every stage is in exactly one segment.
+
+    /// Start a block of segment passes. `layout` identifies how the chain is split (a bit per
+    /// segment start); a different split than the last block's starts the silence counts over.
+    #[inline]
+    pub fn begin_segments(&mut self, layout: u8) {
+        if layout != self.seg_layout {
+            self.seg_layout = layout;
+            self.seg_silence = [0; FX_SLOTS];
+        }
+        // The whole-chain counter is stale from here on; when the chain runs whole again it counts
+        // anew rather than going idle on a tail it did not see.
+        self.silence_run = 0;
+        self.seg_bypass = self.bypass_mix;
+        self.seg_bypass_end = None;
+    }
+
+    /// Run stages `from..to` over a block in place. Call between [`Chain::begin_segments`] and
+    /// [`Chain::end_segments`], with the segments of one block in signal order.
+    pub fn process_segment(&mut self, l: &mut [f32], r: &mut [f32], from: usize, to: usize) {
+        let to = to.min(FX_SLOTS);
+        if from >= to {
+            return;
+        }
+        let mut bypass = self.seg_bypass;
+        for (xl, xr) in l.iter_mut().zip(r.iter_mut()) {
+            let x = Frame { l: *xl, r: *xr };
+            if self.bypass && bypass.settled() && bypass.value() == 0.0 {
+                continue;
+            }
+            let b = bypass.next();
+            if x.is_silent() {
+                if self.seg_silence[from] >= self.tail_samples {
+                    *xl = 0.0;
+                    *xr = 0.0;
+                    continue;
+                }
+                self.seg_silence[from] += 1;
+            } else {
+                self.seg_silence[from] = 0;
+            }
+            let mut y = x;
+            for stage in from..to {
+                y = self.stage(stage, y);
+            }
+            let out = blend(x, y, b);
+            *xl = out.l;
+            *xr = out.r;
+        }
+        self.seg_bypass_end = Some(bypass);
+    }
+
+    /// The block's segment passes are done: the bypass crossfade moves on by the block.
+    #[inline]
+    pub fn end_segments(&mut self) {
+        if let Some(b) = self.seg_bypass_end.take() {
+            self.bypass_mix = b;
+        }
     }
 }
 

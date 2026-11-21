@@ -891,6 +891,7 @@ fn read_mix_field(mix: &mut TrackMixSource, field: &str, value: &Node<'_>) {
                             Some(InsertLine {
                                 plugin: get("plugin").and_then(text_of)?,
                                 bypass: get("bypass").and_then(boolean),
+                                before: get("before").and_then(text_of),
                             })
                         })
                         .collect(),
@@ -1823,7 +1824,8 @@ fn mix_lines(mix: &TrackMixSource) -> Vec<(&'static str, String)> {
             ]),
         ));
     }
-    // Last: the plugins sit after the built-in chain in the signal path.
+    // Last: the plugins, in signal order; `before` only for one that sits inside the built-in
+    // chain (absent = after it, as every score before positions existed).
     if let Some(inserts) = &mix.inserts {
         let items: Vec<String> = inserts
             .iter()
@@ -1831,6 +1833,7 @@ fn mix_lines(mix: &TrackMixSource) -> Vec<(&'static str, String)> {
                 flow(vec![
                     ("plugin", Some(flow_scalar(&i.plugin))),
                     ("bypass", b(i.bypass)),
+                    ("before", i.before.as_deref().map(flow_scalar)),
                 ])
             })
             .collect();

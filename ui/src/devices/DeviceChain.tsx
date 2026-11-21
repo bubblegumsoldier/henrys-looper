@@ -2,16 +2,15 @@
 //! Live view's track detail and in the mixer's channel panel, for tracks and for buses:
 //!
 //! ```text
-//!  DEVICES · voice                [Preset  Voice ▾] [⏻ Chain on]
-//!  ─ Built-in ─────────────────────────────────────────────────
+//!  DEVICES · voice      [Copy chain to…] [Preset  Voice ▾] [⏻ Chain on]
+//!  ⏻ • IRDX Studio                        Two notes · 8 smp ⠿ ▸
 //!  ⏻ High-pass                                  80 Hz        ▸
 //!  ⏻ EQ                                         ~~~~         ▾
 //!     [ graph with the three band handles, band knobs ]
 //!  ⏻ Compressor                    −18 dB · 3:1  ▮▮▯         ▸
 //!  ⏻ Delay                              1/8. · 22 %          ▸
 //!  ⏻ Reverb                       62 % room · 18 %           ▸
-//!  ─ Plug-ins ─────────────────────────────────────────────────
-//!  ⏻ ValhallaRoom                     Valhalla DSP      ⠿ ▸
+//!  ⏻ • ValhallaRoom                     Valhalla DSP      ⠿ ▸
 //!  + Add plugin
 //! ```
 //!
@@ -19,8 +18,11 @@
 //!   right under it (an accordion - one open at a time, remembered per channel).
 //! * A device that is off is dimmed, but its controls work: turning one switches it on (and the
 //!   chain in) - see `TouchFxParam` on the Rust side.
-//! * Built-in devices have the engine's fixed order and come before the plug-ins; plug-ins can be
-//!   dragged among themselves.
+//! * Built-in devices have the engine's fixed order; a plug-in row (marked with a dot) can be
+//!   dragged above or below any row - in front of a built-in device, or after all of them. Its
+//!   slot stays whenever it only crosses built-in devices, so its MIDI addresses stay too.
+//! * "Copy to…" in an open plug-in or instrument row, "Copy chain to…" in the header: copies with
+//!   the full plugin state, independent afterwards.
 //! * Keyboard: ↑/↓ move between rows, Enter or Space opens and closes one.
 
 import { useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
@@ -34,12 +36,25 @@ import { Icon } from "../shell/Icon";
 import { T } from "../shell/terms";
 import { useStatusSlice } from "../status";
 import type { FxSlotName, FxStatus } from "../types";
-import { FX_NAME, FX_SLOT_ORDER, fxOn, type FxActions } from "../mixer/fxModel";
+import { FX_NAME, fxOn, type FxActions } from "../mixer/fxModel";
 import { curvePath, responseDb } from "../mixer/EqGraph";
 import { InstrumentPicker, NoteLed } from "../mixer/InstrumentSlot";
+import { Popover } from "../mixer/Popover";
 import { CompEditor, CompReduction, DelayEditor, EqEditor, HighPassEditor, OctaverEditor, PresetPicker, ReverbEditor } from "./editors";
 import { FORMAT, PluginPicker, attempt } from "./PluginPicker";
-import { builtinSummary, defaultDevice, deviceOrder, pluginId, pluginSummary, type DeviceId, type Owner } from "./model";
+import {
+  builtinSummary,
+  busOwner,
+  defaultDevice,
+  deviceOrder,
+  pluginId,
+  pluginSlotOf,
+  pluginSummary,
+  placeDrop,
+  trackOwner,
+  type DeviceId,
+  type Owner,
+} from "./model";
 import { openDevice, useOpenDevice } from "./store";
 import "./devices.css";
 
@@ -68,7 +83,7 @@ export function DeviceChain({ owner, track, size, title }: Props) {
     () => rack.slots.filter((s) => s.target === owner).sort((a, b) => a.slot - b.slot),
     [rack, owner],
   );
-  const order = deviceOrder({ instrument: !!track?.instrument, builtin: !!track, plugins: plugins.map((p) => p.slot) });
+  const order = deviceOrder({ instrument: !!track?.instrument, builtin: !!track, plugins });
   const stored = useOpenDevice(owner);
   const open = stored === undefined || (stored !== null && !order.includes(stored)) ? defaultDevice(order) : stored;
   const toggle = (id: DeviceId) => openDevice(owner, open === id ? null : id);
@@ -94,6 +109,7 @@ export function DeviceChain({ owner, track, size, title }: Props) {
         </span>
         {track && fx && (
           <div className="dev-head-ctl">
+            <CopyChain track={track} />
             <PresetPicker track={track.index} fx={fx} actions={track.actions} />
             <button
               className={`btn s chainsw${fx.bypass ? " out" : " on"}`}
@@ -121,23 +137,7 @@ export function DeviceChain({ owner, track, size, title }: Props) {
       )}
 
       <div className="devlist" ref={list} onKeyDown={onKey} role="list" aria-label={`${T.devices}${track ? ` of ${track.name}` : ""}`}>
-        {track?.instrument && (
-          <InstrumentRow track={track} open={open === "instrument"} onToggle={() => toggle("instrument")} />
-        )}
-        {track && fx && (
-          <>
-            <div className="dev-sep" role="presentation">
-              <span>{T.builtIn}</span>
-            </div>
-            {FX_SLOT_ORDER.map((slot) => (
-              <BuiltinRow key={slot} slot={slot} track={track} fx={fx} open={open === slot} onToggle={() => toggle(slot)} />
-            ))}
-          </>
-        )}
-        <div className="dev-sep" role="presentation">
-          <span>{T.plugIns}</span>
-        </div>
-        <PluginRows owner={owner} plugins={plugins} open={open} toggle={toggle} />
+        <ChainRows owner={owner} track={track} fx={fx} plugins={plugins} order={order} open={open} toggle={toggle} />
       </div>
     </div>
   );
@@ -159,22 +159,29 @@ interface RowProps {
   onToggle: () => void;
   children?: ReactNode;
   trail?: ReactNode;
-  drag?: {
-    onDragStart: (e: DragEvent) => void;
-    onDragOver: (e: DragEvent) => void;
-    onDrop: (e: DragEvent) => void;
-    onDragEnd: () => void;
-    over: boolean;
-  };
+  /** Every row is a drop target while a plug-in is dragged; only plug-in rows can be dragged. */
+  drag?: RowDrag;
   title?: string;
+  /** A plug-in row (marked as such among the built-in devices). */
+  plug?: boolean;
+}
+
+interface RowDrag {
+  draggable: boolean;
+  onDragStart?: (e: DragEvent) => void;
+  onDragOver: (e: DragEvent) => void;
+  onDrop: (e: DragEvent) => void;
+  onDragEnd: () => void;
+  /** Where the dragged plug-in would land: in front of this row or behind it. */
+  over: "above" | "below" | null;
 }
 
 function DeviceRow(p: RowProps) {
   return (
     <div
-      className={`dvc ${p.state}${p.open ? " open" : ""}${p.drag?.over ? " dropover" : ""}`}
+      className={`dvc ${p.state}${p.open ? " open" : ""}${p.plug ? " plug" : ""}${p.drag?.over ? ` drop-${p.drag.over}` : ""}`}
       role="listitem"
-      draggable={!!p.drag}
+      draggable={!!p.drag?.draggable}
       onDragStart={p.drag?.onDragStart}
       onDragOver={p.drag?.onDragOver}
       onDrop={p.drag?.onDrop}
@@ -209,7 +216,7 @@ function DeviceRow(p: RowProps) {
 
 // ---- built-in devices --------------------------------------------------------------------------
 
-function BuiltinRow({ slot, track, fx, open, onToggle }: { slot: FxSlotName; track: TrackChain; fx: FxStatus; open: boolean; onToggle: () => void }) {
+function BuiltinRow({ slot, track, fx, open, onToggle, drag }: { slot: FxSlotName; track: TrackChain; fx: FxStatus; open: boolean; onToggle: () => void; drag?: RowDrag }) {
   const on = fxOn(fx, slot);
   const i = track.index;
   const editor = { track: i, fx, actions: track.actions };
@@ -229,6 +236,7 @@ function BuiltinRow({ slot, track, fx, open, onToggle }: { slot: FxSlotName; tra
       state={on ? (fx.bypass ? "held" : "on") : "off"}
       open={open}
       onToggle={onToggle}
+      drag={drag}
       title={`${FX_NAME[slot]} - click to ${open ? "fold" : "edit"}`}
     >
       {slot === "octaver" && <OctaverEditor {...editor} />}
@@ -275,6 +283,7 @@ function InstrumentRow({ track, open, onToggle }: { track: TrackChain; open: boo
   const { rack } = useInstruments();
   const inst = instrumentOf(rack, track.name);
   const [picker, setPicker] = useState<HTMLElement | null>(null);
+  const copyTargets = useCopyTargets();
   const loading = rack.loading?.includes(track.name) ?? false;
   const summary = !rack.supported
     ? "macOS only for now"
@@ -314,6 +323,16 @@ function InstrumentRow({ track, open, onToggle }: { track: TrackChain; open: boo
         </button>
         <div className="grow" />
         {inst && (
+          <CopyTo
+            label={T.copyTo}
+            title={`Put ${inst.name} with all its settings on another instrument track, replacing what plays there. The copy is independent.`}
+            targets={copyTargets
+              .filter((t) => t.instrument && t.index !== null && t.index !== track.index)
+              .map((t) => ({ key: t.name, name: t.name }))}
+            onPick={async (to) => setInstruments(await instrumentApi.copy(track.name, to))}
+          />
+        )}
+        {inst && (
           <button className="btn s danger" onClick={() => void attempt(async () => setInstruments(await instrumentApi.set(track.name, null)))} title="Take the instrument off this track">
             <Icon name="trash" />
             {T.removeDevice}
@@ -325,69 +344,187 @@ function InstrumentRow({ track, open, onToggle }: { track: TrackChain; open: boo
   );
 }
 
-// ---- plug-ins --------------------------------------------------------------------------------
+// ---- the rows: built-in devices and plug-ins in one list ----------------------------------------
 
-function PluginRows({ owner, plugins, open, toggle }: { owner: Owner; plugins: SlotView[]; open: DeviceId | null; toggle: (id: DeviceId) => void }) {
+interface ChainRowsProps {
+  owner: Owner;
+  track?: TrackChain;
+  fx?: FxStatus;
+  plugins: SlotView[];
+  /** The column in signal order (`deviceOrder`). */
+  order: DeviceId[];
+  open: DeviceId | null;
+  toggle: (id: DeviceId) => void;
+}
+
+/**
+ * Every device of a column in signal order. A plug-in row can be dragged above or below any other
+ * row - in front of a built-in device, between two of them, or after the chain; the built-in
+ * devices keep their order. Dropping asks the host for the slot and the place `placeDrop` works out.
+ */
+function ChainRows({ owner, track, fx, plugins, order, open, toggle }: ChainRowsProps) {
   const { rack } = usePlugins();
   const [picker, setPicker] = useState<HTMLElement | null>(null);
   const [drag, setDrag] = useState<number | null>(null);
-  const [over, setOver] = useState<number | null>(null);
-
-  if (!rack.supported) return <div className="dev-hint">{T.plugUnsupported}</div>;
+  /** Index into `order` the dragged plug-in would land in front of (`order.length`: the end). */
+  const [at, setAt] = useState<number | null>(null);
 
   const free = (() => {
     for (let n = 0; n < rack.max_slots; n += 1) if (!plugins.some((s) => s.slot === n)) return n;
     return -1;
   })();
 
+  const stop = () => {
+    setDrag(null);
+    setAt(null);
+  };
+  const drop = () => {
+    const from = drag;
+    const target = at;
+    stop();
+    if (from === null || target === null) return;
+    const move = placeDrop(order, from, target, rack.max_slots);
+    if (move) void attempt(async () => setRack(await pluginApi.place(owner, from, move.to, move.before)));
+  };
+  /** Drop handlers of the row at `index`: its upper half is "in front of it", the lower "behind". */
+  const rowDrag = (index: number, slot: number | null): RowDrag | undefined => {
+    if (!rack.supported) return undefined;
+    return {
+      draggable: slot !== null,
+      onDragStart:
+        slot === null
+          ? undefined
+          : (e) => {
+              e.dataTransfer.effectAllowed = "move";
+              e.dataTransfer.setData("text/plain", String(slot));
+              setDrag(slot);
+            },
+      onDragOver: (e) => {
+        if (drag === null) return;
+        e.preventDefault();
+        const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const next = e.clientY > box.top + box.height / 2 ? index + 1 : index;
+        if (next !== at) setAt(next);
+      },
+      onDrop: (e) => {
+        e.preventDefault();
+        drop();
+      },
+      onDragEnd: stop,
+      over: drag !== null && at === index ? "above" : null,
+    };
+  };
+
   return (
     <>
-      {plugins.map((s) => (
-        <PluginRow
-          key={`${s.slot}-${s.plugin_id}`}
-          s={s}
-          open={open === pluginId(s.slot)}
-          onToggle={() => toggle(pluginId(s.slot))}
-          drag={{
-            onDragStart: (e) => {
-              e.dataTransfer.effectAllowed = "move";
-              e.dataTransfer.setData("text/plain", String(s.slot));
-              setDrag(s.slot);
-            },
-            onDragOver: (e) => {
-              if (drag === null) return;
-              e.preventDefault();
-              if (over !== s.slot) setOver(s.slot);
-            },
-            onDrop: (e) => {
-              e.preventDefault();
-              const from = drag;
-              setDrag(null);
-              setOver(null);
-              if (from === null || from === s.slot) return;
-              void attempt(async () => setRack(await pluginApi.move(owner, from, s.slot)));
-            },
-            onDragEnd: () => {
-              setDrag(null);
-              setOver(null);
-            },
-            over: over === s.slot && drag !== s.slot,
+      {order.map((id, index) => {
+        if (id === "instrument") {
+          return track ? <InstrumentRow key={id} track={track} open={open === id} onToggle={() => toggle(id)} /> : null;
+        }
+        const slot = pluginSlotOf(id);
+        if (slot === null) {
+          if (!track || !fx) return null;
+          const name = id as FxSlotName;
+          return <BuiltinRow key={id} slot={name} track={track} fx={fx} open={open === id} onToggle={() => toggle(id)} drag={rowDrag(index, null)} />;
+        }
+        const s = plugins.find((p) => p.slot === slot);
+        if (!s) return null;
+        return <PluginRow key={`${s.slot}-${s.plugin_id}`} s={s} open={open === id} onToggle={() => toggle(id)} drag={rowDrag(index, s.slot)} />;
+      })}
+      {!rack.supported ? (
+        <div className="dev-hint">{T.plugUnsupported}</div>
+      ) : (
+        <button
+          className={`dev-add${drag !== null && at === order.length ? " drop-above" : ""}`}
+          disabled={free < 0}
+          onClick={(e) => setPicker(e.currentTarget)}
+          onDragOver={(e) => {
+            if (drag === null) return;
+            e.preventDefault();
+            if (at !== order.length) setAt(order.length);
           }}
-        />
-      ))}
-      <button
-        className="dev-add"
-        disabled={free < 0}
-        onClick={(e) => setPicker(e.currentTarget)}
-        title={free < 0 ? `All ${rack.max_slots} slots are taken` : "Load a plugin - after the built-in chain, before the fader"}
-      >
-        <Icon name="plus" />
-        {T.addPlugin}
-      </button>
+          onDrop={(e) => {
+            e.preventDefault();
+            drop();
+          }}
+          title={
+            free < 0
+              ? `All ${rack.max_slots} slots are taken`
+              : track
+                ? "Load a plugin - after the built-in devices; drag it anywhere in the chain afterwards"
+                : "Load a plugin into this bus"
+          }
+        >
+          <Icon name="plus" />
+          {T.addPlugin}
+        </button>
+      )}
       {picker && free >= 0 && (
         <PluginPicker target={owner} slot={free} anchor={picker} onClose={() => setPicker(null)} onLoaded={(slot) => openDevice(owner, pluginId(slot))} />
       )}
     </>
+  );
+}
+
+/** The other tracks (and buses) of the session: where a copy can go. */
+function useCopyTargets(): { owner: Owner; index: number | null; name: string; instrument: boolean }[] {
+  const key = useStatusSlice((s) => s.tracks.map((t) => `${t.instrument ? 1 : 0}${t.name}`).join("\u0001"));
+  return useMemo(() => {
+    const tracks = key
+      ? key.split("\u0001").map((entry, index) => ({
+          owner: trackOwner(index),
+          index,
+          name: entry.slice(1),
+          instrument: entry[0] === "1",
+        }))
+      : [];
+    return [
+      ...tracks,
+      { owner: busOwner("main"), index: null, name: T.main, instrument: false },
+      { owner: busOwner("monitor"), index: null, name: T.monitorBus, instrument: false },
+    ];
+  }, [key]);
+}
+
+/** A small "Copy to …" button with the list of places a copy can go. */
+function CopyTo({ label, title, targets, onPick }: { label: string; title: string; targets: { key: string; name: string }[]; onPick: (key: string) => Promise<unknown> }) {
+  const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  return (
+    <>
+      <button className="btn s" disabled={targets.length === 0} onClick={(e) => setAnchor(anchor ? null : e.currentTarget)} aria-expanded={anchor !== null} title={title}>
+        <Icon name="dup" />
+        {label}
+      </button>
+      {anchor && (
+        <Popover anchor={anchor} onClose={() => setAnchor(null)} className="menu" width={Math.max(160, anchor.offsetWidth)}>
+          {targets.map((t) => (
+            <button
+              key={t.key}
+              role="menuitem"
+              onClick={() => {
+                setAnchor(null);
+                void attempt(() => onPick(t.key));
+              }}
+            >
+              {t.name}
+            </button>
+          ))}
+        </Popover>
+      )}
+    </>
+  );
+}
+
+/** "Copy chain to …" in a track's header: every built-in setting and every plug-in with its state. */
+function CopyChain({ track }: { track: TrackChain }) {
+  const targets = useCopyTargets().filter((t) => t.index !== null && t.index !== track.index);
+  return (
+    <CopyTo
+      label={T.copyChain}
+      title={`Copy the whole device chain of ${track.name} - every built-in setting and every plug-in with its settings - onto another track. Its plug-ins are replaced; fader, mute and instrument stay.`}
+      targets={targets.map((t) => ({ key: String(t.index), name: t.name }))}
+      onPick={async (to) => setRack(await pluginApi.copyChain(track.index, Number(to)))}
+    />
   );
 }
 
@@ -408,9 +545,10 @@ function PluginRow({ s, open, onToggle, drag }: { s: SlotView; open: boolean; on
       open={open}
       onToggle={onToggle}
       drag={drag}
-      title={`${s.name} · ${s.vendor} · ${FORMAT[s.format] ?? s.format}${s.latency ? ` · ${s.latency} frames latency` : ""}\nClick to ${open ? "fold" : "show its parameters"} · drag to reorder`}
+      plug
+      title={`${s.name} · ${s.vendor} · ${FORMAT[s.format] ?? s.format}${s.latency ? ` · ${s.latency} frames latency` : ""}\nClick to ${open ? "fold" : "show its parameters"} · drag to move it anywhere in the chain`}
       trail={
-        <span className="dev-grip" title="Drag to reorder the plug-ins" aria-hidden="true">
+        <span className="dev-grip" title="Drag to move this plug-in - in front of a built-in device, between two, or after them" aria-hidden="true">
           <Icon name="grip" />
         </span>
       }
@@ -422,6 +560,7 @@ function PluginRow({ s, open, onToggle, drag }: { s: SlotView; open: boolean; on
 
 function PluginEditor({ s }: { s: SlotView }) {
   const run = async (work: () => Promise<unknown>) => attempt(work);
+  const targets = useCopyTargets().filter((t) => t.owner !== s.target);
   return (
     <>
       {s.error && <div className="plg-error">{s.error}</div>}
@@ -437,6 +576,12 @@ function PluginEditor({ s }: { s: SlotView }) {
           {s.active ? ` · ${s.cpu_us.toFixed(0)} µs` : ""}
         </span>
         <div className="grow" />
+        <CopyTo
+          label={T.copyTo}
+          title={`Put a copy of ${s.name} - with all its settings, on/off and place in the chain - on another track or bus. The copy is independent.`}
+          targets={targets.map((t) => ({ key: t.owner, name: t.name }))}
+          onPick={async (to) => setRack(await pluginApi.copy(s.target, s.slot, to))}
+        />
         <button className="btn s danger" onClick={() => void run(async () => setRack(await pluginApi.remove(s.target, s.slot)))} title="Remove this plugin">
           <Icon name="trash" />
           {T.removeDevice}

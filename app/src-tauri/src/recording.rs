@@ -438,6 +438,15 @@ impl Recorder {
         match Recording::start(info, &mut self.port) {
             Ok(rec) => {
                 log!("Recording to {}", rec.folder().display());
+                // The score's plugin settings as last saved, beside its `score.yaml`: the
+                // recording documents the sounds it was played with. A copy of a file, nothing
+                // asked of the plugins here.
+                if mode == Mode::Score
+                    && let Some(side) = crate::scorestate::current_sidecar()
+                    && let Err(e) = std::fs::copy(&side, rec.folder().join("score.plugins.json"))
+                {
+                    log!("Plugin settings not copied into the recording: {e}");
+                }
                 self.mode = mode;
                 self.dropout_base = dropouts;
                 self.active = Some(rec);

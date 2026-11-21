@@ -123,6 +123,17 @@ pub fn found(track: &str, instrument: bool) {
     });
 }
 
+/// Whether the score's inserts / instrument of `track` could not be loaded here - the score's
+/// plugin settings file (`crate::scorestate`) then keeps their entries as they are.
+pub fn missing(track: &str) -> (bool, bool) {
+    with(|s| {
+        (
+            s.missing_inserts.contains_key(track),
+            s.missing_instrument.contains_key(track),
+        )
+    })
+}
+
 /// Goes up with every human change; part of the status's `mixer_rev`.
 pub fn rev() -> u64 {
     with(|s| s.rev)
@@ -193,6 +204,7 @@ mod tests {
         InsertLine {
             plugin: id.to_string(),
             bypass: None,
+            before: None,
         }
     }
 

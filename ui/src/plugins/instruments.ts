@@ -54,6 +54,8 @@ export const instrumentApi = {
   /** Put an instrument on a track, or take it off with `null`. Applies at once, engine or not. */
   set: (track: string, pluginId: string | null) =>
     call<InstrumentRack>("instrument_set", { track, plugin_id: pluginId }),
+  /** A copy of `from`'s instrument with its full state onto instrument track `to` (both names). */
+  copy: (from: string, to: string) => call<InstrumentRack>("instrument_copy", { from, to }),
   /** The instrument's own window; opening it starts the engine first when it is not running. */
   editor: async (track: string, open: boolean) => {
     if (open) await invoke("engine_ensure").catch(() => undefined);

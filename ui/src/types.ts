@@ -1027,6 +1027,8 @@ export interface TrackMix {
 export interface MixInsert {
   plugin: string;
   bypass?: boolean;
+  /** The built-in effect the plugin sits in front of; absent = after the built-in chain. */
+  before?: FxSlotName;
 }
 
 export interface MixBand {

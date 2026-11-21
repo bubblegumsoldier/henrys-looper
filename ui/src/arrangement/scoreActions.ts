@@ -24,7 +24,7 @@ import type { RecentFile } from "../types";
 import { docStore, useDoc } from "./useDoc";
 import { docCountIn, setDocCountIn, withoutCountIn } from "./countIn";
 import { compareDisk } from "./diskWatch";
-import { markLoaded, mixIsLoaded, setLoadedTextCheck, withoutMixer } from "../mixer/scoreMix";
+import { isLive, markLoaded, mixIsLoaded, setLoadedTextCheck, withoutMixer } from "../mixer/scoreMix";
 import { reloadEverything } from "./reload";
 
 export interface ScoreActions {
@@ -105,7 +105,7 @@ export async function loadOpenScore(reset = false): Promise<void> {
   const text = scoreFile().text;
   // No count-in of its own: the score's `count_in:` is what the runner takes. `reset`: Reload -
   // the Rust side resets everything first (see `reload.ts`).
-  const loaded = await scoreApi.load(text, undefined, reset);
+  const loaded = await scoreApi.load(text, undefined, reset, scoreFile().path ?? null);
   loadedText = text;
   // The host has applied the score's `mixer:`; from now on fader and section move together.
   markLoaded();
@@ -218,7 +218,9 @@ export function useScoreActions(): ScoreActions {
       return;
     }
     try {
-      const saved = await filesApi.save(path, text);
+      const doc = docStore.get();
+      // The score the engine plays: its plugin settings go next to the file too.
+      const saved = await filesApi.save(path, text, isLive(doc.doc, doc.docId, currentStatus()));
       kept = null;
       setDiskText(null);
       updateScoreFile({ path: saved.path, name: saved.name, savedText: text });

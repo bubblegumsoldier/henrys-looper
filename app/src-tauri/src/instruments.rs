@@ -24,7 +24,7 @@
 //! of this file.
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
@@ -383,12 +383,34 @@ impl Manager {
     /// with its sound; another one is loaded (with the state it last had on this track, if it
     /// had one here); one that is not installed leaves the track silent and says so.
     fn apply_score(&mut self, track: &str, plugin_id: &str) {
-        if self
-            .position(track)
-            .is_some_and(|p| self.slots[p].info.info.id == plugin_id)
+        // The settings the score's own file has for this instrument, right after a load
+        // (`crate::scorestate`) - only for the very plugin they came from.
+        let fresh = crate::scorestate::take_instrument(track)
+            .filter(|s| s.plugin_id == plugin_id)
+            .and_then(|s| s.bytes());
+        if let Some(p) = self.position(track)
+            && self.slots[p].info.info.id == plugin_id
         {
+            if let Some(state) = fresh {
+                let slot = &mut self.slots[p];
+                match slot.plugin.load_state(&state) {
+                    Ok(()) => self.changed(),
+                    Err(e) => log!("State of {} from the score not loaded: {e}", slot.info.info.name),
+                }
+            }
             crate::pluginmix::found(track, true);
             return;
+        }
+        if let Some(state) = fresh {
+            self.restoring.retain(|e| e.track != track);
+            match self.put(track, plugin_id, Some(&state)) {
+                Ok(_) => {
+                    crate::pluginmix::found(track, true);
+                    log!("Instrument {plugin_id} on track \"{track}\" from the score, with its settings.");
+                    return;
+                }
+                Err(e) => log!("Instrument {plugin_id} with the score's settings not loaded: {e}"),
+            }
         }
         if self.position(track).is_none() && crate::pluginmix::instrument_is_missing(track, plugin_id) {
             return;
@@ -637,6 +659,53 @@ impl Manager {
             return Ok(self.view());
         };
         self.put(track, plugin_id, None)
+    }
+
+    /// The instruments of the instrument tracks of the running engine (or the last one), with
+    /// their states.
+    fn capture(&self) -> BTreeMap<String, crate::scorestate::SidePlugin> {
+        self.slots
+            .iter()
+            .filter(|s| self.index_of(&s.track).is_some())
+            .map(|s| {
+                let state = match s.plugin.save_state() {
+                    Ok(bytes) => Some(crate::plugins::encode_state(&bytes)),
+                    Err(e) => {
+                        log!("Instrument {} did not hand over its state: {e}", s.info.info.name);
+                        None
+                    }
+                };
+                (
+                    s.track.clone(),
+                    crate::scorestate::SidePlugin {
+                        plugin_id: s.info.info.id.clone(),
+                        name: s.info.info.name.clone(),
+                        state,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// `from`'s instrument with its state onto `to`.
+    fn copy(&mut self, from: &str, to: &str) -> Result<InstrumentRack, String> {
+        if from == to {
+            return Ok(self.view());
+        }
+        if self.index_of(to).is_none() {
+            return Err(format!("\"{to}\" is not an instrument track."));
+        }
+        let p = self
+            .position(from)
+            .ok_or_else(|| format!("Track \"{from}\" has no instrument to copy."))?;
+        let slot = &self.slots[p];
+        let state = slot.plugin.save_state().map_err(|e| {
+            format!("\"{}\" did not hand over its settings: {e}", slot.info.info.name)
+        })?;
+        let id = slot.info.info.id.clone();
+        self.restoring.retain(|e| e.track != to);
+        self.put(to, &id, Some(&state))
     }
 
     /// Load `plugin_id` for `track`, give it `state` while it is not running yet, and start it.
@@ -966,6 +1035,31 @@ pub async fn instrument_set(track: String, plugin_id: Option<String>) -> Result<
             let view = m.set(&track, plugin_id.as_deref())?;
             // A human choice: the open score writes it into its `mixer:` section.
             crate::pluginmix::touch_instrument(&track);
+            Ok(view)
+        })
+    })
+    .await
+}
+
+/// Every instrument with its state, by track name - for the score's plugin settings file
+/// (`crate::scorestate`). Not on the main thread.
+pub fn capture() -> Result<BTreeMap<String, crate::scorestate::SidePlugin>, String> {
+    on_main(|m| Ok(m.capture()))
+}
+
+/// [`capture`] on the main thread itself (the way out of the app).
+pub fn capture_here() -> BTreeMap<String, crate::scorestate::SidePlugin> {
+    MANAGER.with(|m| m.try_borrow().map(|m| m.capture()).unwrap_or_default())
+}
+
+/// Put a copy of `from`'s instrument - the same plugin with its full state - on track `to` (both
+/// by name), replacing what `to` had. A second, independent instance, loaded like any choice.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn instrument_copy(from: String, to: String) -> Result<InstrumentRack, String> {
+    blocking(move || {
+        on_main(move |m| {
+            let view = m.copy(&from, &to)?;
+            crate::pluginmix::touch_instrument(&to);
             Ok(view)
         })
     })
