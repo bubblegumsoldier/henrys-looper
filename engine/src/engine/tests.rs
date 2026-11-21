@@ -2966,3 +2966,34 @@ fn click_and_monitor_levels_change_at_runtime() {
     assert_eq!(status.monitor_gain, 0.5);
     assert!(status.bus_peak_max(Bus::Monitor) > 0.0);
 }
+
+/// The feedback guard silences the monitored input on the way out and nothing else: the volume
+/// and the switch stay where they were, and lifting the guard brings the input straight back.
+#[test]
+fn the_monitor_guard_silences_live_inputs_and_keeps_the_volume() {
+    let bar = Timeline::new(RATE, 100.0, TimeSignature::new(4, 4)).span_bars(0, 1);
+    let mut sim = Sim::new(
+        SimSpec {
+            click: false,
+            output_channels: 4,
+            loopback_channel: None,
+            tracks: vec![TrackSpec::on(0).monitoring()],
+            ..Default::default()
+        },
+        mono(|k| if k % 2 == 0 { 0.5 } else { -0.5 }),
+    );
+    let monitor_peak = |sim: &mut Sim| sim.latest_status().expect("Status").bus_peak_max(Bus::Monitor);
+    sim.run_to(bar);
+    assert!(monitor_peak(&mut sim) > 0.0, "Mithoeren klingt");
+
+    sim.send(Command::SetMonitorMute { on: true });
+    sim.run_to(2 * bar);
+    assert_eq!(monitor_peak(&mut sim), 0.0, "die Sperre macht das Mithoeren stumm");
+    let status = sim.latest_status().expect("Status");
+    assert_eq!(status.monitor_gain, 1.0, "die Lautstaerke bleibt stehen");
+    assert!(status.tracks()[0].monitor, "der Schalter bleibt an");
+
+    sim.send(Command::SetMonitorMute { on: false });
+    sim.run_to(3 * bar);
+    assert!(monitor_peak(&mut sim) > 0.0, "ohne Sperre klingt es wieder");
+}

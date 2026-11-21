@@ -211,6 +211,8 @@ pub struct EngineCore {
     spare_slots: [usize; BUFFER_KINDS],
     layer_frames: u64,
     monitor_gain: f32,
+    /// The feedback guard (`Command::SetMonitorMute`): every live input is silent on the way out.
+    monitor_muted: bool,
     click: bool,
     click_gain: f32,
     bus_gain: [f32; BUS_COUNT],
@@ -297,6 +299,7 @@ impl EngineCore {
             spare_slots,
             layer_frames: cfg.layer_frames,
             monitor_gain: cfg.monitor_gain,
+            monitor_muted: false,
             click: cfg.click,
             click_gain: cfg.click_gain,
             bus_gain: [
@@ -367,6 +370,12 @@ impl EngineCore {
     /// Open with the transport standing: bar 1, no click, no loop heard until a
     /// [`Command::TransportStart`] arrives. Called on the control thread before the engine moves
     /// into the callback. The CLI and the score subcommand never call it and run as they always did.
+    /// Start with every live input silenced (see [`Command::SetMonitorMute`]) - called before the
+    /// streams run, so not a single block of a microphone reaches built-in speakers.
+    pub fn mute_monitoring(&mut self, on: bool) {
+        self.monitor_muted = on;
+    }
+
     pub fn hold_transport(&mut self) {
         self.transport = false;
         for track in self.tracks.iter_mut() {
@@ -837,7 +846,7 @@ impl EngineCore {
         in_frames: usize,
     ) {
         let channels = self.input_channels;
-        let monitor_gain = self.monitor_gain;
+        let monitor_gain = if self.monitor_muted { 0.0 } else { self.monitor_gain };
         // A standing transport has no beat to click on.
         let click = self.clicking();
         let click_gain = self.click_gain;
@@ -933,7 +942,7 @@ impl EngineCore {
     ) {
         let n = out.len() / BUS_SAMPLES;
         let channels = self.input_channels;
-        let monitor_gain = self.monitor_gain;
+        let monitor_gain = if self.monitor_muted { 0.0 } else { self.monitor_gain };
         let collapsed = self.routing.collapsed();
         let transport = self.plugin_transport(start);
         let sources = self.sources.as_deref();
@@ -1447,6 +1456,7 @@ impl EngineCore {
             Command::SetMonitorGain { gain } => {
                 self.monitor_gain = gain.clamp(0.0, super::command::MAX_LEVEL_GAIN);
             }
+            Command::SetMonitorMute { on } => self.monitor_muted = on,
             Command::TransportStart { at } => self.start_transport(at),
             Command::CountIn { at, end } => {
                 self.start_transport(at);

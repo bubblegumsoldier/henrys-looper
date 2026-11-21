@@ -147,6 +147,11 @@ pub enum Command {
     /// Volume of every monitored live input, linear, clamped like the click. Untimed, and it
     /// cannot reach a recording - what is recorded is the input before this gain.
     SetMonitorGain { gain: f32 },
+    /// Silence every monitored live input on the way out, whatever the switches and the volume
+    /// say - the host's guard against feedback while the output is a pair of built-in speakers.
+    /// Untimed. The monitor volume and the switches are left as they are, so lifting the guard
+    /// brings back exactly what was set; instruments are not live inputs and stay audible.
+    SetMonitorMute { on: bool },
     /// New tempo, time signature and layer length. Only accepted while every track is empty and
     /// idle, because it redefines what every sample position means.
     SetTempo {
@@ -241,6 +246,7 @@ impl Command {
             | Command::SetClick { .. }
             | Command::SetClickGain { .. }
             | Command::SetMonitorGain { .. }
+            | Command::SetMonitorMute { .. }
             | Command::SetTempo { .. }
             | Command::SetFxBypass { .. }
             | Command::SetFxEnabled { .. }
@@ -285,6 +291,7 @@ impl Command {
             | Command::SetClick { .. }
             | Command::SetClickGain { .. }
             | Command::SetMonitorGain { .. }
+            | Command::SetMonitorMute { .. }
             | Command::SetBusGain { .. }
             | Command::SetBusOutput { .. }
             | Command::SetTempo { .. }
