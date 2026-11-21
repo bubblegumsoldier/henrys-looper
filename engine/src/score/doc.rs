@@ -171,6 +171,12 @@ pub struct DocSectionTrack {
     /// The clip's own note grid (`{state: play, grid: 1/16}`), reserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<String>,
+    /// `{state: play, restart: true}`: the loop starts from its top at this section's start.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub restart: bool,
+    /// `{state: record, bars: 2}`: a take shorter than the section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bars: Option<u32>,
     #[serde(default, skip_serializing_if = "Comments::is_empty")]
     pub comments: Comments,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -518,6 +524,10 @@ fn boolean(node: &Node<'_>) -> Option<bool> {
     }
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Walk a tree the reader has already accepted. Nothing here reports anything: shapes that do not
 /// fit are skipped, which on a validated tree never happens.
 fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
@@ -652,18 +662,25 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                 "tracks" => {
                                     if let NodeKind::Map(states) = &v.kind {
                                         for state in states {
-                                            // `voice: record` or `keys: {state: play, grid: 1/16}`.
-                                            let (word, grid) = match &state.value.kind {
+                                            // `voice: record` or `keys: {state: play, grid: 1/16}`,
+                                            // also with `restart: true` or `bars: 2`.
+                                            let (word, grid, restart, bars) = match &state.value.kind {
                                                 NodeKind::Map(fields) => {
-                                                    let get = |k: &str| {
+                                                    let node = |k: &str| {
                                                         fields
                                                             .iter()
                                                             .find(|f| f.key.as_str() == Some(k))
-                                                            .and_then(|f| f.value.as_str())
+                                                            .map(|f| &f.value)
                                                     };
-                                                    (get("state"), get("grid").map(str::to_string))
+                                                    let get = |k: &str| node(k).and_then(|v| v.as_str());
+                                                    (
+                                                        get("state"),
+                                                        get("grid").map(str::to_string),
+                                                        node("restart").and_then(boolean).unwrap_or(false),
+                                                        node("bars").and_then(int).map(|i| i as u32),
+                                                    )
                                                 }
-                                                _ => (state.value.as_str(), None),
+                                                _ => (state.value.as_str(), None, false, None),
                                             };
                                             let (Some(track), Some(word)) = (state.key.as_str(), word)
                                             else {
@@ -680,6 +697,8 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                                 track: track.to_string(),
                                                 state: parsed,
                                                 grid,
+                                                restart,
+                                                bars,
                                                 comments: Comments::default(),
                                                 line: Some(state.key.pos.line),
                                             });
@@ -1424,13 +1443,20 @@ pub fn render_doc(doc: &ScoreDoc) -> String {
             if !section.tracks.is_empty() {
                 w.line(2, "tracks:", &field("tracks"));
                 for state in &section.tracks {
-                    let value = match &state.grid {
-                        Some(grid) => format!(
-                            "{{state: {}, grid: {}}}",
-                            state.state.as_str(),
-                            flow_scalar(grid)
-                        ),
-                        None => state.state.as_str().to_string(),
+                    let mut options = Vec::new();
+                    if let Some(grid) = &state.grid {
+                        options.push(format!("grid: {}", flow_scalar(grid)));
+                    }
+                    if let Some(bars) = state.bars {
+                        options.push(format!("bars: {bars}"));
+                    }
+                    if state.restart {
+                        options.push("restart: true".to_string());
+                    }
+                    let value = if options.is_empty() {
+                        state.state.as_str().to_string()
+                    } else {
+                        format!("{{state: {}, {}}}", state.state.as_str(), options.join(", "))
                     };
                     w.line(3, &format!("{}: {value}", scalar(&state.track)), &state.comments);
                 }
@@ -1895,6 +1921,8 @@ pub fn template_with(tracks: Vec<DocTrack>, instruments: Vec<(String, String)>) 
         track: track.to_string(),
         state,
         grid: None,
+        restart: false,
+        bars: None,
         comments: Comments::default(),
         line: None,
     };

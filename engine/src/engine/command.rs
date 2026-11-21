@@ -78,6 +78,16 @@ pub enum Command {
     LatchOverdub { track: usize, on: bool, at: u64 },
     StartPlay { track: usize, at: u64 },
     StopPlay { track: usize, at: u64 },
+    /// Re-anchor this track's loop at `at`: from there on it plays from its top. Sent by the score
+    /// runner when a section brings a loop back in (or asks for it with `restart: true`) and the
+    /// section does not begin on the loop's own grid. `play`: a `StartPlay` for the same `at`
+    /// follows, and the loop may already be read ahead from `at` on, so a track whose plugins or
+    /// chain report latency begins with its very first frame.
+    ///
+    /// It acts **early**, as soon as the track's read-ahead reaches `at` (see
+    /// `EngineCore::next_due`); each axis switches when it reaches `at` itself (`LoopGrid::restart`).
+    /// Refused as `Busy` while the take defining the loop is still open across `at`.
+    RestartLoop { track: usize, at: u64, play: bool },
     /// Throw this track's layers away; the buffers go back to the control thread.
     ClearTrack { track: usize, at: u64 },
     /// Reset every track to the state of a fresh start and return every buffer. Commands that were
@@ -223,6 +233,7 @@ impl Command {
             | Command::StopRecord { at, .. }
             | Command::StartPlay { at, .. }
             | Command::StopPlay { at, .. }
+            | Command::RestartLoop { at, .. }
             | Command::ClearTrack { at, .. }
             | Command::ClearAll { at }
             | Command::LatchOverdub { at, .. }
@@ -267,6 +278,7 @@ impl Command {
             | Command::StopRecord { track, .. }
             | Command::StartPlay { track, .. }
             | Command::StopPlay { track, .. }
+            | Command::RestartLoop { track, .. }
             | Command::ClearTrack { track, .. }
             | Command::LatchOverdub { track, .. }
             | Command::SetMonitor { track, .. }

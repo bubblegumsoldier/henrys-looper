@@ -806,7 +806,12 @@ impl EngineCore {
         let mut best: Option<(usize, u64)> = None;
         for (i, cmd) in self.scheduled.iter().enumerate() {
             // Untimed commands carry no musical meaning and act at the next opportunity.
-            let at = cmd.at().unwrap_or(0);
+            let at = match *cmd {
+                // A re-anchoring has to be in place before the track's read-ahead reaches it; what
+                // it changes switches per position, so acting early moves nothing audible.
+                Command::RestartLoop { track, at, .. } => at.saturating_sub(self.read_ahead(track)),
+                _ => cmd.at().unwrap_or(0),
+            };
             if best.map(|(_, b)| at < b).unwrap_or(true) {
                 best = Some((i, at));
             }
@@ -817,6 +822,21 @@ impl EngineCore {
         } else {
             None
         }
+    }
+
+    /// How far ahead of the output position a track's loop is read: the plugin and chain latency
+    /// of [`Track::playback_advance`], and on a MIDI loop also the instrument's own latency (see
+    /// `play_midi`).
+    #[inline]
+    fn read_ahead(&self, track: usize) -> u64 {
+        let Some(t) = self.tracks.get(track) else {
+            return 0;
+        };
+        let instrument = match self.sources.as_deref() {
+            Some(rack) if t.midi_loop() => rack.latency(track),
+            _ => 0,
+        };
+        t.playback_advance() + instrument
     }
 
     /// Click plus every track for one uninterrupted segment, summed into the two stereo buses.
@@ -1298,6 +1318,11 @@ impl EngineCore {
                 self.midi_length_known(track);
             }
             Command::StartPlay { track, .. } => self.tracks[track].set_playing(true),
+            Command::RestartLoop { track, at, play } => {
+                if !self.tracks[track].arm_restart(at, play) {
+                    self.refuse(Refusal::Busy);
+                }
+            }
             Command::StopPlay { track, .. } => {
                 self.tracks[track].set_playing(false);
                 self.release_layers(track, None);

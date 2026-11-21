@@ -44,6 +44,8 @@ pub mod read;
 pub mod yaml;
 
 #[cfg(test)]
+mod clip_tests;
+#[cfg(test)]
 mod instrument_tests;
 #[cfg(test)]
 mod tests;
@@ -52,7 +54,7 @@ pub use doc::{ModelIssue, ScoreDoc, ScoreRef, parse_doc, render_doc};
 pub use error::{ScoreError, ScoreIssue};
 pub use map::OrderedMap;
 pub use model::{
-    CompiledMidiBinding, CompiledScore, CompiledSection, CompiledTrack, GRID_NAMES,
+    ClipOptions, CompiledMidiBinding, CompiledScore, CompiledSection, CompiledTrack, GRID_NAMES,
     InstrumentSource, LoopKind, MidiBindingSource, MidiKind, ScoreSource, SectionSource,
     TrackSource, TrackState,
 };

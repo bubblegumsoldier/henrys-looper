@@ -1631,3 +1631,77 @@ fn fast_hits_on_one_pad_before_the_previous_off_all_come_back() {
         assert!(sounding(&rig).is_empty(), "{grid:?}: {:?}", sounding(&rig));
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Re-anchoring a MIDI loop (`Command::RestartLoop`)
+// ---------------------------------------------------------------------------------------------
+
+/// A playing MIDI loop re-anchored in the middle of a held note: the note of the old phase ends on
+/// the very sample of the re-anchoring (its own note-off lies in the part of the loop that is now
+/// skipped and would never come), and the loop then plays from its top - on time, the
+/// instrument's latency included. Nothing is left hanging, and a stop afterwards still ends what
+/// the new phase started.
+#[test]
+fn a_midi_loop_re_anchored_mid_note_leaves_nothing_hanging() {
+    for latency in [0u32, 100] {
+        let lat = u64::from(latency);
+        let mut rig = rig_with(latency, 0);
+        record_first_pass(&mut rig);
+        play(&mut rig, 10_000, [0x90, 60, 100]);
+        play(&mut rig, 80_000, [0x80, 60, 0]);
+        // Pass 2 plays the note from L + 10_000 to L + 80_000. Re-anchor at L + 40_000.
+        let at = L + 40_000;
+        rig.sim.send(Command::RestartLoop {
+            track: 0,
+            at,
+            play: false,
+        });
+        rig.sim.run_to(at + 85_000);
+        assert_eq!(
+            sent(&rig, L, at + 85_000),
+            vec![
+                (L + 10_000 - lat, [0x90, 60, 100]),
+                // The old phase's note ends on the re-anchoring ...
+                (at - lat, [0x80, 60, 0]),
+                // ... and the loop starts over there: the note at its index 10_000.
+                (at + 10_000 - lat, [0x90, 60, 100]),
+                (at + 80_000 - lat, [0x80, 60, 0]),
+            ],
+            "Latenz {latency}"
+        );
+        rig.sim.run_to(at + 20_000 + L);
+        assert_eq!(sounding(&rig), vec![(0, 60)], "Latenz {latency}: Durchlauf nach dem Neuanfang");
+        let stop = rig.sim.pos() + 64;
+        rig.sim.send(Command::StopPlay { track: 0, at: stop });
+        rig.sim.run_to(stop + 4 * BLOCK as u64);
+        assert!(sounding(&rig).is_empty(), "Latenz {latency}: nichts haengt");
+    }
+}
+
+/// A stopped MIDI loop brought back with a re-anchoring (`play: true` plus the `StartPlay` for the
+/// same sample, what the score runner sends): a note on the loop's very first frame is played,
+/// moved forward by the instrument's latency - without the re-anchoring's read-ahead it would
+/// fall before the moment the track starts and be lost.
+#[test]
+fn a_midi_loop_that_comes_back_plays_its_first_note() {
+    for latency in [0u32, 100] {
+        let lat = u64::from(latency);
+        let mut rig = rig_with(latency, 0);
+        rig.sim.send(Command::StartRecord { track: 0, at: 0 });
+        rig.sim.send(Command::StopRecord { track: 0, at: L });
+        // A note on the downbeat - in the pre-roll window, so it is stored at the loop's frame 0.
+        play(&mut rig, 0, [0x90, 64, 90]);
+        play(&mut rig, 5_000, [0x80, 64, 0]);
+        rig.sim.run_to(L + 1_000);
+        let at = L + 3 * 28_800 + 17;
+        rig.sim.send(Command::RestartLoop { track: 0, at, play: true });
+        rig.sim.send(Command::StartPlay { track: 0, at });
+        rig.sim.run_to(at + 10_000);
+        assert_eq!(
+            sent(&rig, L + 2_000, at + 10_000),
+            vec![(at - lat, [0x90, 64, 90]), (at + 5_000 - lat, [0x80, 64, 0])],
+            "Latenz {latency}"
+        );
+        assert!(sounding(&rig).is_empty());
+    }
+}

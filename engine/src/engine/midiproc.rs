@@ -38,8 +38,8 @@ use super::super::command::MAX_TRACKS;
 use super::super::midiloop::{
     CLIP_STOCK, ClipEndpoint, ClipNews, MidiClip, OpenNotes, RawEvent, pass_end,
 };
-use super::super::source::{NoteEvent, ticks_of_frames};
-use super::super::track::LayerStore;
+use super::super::source::{NoteEvent, SourceRack, ticks_of_frames};
+use super::super::track::{LayerStore, Track};
 use super::EngineCore;
 
 /// Events of the last moments per track, so a take that begins can take its pre-roll.
@@ -569,6 +569,12 @@ impl EngineCore {
     }
 
     /// Hand every playing MIDI layer's events for output positions `from..to` to the event stage.
+    ///
+    /// A re-anchoring (`Command::RestartLoop`) splits the window where the read position reaches
+    /// it: before, the old grid (and only if the track plays); from there on, the new one. Every
+    /// note the old phase left sounding is ended on that very sample, ahead of the new phase's
+    /// first notes - its note-off would otherwise come from a part of the loop that is now skipped,
+    /// and the note would hang.
     pub(super) fn play_midi(&mut self, from: u64, to: u64) {
         if self.midi.is_none() || from >= to {
             return;
@@ -577,7 +583,7 @@ impl EngineCore {
             return;
         };
         for (t, track) in self.tracks.iter_mut().enumerate() {
-            if !track.midi_loop() || !track.playing() || track.held() {
+            if !track.midi_loop() || track.held() {
                 continue;
             }
             let len = track.loop_len();
@@ -585,46 +591,31 @@ impl EngineCore {
                 continue;
             }
             let advance = rack.latency(t) + track.playback_advance();
-            let origin = track.origin();
-            let a = (from + advance).max(origin);
-            let b = to + advance;
-            if a >= b {
-                continue;
-            }
-            for layer in track.layers_mut() {
-                if layer.muted() {
-                    continue;
-                }
-                let gain = layer.gain();
-                let Some(clip) = layer.clip_mut() else {
-                    continue;
-                };
-                let base = clip.base();
-                let mut p = a;
-                while p < b {
-                    let offset = (p - origin) % len;
-                    let pass = p - offset;
-                    let stop = b.min(pass + len);
-                    let (lo, hi) = clip.window(offset, offset + (stop - p));
-                    for i in lo..hi {
-                        let e = clip.play()[i];
-                        // Played live in this very pass of its take: it has sounded already.
-                        if e.heard_live(pass + u64::from(e.offset), base) {
-                            continue;
-                        }
-                        let mut msg = e.msg;
-                        if is_on(msg) && gain != 1.0 {
-                            let v = (f32::from(msg[2]) * gain).round().clamp(0.0, 127.0) as u8;
-                            if v == 0 {
-                                continue;
-                            }
-                            msg[2] = v;
-                        }
-                        clip.tracker.note(msg);
-                        let at = pass + u64::from(e.offset) - advance;
-                        rack.push_loop(t, at, msg);
+            let (a, b) = (from + advance, to + advance);
+            match track.restart() {
+                Some((at, _)) if at < b => {
+                    let old = track.grid().origin;
+                    if track.playing() && a < at {
+                        play_span(track, rack, t, a, at, old, advance);
                     }
-                    p = stop;
+                    if a <= at {
+                        // The switch lies in this window: what the old phase left on ends here.
+                        let off = at - advance;
+                        for layer in track.layers_mut() {
+                            if let Some(clip) = layer.clip_mut() {
+                                clip.tracker.release_own(|msg| rack.push_loop(t, off, msg));
+                            }
+                        }
+                    }
+                    if track.sounds_at(at) {
+                        play_span(track, rack, t, a.max(at), b, at, advance);
+                    }
+                }
+                _ => {
+                    if track.playing() {
+                        let origin = track.grid().origin;
+                        play_span(track, rack, t, a, b, origin, advance);
+                    }
                 }
             }
         }
@@ -644,5 +635,59 @@ impl EngineCore {
     #[cfg(test)]
     pub fn clip_stock(&self) -> usize {
         self.midi.as_deref().map_or(0, MidiLoops::stock)
+    }
+}
+
+/// The events of every audible MIDI layer of `track` for read positions `a..b` on the grid that
+/// starts at `origin`, handed to the event stage `advance` frames earlier on the output axis.
+fn play_span(
+    track: &mut Track,
+    rack: &mut SourceRack,
+    t: usize,
+    a: u64,
+    b: u64,
+    origin: u64,
+    advance: u64,
+) {
+    let len = track.loop_len();
+    let a = a.max(origin);
+    if a >= b || len == 0 {
+        return;
+    }
+    for layer in track.layers_mut() {
+        if layer.muted() {
+            continue;
+        }
+        let gain = layer.gain();
+        let Some(clip) = layer.clip_mut() else {
+            continue;
+        };
+        let base = clip.base();
+        let mut p = a;
+        while p < b {
+            let offset = (p - origin) % len;
+            let pass = p - offset;
+            let stop = b.min(pass + len);
+            let (lo, hi) = clip.window(offset, offset + (stop - p));
+            for i in lo..hi {
+                let e = clip.play()[i];
+                // Played live in this very pass of its take: it has sounded already.
+                if e.heard_live(pass + u64::from(e.offset), base) {
+                    continue;
+                }
+                let mut msg = e.msg;
+                if is_on(msg) && gain != 1.0 {
+                    let v = (f32::from(msg[2]) * gain).round().clamp(0.0, 127.0) as u8;
+                    if v == 0 {
+                        continue;
+                    }
+                    msg[2] = v;
+                }
+                clip.tracker.note(msg);
+                let at = pass + u64::from(e.offset) - advance;
+                rack.push_loop(t, at, msg);
+            }
+            p = stop;
+        }
     }
 }

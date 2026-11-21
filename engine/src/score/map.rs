@@ -67,6 +67,11 @@ impl<V> OrderedMap<V> {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    pub fn remove(&mut self, key: &str) -> Option<V> {
+        let index = self.entries.iter().position(|(k, _)| k == key)?;
+        Some(self.entries.remove(index).1)
+    }
 }
 
 impl<V> FromIterator<(String, V)> for OrderedMap<V> {

@@ -43,6 +43,14 @@ pub struct LoopGrid {
     pub filled: u64,
     pub take: Option<Take>,
     pub pending: Option<PendingGeom>,
+    /// A re-anchoring that has been armed: from this musical position on, loop index 0 is this
+    /// position. Kept beside `origin` instead of overwriting it, because the two axes the grid is
+    /// used on reach the position at different times - playback reads ahead of the output (plugin
+    /// and chain latency), recording trails it by the roundtrip. Every position is therefore
+    /// mapped through [`LoopGrid::origin_at`], and a take that ends on the very sample of the
+    /// re-anchoring keeps writing its last frames on the old grid. Folded into `origin` when the
+    /// next re-anchoring is armed; dropped with the loop.
+    pub restart: Option<u64>,
 }
 
 impl LoopGrid {
@@ -52,12 +60,41 @@ impl LoopGrid {
         self.origin = 0;
         self.loop_len = 0;
         self.filled = 0;
+        self.restart = None;
+    }
+
+    /// The origin that holds at musical position `pos`: the re-anchored one from its position on,
+    /// the old one before.
+    #[inline(always)]
+    pub fn origin_at(&self, pos: u64) -> u64 {
+        match self.restart {
+            Some(at) if pos >= at => at,
+            _ => self.origin,
+        }
+    }
+
+    /// The origin of the newest geometry, armed or not - what a take that begins now and a display
+    /// have to go by.
+    #[inline]
+    pub fn latest_origin(&self) -> u64 {
+        self.restart.unwrap_or(self.origin)
+    }
+
+    /// Re-anchor the loop at `at`: from there on the loop plays from its top. A re-anchoring armed
+    /// before is folded in first - it lies a section or more in the past by then.
+    #[inline]
+    pub fn arm_restart(&mut self, at: u64) {
+        if let Some(previous) = self.restart.take() {
+            self.origin = previous;
+        }
+        self.restart = Some(at);
     }
 
     /// Open the first take of a new loop, writing into layer `layer`.
     #[inline]
     pub fn begin_loop(&mut self, start: u64, layer: usize) {
         self.origin = start;
+        self.restart = None;
         self.loop_len = 0;
         self.filled = 0;
         self.take = Some(Take {
@@ -110,7 +147,8 @@ impl LoopGrid {
             if self.loop_len == 0 {
                 return None;
             }
-            Some((pos - self.origin) % self.loop_len)
+            let origin = self.origin_at(pos);
+            Some(pos.checked_sub(origin)? % self.loop_len)
         }
     }
 
@@ -162,5 +200,32 @@ mod tests {
         g.begin_overdub(1_000 + 3 * 40 + 5, 1);
         assert_eq!(g.write_index(1_000 + 3 * 40 + 5, 100), Some(5));
         assert_eq!(g.take_limit(100), Some(1_000 + 3 * 40 + 5 + 40));
+    }
+
+    #[test]
+    fn a_restart_moves_the_top_from_its_position_on_and_only_there() {
+        let mut g = LoopGrid::default();
+        g.begin_loop(1_000, 0);
+        for i in 0..40 {
+            g.write_index(1_000 + i, 100);
+        }
+        g.set_take_end(1_040, 100);
+        g.finish_take(1_040);
+        // An overdub running up to the re-anchoring keeps its old grid to its last frame ...
+        g.begin_overdub(1_080, 1);
+        g.arm_restart(1_090);
+        assert_eq!(g.write_index(1_089, 100), Some(9));
+        // ... and what comes after it is counted from the new top.
+        assert_eq!(g.write_index(1_090, 100), Some(0));
+        assert_eq!(g.write_index(1_131, 100), Some(1));
+        assert_eq!(g.origin_at(1_089), 1_000);
+        assert_eq!(g.latest_origin(), 1_090);
+        // The next one folds this one in.
+        g.arm_restart(1_200);
+        assert_eq!(g.origin, 1_090);
+        assert_eq!(g.origin_at(1_199), 1_090);
+        assert_eq!(g.origin_at(1_200), 1_200);
+        g.reset();
+        assert_eq!(g.restart, None);
     }
 }

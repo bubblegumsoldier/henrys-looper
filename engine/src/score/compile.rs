@@ -18,8 +18,8 @@ use std::collections::HashMap;
 
 use super::map::OrderedMap;
 use super::model::{
-    CompiledMidiBinding, CompiledScore, CompiledSection, CompiledTrack, ScoreSource, SectionSource,
-    TrackState,
+    ClipOptions, CompiledMidiBinding, CompiledScore, CompiledSection, CompiledTrack, ScoreSource,
+    SectionSource, TrackState,
 };
 use crate::engine::schedule::Quantize;
 
@@ -122,6 +122,16 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
                     })
                     .collect(),
                 grids: section_grids(section, &by_id),
+                // Only the tracks that are still there, in track order.
+                clips: {
+                    let mut clips = OrderedMap::new();
+                    for track in &tracks {
+                        if let Some(clip) = state.clips.get(track.name.as_str()) {
+                            clips.insert(track.name.clone(), *clip);
+                        }
+                    }
+                    clips
+                },
                 source_line: section.source_line,
             }
         })
@@ -148,6 +158,7 @@ struct Resolved {
     autorelease: bool,
     quantize: Quantize,
     tracks: OrderedMap<TrackState>,
+    clips: OrderedMap<ClipOptions>,
 }
 
 /// Fold `repeat:` chains, memoising each section by id.
@@ -176,6 +187,7 @@ fn resolve<'a>(
         autorelease: DEFAULT_AUTORELEASE,
         quantize: Quantize::default(),
         tracks: OrderedMap::new(),
+        clips: OrderedMap::new(),
     });
 
     if let Some(bars) = section.bars {
@@ -189,6 +201,12 @@ fn resolve<'a>(
     }
     for (name, track_state) in section.tracks.iter() {
         state.tracks.insert(name, *track_state);
+        // A clip the section states itself brings its own options or none - never those of the
+        // clip it replaces.
+        state.clips.remove(name);
+        if let Some(clip) = section.clips.get(name) {
+            state.clips.insert(name, *clip);
+        }
     }
 
     memo.insert(section.id.as_str(), state.clone());

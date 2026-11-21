@@ -424,6 +424,11 @@ pub struct Track {
     /// On an instrument track: the fixed delay `C` plus the instrument's own latency, in frames -
     /// what its recording is taken back by before the trim is added. See `super::source`.
     source_base: u64,
+    /// A re-anchoring is armed (`LoopGrid::restart`) and the track is to sound from its position
+    /// on - judged on the **read** axis, so a loop read ahead for plugin or chain latency begins
+    /// with its very first frame instead of losing the first `playback_advance` of them. The
+    /// `StartPlay` sent with it makes it permanent; a stop clears it.
+    restart_play: bool,
 }
 
 impl Track {
@@ -461,6 +466,7 @@ impl Track {
             audible: Smoothed::new(1.0, FADER_MS, sample_rate),
             strip_peak: [0.0; 2],
             source_base: 0,
+            restart_play: false,
         }
         .instrument_defaults()
     }
@@ -793,8 +799,9 @@ impl Track {
         monitor: Frame,
         collapsed: bool,
     ) -> ([Frame; BUS_COUNT], Spread) {
-        let dry = if self.playing && !self.held {
-            self.read(pos + self.playback_advance)
+        let ahead = pos + self.playback_advance;
+        let dry = if self.sounds_at(ahead) && !self.held {
+            self.read(ahead)
         } else {
             Frame::SILENT
         };
@@ -879,7 +886,9 @@ impl Track {
     /// on the global one - see `engine::schedule`.
     #[inline]
     pub fn origin(&self) -> u64 {
-        self.grid.origin
+        // The newest geometry: a take that begins now, the status and the free-mode scheduler all
+        // mean the loop as it will be from here on.
+        self.grid.latest_origin()
     }
 
     #[inline]
@@ -900,6 +909,46 @@ impl Track {
     #[inline]
     pub fn set_playing(&mut self, on: bool) {
         self.playing = on;
+        if !on {
+            self.restart_play = false;
+        }
+    }
+
+    /// Whether the loop is heard at read position `pos`: playing, or about to be by an armed
+    /// re-anchoring whose position the read-ahead has reached.
+    #[inline(always)]
+    pub fn sounds_at(&self, pos: u64) -> bool {
+        self.playing || (self.restart_play && self.grid.restart.is_some_and(|at| pos >= at))
+    }
+
+    /// Arm a re-anchoring at musical position `at`: from there on the loop plays from its top, on
+    /// every axis - read, write and the MIDI playback - each when it reaches `at`. `play` says the
+    /// track is started there too (a `StartPlay` for `at` follows), so the read-ahead may sound
+    /// from `at` on rather than from the moment the command acts.
+    ///
+    /// Refused (returns `false`) without a loop, and while the take that defines the loop is still
+    /// open with no end or an end after `at` - its length is not known yet, and moving its top
+    /// would tear it. An overdub may run up to `at`: it keeps the old grid for every frame before.
+    /// Bounded work, nothing allocated.
+    pub fn arm_restart(&mut self, at: u64, play: bool) -> bool {
+        if self.layers.is_empty() || self.grid.loop_len == 0 {
+            return false;
+        }
+        if let Some(take) = self.grid.take
+            && take.defines_loop
+            && take.end.is_none_or(|end| end > at)
+        {
+            return false;
+        }
+        self.grid.arm_restart(at);
+        self.restart_play = play;
+        true
+    }
+
+    /// An armed re-anchoring and whether it starts the track, for the MIDI playback.
+    #[inline]
+    pub fn restart(&self) -> Option<(u64, bool)> {
+        self.grid.restart.map(|at| (at, self.restart_play))
     }
 
     /// Whether the transport stands. A held track keeps its layers and its play state but is not
@@ -921,6 +970,9 @@ impl Track {
         if !self.layers.is_empty() {
             self.grid.origin = origin;
         }
+        // A re-anchoring armed for later belongs to the run that has just been replaced.
+        self.grid.restart = None;
+        self.restart_play = false;
     }
 
     #[inline]
@@ -1011,10 +1063,11 @@ impl Track {
     /// buffer arrives zeroed from the control thread.
     #[inline]
     pub fn read(&self, pos: u64) -> Frame {
-        if self.grid.loop_len == 0 || pos < self.grid.origin || self.midi_loop {
+        let origin = self.grid.origin_at(pos);
+        if self.grid.loop_len == 0 || pos < origin || self.midi_loop {
             return Frame::SILENT;
         }
-        let frame_index = ((pos - self.grid.origin) % self.grid.loop_len) as usize;
+        let frame_index = ((pos - origin) % self.grid.loop_len) as usize;
         let n = self.channels.count();
         // The one place a frame index becomes a buffer offset. See the module comment.
         let base = frame_index * n;
@@ -1206,7 +1259,7 @@ impl Track {
         let layer = self.layers.pop()?;
         if self.layers.is_empty() {
             self.grid.reset();
-            self.playing = false;
+            self.set_playing(false);
         }
         Some(layer.store)
     }
@@ -1221,7 +1274,7 @@ impl Track {
         let layer = self.layers.remove(index);
         if self.layers.is_empty() {
             self.grid.reset();
-            self.playing = false;
+            self.set_playing(false);
         }
         Some(layer.store)
     }
@@ -1356,6 +1409,57 @@ mod tests {
         let mut t = Track::new(TrackInput::Stereo { left: 2, right: 3 }, false, 0.0, 48_000);
         t.begin_loop_take(1_000, vec![0.0; frames * 2]);
         t
+    }
+
+    /// A loop of 100 frames whose index `i` holds `i + 1`, so every index is recognisable.
+    fn counting_loop() -> Track {
+        let mut t = track_with_layer(100);
+        for i in 0..100u64 {
+            t.write(1_000 + i, Frame::mono(i as f32 + 1.0));
+        }
+        t.set_take_end(1_100);
+        t.finish_take(1_100);
+        t
+    }
+
+    /// The loop is read ahead for the latency of its chain and plugins. A loop that comes back with
+    /// a re-anchoring is heard from its very first frame: the read-ahead reaches the new top before
+    /// the output does, and from there the track sounds on the new grid - before it, nothing.
+    #[test]
+    fn a_re_anchored_loop_read_ahead_starts_with_its_first_frame() {
+        let mut t = counting_loop();
+        let advance = 30u64;
+        t.set_playback_advance(advance);
+        let at = 5_037u64;
+        assert!(t.arm_restart(at, true));
+        // Output position `at - advance` feeds the chain with the loop's index 0.
+        let (before, _) = t.render_unpanned(at - advance - 1, Frame::SILENT, false);
+        assert_eq!(before[0], Frame::SILENT, "noch still");
+        let (first, _) = t.render_unpanned(at - advance, Frame::SILENT, false);
+        assert_eq!(first[0], Frame::mono(1.0), "Index 0 zuerst");
+        assert_eq!(t.read(at + 99), Frame::mono(100.0));
+        assert_eq!(t.read(at + 100), Frame::mono(1.0));
+        // Before the re-anchoring the old grid holds: 5_036 - 1_000 = 40 * 100 + 36.
+        assert_eq!(t.read(at - 1), Frame::mono(37.0));
+        assert_eq!(t.origin(), at, "der Status zeigt das neue Raster");
+        // A stop takes the pending start back.
+        t.set_playing(false);
+        let (after_stop, _) = t.render_unpanned(at, Frame::SILENT, false);
+        assert_eq!(after_stop[0], Frame::SILENT);
+    }
+
+    /// Refused while the take that defines the loop is still open past the re-anchoring - its
+    /// length is not known yet - and on an empty track.
+    #[test]
+    fn a_re_anchoring_needs_a_loop_whose_length_is_known() {
+        let mut empty = Track::mono(0, false, 48_000);
+        assert!(!empty.arm_restart(10, true));
+        let mut t = track_with_layer(100);
+        t.write(1_000, Frame::mono(1.0));
+        assert!(!t.arm_restart(2_000, true), "Take offen");
+        t.set_take_end(1_050);
+        assert!(!t.arm_restart(1_040, true), "Re-Anker mitten im Take");
+        assert!(t.arm_restart(1_050, true), "Take endet vorher, wartet nur auf seine letzten Frames");
     }
 
     #[test]

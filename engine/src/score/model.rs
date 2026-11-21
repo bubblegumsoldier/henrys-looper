@@ -32,6 +32,31 @@ use crate::engine::timeline::TimeSignature;
 use crate::engine::track::TrackLatency;
 use crate::midi::{ButtonMode, Takeover};
 
+/// What one clip says beyond its state - `theme: {state: play, restart: true}`,
+/// `chorus_guitar: {state: record, bars: 2}`. Only clips that say something carry an entry.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipOptions {
+    /// Start the loop from its top at this section's start, even though the track keeps playing
+    /// across the boundary. A loop that comes *back* (from `stop`, `hear_through`) does that
+    /// anyway. Allowed on `play`, `overdub` and `stack`. See `engine::runner`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub restart: bool,
+    /// A take shorter than the section: `record` for this many bars from the section start, then
+    /// the new loop plays for the rest of the section. Only on `record`, `1..=bars` of the section.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bars: Option<u32>,
+}
+
+impl ClipOptions {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// What a track is supposed to do during a section. The complete state, not a delta: a section
 /// that does not mention a track puts it on [`TrackState::Stop`].
 ///
@@ -54,6 +79,13 @@ pub enum TrackState {
     Stop,
     /// Not playing, but the input is audible - singing along without recording.
     HearThrough,
+}
+
+impl CompiledSection {
+    /// The clip options of `track` here - empty when the clip states none.
+    pub fn clip(&self, track: &str) -> ClipOptions {
+        self.clips.get(track).copied().unwrap_or_default()
+    }
 }
 
 impl TrackState {
@@ -341,6 +373,9 @@ pub struct SectionSource {
     /// the section runs.
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub grids: OrderedMap<String>,
+    /// Per-clip options (`restart`, `bars`), only for the clips of this section that state any.
+    #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
+    pub clips: OrderedMap<ClipOptions>,
     /// 1-based line the section starts on. Not part of the written format - the reader fills it in
     /// so the block preview can point back at the source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -477,6 +512,10 @@ pub struct CompiledSection {
     /// A section with `repeat:` and no grids of its own takes those of the section it repeats.
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub grids: OrderedMap<String>,
+    /// Per-clip options of this section (`restart`, `bars`). A section with `repeat:` takes them
+    /// with the state of every track it inherits; a track it states itself has only its own.
+    #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
+    pub clips: OrderedMap<ClipOptions>,
     /// 1-based line this section starts on, for the block preview.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_line: Option<u32>,

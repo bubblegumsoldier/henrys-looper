@@ -287,15 +287,28 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
             .tracks
             .iter()
             .map(|t| {
+                let clip = section.clip(&t.name);
+                let mut options = Vec::new();
+                if let Some(bars) = clip.bars {
+                    options.push(format!("{bars} bar{}", if bars == 1 { "" } else { "s" }));
+                }
+                if clip.restart {
+                    options.push("restart".to_string());
+                }
                 format!(
-                    "{}={}",
+                    "{}={}{}",
                     t.name,
                     section
                         .tracks
                         .get(&t.name)
                         .copied()
                         .unwrap_or(ScoreState::Stop)
-                        .as_str()
+                        .as_str(),
+                    if options.is_empty() {
+                        String::new()
+                    } else {
+                        format!("({})", options.join(", "))
+                    }
                 )
             })
             .collect();

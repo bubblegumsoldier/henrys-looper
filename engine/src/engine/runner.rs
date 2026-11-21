@@ -23,8 +23,8 @@
 //! | nicht `stack` | `stack` | `LatchOverdub an`, dann der erste Durchlauf wie `record` (leere Spur) bzw. `overdub` |
 //! | `stack` | `stack` | **keins** - der Latch laeuft einfach weiter |
 //! | `stack` | anderes | `LatchOverdub aus` mitten im letzten Durchlauf (+ `StopRecord` an dessen Ende, wenn ein Take folgt), dann wie oben |
-//! | klingt schon | `play` | **keins** |
-//! | still | `play` | `StartPlay` |
+//! | klingt schon | `play` | **keins** (mit `restart: true` ggf. `RestartLoop`) |
+//! | still | `play` | `StartPlay`, davor `RestartLoop`, wenn die Sektion nicht auf seinem Raster beginnt |
 //! | klingt | `stop` / `hear_through` | `StopPlay` |
 //! | still | `stop` | **keins** |
 //!
@@ -32,6 +32,16 @@
 //! that stands on `stop`. That is not tidiness: every superfluous command at a section boundary is
 //! a state change on the audio thread at a musically exposed moment, and the kind of fault one only
 //! notices as a click twenty minutes into a take.
+//!
+//! # A loop that comes in starts from its top
+//!
+//! A loop is read as `(position - origin) mod loop_len`, phase-locked to the song from its first
+//! take on. A section whose length is not a multiple of a loop would leave that loop out of phase
+//! for everything after it. So a loop that comes **in** with a section - it was silent in the
+//! section before, or the clip says `restart: true` - is re-anchored on the section's first sample
+//! ([`Command::RestartLoop`]), unless the section begins on its grid anyway. See
+//! [`Runner::restarts`] for the rule and `docs/architektur.md`, section 10, for the cases. A score
+//! whose sections are multiples of its loops therefore gets no new command at all.
 //!
 //! # Why the runner predicts the loop geometry instead of reading it back
 //!
@@ -101,7 +111,7 @@
 
 use std::time::Duration;
 
-use crate::score::{CompiledScore, TrackState as ScoreState};
+use crate::score::{ClipOptions, CompiledScore, TrackState as ScoreState};
 
 use super::command::{Command, MAX_TRACKS};
 use super::live::TrackDef;
@@ -184,6 +194,8 @@ struct SectionPlan {
     quantize: Quantize,
     /// Target state per track, in track order. Always complete - the compiler fills the gaps.
     want: Vec<ScoreState>,
+    /// Clip options per track, in track order (`restart`, `bars`); empty where none are written.
+    clips: Vec<ClipOptions>,
 }
 
 /// Where a section sits on the sample timeline.
@@ -234,6 +246,9 @@ struct TrackRun {
     sounding: bool,
     /// Predicted loop geometry - see the module comment. `len == 0` means "no loop yet".
     origin: u64,
+    /// The bar `origin` is the line of. Every origin the runner sets is a section start, so it is
+    /// one; kept as a number so "does this section begin on the loop's grid" is asked in bars.
+    origin_bar: u64,
     len: u64,
     /// The same length in bars. Kept beside `len` because bar boundaries are rounded individually:
     /// eight bars here and eight bars there can differ by a sample, so the question "is this
@@ -361,6 +376,11 @@ impl Runner {
                             .unwrap_or(ScoreState::Stop)
                     })
                     .collect(),
+                clips: score
+                    .tracks
+                    .iter()
+                    .map(|track| section.clip(&track.name))
+                    .collect(),
             })
             .collect();
         let tracks: Vec<TrackRun> = score
@@ -375,6 +395,7 @@ impl Runner {
                 target: ScoreState::Stop,
                 sounding: false,
                 origin: 0,
+                origin_bar: 0,
                 len: 0,
                 len_bars: 0,
                 layers: 0,
@@ -716,6 +737,7 @@ impl Runner {
             track.target = ScoreState::Stop;
             track.sounding = false;
             track.origin = 0;
+            track.origin_bar = 0;
             track.len = 0;
             track.len_bars = 0;
             track.layers = 0;
@@ -1103,17 +1125,38 @@ impl Runner {
             if self.tracks[track].stacking && want != ScoreState::Stack {
                 self.end_stack(track, start, want);
             }
+            let clip = plan.clips[track];
+            if self.restarts(track, want, clip, start_bar) {
+                // The loop comes in from its top: re-anchored on this very sample, which every
+                // overdub planned below then finds as its grid. `play`: the `StartPlay` follows
+                // right away for the same sample, so the engine may sound it from there on its
+                // read-ahead axis too (plugin and chain latency).
+                self.out.push(Command::RestartLoop {
+                    track,
+                    at: start,
+                    play: want == ScoreState::Play,
+                });
+                let t = &mut self.tracks[track];
+                t.origin = start;
+                t.origin_bar = start_bar;
+            }
             match want {
                 ScoreState::Record => {
-                    let scheduled = self.sched.record_at(track, &name, start, plan.bars);
+                    // A take of its own length (`{state: record, bars: 2}`) ends early and the new
+                    // loop plays for the rest of the section - its `StartPlay` comes with the take.
+                    // The reader keeps it within the section.
+                    let bars = clip.bars.unwrap_or(plan.bars).clamp(1, plan.bars);
+                    let take_end = self.sched.timeline.bar_start(start_bar + bars as u64);
+                    let scheduled = self.sched.record_at(track, &name, start, bars);
                     self.push(scheduled);
                     let t = &mut self.tracks[track];
                     t.origin = start;
-                    t.len = end - start;
-                    t.len_bars = plan.bars;
+                    t.origin_bar = start_bar;
+                    t.len = take_end - start;
+                    t.len_bars = bars;
                     t.layers = 1;
-                    t.take_end = end;
-                    t.take_end_bar = start_bar + plan.bars as u64;
+                    t.take_end = take_end;
+                    t.take_end_bar = start_bar + bars as u64;
                     // The take's own `StartPlay` at `end` leaves the track playing, which is what a
                     // section that loops needs and what the next section then finds.
                     t.sounding = true;
@@ -1161,6 +1204,7 @@ impl Runner {
                     let t = &mut self.tracks[track];
                     if defines_loop {
                         t.origin = take_start;
+                        t.origin_bar = start_bar;
                         t.len = take_end - take_start;
                         t.len_bars = plan.bars;
                         t.layers = 1;
@@ -1209,6 +1253,7 @@ impl Runner {
                     let t = &mut self.tracks[track];
                     if defines_loop {
                         t.origin = take_start;
+                        t.origin_bar = start_bar;
                         t.len = take_end - take_start;
                         t.len_bars = plan.bars;
                         t.layers = 1;
@@ -1241,6 +1286,32 @@ impl Runner {
             self.tracks[track].target = want;
         }
         takes
+    }
+
+    /// Whether the section starting on bar `start_bar` re-anchors `track`'s loop - the rule of
+    /// "Ein Loop, der einsetzt, beginnt vorn" (`docs/architektur.md`, section 10):
+    ///
+    /// * the track plays its loop in this section (`play`, or `overdub` / `stack` on a loop it
+    ///   already has) and is not simply carrying on a running stack,
+    /// * it comes **in** - it was not sounding in the section before - or the clip asks for it
+    ///   with `restart: true`,
+    /// * and the section does not begin on the loop's own grid anyway. Asked in bars: a loop is
+    ///   always whole bars, and its origin always a section start. A score whose sections are
+    ///   multiples of its loops therefore never sends a single re-anchoring - it plays exactly as
+    ///   it did before the rule existed.
+    fn restarts(&self, track: usize, want: ScoreState, clip: ClipOptions, start_bar: u64) -> bool {
+        let t = &self.tracks[track];
+        let plays_loop = matches!(
+            want,
+            ScoreState::Play | ScoreState::Overdub | ScoreState::Stack
+        );
+        if !plays_loop || t.len == 0 || t.len_bars == 0 || t.stacking {
+            return false;
+        }
+        if t.sounding && !clip.restart {
+            return false;
+        }
+        start_bar < t.origin_bar || (start_bar - t.origin_bar) % u64::from(t.len_bars) != 0
     }
 
     /// Everything silent at `at` - the end of the score, the click included.
@@ -1365,3 +1436,9 @@ pub fn check_tracks(score: &CompiledScore, running: &[TrackDef]) -> Result<(), S
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod restart_tests;
+
+#[cfg(test)]
+mod golden_tests;

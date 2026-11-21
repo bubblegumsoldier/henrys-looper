@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use super::error::{ScoreError, ScoreIssue, allowed, suggest, suggest_or_list};
 use super::map::OrderedMap;
 use super::model::{
-    GRID_NAMES, InstrumentSource, LoopKind, MidiBindingSource, MidiKind, ScoreSource,
+    ClipOptions, GRID_NAMES, InstrumentSource, LoopKind, MidiBindingSource, MidiKind, ScoreSource,
     SectionSource, TrackSource, TrackState,
 };
 use super::yaml::{Entry, Node, NodeKind, Pos, parse_document};
@@ -49,7 +49,7 @@ const TRACK_FIELDS: [&str; 10] = [
     "grid",
 ];
 const TRACK_MIDI_FIELDS: [&str; 4] = ["device", "channel", "notes", "transpose"];
-const CLIP_FIELDS: [&str; 2] = ["state", "grid"];
+const CLIP_FIELDS: [&str; 4] = ["state", "grid", "restart", "bars"];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
 /// Fields one binding may carry. The *keys* of `midi:` are not a closed list any more - any address
 /// of the parameter tree does, and the two Ableton-era names `next_section` and `stop_all` are
@@ -116,6 +116,9 @@ pub fn read_score_noted(yaml_text: &str) -> (Result<ScoreSource, ScoreError>, Ve
         && let Some(score) = &score
     {
         notes.extend(stack_notes(score, &reader.state_pos));
+        // Needs `repeat:` resolved, so it runs on a score that is otherwise clean.
+        let issues = take_length_issues(score, &reader.clip_bars_pos);
+        reader.issues.extend(issues);
     }
     if reader.issues.is_empty() {
         // Only a clean read produces a score; anything else would hand the compiler half a file.
@@ -143,6 +146,44 @@ struct Reader {
     notes: Vec<ScoreIssue>,
     /// Where each written clip state stands: `(section id, track)` -> position of the value.
     state_pos: HashMap<(String, String), Pos>,
+    /// Where each clip's `bars:` value stands, the same way.
+    clip_bars_pos: HashMap<(String, String), Pos>,
+}
+
+/// A take of its own length (`{state: record, bars: N}`) has to fit into its section: a take never
+/// runs across a section boundary. Judged on the resolved sections, because the section's `bars`
+/// may come from a `repeat:`, and a repeat carries the clip along.
+fn take_length_issues(
+    score: &ScoreSource,
+    bars_pos: &HashMap<(String, String), Pos>,
+) -> Vec<ScoreIssue> {
+    let compiled = super::compile::compile(score);
+    let mut issues = Vec::new();
+    for section in &compiled.sections {
+        for (track, clip) in section.clips.iter() {
+            let Some(bars) = clip.bars else { continue };
+            if bars <= section.bars {
+                continue;
+            }
+            let pos = bars_pos.get(&(section.id.clone(), track.to_string())).copied();
+            let mut issue = ScoreIssue::new(
+                pos,
+                format!(
+                    "Track '{track}' records {bars} bars in Section '{}', but the section has only {}.",
+                    section.id, section.bars
+                ),
+            )
+            .with_suggestion(format!(
+                "A take cannot run into the next section - at most 'bars: {}'.",
+                section.bars
+            ));
+            if pos.is_none() {
+                issue.line = section.source_line;
+            }
+            issues.push(issue);
+        }
+    }
+    issues
 }
 
 /// `stack` with `autorelease: true` on a track that nothing has recorded on yet: the section's
@@ -1293,7 +1334,7 @@ impl Reader {
             );
         }
 
-        let (tracks, grids) = fields
+        let (tracks, grids, clips) = fields
             .get("tracks")
             .and_then(|node| self.read_section_tracks(id, node, track_names))
             .unwrap_or_default();
@@ -1307,6 +1348,7 @@ impl Reader {
                 quantize,
                 tracks,
                 grids,
+                clips,
                 source_line: Some(node.pos.line),
             },
             repeat_node.map(|node| node.pos),
@@ -1334,10 +1376,11 @@ impl Reader {
         section: &str,
         node: &Node<'_>,
         track_names: &[&str],
-    ) -> Option<(OrderedMap<TrackState>, OrderedMap<String>)> {
+    ) -> Option<(OrderedMap<TrackState>, OrderedMap<String>, OrderedMap<ClipOptions>)> {
         let entries = self.as_map(node, &format!("'tracks' in Section '{section}'"))?;
         let mut states = OrderedMap::new();
         let mut grids = OrderedMap::new();
+        let mut clips = OrderedMap::new();
         let state_names = TrackState::names();
         for entry in entries {
             let Some(name) = entry.key.as_str() else {
@@ -1370,6 +1413,8 @@ impl Reader {
                 continue;
             }
             // `voice: record`, or - with a clip setting - `keys: {state: play, grid: 1/16}`.
+            let mut clip = ClipOptions::default();
+            let mut clip_nodes: Vec<(&str, Pos)> = Vec::new();
             let state_node = match &entry.value.kind {
                 NodeKind::Map(fields) => {
                     let what = format!("Track '{name}' in Section '{section}'");
@@ -1378,6 +1423,21 @@ impl Reader {
                         && let Some(grid) = self.read_grid(&format!("'grid' of {what}"), node)
                     {
                         grids.insert(name, grid);
+                    }
+                    if let Some(node) = fields.get("restart")
+                        && let Some(on) = self.as_bool(node, &format!("'restart' of {what}"))
+                    {
+                        clip.restart = on;
+                        clip_nodes.push(("restart", node.pos));
+                    }
+                    if let Some(node) = fields.get("bars")
+                        && let Some(bars) =
+                            self.as_int(node, &format!("'bars' of {what}"), 1, MAX_BARS)
+                    {
+                        clip.bars = Some(bars);
+                        clip_nodes.push(("bars", node.pos));
+                        self.clip_bars_pos
+                            .insert((section.to_string(), name.to_string()), node.pos);
                     }
                     match fields.get("state") {
                         Some(node) => *node,
@@ -1411,6 +1471,10 @@ impl Reader {
                 Some(state) => {
                     self.state_pos
                         .insert((section.to_string(), name.to_string()), state_node.pos);
+                    self.check_clip(section, name, state, clip, &clip_nodes);
+                    if !clip.is_empty() {
+                        clips.insert(name, clip);
+                    }
                     states.insert(name, state)
                 }
                 None => self.error_with(
@@ -1420,7 +1484,59 @@ impl Reader {
                 ),
             }
         }
-        Some((states, grids))
+        Some((states, grids, clips))
+    }
+
+    /// The clip options have to fit the state they are written with. Both are rejected rather than
+    /// ignored where they would do nothing: a score that says something the player does not do
+    /// is worse than one that does not compile.
+    fn check_clip(
+        &mut self,
+        section: &str,
+        name: &str,
+        state: TrackState,
+        clip: ClipOptions,
+        nodes: &[(&str, Pos)],
+    ) {
+        let pos = |field: &str| nodes.iter().find(|(f, _)| *f == field).map(|(_, p)| *p);
+        if clip.restart {
+            match state {
+                TrackState::Play | TrackState::Overdub | TrackState::Stack => {}
+                TrackState::Record => self.error_with(
+                    pos("restart"),
+                    format!(
+                        "'restart' on record does nothing (Track '{name}' in Section '{section}'): \
+                         the new take starts the loop at the section start anyway."
+                    ),
+                    "Remove 'restart'; it goes with play, overdub or stack.",
+                ),
+                TrackState::Stop | TrackState::HearThrough => self.error_with(
+                    pos("restart"),
+                    format!(
+                        "'restart' needs a loop that plays, but Track '{name}' is on {} in \
+                         Section '{section}'.",
+                        state.as_str()
+                    ),
+                    "Remove 'restart'; it goes with play, overdub or stack.",
+                ),
+            }
+        }
+        if clip.bars.is_some() && state != TrackState::Record {
+            let why = match state {
+                TrackState::Overdub => "an overdub always lasts one pass of the loop",
+                TrackState::Stack => "a stack records one pass after the other until the section ends",
+                _ => "it is the length of a take",
+            };
+            self.error_with(
+                pos("bars"),
+                format!(
+                    "'bars' of a clip only goes with record (Track '{name}' is on {} in \
+                     Section '{section}'): {why}.",
+                    state.as_str()
+                ),
+                format!("'{name}: {{state: record, bars: 2}}' records two bars, then plays them as a loop."),
+            );
+        }
     }
 
     /// `repeat:` must name an existing section, and the graph it spans must be acyclic.
