@@ -143,7 +143,7 @@ use super::latch::{Latches, Verdict};
 use super::metro::Metronome;
 use super::source::{HostClock, SourceEndpoint, SourceRack, heard_at, place_event};
 use super::timeline::Timeline;
-use super::track::{MAX_LAYERS, Track, TrackLatency};
+use super::track::{MAX_LAYERS, Track, TrackLatency, fade_in, fade_out};
 
 #[path = "midiproc.rs"]
 mod midiproc;
@@ -219,8 +219,17 @@ pub struct EngineCore {
     routing: BusRouting,
     output_channels: usize,
     commands: CommandReceiver,
-    /// Commands taken out of the queue but not executed yet, see [`EngineCore::next_due`].
-    scheduled: Vec<Command>,
+    /// Commands taken out of the queue but not executed yet, see [`EngineCore::next_due`], each
+    /// with its arrival number - what tells a command that acts early whether a drain sent after
+    /// it would have caught it.
+    scheduled: Vec<(u64, Command)>,
+    /// Arrival number of the next command taken out of the queue.
+    arrivals: u64,
+    /// Output position the command being applied acts at.
+    now: u64,
+    /// Weight of the live input in the recorder at the last input frame, per track: 1 while the
+    /// track records or monitors, 0 otherwise, in between during a fade.
+    live_weight: Vec<f32>,
     status: StatusSender,
     buffers: BufferEndpoint,
     status_interval: u64,
@@ -281,6 +290,7 @@ impl EngineCore {
         let output_channels = cfg.output_channels.max(1);
         let routing = cfg.routing.clamped(output_channels);
         let mut tracks = cfg.tracks;
+        let track_count = tracks.len();
         // The control thread builds the tracks and knows what each of them was configured with;
         // only here is the default known, so this is where the two are added up. From now on every
         // track answers with a plain number.
@@ -310,6 +320,9 @@ impl EngineCore {
             output_channels,
             commands: cfg.commands,
             scheduled: Vec::with_capacity(SCHEDULED_SLOTS),
+            arrivals: 0,
+            now: 0,
+            live_weight: vec![0.0; track_count],
             status: cfg.status,
             buffers: cfg.buffers,
             status_interval: cfg.status_interval.max(1),
@@ -440,6 +453,11 @@ impl EngineCore {
         self.collect_capture();
         self.collect_clips();
         self.publish_tempo();
+        // Fades that lie wholly behind both read positions (the mix reads ahead of the dry stem)
+        // are done with. A handful of comparisons per track.
+        for track in self.tracks.iter_mut() {
+            track.fold_edges(self.out_pos, self.in_index);
+        }
         let in_frames = input.len() / self.input_channels;
         let out_frames = output.len() / BUS_SAMPLES;
 
@@ -530,7 +548,10 @@ impl EngineCore {
     fn collect_commands(&mut self) {
         while self.scheduled.len() < SCHEDULED_SLOTS {
             match self.commands.pop() {
-                Some(cmd) => self.scheduled.push(cmd),
+                Some(cmd) => {
+                    self.scheduled.push((self.arrivals, cmd));
+                    self.arrivals += 1;
+                }
                 None => break,
             }
         }
@@ -673,12 +694,11 @@ impl EngineCore {
                 }
                 let (pos, frame) = (q - latency, Frame::new(l, r));
                 let wrote = !midi_loop && self.record_frame(t, pos, frame);
-                // The recorder hears the instrument like any live input, at the same position.
-                if let Some(capture) = self.capture.as_deref_mut().and_then(CaptureSlot::session) {
-                    let track = &self.tracks[t];
-                    let live = wrote || track.monitor();
-                    capture.live_frame(t, pos, frame, track, live, collapsed);
+                if !midi_loop {
+                    self.tracks[t].remember(pos, frame);
                 }
+                // The recorder hears the instrument like any live input, at the same position.
+                self.capture_live(t, pos, q, frame, wrote, collapsed);
             }
         }
     }
@@ -773,9 +793,10 @@ impl EngineCore {
                 cursor = boundary;
             }
             match due {
-                Some((index, _)) => {
+                Some((index, at)) => {
                     // `remove` on a `Vec` of `Copy` commands is a memmove of a few dozen bytes.
-                    let cmd = self.scheduled.remove(index);
+                    let (arrival, cmd) = self.scheduled.remove(index);
+                    self.now = at;
                     if matches!(
                         cmd,
                         Command::ClearAll { .. }
@@ -791,6 +812,9 @@ impl EngineCore {
                         // reason: a play or a take end armed for bar 9 has no bar 9 to happen in.
                         // `DropWaiting` is exactly this drop and nothing else - "Stop all".
                         self.scheduled.drain(..index);
+                    }
+                    if self.drained_later(arrival, &cmd) {
+                        continue;
                     }
                     self.apply(cmd);
                 }
@@ -810,14 +834,8 @@ impl EngineCore {
     #[inline]
     fn next_due(&self, block_end: u64, not_before: u64) -> Option<(usize, u64)> {
         let mut best: Option<(usize, u64)> = None;
-        for (i, cmd) in self.scheduled.iter().enumerate() {
-            // Untimed commands carry no musical meaning and act at the next opportunity.
-            let at = match *cmd {
-                // A re-anchoring has to be in place before the track's read-ahead reaches it; what
-                // it changes switches per position, so acting early moves nothing audible.
-                Command::RestartLoop { track, at, .. } => at.saturating_sub(self.read_ahead(track)),
-                _ => cmd.at().unwrap_or(0),
-            };
+        for (i, (_, cmd)) in self.scheduled.iter().enumerate() {
+            let at = self.due(cmd);
             if best.map(|(_, b)| at < b).unwrap_or(true) {
                 best = Some((i, at));
             }
@@ -828,6 +846,83 @@ impl EngineCore {
         } else {
             None
         }
+    }
+
+    /// The output position a waiting command acts at.
+    ///
+    /// Untimed commands carry no musical meaning and act at the next opportunity. Four act
+    /// *before* their time on an audio loop, because what they change is decided per position and
+    /// the loop has to know it a fade length ahead (see `Track::play_frame`):
+    ///
+    /// * `StartPlay` / `StopPlay` - one fade length early, so a start can fade in what leads into
+    ///   its position and a stop can be silent from its position on;
+    /// * `RestartLoop` - before the track's read-ahead reaches the fade before it;
+    /// * `StopRecord` - one fade length early, so the loop's length is known when a start right
+    ///   at the take's end begins its fade. Never before the take it ends has begun; what it sets
+    ///   is a position, so recording still ends on the very sample.
+    ///
+    /// A MIDI loop keeps every time as it was: its notes are not faded.
+    #[inline]
+    fn due(&self, cmd: &Command) -> u64 {
+        match *cmd {
+            Command::RestartLoop { track, at, .. } => {
+                at.saturating_sub(self.read_ahead(track) + self.lead(track))
+            }
+            Command::StartPlay { track, at } | Command::StopPlay { track, at } => {
+                at.saturating_sub(self.lead(track))
+            }
+            Command::StopRecord { track, at } => self.stop_record_due(track, at),
+            _ => cmd.at().unwrap_or(0),
+        }
+    }
+
+    /// How far ahead of their time play changes act on this track: a fade on an audio loop,
+    /// nothing on a MIDI loop.
+    #[inline]
+    fn lead(&self, track: usize) -> u64 {
+        match self.tracks.get(track) {
+            Some(t) if !t.midi_loop() => t.edge(),
+            _ => 0,
+        }
+    }
+
+    #[inline]
+    fn stop_record_due(&self, track: usize, at: u64) -> u64 {
+        let lead = self.lead(track);
+        let Some(t) = self.tracks.get(track) else {
+            return at;
+        };
+        if lead == 0 {
+            return at;
+        }
+        let begun = match (t.grid().pending, t.take()) {
+            (Some(pending), _) => pending.start,
+            (None, Some(take)) => take.start,
+            // The take it ends has not been opened yet: wait for it.
+            (None, None) => return at,
+        };
+        at.saturating_sub(lead).max(begun + 1).min(at)
+    }
+
+    /// Whether a command that acts before its time would have been thrown away by a drain sent
+    /// after it - `DropWaiting` up to its time, `ClearAll`, a transport stop. Without the check an
+    /// early start could survive the "Stop all" that was meant to call it back.
+    #[inline]
+    fn drained_later(&self, arrival: u64, cmd: &Command) -> bool {
+        let Some(at) = cmd.at() else {
+            return false;
+        };
+        if self.now >= at {
+            return false;
+        }
+        self.scheduled.iter().any(|&(a, ref c)| {
+            a > arrival
+                && match *c {
+                    Command::DropWaiting { at: drop } => drop <= at,
+                    Command::ClearAll { .. } | Command::TransportStop => true,
+                    _ => false,
+                }
+        })
     }
 
     /// How far ahead of the output position a track's loop is read: the plugin and chain latency
@@ -889,6 +984,7 @@ impl EngineCore {
         let tracks = &mut self.tracks;
         let mut capture = self.capture.as_deref_mut().and_then(CaptureSlot::session);
         let sources = self.sources.as_deref();
+        let in_index = self.in_index;
 
         for (i, slot) in out.chunks_exact_mut(BUS_SAMPLES).enumerate() {
             let pos = start + i as u64;
@@ -908,7 +1004,7 @@ impl EngineCore {
                 let monitor = if track.is_instrument() {
                     instrument_frame(track, sources, t, frame)
                 } else {
-                    monitor_frame(track, input, frame, in_frames, channels, monitor_gain)
+                    monitor_frame(track, input, frame, in_frames, channels, monitor_gain, in_index)
                 };
                 let sent = track.render(pos, monitor, collapsed);
                 if let Some(capture) = capture.as_mut() {
@@ -975,6 +1071,7 @@ impl EngineCore {
         let collapsed = self.routing.collapsed();
         let transport = self.plugin_transport(start);
         let sources = self.sources.as_deref();
+        let in_index = self.in_index;
         let Some(rack) = self.inserts.as_deref_mut() else {
             return;
         };
@@ -993,7 +1090,15 @@ impl EngineCore {
                     let monitor = if track.is_instrument() {
                         instrument_frame(track, sources, t, in_base + i)
                     } else {
-                        monitor_frame(track, input, in_base + i, in_frames, channels, monitor_gain)
+                        monitor_frame(
+                            track,
+                            input,
+                            in_base + i,
+                            in_frames,
+                            channels,
+                            monitor_gain,
+                            in_index,
+                        )
                     };
                     let (wet, s) = track.render_unpanned(start + i as u64, monitor, collapsed);
                     spread = s;
@@ -1198,15 +1303,68 @@ impl EngineCore {
                     continue;
                 }
                 let wrote = self.record_frame(t, pos, frame);
+                // After the take: the history holds what *precedes* the frame a take begins with.
+                self.tracks[t].remember(pos, frame);
                 // The recorder hears what the musician plays on this track while it records,
                 // overdubs or hears through - placed at `pos`, the same position the take uses.
-                if let Some(capture) = self.capture.as_deref_mut().and_then(CaptureSlot::session) {
-                    let track = &self.tracks[t];
-                    let live = wrote || track.monitor();
-                    capture.live_frame(t, pos, frame, track, live, collapsed);
-                }
+                self.capture_live(t, pos, k, frame, wrote, collapsed);
             }
         }
+    }
+
+    /// Hand the recorder one live input frame of track `t` at musical position `pos` (input index
+    /// `k`), weighted by how much of it is "live" right now: 1 while the track records or
+    /// monitors, 0 otherwise, and a fade where either begins or ends - the same few milliseconds
+    /// the loop playback fades over, so the dry stem never steps either:
+    ///
+    /// * monitoring switched on or off fades with the monitor itself;
+    /// * a take that the loop takes over from (or that just ends) fades out over its last frames,
+    ///   exactly where the loop's lead-in fades in - the seam crossfade, in the stem;
+    /// * a take that begins out of silence gets its pre-roll faded in before its first frame,
+    ///   the way the loop will play it.
+    fn capture_live(&mut self, t: usize, pos: u64, k: u64, frame: Frame, wrote: bool, collapsed: bool) {
+        let fresh = self.tracks[t].take_fresh_take();
+        if self.capture.is_none() {
+            return;
+        }
+        let track = &self.tracks[t];
+        let monitor = track.monitor_level(k);
+        let take = if wrote {
+            let follows = track.has_pending() || self.latch.on(t);
+            match track.take() {
+                Some(take) if !follows => match take.end {
+                    Some(end) if end > pos && end - pos <= track.fade_len() => {
+                        let fade = track.fade_len();
+                        fade_out(fade - (end - pos), fade)
+                    }
+                    _ => 1.0,
+                },
+                _ => 1.0,
+            }
+        } else {
+            0.0
+        };
+        let weight = take + (1.0 - take) * monitor;
+        let before = self.live_weight[t];
+        self.live_weight[t] = weight;
+        let Some(capture) = self.capture.as_deref_mut().and_then(CaptureSlot::session) else {
+            return;
+        };
+        if let Some(start) = fresh
+            && before < 1.0
+            && let Some(layer) = track.take().map(|take| take.layer)
+        {
+            let edge = track.edge();
+            for j in 0..edge {
+                let Some(p) = (start + j).checked_sub(edge) else {
+                    continue;
+                };
+                let g = fade_in(j, edge) * (1.0 - before);
+                let v = track.pre_roll(layer, j as usize);
+                capture.live_frame(t, p, Frame::new(v.l * g, v.r * g), track, 1.0, collapsed);
+            }
+        }
+        capture.live_frame(t, pos, frame, track, weight, collapsed);
     }
 
     /// The take part of [`Self::record_input`] for one track and one input frame at musical
@@ -1323,14 +1481,15 @@ impl EngineCore {
                 self.tracks[track].set_take_end(at);
                 self.midi_length_known(track);
             }
-            Command::StartPlay { track, .. } => self.tracks[track].set_playing(true),
+            Command::StartPlay { track, at } => self.play_at(track, true, at),
             Command::RestartLoop { track, at, play } => {
-                if !self.tracks[track].arm_restart(at, play) {
+                let now = self.read_now(track);
+                if !self.tracks[track].arm_restart(at, play, now) {
                     self.refuse(Refusal::Busy);
                 }
             }
-            Command::StopPlay { track, .. } => {
-                self.tracks[track].set_playing(false);
+            Command::StopPlay { track, at } => {
+                self.play_at(track, false, at);
                 self.release_layers(track, None);
             }
             Command::SetLoopKind { track, midi } => {
@@ -1349,7 +1508,11 @@ impl EngineCore {
                     self.tracks[track].restore_defaults();
                 }
             }
-            Command::SetMonitor { track, on } => self.tracks[track].set_monitor(on),
+            Command::SetMonitor { track, on } => {
+                // The input frame that pairs with the output frame this acts at.
+                let k = self.in_index + (self.now.saturating_sub(self.out_pos));
+                self.tracks[track].fade_monitor(on, k);
+            }
             Command::SetPan { track, pan } => self.tracks[track].set_pan(pan),
             // The channel strip: a few stores and a new smoother target. Listening only - nothing
             // here reaches `record_input`, so a muted or soloed-away track records as before.
@@ -1495,7 +1658,8 @@ impl EngineCore {
             Command::CountIn { at, end } => {
                 self.start_transport(at);
                 for track in 0..self.tracks.len() {
-                    self.tracks[track].set_held(true);
+                    let now = self.read_now(track);
+                    self.tracks[track].hold(true, now);
                     self.release_layers(track, None);
                 }
                 self.count_in = Some(end);
@@ -1511,12 +1675,36 @@ impl EngineCore {
                 self.latch.all_off();
                 for track in 0..self.tracks.len() {
                     self.cancel_takes(track);
-                    self.tracks[track].set_playing(false);
+                    let now = self.read_now(track);
+                    if self.tracks[track].midi_loop() {
+                        self.tracks[track].set_playing(false);
+                    } else {
+                        self.tracks[track].fade_playing(false, now);
+                    }
                     self.release_layers(track, None);
                 }
                 self.stopped = true;
             }
         }
+    }
+
+    /// Start or stop a track's loop counting from output position `at`: on an audio loop a switch
+    /// on the read axis, armed a fade ahead (see [`Self::due`]); a MIDI loop switches as it always
+    /// did.
+    fn play_at(&mut self, track: usize, on: bool, at: u64) {
+        if self.tracks[track].midi_loop() {
+            self.tracks[track].set_playing(on);
+            return;
+        }
+        let advance = self.tracks[track].playback_advance();
+        let now = self.read_now(track);
+        self.tracks[track].arm_playing(on, at + advance, now);
+    }
+
+    /// The read position of a track's loop at the output position the current command acts at.
+    #[inline]
+    fn read_now(&self, track: usize) -> u64 {
+        self.now.max(self.out_pos) + self.tracks[track].playback_advance()
     }
 
     /// Whether the click sounds: switched on (or a free count-in runs), the clock runs, and no score
@@ -1546,7 +1734,8 @@ impl EngineCore {
                 self.cancel_takes(t);
             }
             self.tracks[t].rebase(at);
-            self.tracks[t].set_held(false);
+            let now = self.read_now(t);
+            self.tracks[t].hold(false, now);
         }
         self.timeline = self.timeline.with_zero(at);
         self.transport = true;
@@ -1585,7 +1774,8 @@ impl EngineCore {
                     self.tracks[t].set_take_end(end);
                 }
             }
-            self.tracks[t].set_held(true);
+            let now = self.read_now(t);
+            self.tracks[t].hold(true, now);
             self.release_layers(t, None);
         }
         self.transport = false;
@@ -1919,13 +2109,19 @@ fn monitor_frame(
     in_frames: usize,
     channels: usize,
     monitor_gain: f32,
+    in_index: u64,
 ) -> Frame {
-    if !track.monitor() || frame >= in_frames {
+    if !track.monitor_active() || frame >= in_frames {
+        return Frame::SILENT;
+    }
+    // Switching monitoring fades over a few milliseconds instead of cutting the input in or out.
+    let gain = monitor_gain * track.monitor_level(in_index + frame as u64);
+    if gain == 0.0 {
         return Frame::SILENT;
     }
     let base = frame * channels;
     let input_of = |c: usize| match input.get(base + track.input().device_channel(c)) {
-        Some(&s) => s * monitor_gain,
+        Some(&s) => s * gain,
         None => 0.0,
     };
     match track.channels() {

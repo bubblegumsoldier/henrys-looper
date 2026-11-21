@@ -268,9 +268,162 @@ fn theme_b_is_continuous_across_the_spot_of_the_owners_click() {
     assert_eq!(decode(content[0]), Some(intro_b + LATENCY));
 }
 
-#[allow(dead_code)]
-fn main_bus(stage: &Stage) -> Vec<f32> {
-    stage.sim.buses[Bus::Main.index()][0].clone()
+// ---------------------------------------------------------------------------------------------
+// No clicks
+// ---------------------------------------------------------------------------------------------
+
+/// Frames of one declicking fade: 10 ms. Written out here rather than taken from the engine, so the
+/// bound below is the test's own.
+const FADE: f64 = RATE as f64 * 0.010;
+
+/// The partials of the two inputs: (frequency in Hz, amplitude). The guitar is what the piezo
+/// gave in the recording - most of its energy at 41 and 73 Hz - plus a slow drift; the voice
+/// likewise low. All incommensurate, so no two passes of a loop are alike and a loop's first and
+/// last sample practically never meet.
+const GUITAR: [(f64, f64); 3] = [(41.0, 0.25), (73.0, 0.15), (0.37, 0.05)];
+const VOICE: [(f64, f64); 3] = [(55.0, 0.2), (97.0, 0.1), (0.23, 0.05)];
+
+fn partials(ch: usize) -> &'static [(f64, f64); 3] {
+    if ch == 0 { &VOICE } else { &GUITAR }
+}
+
+fn low(k: u64, ch: usize) -> f32 {
+    let t = k as f64 / f64::from(RATE);
+    partials(ch)
+        .iter()
+        .enumerate()
+        .map(|(n, (f, a))| a * (std::f64::consts::TAU * f * t + n as f64).sin())
+        .sum::<f64>() as f32
+}
+
+/// What one signal on the bus may do from one sample to the next, derived from the input itself.
+///
+/// A sum of partials `a sin(2 pi f t)` changes by at most `sum 2 pi f a / rate` per sample (slope)
+/// and its slope by at most `sum (2 pi f / rate)^2 a` (curvature). A raised-cosine fade of `F`
+/// frames over a difference of at most `2A` (`A` the peak) adds `pi A / F` of slope and
+/// `(pi / F)^2 A + (pi / F) slope` of curvature. The bus carries at most `signals` such signals
+/// at once. A click - a step of size `s` between two samples - shows as `s` in both differences, so
+/// it is caught down to the curvature bound: a few ten-thousandths of full scale.
+fn bounds(signals: usize) -> (f64, f64) {
+    let mut worst = (0.0f64, 0.0f64);
+    for ch in 0..2 {
+        let rate = f64::from(RATE);
+        let peak: f64 = partials(ch).iter().map(|(_, a)| a).sum();
+        let slope: f64 = partials(ch)
+            .iter()
+            .map(|(f, a)| std::f64::consts::TAU * f * a / rate)
+            .sum();
+        let curve: f64 = partials(ch)
+            .iter()
+            .map(|(f, a)| (std::f64::consts::TAU * f / rate).powi(2) * a)
+            .sum();
+        let w = std::f64::consts::PI / FADE;
+        let s = slope + w * peak;
+        let c = curve + w * w * peak + w * slope;
+        worst = (worst.0.max(s), worst.1.max(c));
+    }
+    (worst.0 * signals as f64, worst.1 * signals as f64)
+}
+
+/// Every audio track plus both monitored inputs: the most signals the Main bus can sum.
+fn signals(stage: &Stage) -> usize {
+    stage.score().tracks.iter().filter(|t| !t.is_instrument()).count() + 2
+}
+
+/// The largest first and second difference of the Main bus (both sides) in `from..to`, with where.
+fn roughness(stage: &Stage, from: u64, to: u64) -> ((f64, u64), (f64, u64)) {
+    let mut step = (0.0f64, 0u64);
+    let mut curve = (0.0f64, 0u64);
+    for side in &stage.sim.buses[Bus::Main.index()] {
+        for p in from.max(2)..to {
+            let (a, b, c) = (
+                f64::from(side[p as usize - 2]),
+                f64::from(side[p as usize - 1]),
+                f64::from(side[p as usize]),
+            );
+            if (c - b).abs() > step.0 {
+                step = ((c - b).abs(), p);
+            }
+            if (c - 2.0 * b + a).abs() > curve.0 {
+                curve = ((c - 2.0 * b + a).abs(), p);
+            }
+        }
+    }
+    (step, curve)
+}
+
+/// Positions in `from..to` where the Main bus bends by more than `bound` on either side.
+fn clicks(stage: &Stage, from: u64, to: u64, bound: f64) -> usize {
+    (from.max(2)..to)
+        .filter(|&p| {
+            stage.sim.buses[Bus::Main.index()].iter().any(|side| {
+                let (a, b, c) = (
+                    f64::from(side[p as usize - 2]),
+                    f64::from(side[p as usize - 1]),
+                    f64::from(side[p as usize]),
+                );
+                (c - 2.0 * b + a).abs() > bound
+            })
+        })
+        .count()
+}
+
+/// The owner's whole score, played with low-frequency material: every take start and end, every
+/// wrap of every loop, every start and stop at a section line, the re-anchored comebacks (theme
+/// and bass in verse 1 and both choruses, `restart: true` in verse 2), the monitoring switched on
+/// and off by the sections, and the end where everything stops. The Main bus never steps or bends
+/// by more than the input itself and a fade can make it.
+#[test]
+fn the_owners_score_plays_without_a_single_click() {
+    let mut stage = Stage::new(Box::new(low), false);
+    let from = stage.section(0);
+    stage.run_all();
+    let to = stage.sim.pos();
+    let (max_step, max_curve) = bounds(signals(&stage));
+    let ((step, at_step), (curve, at_curve)) = roughness(&stage, from, to);
+    let clicks = clicks(&stage, from, to, max_curve);
+    eprintln!(
+        "step {step:.5} at {at_step} (bound {max_step:.5}), curvature {curve:.6} at {at_curve} \
+         (bound {max_curve:.6}), {clicks} positions over the bound"
+    );
+    assert!(step <= max_step, "step {step} at {at_step} over {max_step}");
+    assert!(curve <= max_curve, "click: curvature {curve} at {at_curve} over {max_curve}");
+
+    // And the material really is the kind that clicks: without a fade, the wrap of the theme
+    // alone - its last recorded sample against its first - is many times what the bus may do.
+    let theme = stage.sim.core.track(0);
+    let len = theme.loop_len();
+    let raw = theme.layer(0).unwrap().channel(0, len);
+    let jump = f64::from((raw[len as usize - 1] - raw[0]).abs());
+    assert!(jump > 20.0 * max_curve, "the theme's raw seam is only {jump}");
+}
+
+/// "Stop all" pressed mid-chorus, mid-loop, mid-take: everything is silent from the sample it
+/// takes effect on, and the way there is a fade, not a cut.
+#[test]
+fn stop_all_fades_out_and_is_silent_on_its_sample() {
+    for (section, offset) in [(5usize, 12_345u64), (8, 70_001), (11, 3_333)] {
+        let mut stage = Stage::new(Box::new(low), false);
+        let press = stage.section(section) + offset;
+        stage.run_to(press);
+        let est = stage.sim.pos();
+        let soon = stage.runner.scheduler().soon(est);
+        stage.runner.stop_all(est);
+        stage.pump();
+        stage.run_to(soon + 4 * u64::from(BLOCK) * 10);
+        let (max_step, max_curve) = bounds(signals(&stage));
+        let ((step, at_step), (curve, at_curve)) =
+            roughness(&stage, stage.section(0), stage.sim.pos());
+        assert!(step <= max_step, "{section}: step {step} at {at_step}");
+        assert!(curve <= max_curve, "{section}: curvature {curve} at {at_curve}");
+        let loud_before = (soon - 2_000..soon - 500)
+            .any(|p| stage.sim.bus(Bus::Main, p).l.abs() > 0.01);
+        assert!(loud_before, "{section}: something was playing");
+        for p in soon..stage.sim.pos() {
+            let f = stage.sim.bus(Bus::Main, p);
+            assert_eq!((f.l, f.r), (0.0, 0.0), "{section}: sound at {p}, stop at {soon}");
+        }
+    }
 }
 
 #[allow(dead_code)]

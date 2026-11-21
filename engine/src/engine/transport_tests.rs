@@ -100,9 +100,9 @@ fn stop_keeps_the_loops_and_start_plays_them_from_the_top() {
     sim.run_to(now + 2_000);
     assert!(sim.out_l[now as usize..].iter().any(|&s| s != 0.0));
 
-    // ... until the transport stops: silence, but nothing is lost.
+    // ... until the transport stops: silence after a fade of one fade length, nothing is lost.
     sim.send(Command::TransportStop);
-    sim.run_blocks(2);
+    sim.run_blocks(5);
     let stopped_from = sim.pos();
     sim.run_to(stopped_from + 50_000);
     assert!(
@@ -116,14 +116,23 @@ fn stop_keeps_the_loops_and_start_plays_them_from_the_top() {
     assert!(status.tracks[0].playing, "der Track bleibt auf Play");
     assert_eq!(status.tracks[0].state, TrackState::Playing);
 
-    // Start again in the middle of a block: the loop begins with its first frame exactly there.
+    // Start again in the middle of a block: the loop begins with its first frame exactly there,
+    // faded in over one fade length - a transport start acts on its own sample, nothing could
+    // fade in before it - and is the loop as it is heard from there on.
     let at = sim.pos() + 1_000 + 37;
     sim.send(Command::TransportStart { at });
     sim.run_to(at + len + 500);
     assert_eq!(sim.out_l[at as usize - 1], 0.0);
-    for i in [0u64, 1, 2, 999, len - 1] {
+    let edge = crate::engine::track::edge_frames(48_000);
+    for i in [0u64, 1, 2, edge - 1] {
+        let want = content[i as usize] * crate::engine::track::fade_in(i, edge);
+        assert_eq!(sim.out_l[(at + i) as usize], want, "Einblendung, Frame {i} des Loops");
+    }
+    for i in [edge, 999, len - edge - 1] {
         assert_eq!(sim.out_l[(at + i) as usize], content[i as usize], "Frame {i} des Loops");
     }
+    let heard = sim.core.track(0).steady_layer(0, len - 1).l;
+    assert_eq!(sim.out_l[(at + len - 1) as usize], heard, "letzter Frame mit der Naht-Blende");
     assert_eq!(sim.out_l[(at + len) as usize], content[0], "und wieder von vorn");
     assert_eq!(sim.core.track(0).origin(), at, "der Loop ist auf die neue Eins verankert");
     let status = sim.latest_status().expect("Status");

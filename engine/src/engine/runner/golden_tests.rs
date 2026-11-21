@@ -144,10 +144,16 @@ fn scores_with_whole_loops_sound_exactly_as_before() {
     assert_eq!(got, GOLDEN.to_vec());
 }
 
-/// Taken on `origin/octaver` (2a135a0), before the re-anchoring existed.
+/// Taken on `origin/octaver` (2a135a0), before the re-anchoring existed, and taken again when loop
+/// playback and monitoring got their declicking fades (`audio-clean`, `Track::play_frame`). That
+/// change was checked against the previous output sample by sample: every frame of both buses is
+/// bit-identical except runs of 480-484 frames (one 10 ms fade, two overlapping where two tracks'
+/// seams lie a few frames apart) - right before a loop's seam, start, stop or re-anchoring, and
+/// right after a monitoring switch. 0.2 % of all frames; the hashes before were
+/// 0x239a_6ea4_e2fa_f135, 0xf3c7_eb75_2ba3_7c7b, 0x916c_672b_6618_fad1, 0x4382_1c7d_4d6f_4550.
 const GOLDEN: [(&str, u64); 4] = [
-    ("henry-3-4", 0x239a_6ea4_e2fa_f135),
-    ("waltz", 0xf3c7_eb75_2ba3_7c7b),
-    ("solo-loop", 0x916c_672b_6618_fad1),
-    ("whole loops", 0x4382_1c7d_4d6f_4550),
+    ("henry-3-4", 0xcd12_e6da_5f4f_0c7d),
+    ("waltz", 0xb80a_7581_3166_0428),
+    ("solo-loop", 0xeac7_ad07_0b49_9a75),
+    ("whole loops", 0x5cad_5a7f_2d4a_4f8d),
 ];

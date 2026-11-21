@@ -342,7 +342,7 @@ pub fn capture_pair(spec: &CaptureSpec) -> (Box<CaptureSession>, CaptureReader) 
 /// case it is in the stem already, and the latency-aligned complement must not add it again.
 #[inline]
 pub fn live_reaches_main(track: &Track, collapsed: bool) -> bool {
-    if !track.monitor() {
+    if !track.monitor_active() {
         return false;
     }
     let send: BusSend = track.monitor_send();
@@ -396,13 +396,11 @@ impl CaptureSession {
             return;
         };
         self.add2(base + slots.stem, stem);
-        if let Some(dry) = slots.dry
-            && track.playing()
-            && !track.held()
-        {
+        if let Some(dry) = slots.dry {
             // The loop on its own grid, without the read-ahead for plugin latency: the dry stem is
-            // musical position, not what was fed to a plugin.
-            let f = track.read(pos);
+            // musical position, not what was fed to a plugin. Read through the same function the
+            // mix reads it through, fades included - the stem holds what was heard.
+            let f = track.play_frame(pos);
             self.acc[base + dry] += f.l;
             if slots.dry_channels == 2 {
                 self.acc[base + dry + 1] += f.r;
@@ -418,9 +416,9 @@ impl CaptureSession {
         }
     }
 
-    /// One live input frame of one track, already at its musical position `pos = k - R`. `live`
-    /// says whether the track is recording, overdubbing or hearing through right now - only then
-    /// is the input music rather than the room.
+    /// One live input frame of one track, already at its musical position `pos = k - R`. `weight`
+    /// says how much of it is music rather than the room: 1 while the track is recording,
+    /// overdubbing or hearing through, 0 otherwise, in between while either fades in or out.
     #[inline]
     pub fn live_frame(
         &mut self,
@@ -428,12 +426,17 @@ impl CaptureSession {
         pos: u64,
         raw: Frame,
         track: &Track,
-        live: bool,
+        weight: f32,
         collapsed: bool,
     ) {
-        if !live || pos < self.start {
+        if weight <= 0.0 || pos < self.start {
             return;
         }
+        let raw = if weight >= 1.0 {
+            raw
+        } else {
+            Frame::new(raw.l * weight, raw.r * weight)
+        };
         let Some(base) = self.slot(pos) else {
             // Before the oldest open frame - it arrived later than the lag allows - or so far
             // ahead that it cannot be a real position. Either way it is left out and counted.

@@ -56,7 +56,8 @@ fn spec() -> SimSpec {
     }
 }
 
-/// Record [`LEN`] frames on track 0 and start playing them at [`PLAY_AT`]; returns the content.
+/// Record [`LEN`] frames on track 0 and start playing them at [`PLAY_AT`]; returns the loop as it
+/// is heard - the content with its seam crossfade (`Track::play_frame`).
 fn record_and_play(sim: &mut Sim) -> Vec<f32> {
     sim.send(Command::StartRecord {
         track: 0,
@@ -72,7 +73,7 @@ fn record_and_play(sim: &mut Sim) -> Vec<f32> {
         at: PLAY_AT,
     });
     let t = sim.core.track(0);
-    t.layer(0).expect("Ebene").content(t.loop_len()).to_vec()
+    (0..t.loop_len()).map(|i| t.steady_layer(0, i).l).collect()
 }
 
 fn loop_at(content: &[f32], pos: u64) -> f32 {
@@ -311,8 +312,10 @@ fn the_output_stage_never_reaches_the_recording() {
         },
         mono(square),
     );
-    let content = record_and_play(&mut sim);
+    record_and_play(&mut sim);
     run_and_meter(&mut sim);
+    let t = sim.core.track(0);
+    let content = t.layer(0).expect("Ebene").content(t.loop_len()).to_vec();
     assert_eq!(peak(&content), MINUS_1_4_DB, "die Ebene ist der Eingang, unbegrenzt");
     // The Main bus itself is not clamped any more either: its meter shows the true +7.5 dBFS.
     let main = peak(window(&sim.buses[0][0]));
