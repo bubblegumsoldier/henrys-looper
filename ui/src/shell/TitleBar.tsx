@@ -16,7 +16,7 @@ import { setLearnMode, setMidiView, sayMidi, useLearnMode, useMidiView } from ".
 import { IS_MAC } from "../platform";
 import { useStatusSlice } from "../status";
 import { Icon } from "./Icon";
-import { useEngine } from "./engine";
+import { engineWords, useEngine } from "./engine";
 import { Ticker } from "./Toasts";
 import { ClickSwitch } from "./ClickSwitch";
 import { OutputClip } from "./OutputClip";
@@ -49,6 +49,8 @@ interface Props {
 
 interface Facts {
   running: boolean;
+  /** The stage can be shown - the engine runs, or the resting status of the setup is there. */
+  ready: boolean;
   bpm: number;
   bpb: number;
   unit: number;
@@ -66,6 +68,7 @@ interface Facts {
 function pickFacts(s: LooperStatus): Facts {
   return {
     running: s.running,
+    ready: s.ready,
     bpm: s.bpm,
     bpb: s.beats_per_bar,
     unit: s.beat_unit,
@@ -83,6 +86,7 @@ function pickFacts(s: LooperStatus): Facts {
 function sameFacts(a: Facts, b: Facts): boolean {
   return (
     a.running === b.running &&
+    a.ready === b.ready &&
     a.bpm === b.bpm &&
     a.bpb === b.bpb &&
     a.unit === b.unit &&
@@ -261,7 +265,7 @@ function FreeTransport({ facts }: { facts: Facts }) {
       <button
         className={`tp start${facts.transport ? " on" : ""}`}
         data-midi={FREE_TRANSPORT}
-        disabled={!facts.running}
+        disabled={!facts.ready}
         onClick={() => freeTransport(!facts.transport)}
         title={`${facts.transport ? T.transportStop : T.transportStart} the clock · Space`}
         aria-pressed={facts.transport}
@@ -276,8 +280,8 @@ function Lcd({ facts, score }: { facts: Facts; score: ScoreView }) {
   const dash = "–";
   const withScore = score.loaded && score.section !== null;
   const barInLoop = facts.bars > 0 ? ((facts.bar - 1) % facts.bars) + 1 : facts.bar;
-  const bar = !facts.running ? dash : withScore ? score.bar : barInLoop;
-  const of = !facts.running ? "" : withScore ? score.barsTotal : facts.bars;
+  const bar = !facts.ready ? dash : withScore ? score.bar : barInLoop;
+  const of = !facts.ready ? "" : withScore ? score.barsTotal : facts.bars;
   // A standing clock lights no beat dot - nothing on the bar may blink while one arranges.
   const beat = facts.running && facts.transport ? (withScore ? score.beat : facts.beat) : 0;
   const dots = facts.bpb > 0 ? facts.bpb : 4;
@@ -294,7 +298,7 @@ function Lcd({ facts, score }: { facts: Facts; score: ScoreView }) {
             ? score.sectionId
             : score.loaded
               ? score.title
-              : !facts.running
+              : !facts.ready
                 ? dash
                 : facts.transport
                   ? "free loop"
@@ -311,7 +315,7 @@ function Lcd({ facts, score }: { facts: Facts; score: ScoreView }) {
       <div>
         <label>{T.beat}</label>
         <b>
-          {facts.running ? beat || 1 : dash}
+          {facts.ready ? beat || 1 : dash}
           <span className="beats">
             {Array.from({ length: Math.min(dots, 12) }, (_, i) => (
               <i key={i} className={`${i === 0 ? "one" : ""}${i + 1 === beat && facts.running ? " on" : ""}`} />
@@ -322,29 +326,31 @@ function Lcd({ facts, score }: { facts: Facts; score: ScoreView }) {
       <div>
         <label>{T.tempo}</label>
         <b>
-          {facts.running ? num(facts.bpm) : dash}
+          {facts.ready ? num(facts.bpm) : dash}
           <small>BPM</small>
         </b>
       </div>
       <div>
         <label>{T.timeSig}</label>
-        <b>{facts.running ? `${facts.bpb}/${facts.unit}` : dash}</b>
+        <b>{facts.ready ? `${facts.bpb}/${facts.unit}` : dash}</b>
       </div>
     </div>
   );
 }
 
 function StatusPill({ facts, open, onClick }: { facts: Facts; open: boolean; onClick: () => void }) {
-  const engine = useEngine().info;
+  const { info: engine, view } = useEngine();
   const frames = engine ? (engine.driver_input_frames ?? engine.buffer_frames) : null;
   let body: ReactNode;
   let cls = "pill status-pill";
   if (!facts.running) {
-    cls += " off";
+    // Not an instruction - the engine is the app's business. A calm word about where it stands.
+    const phase = view?.phase ?? "off";
+    cls += phase === "starting" ? " starting" : phase === "failed" ? " err" : phase === "waiting" ? " warn" : " off";
     body = (
       <>
         <i className="led" />
-        {T.engineStopped}
+        {engineWords(view)}
       </>
     );
   } else {

@@ -191,6 +191,21 @@ input.range:disabled { opacity: .4; }
 .alarm b { color: #fff; }
 .alarm .ic { --ic: 18px; color: var(--err); }
 
+/* The engine's band (EngineBanner): only when there is something to decide. */
+.ebanner {
+  display: flex; align-items: center; gap: 10px; padding: 7px 12px 7px 16px; min-width: 0;
+  border-bottom: 1px solid var(--line-2); background: var(--bg-2); color: var(--tx-2); font-size: var(--fs-13);
+}
+.ebanner .grow { flex: 1 1 auto; min-width: 0; }
+.ebanner .btn { flex: none; }
+.ebanner > .ic { --ic: 16px; flex: none; color: var(--tx-3); }
+.ebanner.warn { background: rgba(245,185,66,.09); border-bottom-color: rgba(245,185,66,.4); color: var(--tx-1); }
+.ebanner.warn > .ic { color: var(--warn); }
+.ebanner.err { background: rgba(255,92,108,.10); border-bottom-color: rgba(255,92,108,.45); color: var(--tx-1); }
+.ebanner.err > .ic { color: var(--err); }
+.pill.starting .led { background: var(--warn); box-shadow: none; animation: led-wait 1s ease-in-out infinite; }
+@keyframes led-wait { 50% { opacity: .35; } }
+
 /* --- Ticker: the newest message as one line in the title bar ----------------------------------- */
 .titlebar .doc { flex: none; max-width: 220px; }
 .titlebar .doc b, .titlebar .doc span { overflow: hidden; text-overflow: ellipsis; }

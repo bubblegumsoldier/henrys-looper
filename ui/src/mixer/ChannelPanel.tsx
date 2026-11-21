@@ -83,7 +83,7 @@ export function ChannelPanel({ expect, onTrackTab }: Props = {}) {
       <aside className="insp chan">
         <div className="insp-h">
           <span className="caps">Channel</span>
-          <div className="sub">No engine running - start it to see its channels.</div>
+          <div className="sub">No channel - add tracks in Setup.</div>
         </div>
       </aside>
     );

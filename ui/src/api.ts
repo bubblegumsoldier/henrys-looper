@@ -32,6 +32,7 @@ import type {
   ScoreDoc,
   ScoreLoaded,
   StartConfig,
+  EngineStateView,
   TrackSourceId,
 } from "./types";
 import type { MidiBindingOptions, MidiPortView, MidiProfileAction, MidiSaved, MidiView } from "./midi/types";
@@ -81,6 +82,24 @@ export const api = {
   /** What the running engine opened, or null - asked once when the page (re)loads. */
   engineInfo: () => call<EngineInfo | null>("engine_info"),
   engineStop: () => call<void>("engine_stop"),
+  /**
+   * The setup and "start when the app opens", sent at startup and on every change. The first call
+   * of a run is when the engine starts by itself. `preview`: the score that will be loaded again,
+   * whose tracks the resting stage shows. Answers where the engine stands.
+   */
+  engineConfigure: (config: StartConfig, autostart: boolean, preview: string | null) =>
+    call<EngineStateView>("engine_configure", { config, autostart, preview }),
+  engineState: () => call<EngineStateView>("engine_state"),
+  /** Start the engine if it is not running (before a plugin's window opens). */
+  engineEnsure: () => call<void>("engine_ensure"),
+  /** "Use … now" while the engine waits for a missing interface. */
+  engineUseFallback: () => call<EngineInfo>("engine_use_fallback"),
+  /** Rebuild with the setup sent last; a loaded score is loaded again. */
+  engineRestart: () => call<EngineInfo>("engine_restart"),
+  /** "Unmute anyway": monitored inputs are heard on built-in speakers too (this run). */
+  engineUnmute: () => call<void>("engine_unmute"),
+  /** macOS's microphone privacy settings. */
+  openMicSettings: () => call<void>("open_mic_settings"),
 
   // --- per track (zero-based index into the status event's `tracks`) --------
   trackRecord: (track: number) => call<void>("track_record", { track }),

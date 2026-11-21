@@ -32,9 +32,14 @@ export const pluginApi = {
   /** Normalised 0..1. Answers with what the plugin actually took. */
   setParam: (target: string, slot: number, id: number, value: number) =>
     call<ParamValue>("plugin_set_param", { target, slot, id, value }),
-  /** The plugin's own window. Fails with a sentence when it has none - show `params` instead. */
-  editor: (target: string, slot: number, open: boolean) =>
-    call<RackView>("plugin_editor", { target, slot, open }),
+  /**
+   * The plugin's own window. Fails with a sentence when it has none - show `params` instead. Opening
+   * it starts the engine first when it is not running: a plugin one plays wants to be heard.
+   */
+  editor: async (target: string, slot: number, open: boolean) => {
+    if (open) await invoke("engine_ensure").catch(() => undefined);
+    return call<RackView>("plugin_editor", { target, slot, open });
+  },
   /** The complete plugin state as base64 (a preset to keep). */
   stateGet: (target: string, slot: number) => call<string>("plugin_state_get", { target, slot }),
   stateSet: (target: string, slot: number, data: string) =>

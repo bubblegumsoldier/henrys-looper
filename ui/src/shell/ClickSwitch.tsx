@@ -17,16 +17,30 @@ import { Icon } from "./Icon";
 import { run } from "./notes";
 import { T } from "./terms";
 
-/** 0 = engine off, then bit 1 = on, bit 2 = the click can be heard now. */
+/** 0 = no stage at all, then bit 1 = shown, bit 2 = on, bit 4 = the click can be heard now. */
 function pick(s: LooperStatus): number {
-  if (!s.running) return 0;
-  return 1 | (s.click ? 2 : 0) | (s.click_open ? 4 : 0);
+  if (!s.ready) return 0;
+  // Without an engine nothing clicks, so "on" is all there is to say.
+  return 1 | (s.click ? 2 : 0) | (s.click_open || !s.running ? 4 : 0);
 }
 
+/**
+ * K, the switch, MIDI. Without a running engine the click is a setting of the next start: it goes
+ * into the setup, and the resting stage shows it at once - nothing to start for that.
+ */
 export function toggleClick(): void {
   const s = currentStatus();
-  if (!s.running) return;
+  if (!s.ready) return;
+  if (!s.running) {
+    setConfig((c) => ({ ...c, click: !c.click }));
+    return;
+  }
   run(() => api.setClick(!s.click));
+}
+
+function setClickGain(g: number): void {
+  if (currentStatus().running) run(() => api.clickGain(g));
+  else setConfig((c) => ({ ...c, click_gain: g }));
 }
 
 function gainDb(g: number): string {
@@ -62,8 +76,7 @@ function ClickVolume({ onClose }: { onClose: () => void }) {
         value={gain}
         data-midi={GLOBAL.clickGain}
         onChange={(e) => {
-          const g = Number(e.target.value);
-          run(() => api.clickGain(g));
+          setClickGain(Number(e.target.value));
         }}
         title="The click is on the monitor bus only"
       />
@@ -82,7 +95,7 @@ export function ClickSwitch({ variant }: { variant: "bar" | "tile" }) {
   const waiting = on && !heard;
   const look = !running ? "" : !on ? " off" : waiting ? " on waiting" : " on";
   const title = !running
-    ? "The click - start the engine first"
+    ? T.click
     : !on
       ? `${T.clickOff} · key K. Right-click: volume`
       : waiting

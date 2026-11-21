@@ -12,7 +12,8 @@
 //!
 //! Without a score the same frame is a free looper: the position block counts the loop, the
 //! Release surface shows the next armed take with its countdown, the two big buttons become the
-//! grid and the click. With the engine stopped it offers to start it.
+//! grid and the click. With the engine not (yet) running it is the same stage at rest - the
+//! engine starts by itself, or with the first press that needs it.
 //!
 //! Rendering discipline (the engine pushes 20 events a second): this component watches the track
 //! *structure*, the clock (bar/beat) and the runner view, all of which change a few times a second
@@ -32,12 +33,9 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { api } from "../api";
 import { currentStatus, structureSignature, useStatusEffect, useStatusSlice } from "../status";
 import { run } from "../shell/notes";
-import { Icon } from "../shell/Icon";
-import { startEngine, useEngine } from "../shell/engine";
 import { useScore } from "../shell/scoreTransport";
 import { useLoadedScore } from "../shell/scoreModel";
 import { T } from "../shell/terms";
-import { currentConfig } from "../setup/config";
 import { PositionPanel, type Clock } from "./PositionPanel";
 import { ReleasePanel } from "./ReleasePanel";
 import { ArrangementStrip } from "./ArrangementStrip";
@@ -136,39 +134,13 @@ interface Props {
   onOpenArrangement: () => void;
 }
 
+/**
+ * Always the whole stage. Without a running engine the status is the resting one the Rust side
+ * builds from the setup (or from the score about to be loaded): the same tiles and clock, meters
+ * at rest, and the first press that needs the engine starts it.
+ */
 export function LiveView(props: Props) {
-  const running = useStatusSlice((s) => s.running);
-  if (!running) return <EngineOff {...props} />;
   return <Stage {...props} />;
-}
-
-function EngineOff({ onOpenSetup }: Props) {
-  const { busy } = useEngine();
-  const config = currentConfig();
-  return (
-    <div className="live-wrap">
-      <div className="live live-off">
-        <section className="panel offcard">
-          <Icon name="power" size={40} />
-          <h2>{T.engineStopped}</h2>
-          <p>
-            {config.host} · {config.device ?? "default device"} · {config.sample_rate / 1000} kHz ·{" "}
-            {config.buffer_frames} frames · {config.tracks.length} tracks
-          </p>
-          <div className="row">
-            <button className="bigbtn running" disabled={busy} onClick={() => void startEngine(currentConfig())}>
-              <Icon name="power" />
-              {busy ? "Starting…" : T.startEngine}
-            </button>
-            <button className="bigbtn" onClick={onOpenSetup}>
-              <Icon name="gear" />
-              {T.setup}
-            </button>
-          </div>
-        </section>
-      </div>
-    </div>
-  );
 }
 
 function Stage({ onOpenArrangement }: Props) {
@@ -228,7 +200,7 @@ function Stage({ onOpenArrangement }: Props) {
   const lastBp = useRef(-1);
   useStatusEffect((s) => {
     const el = root.current;
-    if (!el || !s.running) return;
+    if (!el || !s.ready) return;
     const spb = s.samples_per_beat;
     const bpb = s.beats_per_bar || 4;
     const inBeat = spb > 0 ? Math.min(1, s.beat_offset / spb) : 0;

@@ -155,8 +155,8 @@ function LoadControls({ actions, ok, locked }: { actions: ScoreActions; ok: bool
         onClick={() => void actions.load()}
         title={
           actions.stale
-            ? "The score changed since it was loaded — load it again. Needs a running engine with empty tracks."
-            : "Load the score into the runner. Needs a running engine with empty tracks."
+            ? "The score changed since it was loaded — load it again. Needs empty tracks; starts the engine if it is not running."
+            : "Load the score into the runner. Needs empty tracks; starts the engine if it is not running."
         }
       >
         <i className="ic ic-target" />
@@ -608,7 +608,7 @@ export function Arrangement({ onGoto, actions }: Props) {
             <Ticker feed={false} />
           </div>
           {validity}
-          <span>{run.engine ? `Engine running · ${Math.round(run.sampleRate / 100) / 10} kHz` : "Engine off"}</span>
+          <span>{run.engine ? `Engine running · ${Math.round(run.sampleRate / 100) / 10} kHz` : T.engineOff}</span>
         </div>
       </div>
     </div>

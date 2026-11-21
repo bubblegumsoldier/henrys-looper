@@ -117,9 +117,12 @@ export function scoreCanStart(v: ScoreView): boolean {
 /** Start (`true`), stop (`false`) or toggle (`null`) the clock of free looping. */
 export const freeTransport = (on: boolean | null) => run(() => api.transport(on));
 
-/** What the free-looping keys need to know: is there an engine, and does its clock run. */
+/**
+ * What the free-looping keys need to know: is there a stage (a running engine, or the resting one
+ * whose first press starts it), and does its clock run.
+ */
 function pickFree(s: LooperStatus): number {
-  return (s.running ? 1 : 0) + (s.transport ? 2 : 0);
+  return (s.ready ? 1 : 0) + (s.transport ? 2 : 0);
 }
 
 export const scoreStart = () => say(() => scoreApi.start());

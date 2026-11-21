@@ -18,7 +18,7 @@ import { currentConfig, setConfig } from "../setup/config";
 import { Icon } from "../shell/Icon";
 import { run } from "../shell/notes";
 import { T, num } from "../shell/terms";
-import { useStatusSlice } from "../status";
+import { currentStatus, useStatusSlice } from "../status";
 import type { Clock } from "./PositionPanel";
 
 const BAR_CHOICES = [1, 2, 4, 8, 16];
@@ -33,6 +33,11 @@ const SIGNATURES: [number, number][] = [
 
 /** Send a new grid, and keep it for the next start once the engine has it. */
 export function applyClock(bpm: number, bpb: number, unit: number, bars: number): void {
+  // Without a running engine the grid is a setting of the next start - nothing to start for it.
+  if (!currentStatus().running) {
+    setConfig((c) => ({ ...c, bpm, beats_per_bar: bpb, beat_unit: unit, bars }));
+    return;
+  }
   run(async () => {
     await api.setTempo(bpm, bpb, unit, bars);
     setConfig((c) => ({ ...c, bpm, beats_per_bar: bpb, beat_unit: unit, bars }));
@@ -57,7 +62,8 @@ export function clearAllAsked(): void {
  */
 function useFollowClock(clock: Clock, free: boolean): void {
   useEffect(() => {
-    if (!free || clock.bpm <= 0 || clock.bpb <= 0) return;
+    // The resting stage shows the setup itself (or a score about to be loaded): nothing to follow.
+    if (!free || !currentStatus().running || clock.bpm <= 0 || clock.bpb <= 0) return;
     const c = currentConfig();
     if (c.bpm !== clock.bpm || c.beats_per_bar !== clock.bpb || c.beat_unit !== clock.unit || c.bars !== clock.bars) {
       setConfig({ ...c, bpm: clock.bpm, beats_per_bar: clock.bpb, beat_unit: clock.unit, bars: clock.bars });

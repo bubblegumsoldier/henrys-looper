@@ -299,6 +299,17 @@ export interface LooperTrackStatus {
 export interface LooperStatus {
   running: boolean;
   /**
+   * The stage can be drawn: the engine runs, or it does not yet and this status shows the tracks
+   * and clock it will start with - meters at rest, every control usable; the first press that
+   * needs the engine starts it.
+   */
+  ready: boolean;
+  /**
+   * The monitored live inputs are silenced: the output is a pair of built-in speakers and a
+   * monitored microphone would feed back. `api.engineUnmute` lifts it.
+   */
+  monitor_muted: boolean;
+  /**
    * Whether the clock runs. False: bar 1, beat 1, nothing counts or blinks. In free looping it is
    * the Start/Stop button (`api.transport`); with a score it is true from count-in to end of run.
    */
@@ -385,6 +396,8 @@ export interface LooperStatus {
 
 export const IDLE_STATUS: LooperStatus = {
   running: false,
+  ready: false,
+  monitor_muted: false,
   transport: false,
   pos: 0,
   seconds: 0,
@@ -571,6 +584,27 @@ export interface StartConfig {
   bus_gain_main: number | null;
   /** Volume of the monitor bus, linear. null means 1.0. */
   bus_gain_monitor: number | null;
+}
+
+/** Where the engine stands (`looper://engine-state`, `api.engineState`). */
+export interface EngineStateView {
+  /**
+   * `running`; `starting`; `off` - not started yet, starts with the first press; `stopped` - by
+   * hand, starts with the next press; `waiting` for an interface; `failed`.
+   */
+  phase: "running" | "starting" | "off" | "stopped" | "waiting" | "failed";
+  /** The sentence for the phase: the reason of a failure, what is awaited. */
+  message: string | null;
+  /** The interface the engine waits for. */
+  missing: string | null;
+  /** What "Use … now" would open instead. */
+  alternative: string | null;
+  /** The failure is the refused microphone permission. */
+  permission: boolean;
+  /** The setup changed in something only a restart of the engine applies. */
+  restart_needed: boolean;
+  /** "Start the engine when the app opens". */
+  autostart: boolean;
 }
 
 /** What the driver actually agreed to. Returned by `engine_start`. */

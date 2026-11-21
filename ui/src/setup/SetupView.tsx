@@ -1,11 +1,12 @@
 //! Setup (design/setup.html): a calm page in the same window. Navigation on the left, cards on the
 //! right.
 //!
-//! It is reachable at any time from the gear. While the engine is stopped every field edits the
-//! start configuration; while it runs, the device, rate, buffer and track list are locked (changing
-//! them means reopening the device) and the page shows what the engine really opened - but
-//! everything the engine can change on the fly stays live here: bus outputs and volumes, each
-//! track's monitoring, sends and latency trim, tempo, grid and click.
+//! It is reachable at any time from the gear. While the engine is not running every field edits the
+//! setup it starts with. While it runs, the page shows what the engine really opened and keeps
+//! everything the engine can change on the fly live (bus outputs and volumes, each track's
+//! monitoring, sends and latency trim, tempo, grid and click); "Change" opens the device and the
+//! track list for editing, and leaving Setup applies it - the engine restarts by itself, after
+//! asking when recorded loops would go (`shell/engine.ts` `applySetupChanges`).
 
 import { applyClock } from "../live/ClockBar";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
@@ -22,7 +23,7 @@ import { IS_MAC } from "../platform";
 import { currentStatus, structureSignature, useStatusSlice } from "../status";
 import { Icon } from "../shell/Icon";
 import { fail, run } from "../shell/notes";
-import { startEngine, stopEngine, useEngine } from "../shell/engine";
+import { setEnginePrefs, startEngine, stopEngine, useEngine, useEnginePrefs } from "../shell/engine";
 import { T, gainDb, num } from "../shell/terms";
 import { HMeter } from "../live/HMeter";
 import { GRID_CHOICES, loopKindBlock, setLoopKind, setNoteGrid, setTranspose, TransposeControl } from "../live/MidiLoopRows";
@@ -249,6 +250,9 @@ export function SetupView({ info, page, onPage, onStarted }: Props) {
   const midi = useMidiView();
   const [report, setReport] = useState<DeviceReport | null>(null);
   const [scanning, setScanning] = useState(false);
+  // While the engine runs, "Change" unlocks the device and the track list; leaving Setup applies.
+  const [editing, setEditing] = useState(false);
+  const locked = running && !editing;
   const tracksCard = useRef<HTMLElement | null>(null);
 
   const patch = useCallback((part: Partial<StartConfig>) => setConfig((c) => ({ ...c, ...part })), []);
@@ -261,8 +265,9 @@ export function SetupView({ info, page, onPage, onStarted }: Props) {
       setConfig((c) => {
         const host = found.hosts.find((h) => h.name === c.host) ?? found.hosts[0];
         if (!host) return c;
-        const known = host.devices.some((d) => d.name === c.device);
-        if (host.name === c.host && (known || c.device === null)) return c;
+        // A device that is chosen stays chosen, also while it is not plugged in: the engine waits
+        // for it rather than quietly taking another one (that one could be the laptop speakers).
+        if (host.name === c.host) return c;
         // Prefer the interface this project was measured on, else the default input if it can also
         // play (one device, one clock), else any duplex device, else the default input.
         const duplex = (d: DeviceInfo) => d.input && d.output;
@@ -284,8 +289,8 @@ export function SetupView({ info, page, onPage, onStarted }: Props) {
 
   useEffect(() => {
     // The survey opens nothing, but a running engine already owns the device; ask only when idle.
-    if (!running && report === null) void scan();
-  }, [scan, running, report]);
+    if (!locked && report === null) void scan();
+  }, [scan, locked, report]);
 
   useEffect(() => {
     if (page === "tracks") tracksCard.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -335,8 +340,8 @@ export function SetupView({ info, page, onPage, onStarted }: Props) {
         ))}
         <div className="grow" />
         <div className="hint" style={{ padding: "0 10px" }}>
-          Changes to device, sample rate or buffer need the engine stopped; they apply on the next start.
-          {running && " The engine is running, so they are locked now."}
+          Device, sample rate, buffer and the track list apply when you leave Setup: the engine restarts by itself, and
+          asks first when recorded loops would be lost.
         </div>
       </nav>
 
@@ -352,15 +357,18 @@ export function SetupView({ info, page, onPage, onStarted }: Props) {
               report={report}
               device={device}
               scanning={scanning}
-              running={running}
+              running={locked}
+              live={running}
+              editing={editing}
+              onEdit={() => setEditing(true)}
               busy={engine.busy}
               onScan={() => void scan()}
               onStart={() => void start()}
               patch={patch}
             />
-            <BusCard config={config} device={device} running={running} patch={patch} />
+            <BusCard config={config} device={device} running={locked} patch={patch} />
             <section className="card" ref={tracksCard}>
-              <TracksCard config={config} device={device} running={running} info={info} patch={patch} />
+              <TracksCard config={config} device={device} running={locked} info={info} patch={patch} />
             </section>
           </>
         )}
@@ -384,6 +392,9 @@ function DeviceCard({
   device,
   scanning,
   running,
+  live,
+  editing,
+  onEdit,
   busy,
   onScan,
   onStart,
@@ -393,7 +404,12 @@ function DeviceCard({
   report: DeviceReport | null;
   device: DeviceInfo | null;
   scanning: boolean;
+  /** The fields show what the running engine opened and are locked. */
   running: boolean;
+  /** The engine runs (the fields may still be open for editing). */
+  live: boolean;
+  editing: boolean;
+  onEdit: () => void;
   busy: boolean;
   onScan: () => void;
   onStart: () => void;
@@ -423,8 +439,16 @@ function DeviceCard({
       <div className="card-h">
         <h3>Audio device</h3>
         <div className="grow" />
-        {running ? (
+        {live ? (
           <>
+            {editing ? (
+              <span className="dim">Applies when you leave Setup</span>
+            ) : (
+              <button className="btn s" onClick={onEdit} title="Change device, rate, buffer or tracks - the engine restarts when you leave Setup">
+                <Icon name="gear" />
+                Change
+              </button>
+            )}
             <span className="pill">
               <i className="led" />
               {T.engineRunning}
@@ -438,7 +462,7 @@ function DeviceCard({
           <>
             <span className="pill off">
               <i className="led" />
-              {T.engineStopped}
+              {T.engineOff}
             </span>
             <button className="btn accent" disabled={busy || config.tracks.length === 0} onClick={onStart}>
               <Icon name="power" />
@@ -485,6 +509,10 @@ function DeviceCard({
                 options={[
                   { value: "", label: host?.default_input ? `Default (${host.default_input})` : "(host default)" },
                   ...(host?.devices ?? []).map((d) => ({ value: d.name, label: d.name })),
+                  // Chosen, but not plugged in: it stays the choice, and the engine waits for it.
+                  ...(config.device && host && !host.devices.some((d) => d.name === config.device)
+                    ? [{ value: config.device, label: `${config.device} (not connected)` }]
+                    : []),
                 ]}
                 onChange={(v) => patch({ device: v === "" ? null : v })}
               />
@@ -1389,6 +1417,38 @@ function TempoPage({ config, running, patch }: { config: StartConfig; running: b
 // General
 // ---------------------------------------------------------------------------------------------
 
+/** When the engine runs: by itself, and with the score of the last session. */
+function EngineCard() {
+  const prefs = useEnginePrefs();
+  return (
+    <section className="card">
+      <div className="card-h">
+        <h3>{T.engine}</h3>
+      </div>
+      <div className="card-b">
+        <div className="srow">
+          <label>{T.autostart}</label>
+          <div>
+            <Toggle on={prefs.autostart} onChange={(on) => setEnginePrefs({ autostart: on })} />
+            <span className="dim">
+              {prefs.autostart
+                ? "Open the app and play. Off: the engine starts with the first press that needs it."
+                : "The engine starts with the first press that needs it - Load, Start, Record, a MIDI note."}
+            </span>
+          </div>
+        </div>
+        <div className="srow">
+          <label>{T.reloadScore}</label>
+          <div>
+            <Toggle on={prefs.reloadScore} onChange={(on) => setEnginePrefs({ reloadScore: on })} />
+            <span className="dim">A score that was loaded when the app was closed is loaded again, ready for Space.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function GeneralPage({ info }: { info: AppInfo | null }) {
   const keys: [string, string][] = [
     ["1 – 8", "select a track"],
@@ -1419,6 +1479,7 @@ function GeneralPage({ info }: { info: AppInfo | null }) {
         <h1>General</h1>
         <p className="lead">About this build, and every key.</p>
       </div>
+      <EngineCard />
       <section className="card">
         <div className="card-h">
           <h3>Application</h3>

@@ -201,6 +201,14 @@ export function setConfig(update: StartConfig | ((c: StartConfig) => StartConfig
   for (const l of listeners) l();
 }
 
+/** Called after every change of the setup. Returns the unsubscribe function. */
+export function subscribeConfig(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
 export function useConfig(): StartConfig {
   return useSyncExternalStore(
     (l) => {

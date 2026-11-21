@@ -14,7 +14,7 @@ import { HMeter } from "../live/HMeter";
 import { currentConfig } from "../setup/config";
 import { Icon } from "./Icon";
 import { run } from "./notes";
-import { startEngine, stopEngine, useEngine } from "./engine";
+import { engineWords, startEngine, stopEngine, useEngine } from "./engine";
 import { T, gainDb } from "./terms";
 import type { BusId, LooperStatus } from "../types";
 
@@ -135,7 +135,7 @@ function Reduction({ channel }: { channel: number }) {
 
 export function EnginePanel({ onClose, onSetup }: { onClose: () => void; onSetup: () => void }) {
   const c = useStatusSlice(pick, same);
-  const { info, busy } = useEngine();
+  const { info, busy, view } = useEngine();
   const box = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -176,7 +176,7 @@ export function EnginePanel({ onClose, onSetup }: { onClose: () => void; onSetup
       <div className="pop-h">
         <span className={`pill${c.running ? "" : " off"}`}>
           <i className="led" />
-          {c.running ? T.engineRunning : T.engineStopped}
+          {c.running ? T.engineRunning : engineWords(view)}
         </span>
         <div className="grow" />
         <button className="btn s" onClick={onSetup}>

@@ -91,6 +91,15 @@ export const T = {
   engineStopped: "Engine stopped",
   startEngine: "Start engine",
   stopEngine: "Stop engine",
+  restartEngine: "Restart engine",
+  engineStarting: "Engine starting…",
+  engineOff: "Engine off – starts when you play",
+  monitorMutedSpeakers:
+    "Monitoring is muted: the output is the built-in speakers and would feed back. Plug in headphones or pick another output.",
+  unmuteAnyway: "Unmute anyway",
+  restartClearsLoops: "Restarting the engine clears the recorded loops.",
+  autostart: "Start the engine when the app opens",
+  reloadScore: "Reload the last score on start",
   dropouts: "dropouts",
   clearAll: "Clear all",
 

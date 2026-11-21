@@ -9,8 +9,8 @@
 //!
 //! **Arrangement** is where a song is written (grid, inspector and YAML text of one document;
 //! the mixer is a later stage). **Live** is the stage: big, readable from across the room,
-//! every control reachable by MIDI. **Setup** is reachable from the gear at any time; with the
-//! engine stopped it is where the app opens, and starting the engine from it switches to Live.
+//! every control reachable by MIDI. **Setup** is reachable from the gear at any time. The app
+//! opens on the stage and starts the engine by itself (`shell/engine.ts`).
 //!
 //! MIDI learn reaches every view: `LearnLayer` is the one document-level listener that turns a click
 //! on any element with a `data-midi` address into a binding, and `.learn-on` on the window lets the
@@ -24,9 +24,11 @@ import { LearnLayer } from "./midi/LearnLayer";
 import { LearnBar, MidiSide } from "./midi/MidiSide";
 import { useLearnMode } from "./midi/store";
 import { useLooperEvents } from "./useWebSocket";
-import { useStatusSlice } from "./status";
 import { TitleBar, type Mode } from "./shell/TitleBar";
 import { EnginePanel } from "./shell/EnginePanel";
+import { EngineBanner } from "./shell/EngineBanner";
+import { applySetupChanges, bootEngine } from "./shell/engine";
+import { currentStatus } from "./status";
 import { Alarm } from "./shell/Toasts";
 import { fail } from "./shell/notes";
 import { useScoreKeys } from "./shell/scoreTransport";
@@ -48,15 +50,16 @@ function storedMode(): Mode {
 
 export default function App() {
   const { info, error } = useLooperEvents();
-  const running = useStatusSlice((s) => s.running);
   const learn = useLearnMode();
   const [mode, setMode] = useState<Mode>(storedMode);
-  // The app opens on Setup while the engine is down - that is where the first thing to do is.
-  const [setupOpen, setSetupOpen] = useState(!running);
+  // The app opens where one plays: the engine is the app's business, not a first step.
+  const [setupOpen, setSetupOpen] = useState(false);
   const [page, setPage] = useState<SetupPage>("audio");
   const [enginePanel, setEnginePanel] = useState(false);
 
   useScoreModelSync();
+  // From here on the engine may start by itself (Setup › General).
+  useEffect(() => void bootEngine(), []);
   useWindowTitle();
   // Fader moves go into the open song's `mixer:` section, undo moves the faders back.
   useEffect(() => startScoreMix(), []);
@@ -87,6 +90,15 @@ export default function App() {
     window.addEventListener("looper-autopilot", onPilot);
     return () => window.removeEventListener("looper-autopilot", onPilot);
   }, []);
+
+  // Leaving Setup applies what changed there - a new device or track list rebuilds the engine.
+  const wasOpen = useRef(setupOpen);
+  useEffect(() => {
+    if (wasOpen.current && !setupOpen) {
+      void applySetupChanges(currentStatus().tracks.some((t) => t.layers.length > 0));
+    }
+    wasOpen.current = setupOpen;
+  }, [setupOpen]);
 
   const chooseMode = useCallback((m: Mode) => {
     setMode(m);
@@ -155,6 +167,7 @@ export default function App() {
 
       <div className="bars">
         <Alarm />
+        <EngineBanner onSetup={openSetup} />
         {learn && <LearnBar mode={setupOpen ? "setup" : mode} />}
       </div>
 

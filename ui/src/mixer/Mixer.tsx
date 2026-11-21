@@ -15,7 +15,7 @@ import { DEFAULT_HEIGHT, MIN_HEIGHT, selectChannel, setMixer, useMixer } from ".
 
 export function Mixer() {
   const m = useMixer();
-  const running = useStatusSlice((s) => s.running);
+  const running = useStatusSlice((s) => s.ready);
   const signature = useStatusSlice(structureSignature);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const tracks = useMemo(() => currentStatus().tracks, [signature]);
@@ -131,7 +131,7 @@ export function Mixer() {
       {!running ? (
         <div className="mixer-off">
           <Icon name="power" size={18} />
-          <span>{engine.busy ? "The engine is starting…" : "The engine is stopped - the mixer shows the channels of a running engine."}</span>
+          <span>{engine.busy ? "The engine is starting…" : "No setup yet - add tracks in Setup."}</span>
         </div>
       ) : (
         <div className="strips">
