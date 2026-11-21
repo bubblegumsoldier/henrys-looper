@@ -17,7 +17,7 @@ können sich jederzeit ändern. Die Oberfläche ist englisch, Doku und Code-Komm
 |---|---|
 | **Setup** (Zahnrad) | Audio-Gerät, Puffer, Spuren und Eingänge, Klick, Latenz, MIDI-Geräte, Plugins. Änderungen an Gerät und Spuren gelten beim Verlassen des Setups (die Engine baut sich selbst neu auf). |
 | **Live** | Die Bühnenansicht: je Spur eine Kachel mit *Record · Overdub · Play · Stop · Monitor*, Pegel, Ebenen. Ohne geladene Partitur ein freier Looper; mit Partitur oben Sektion, Takt, Schlag, *Release* und *Stop all*. |
-| **Arrangement** | Die Partitur grafisch (Raster Sektionen × Spuren, Inspektor) oder als YAML-Text; *File* (New/Open/Recent/Save) und *Load*. Darunter aufklappbar der **Mixer** (Fader, Pan, Mute/Solo, Effekte, VST3/AU-Plugins, Busse). Läuft eine Partitur, ist das Arrangement gesperrt. |
+| **Arrangement** | Die Partitur grafisch (Raster Sektionen × Spuren, Inspektor), als YAML-Text oder ihr **Blatt** (*Sheet*: Text, Akkorde, Regie); *File* (New/Open/Recent/Save) und *Load*. Darunter aufklappbar der **Mixer** (Fader, Pan, Mute/Solo, Effekte, VST3/AU-Plugins, Busse). Läuft eine Partitur, ist das Arrangement gesperrt. |
 | **MIDI Learn** | Jedes bedienbare Element lässt sich per Klick und Druck auf ein Pad/einen Regler belegen; die Seitenleiste zeigt alle Belegungen je Gerät. |
 
 Auf dem Mac starten (aus dem Repo-Wurzelverzeichnis):
@@ -61,6 +61,7 @@ Stoppstelle.
 | Live | `1`–`8` | Spur wählen |
 | Live | `R` `O` `P` `S` `M` | Record · Overdub · Play · Stop · Monitor der gewählten Spur |
 | Live | `I` | Spur-Detail auf/zu |
+| Live | `L` | Blatt (Text, Akkorde, Regie) rechts neben der Bühne auf/zu |
 | Live | `F` | Effekte der Spur umgehen (Bypass) |
 | Live | `X` / `V` / `D` + Ziffer | Effekt an/aus (1 Oktaver … 6 Hall) · Preset laden (4 = Bass) · Delay-Notenwert |
 | überall (außer im Textfeld) | `K` | Klick an/aus (auch der große *Click*-Schalter in der Kopfleiste; Rechtsklick: Lautstärke) |
@@ -227,6 +228,33 @@ schreibgeschützt.
   nicht gestartet, ist die Partitur still — der Klick beginnt mit dem Einzähler und endet mit dem
   Ende oder „Stop all".
   Läuft eine Partitur, ist das Arrangement gesperrt; ein Klick auf einen Sektionsmarker springt.
+
+**Das Blatt (Sheet).** Text, Akkorde und Regieanweisungen des Stücks stehen in der Partitur unter
+`sheet: |` und laufen im Live-Modus rechts neben der Bühne mit (Taste `L` oder die Leiste am rechten
+Rand; Breite am linken Rand ziehen, Schrift mit A−/A+, alles wird gemerkt; unter 1280 px Fensterbreite
+startet sie zu). Oben steht fest **NOW** (die geltende Anweisung, rot bei `REC`) und **NEXT** („in 3
+bars · …“ bzw. „after Release“), darunter das ganze Blatt mit hervorgehobener Zeile, Fortschritt,
+klingendem Akkord und abgedunkelter Vergangenheit; es scrollt mit, außer man scrollt selbst (dann ein
+paar Sekunden Pause). Geschrieben wird es im Arrangement unter *Sheet* (Editor links, dieselbe Ansicht
+rechts als Vorschau; Bearbeitungen sind normale Partitur-Änderungen mit ⌘Z und Sichern):
+
+```yaml
+sheet: |
+  beats per chord: 2
+  # Verse 1 @verse_1
+  > REC bass · 2 bars |2
+  Am            C/G
+  Erste Platzhalterzeile
+  [F]Zweite Zeile mit [C]Akkorden |1.5
+```
+
+`# Teil` Überschrift, `@id` dahinter verankert den Teil am Anfang dieser Sektion (eine Sektion, die bis
+Release loopt, wiederholt ihren Text in jedem Durchlauf und springt beim Wechsel weiter); `> …`
+Anweisung (mit `REC` vorn rot, `|2` = dauert selbst 2 Takte); Akkorde über dem Text (die Spalten
+zählen, wie von Tab-Seiten kopiert) oder inline als `[Am]`; eine Zeile dauert `Akkorde × beats per
+chord` Schläge, mit `|N` genau `N` Takte, sonst 1 Takt. `score --check` nennt unbekannte Anker mit
+Zeile und warnt, wenn der Text zwischen zwei Ankern anders lang ist als seine Sektionen. Beispiel:
+`examples/solo-loop-4-4.yaml`. Details: `docs/architektur.md`, Abschnitt 17.
 
 **Mix speichern.** Ist eine Partitur geladen, landet jede Mixer-Änderung (Fader, Mute,
 Effekte, Bus-/Klick-/Mithörpegel — per Maus, Taste oder MIDI) nach einem Moment im Abschnitt

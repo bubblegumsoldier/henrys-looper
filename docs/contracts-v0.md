@@ -159,7 +159,39 @@ sections:
     repeat: verse
     tracks:                            # optionale Overrides
       gitarre: overdub
+sheet: |                               # optional (nur Rust-Engine): Text, Akkorde, Regie fuer die Live-Ansicht
+  beats per chord: 2
+  # Intro
+  > REC gitarre · 4 bars |2
+  Am   C/G   F   C
+  Platzhalterzeile unter den Akkorden
+  # Verse @verse
+  [Am]Erste Zeile mit [C]Akkorden |1.5
 ```
+
+Im Block ist alles Text, auch `#` (keine YAML-Kommentare): `beats per chord: N` (Vorgabe 2),
+`# Name` Teil-Überschrift, `# Name @id` Teil am Anfang der Sektion `id`, `> …` Regieanweisung (mit
+`REC` vorn rot), eine Zeile nur aus Akkorden gehört mit ihren Spalten zur Zeile darunter, `[Am]`
+Akkord inline, `|N` am Zeilenende = dauert `N` Takte (Dezimalzahl erlaubt).
+
+**`sheet:`** ist reiner Text, am besten als Literal-Block (`sheet: |`). Er kommt durch das
+Dokumentmodell **byte-genau** zurück (Spalten, Leerzeilen, `#`-Zeilen sind Text, keine Kommentare);
+die kanonische Form schreibt ihn als letzten Schlüssel, mit `|-`/`|+` bzw. `|2`, wo das nötig ist,
+und fällt nur für Unschreibbares (Wagenrücklauf, Steuerzeichen) auf einen Text in Anführungszeichen
+zurück. Zeitachse in Takten ab 0: eine Zeile dauert `Akkorde × beats per chord` Schläge (Taktart der
+Partitur), mit `|N` genau `N` Takte, ohne beides 1 Takt; eine Anweisung dauert 0 Takte (gilt ab ihrer
+Stelle), außer mit `|N`. `@id` hinter einer Teil-Überschrift verankert den Teil am Anfang der Sektion;
+unverankerte Sektionen laufen einen Durchlauf weiter, ohne Anker laufen die Sektionen der Reihe nach.
+Fehler (Partitur lädt nicht): `@id` ohne solche Sektion (mit Zeile und Vorschlag), Anker in falscher
+Reihenfolge oder doppelt. Hinweis (`score --check` „Note:“, kein Fehler): der Text zwischen zwei Ankern
+dauert anders lange als seine Sektionen; bei einer Sektion, die bis Release loopt, kein Vielfaches
+ihrer Takte.
+
+Im kompilierten JSON steht `"sheet": {"items": [...], "total": <Takte>, "spans": [{"start", "end"}, …]}`
+(eine Spanne je Sektion); `items` sind `{"kind": "part", "name", "section"?, "at", "line"}`,
+`{"kind": "direction", "text", "rec", "bars", "start", "line"}` und `{"kind": "line", "text",
+"chords": [{"name", "col"}], "bars", "start", "line"}`. Ohne `sheet:` fehlt das Feld. Der Runner liest
+es nie.
 
 ## Runner (looper/runner.py)
 

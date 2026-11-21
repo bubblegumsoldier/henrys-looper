@@ -1963,6 +1963,80 @@ wird gezählt (Notice nach dem Lauf, `session.json`). Die WAV-Header werden jede
 nachgeführt: Nach einem Absturz ist jede Datei bis zur letzten Sekunde lesbar (nur `session.json`
 fehlt dann).
 
+## 17. Das Blatt: Text, Akkorde und Regie neben der Bühne
+
+Der Besitzer singt und spielt über seine Loops und muss dabei wissen, was gerade aufgenommen wird und
+was als Nächstes kommt. Das **Blatt** (`sheet:` in der Partitur) ist ein Leadsheet wie eine
+Karaoke-/Tab-Seite: Teile, Regieanweisungen, Zeilen mit Akkorden. Abgenommen als HTML-Prototyp; Format
+und Aussehen folgen ihm. Format im Einzelnen: `docs/contracts-v0.md`, Abschnitt „YAML v0“.
+
+**Speicherung: ein Literal-Block in der Partitur.** Der Musiker schreibt und kopiert das Blatt von
+Hand (Akkordzeilen von Tab-Seiten, deren Spalten zählen); jede andere Form (Liste von Zeilen,
+Strukturen) würde beim Einfügen zerbrechen. Deshalb ist `sheet` ein einziger Text, und das
+Dokumentmodell (`score/doc.rs`) gibt ihn **byte-genau** zurück — anders als den Rest, dessen Layout
+kanonisch ist. `render_doc` schreibt ihn als letzten Schlüssel (`sheet: |`, `|-`/`|+` nach den
+Zeilenumbrüchen am Ende, `|2`, wenn der Text mit einem Leerzeichen beginnt), prüft die Rückrichtung und
+fällt nur für Unschreibbares auf einen Text in Anführungszeichen zurück. `find_comments` überspringt das
+Innere jedes Block-Skalars: `# Verse` ist dort Text, kein YAML-Kommentar. Bearbeitungen im Raster,
+Mixer-Rückschreibung und Reload gehen alle durch `ScoreDoc` und nehmen das Feld mit. Der Runner liest
+es nie; eine Partitur ohne `sheet:` kompiliert und spielt wie vorher, im JSON fehlt das Feld.
+
+**Ein Parser, in Rust** (`engine/src/score/sheet.rs`). Die Oberfläche bräuchte ihn zum Zeichnen,
+`score --check` zum Prüfen: unbekannte Anker mit Zeile, und Text, der zwischen zwei Ankern anders lang
+dauert als seine Sektionen — das braucht die ganze Zeitrechnung. Zwei Implementierungen würden
+auseinanderlaufen, also parst die Engine und liefert das Ergebnis mit der kompilierten Partitur
+(`CompiledScore.sheet`: Elemente mit Takt-Start und -Länge, Akkorde mit Spalte, und **eine Spanne je
+Sektion**). Die UI rechnet nur noch. Die Vorschau im Editor kommt deshalb aus derselben Quelle: Der Text
+geht nach einer Tipp-Pause (400 ms) als normale Bearbeitung in das Dokument, das Backend rendert und
+kompiliert, die Vorschau zeigt `score.sheet`.
+
+**Sektionen statt Sekunden.** Eine Sektion ohne `autorelease` loopt, bis Release kommt — „Takte seit
+dem Start“ liefe danach am Text vorbei. Deshalb hängt das Blatt an Sektionen: `# Verse 1 @verse_1`
+verankert einen Teil am Anfang der Sektion; jede Sektion bekommt eine Spanne `[start, end)` des Blatts
+(verankert: am Anker; sonst einen Durchlauf nach der vorigen; Ende = Anfang der nächsten). Ohne Anker
+laufen die Sektionen einfach der Reihe nach. Abbildung (`ui/src/sheet/position.ts`), aus dem, was der
+Status ohnehin trägt (Sektion, Durchlauf, Takt, Schlag, `beat_offset`, armierter Wechsel samt
+Abstand):
+
+| Lage | Stelle auf dem Blatt |
+|---|---|
+| Ready, Stop all, Ende, Back to start | Ruhe: oben, nichts hervorgehoben, NEXT = erste Anweisung |
+| Einzähler | Anfang der ersten Spanne, NEXT zählt „in N bars“ herunter |
+| Sektion mit `autorelease` | linear durch die Spanne; ist der Text kürzer, bleibt die letzte Zeile stehen |
+| Sektion bis Release | `Anfang + (verstrichen mod max(Spannenlänge, Sektionstakte))` — bei gleicher Länge springt der Text mit jedem Durchlauf nach vorn, ein längerer Text (Strophe über einem Zwei-Takt-Loop) läuft über mehrere Durchläufe |
+| Wechsel (Release, Autorelease, Ende des Einzählers) | Sprung an den Anfang der nächsten Spanne, genau auf dem Taktstrich |
+
+**Pünktlich trotz 20 Status je Sekunde.** Zwischen zwei Status rechnet die Seitenleiste je Bild mit
+dem Tempo weiter (höchstens 250 ms über den letzten Status hinaus, damit eine stehende Engine nicht
+weiterläuft). Den Wechsel sagt der armierte Wechsel voraus: Sein Abstand ist bekannt (`bars`, `beats`
+minus der angebrochene Schlag), also springt das Blatt beim Überschreiten selbst in die Folgesektion,
+auch wenn der Runner es erst einen Steuertakt später meldet. NEXT nennt Anweisungen der Folgesektion
+in einer loopenden Sektion „after Release“, bis Release gedrückt ist; dann „in N bars“.
+
+**Zeichnen ohne Rendern.** `SheetView` zeichnet die Seite einmal je Blatt; je Bild werden nur Klassen
+(`cur`, `past`, `active`), der Fortschritt (`--p`) und zwei Texte gesetzt — dieselbe Disziplin wie bei
+den Pegeln (`status.ts`). Mitscrollen hält die aktuelle Zeile in der Mitte; Mausrad, Wischen,
+Scrollbalken oder Pfeiltasten im Blatt pausieren es für vier Sekunden.
+
+**Welches Blatt.** Die Live-Ansicht zeigt das Blatt der geladenen Partitur — oder das des geöffneten
+Dokuments, solange dessen Sektionen (Ids, Takte, Autorelease) mit der geladenen übereinstimmen. So
+erscheint eine Textkorrektur sofort auf der Bühne, ohne Reload (der leere Spuren bräuchte).
+
+**Bedienung.** Seitenleiste rechts in der Live-Ansicht, Taste `L` oder die schmale Leiste am Rand;
+Breite (Anteil am Fenster) am linken Rand ziehen, Schrift A−/A+; beides und offen/zu in
+`localStorage` (`live.sheet`). Ohne gespeicherte Wahl startet sie nur ab 1280 px Fensterbreite offen —
+bei 1024 px braucht die Bühne den Platz. Ohne Blatt zeigt sie, wie man eins anlegt. Im Arrangement ist
+*Sheet* der dritte Reiter neben *Grid* und *Text (YAML)*: Editor links, Vorschau rechts, die Probleme
+des Blatts darunter (Klick springt zur Zeile, Klick in der Vorschau ebenso).
+
+| Datei | Inhalt |
+|---|---|
+| `engine/src/score/sheet.rs` | Parser, Spannen je Sektion, Prüfungen (Fehler: Anker; Hinweise: Längen) |
+| `engine/src/score/read.rs` | `sheet` als Feld; Prüfung auf den aufgelösten Sektionen, Zeilen der Datei |
+| `engine/src/score/doc.rs` | `ScoreDoc.sheet`, Block-Skalar schreiben, `#` im Block ist kein Kommentar |
+| `ui/src/sheet/position.ts` | Status → Stelle auf dem Blatt, NOW/NEXT |
+| `ui/src/sheet/SheetSidebar.tsx`, `SheetView.tsx`, `SheetEditor.tsx` | Seitenleiste, Seite, Editor |
+
 ## 13. Arbeitsweise
 
 - Henry bedient Hardware selbst; Audio-Tests laufen nur mit seiner Zustimmung.
