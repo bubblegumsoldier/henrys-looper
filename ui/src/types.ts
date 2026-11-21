@@ -399,6 +399,8 @@ export interface LooperStatus {
   fifo_overruns: number;
   other_errors: number;
   max_callback_ms: number;
+  /** Audio load and overruns of the output callback. Missing in a status from before it existed. */
+  load?: LoadStatus;
   ignored_commands: number;
   spares: number;
   /** Newest German sentence about what happened - a confirmation or a refusal. */
@@ -409,6 +411,48 @@ export interface LooperStatus {
    */
   mixer_rev: number;
 }
+
+/**
+ * How much of its time budget (`block_frames / sample_rate`) the audio callback uses, and when it
+ * did not make it. Rust: `proto::LoadStatusEvent`, measured in `looper_engine::load`.
+ */
+export interface LoadStatus {
+  /** Last second: processing time / budget, summed - percent. */
+  avg_percent: number;
+  /** Last second: the worst single callback - percent. Above 100 it was late. */
+  peak_percent: number;
+  /** Last second: time inside plugins (instruments and inserts) / budget - percent. */
+  plugin_percent: number;
+  /** Overruns since the engine started; what came together within a few ms counts once. */
+  overruns: number;
+  /** Callbacks that took longer than their budget. */
+  late_blocks: number;
+  /** Callbacks that started more than two blocks after the previous one. */
+  late_wakeups: number;
+  /** What the driver reported (CoreAudio's processor overload); the same as `xruns`. */
+  driver_overloads: number;
+  /** Local time of the newest overrun, "HH:MM:SS"; null while there was none. */
+  last_overrun: string | null;
+  last_overrun_kind: string | null;
+  last_overrun_percent: number;
+  block_frames: number;
+  budget_ms: number;
+}
+
+export const IDLE_LOAD: LoadStatus = {
+  avg_percent: 0,
+  peak_percent: 0,
+  plugin_percent: 0,
+  overruns: 0,
+  late_blocks: 0,
+  late_wakeups: 0,
+  driver_overloads: 0,
+  last_overrun: null,
+  last_overrun_kind: null,
+  last_overrun_percent: 0,
+  block_frames: 0,
+  budget_ms: 0,
+};
 
 export const IDLE_STATUS: LooperStatus = {
   running: false,
@@ -451,6 +495,7 @@ export const IDLE_STATUS: LooperStatus = {
   fifo_overruns: 0,
   other_errors: 0,
   max_callback_ms: 0,
+  load: IDLE_LOAD,
   ignored_commands: 0,
   spares: 0,
   message: null,
