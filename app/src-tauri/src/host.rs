@@ -2108,6 +2108,10 @@ struct HostStats {
     underruns: AtomicU64,
     /// Input callbacks that could not push - frames lost, alignment gone.
     overruns: AtomicU64,
+    /// Input callbacks whose frame count differed from the one before. Each such change makes
+    /// coreaudio-rs (under cpal) query the device format and resize its input buffer - a HAL call
+    /// and an allocation on the input's real-time thread, before our callback runs.
+    input_resizes: AtomicU64,
     cb_nanos_max: AtomicU64,
 }
 
@@ -2164,6 +2168,7 @@ struct Session {
     /// scheduling, once logged.
     logged_rt: (u64, u64),
     logged_priority: bool,
+    logged_resizes: u64,
     /// Overruns made out of it: counted, logged, marked in the recording (`crate::loadwatch`).
     load_watch: LoadWatch,
     scheduler: Scheduler,
@@ -2397,11 +2402,18 @@ impl Session {
         // ---- input stream: whole frames into the FIFO, nothing else ------------------------
         let stats_in = Arc::clone(&stats);
         let stats_in_err = Arc::clone(&stats);
+        let mut last_input_len = 0usize;
         let input = audio::build_input(
             &setup.input,
             &setup.in_plan,
             move |data: &[f32], _: &InputCallbackInfo, _offset: usize| {
                 let t0 = Instant::now();
+                if data.len() != last_input_len {
+                    if last_input_len != 0 {
+                        stats_in.input_resizes.fetch_add(1, Ordering::Relaxed);
+                    }
+                    last_input_len = data.len();
+                }
                 // Whole frames only (`looper_engine::fifo`); what does not fit is lost input.
                 if fifo_in.push(data) > 0 {
                     stats_in.overruns.fetch_add(1, Ordering::Relaxed);
@@ -2608,6 +2620,7 @@ impl Session {
             fault_history: VecDeque::new(),
             logged_rt: (0, 0),
             logged_priority: false,
+            logged_resizes: 0,
             load_watch: LoadWatch::default(),
             scheduler: Scheduler::new(
                 timeline,
@@ -3736,6 +3749,17 @@ impl Session {
                 reading.rt_frees
             );
             self.logged_rt = (reading.rt_allocs, reading.rt_frees);
+        }
+        let resizes = self.stats.input_resizes.load(Ordering::Relaxed);
+        if resizes != self.logged_resizes {
+            log!(
+                "The input stream changed its block size {} time(s) ({} in this session): each \
+                 change makes the CoreAudio layer under cpal query the device and resize its \
+                 buffer on the input's real-time thread.",
+                resizes - self.logged_resizes,
+                resizes
+            );
+            self.logged_resizes = resizes;
         }
         if !self.logged_priority && reading.priority != 0 {
             self.logged_priority = true;
