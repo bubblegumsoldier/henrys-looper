@@ -686,6 +686,8 @@ fn a_score_records_overdubs_plays_and_stops_a_midi_loop() {
         rig.sim.send(cmd);
     }
     let first = runner.armed_at().expect("armiert").1;
+    // The run's own grid: the start made its moment bar 1.
+    let timeline = runner.scheduler().timeline;
     let bar = |n: u64| timeline.bar_start(first + n);
     let step = |rig: &mut Rig, runner: &mut Runner, to: u64| {
         while rig.sim.pos() < to {
@@ -946,6 +948,8 @@ sections:
         rig.sim.send(cmd);
     }
     let first = runner.armed_at().expect("armiert").1;
+    // The run's own grid: the start made its moment bar 1.
+    let timeline = runner.scheduler().timeline;
     let bar = |n: u64| timeline.bar_start(first + n);
     let step = |rig: &mut Rig, runner: &mut Runner, to: u64| {
         while rig.sim.pos() < to {
@@ -1391,6 +1395,8 @@ fn owners_take(
         rig.sim.send(cmd);
     }
     let first = runner.armed_at().expect("armiert").1;
+    // The run's own grid: the start made its moment bar 1.
+    let timeline = runner.scheduler().timeline;
     let bar = |n: u64| timeline.bar_start(first + n);
     let step = |rig: &mut Rig, runner: &mut Runner, to: u64| {
         while rig.sim.pos() < to {

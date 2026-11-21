@@ -339,7 +339,11 @@ fn section_markers_land_on_the_bar_lines_of_the_score() {
     sim.core.attach_capture(endpoint);
     let mut runner = Runner::new(score, tl, BLOCK as u32).unwrap();
     runner.start(0);
+    // The start made its own moment bar 1 of the run: the count-in begins there, the
+    // first section - frame 0 of the files - begins `count_in` bars later.
+    let tl = runner.scheduler().timeline;
     let (first, first_bar) = runner.armed_at().unwrap();
+    assert_eq!((tl.zero(), first_bar), (runner.start_lead(), u64::from(runner.count_in_bars())));
     let mut run_info = info(&dir, &["voice"], &[Channels::Mono], first, &tl);
     run_info.mode = Mode::Score;
     run_info.count_in_bars = 1;

@@ -139,19 +139,16 @@ fn the_count_in_runs_once_before_the_first_section() {
     assert!(armed.count_in, "der Einzaehler ist als solcher erkennbar");
     assert!(armed.text().contains("Count-in"), "{}", armed.text());
 
-    // Definition: the count-in begins on the first bar the command queue can still be told about in
-    // time, and the section starts `DEFAULT_COUNT_IN_BARS` bars after that. So the lead is that many
-    // full bars plus the rest of the bar the button was pressed in - never less.
+    // Definition: the count-in begins the moment Start is pressed, plus the head start every timed
+    // command needs; that moment is bar 1 of the run, and the section starts exactly
+    // `DEFAULT_COUNT_IN_BARS` bars after it.
     assert_eq!(drive.runner.count_in_bars(), DEFAULT_COUNT_IN_BARS);
     assert_eq!(DEFAULT_COUNT_IN_BARS, 2, "zwei Takte - die Vorgabe des Besitzers");
-    let bars = u64::from(DEFAULT_COUNT_IN_BARS);
-    let anchor = timeline.bar_start_at_or_after(guard);
+    assert_eq!(drive.runner.start_lead(), guard);
+    assert_eq!(timeline.zero(), guard, "Takt 1 des Laufs ist der Druck plus der Vorlauf");
+    assert_eq!(drive.first_bar, u64::from(DEFAULT_COUNT_IN_BARS));
     let start = drive.at_bar(0);
-    assert_eq!(start, timeline.bar_start(timeline.bar_index_at(anchor) + bars));
-    assert!(
-        start - 0 >= timeline.span_bars(0, DEFAULT_COUNT_IN_BARS),
-        "mindestens zwei ganze Takte"
-    );
+    assert_eq!(start, guard + timeline.span_bars(0, DEFAULT_COUNT_IN_BARS));
 
     // The first take starts with the section, not before it.
     let first_record = drive
@@ -182,21 +179,91 @@ fn the_count_in_runs_once_before_the_first_section() {
     }
 }
 
-/// A longer count-in is a flag, and the lead is never shorter than what was asked for even when the
-/// button is pressed in the middle of a bar.
+/// A longer count-in is a flag, and the lead is exactly that many bars plus the fixed head start -
+/// wherever in a bar of the idling clock the button was pressed.
 #[test]
 fn the_count_in_length_is_configurable_and_never_undershoots() {
-    let mut runner = runner_for(HENRY).with_count_in(2);
-    let timeline = runner.scheduler().timeline;
-    let est = timeline.bar_start(0) + timeline.samples_per_beat() as u64;
-    runner.start(est);
-    let (start, _) = runner.armed_at().expect("armiert");
-    let anchor = timeline.bar_start_at_or_after(est + runner.scheduler().guard);
-    assert_eq!(start, timeline.bar_start(timeline.bar_index_at(anchor) + 2));
-    assert!(
-        start - est > timeline.span_bars(0, 2),
-        "zwei volle Takte plus der Rest des angefangenen"
-    );
+    for bars in 1..=MAX_COUNT_IN_BARS {
+        let mut runner = runner_for(HENRY).with_count_in(bars);
+        let idle = runner.scheduler().timeline;
+        let est = idle.bar_start(7) + idle.samples_per_beat() as u64 + 123;
+        runner.start(est);
+        let timeline = runner.scheduler().timeline;
+        let lead = runner.start_lead();
+        let (start, first_bar) = runner.armed_at().expect("armiert");
+        assert_eq!(timeline.zero(), est + lead);
+        assert_eq!(first_bar, u64::from(bars));
+        assert_eq!(start, est + lead + timeline.span_bars(0, bars), "{bars} Takte");
+    }
+}
+
+/// **Start means now.** Pressed anywhere in a bar of the clock that idles under a loaded score -
+/// forty different places, spread over more than a bar - the count-in's first beat is exactly the
+/// head start after the press, and the first section exactly `count_in` bars after that. The whole
+/// command stream of the run, measured from its own bar 1, is the same every time.
+#[test]
+fn the_count_in_starts_right_away_wherever_the_button_is_pressed() {
+    let reference = {
+        let mut drive = Drive::new(HENRY);
+        drive.to(drive.at_bar(20));
+        let zero = drive.timeline().zero();
+        shifted(&drive.commands, zero)
+    };
+    let idle = runner_for(HENRY).scheduler().timeline;
+    let bar = idle.span_bars(0, 1);
+    for press in 0..40u64 {
+        let est = idle.bar_start(3) + press * (bar + 37) / 40;
+        let mut runner = runner_for(HENRY);
+        runner.start(est);
+        let lead = runner.start_lead();
+        let timeline = runner.scheduler().timeline;
+        let first_bar = runner.armed_at().expect("armiert").1;
+        let commands = runner.take_commands();
+        // The first beat: the window opens and the clock gets its bar 1 at the press plus the lead.
+        assert_eq!(
+            commands[..2],
+            [
+                Command::TransportStart { at: est + lead },
+                Command::ClickGate {
+                    at: est + lead,
+                    open: true,
+                    bar1: timeline.bar_start(first_bar),
+                },
+            ],
+            "Druck {press}"
+        );
+        assert!(lead <= u64::from(idle.sample_rate()) / 20, "ein fester, kleiner Vorlauf: {lead}");
+        assert_eq!(
+            timeline.bar_start(first_bar) - (est + lead),
+            timeline.span_bars(0, DEFAULT_COUNT_IN_BARS),
+            "Druck {press}: Takt 1 genau zwei Takte nach dem ersten Schlag"
+        );
+        let mut drive = Drive { runner, commands, pos: est, first_bar };
+        drive.to(drive.at_bar(20));
+        assert_eq!(
+            shifted(&drive.commands, est + lead),
+            reference,
+            "Druck {press}: derselbe Lauf, nur verschoben"
+        );
+    }
+}
+
+/// Every command with its position measured from `zero` - and the absolute numbers in its text
+/// replaced by that relative one.
+fn shifted(commands: &[Command], zero: u64) -> Vec<(Option<u64>, String)> {
+    commands
+        .iter()
+        .map(|c| {
+            let mut text = format!("{c:?}");
+            if let Some(at) = c.at() {
+                text = text.replace(&format!("at: {at}"), "at: _");
+            }
+            if let Command::ClickGate { bar1, open: true, .. } = c {
+                text = text.replace(&format!("bar1: {bar1}"), &format!("bar1: +{}", bar1 - zero));
+            }
+            (c.at().map(|at| at - zero), text)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -693,6 +760,8 @@ fn play(yaml: &str, tail_blocks: u64) -> (Sim, Runner, Vec<Command>, u64) {
     );
     let mut runner = Runner::new(score, timeline, BLOCK).expect("Runner");
     runner.start(0);
+    // The start made its own moment bar 1: every bar below is on the run's grid.
+    let timeline = runner.scheduler().timeline;
     let first_bar = runner.armed_at().expect("armiert").1;
 
     // Where every section begins, in bars from the first one.
@@ -1229,12 +1298,18 @@ fn a_score_sets_up_pan_buses_and_latency_of_every_track() {
 /// When the grid point fell a sample *before* the bar line, the overdub was put on the next grid
 /// point - a whole loop late - and Release was pushed behind that late take: "in 14 bars" in an
 /// eight-bar section (screenshot live-score-armed, ticker "Takt 44, in 15 Takten").
+///
+/// Since a start makes its own moment bar 1, the press position no longer shifts the run against
+/// the rounding of the bar lines - the count-in length does (the first section begins on bar
+/// `count_in` of the run). So every count-in from 1 to 8 is played, each from ten presses spread
+/// over the idling clock.
 #[test]
 fn release_in_a_looping_overdub_section_lands_at_the_end_of_the_first_pass() {
     let timeline = runner_for(HENRY).scheduler().timeline;
     for start_bar in 0..80u64 {
-        let mut runner = runner_for(HENRY);
-        let est = timeline.bar_start(start_bar);
+        let count_in = 1 + (start_bar % u64::from(MAX_COUNT_IN_BARS)) as u32;
+        let mut runner = runner_for(HENRY).with_count_in(count_in);
+        let est = timeline.bar_start(start_bar) + start_bar * 1_009 % timeline.span_bars(0, 1);
         runner.start(est);
         let first_bar = runner.armed_at().expect("armed").1;
         let mut drive = Drive { commands: runner.take_commands(), first_bar, runner, pos: est };
@@ -1348,19 +1423,21 @@ fn no_click_while_a_loaded_score_waits_for_its_start() {
     assert_eq!(click_peak(&sim, 0, sim.pos()), 0.0, "kein Klick vor dem Start");
 }
 
-/// The click begins exactly on the first bar of the count-in, counts both bars of it and goes on
-/// into the first section.
+/// The click begins exactly on the first beat of the count-in - the press plus the fixed head
+/// start, not the next bar line of the idling clock - counts both bars of it and goes on into the
+/// first section.
 #[test]
 fn the_click_begins_with_the_count_in() {
     let (mut sim, mut runner) = loaded_with_click(ONE_TAKE, 2);
-    let timeline = runner.scheduler().timeline;
-    let bar = timeline.span_bars(0, 1);
+    let bar = runner.scheduler().timeline.span_bars(0, 1);
     advance(&mut sim, &mut runner, 3 * bar + 1_000);
     let est = sim.pos();
     runner.start(est);
+    let timeline = runner.scheduler().timeline;
     let (first, first_bar) = runner.armed_at().expect("armiert");
     let anchor = timeline.bar_start(first_bar - 2);
-    assert_eq!(anchor, timeline.bar_start_at_or_after(est + runner.scheduler().guard));
+    assert_eq!(anchor, est + runner.start_lead(), "der erste Schlag: jetzt");
+    assert_eq!(first - anchor, timeline.span_bars(0, 2), "Takt 1 zwei Takte danach");
     advance(&mut sim, &mut runner, first + 2 * bar);
 
     assert_eq!(click_peak(&sim, 0, anchor), 0.0, "nichts vor dem Einzaehler");
@@ -1370,6 +1447,100 @@ fn the_click_begins_with_the_count_in() {
     }
     assert!(click_peak(&sim, first, first + 200) > 0.0, "und weiter in die Sektion");
     assert_eq!(runner.phase(), Phase::Running);
+}
+
+/// First sample at or after `from` on which the click sounds. The click's waveform is a sine that
+/// starts at zero, so that is the sample *after* the beat it belongs to.
+fn first_click(sim: &Sim, from: u64) -> Option<u64> {
+    (from..sim.pos()).find(|&p| click_peak(sim, p, p + 1) > 0.0)
+}
+
+/// **Start means now, through the real engine.** Forty presses spread over more than a bar of the
+/// clock that idles under the loaded score: every time the first click sample comes no later than
+/// the fixed head start after the press - never after the rest of a bar - and the first section
+/// begins exactly `count_in` bars after that first click.
+#[test]
+fn the_first_click_follows_the_press_by_the_fixed_head_start_only() {
+    let fast = ONE_TAKE.replace("bpm: 120", "bpm: 200");
+    for press in 0..40u64 {
+        let (mut sim, mut runner) = loaded_with_click(&fast, 2);
+        let bar = runner.scheduler().timeline.span_bars(0, 1);
+        advance(&mut sim, &mut runner, bar + press * (bar + 37) / 40);
+        let est = sim.pos();
+        runner.start(est);
+        let lead = runner.start_lead();
+        let timeline = runner.scheduler().timeline;
+        let (first, first_bar) = runner.armed_at().expect("armiert");
+        advance(&mut sim, &mut runner, first + 200);
+        let click = first_click(&sim, est).expect("der Einzaehler klickt");
+        let beat = click - 1;
+        assert!(beat - est <= lead, "Druck {press}: erster Klick {} Samples danach", beat - est);
+        assert_eq!(beat, timeline.bar_start(0), "Druck {press}: auf dem ersten Schlag");
+        assert_eq!(click_peak(&sim, 0, click), 0.0, "Druck {press}: vorher still");
+        assert_eq!(first_bar, 2);
+        assert_eq!(first - beat, timeline.span_bars(0, 2), "Druck {press}: Takt 1 zwei Takte danach");
+        assert_eq!(runner.view(sim.pos()).section, Some(0));
+    }
+}
+
+/// While the count-in runs the display counts exactly the bars that were set - not a bar more for
+/// the rest of the bar the button was pressed in - and before the start nothing counts at all.
+#[test]
+fn the_countdown_shows_exactly_the_count_in() {
+    let (mut sim, mut runner) = loaded_with_click(ONE_TAKE, 3);
+    let bar = runner.scheduler().timeline.span_bars(0, 1);
+    advance(&mut sim, &mut runner, bar + bar / 3);
+    let idle = runner.view(sim.pos());
+    assert_eq!((idle.phase, idle.beat, idle.armed.clone()), (Phase::Idle, 1, None));
+    let est = sim.pos();
+    runner.start(est);
+    // Pressed, the first beat not yet sounding: the full count-in ahead.
+    let view = runner.view(est);
+    let armed = view.armed.expect("Einzaehler");
+    assert!(armed.count_in);
+    assert_eq!((armed.bars, armed.beats, view.beat), (3, 0, 1));
+    let timeline = runner.scheduler().timeline;
+    // Half a beat into the second beat: two bars and two beats to go.
+    let pos = timeline.beat_start(1) + 100;
+    let armed = runner.view(pos).armed.expect("Einzaehler");
+    assert_eq!((armed.bars, armed.beats), (2, 3));
+    assert_eq!(runner.view(pos).beat, 2);
+}
+
+/// The score played to its end, "Back to start", Start: the second count-in begins right away too,
+/// and records exactly like the first run, measured from its own bar 1.
+#[test]
+fn a_start_after_the_end_and_back_to_start_counts_in_right_away() {
+    let (mut sim, mut runner) = loaded_with_click(SHORT, 2);
+    runner.start(sim.pos());
+    let first_zero = runner.scheduler().timeline.zero();
+    let (first_start, _) = runner.armed_at().expect("armiert");
+    let end = runner.scheduler().timeline.bar_start(4);
+    let bar = runner.scheduler().timeline.span_bars(0, 1);
+    advance(&mut sim, &mut runner, end + bar / 2);
+    assert_eq!(runner.phase(), Phase::Finished);
+    let first_layers = sim.latest_status().unwrap().tracks()[0];
+
+    let (_, commands) = runner.rewind(sim.pos()).expect("zurueck");
+    for cmd in commands {
+        sim.send(cmd);
+    }
+    // Somewhere in a bar of the old grid, on purpose.
+    let later = sim.pos() + bar + bar / 7;
+    advance(&mut sim, &mut runner, later);
+    let est = sim.pos();
+    runner.start(est);
+    let timeline = runner.scheduler().timeline;
+    assert_eq!(timeline.zero(), est + runner.start_lead());
+    let (start, _) = runner.armed_at().expect("wieder armiert");
+    assert_eq!(start - timeline.zero(), first_start - first_zero, "derselbe Abstand");
+    advance(&mut sim, &mut runner, timeline.bar_start(4) + bar / 2);
+    let click = first_click(&sim, est).expect("klickt wieder");
+    assert_eq!(click - 1, est + runner.start_lead(), "der erste Schlag, sofort");
+    let track = sim.latest_status().unwrap().tracks()[0];
+    assert_eq!(track.origin, start);
+    assert_eq!(track.loop_len, first_layers.loop_len);
+    assert_eq!(runner.phase(), Phase::Finished);
 }
 
 /// "Stop all" silences the click with the loops; after "Back to start" it stays silent until the
@@ -1398,10 +1569,13 @@ fn stop_all_silences_the_click_and_a_second_start_counts_in_again() {
     advance(&mut sim, &mut runner, rewound + 3 * bar);
     assert_eq!(click_peak(&sim, rewound, sim.pos()), 0.0, "nach Back to start: still");
 
-    // The second run.
-    runner.start(sim.pos());
+    // The second run: right away again, on a grid of its own.
+    let est = sim.pos();
+    runner.start(est);
+    let timeline = runner.scheduler().timeline;
     let (start, first_bar) = runner.armed_at().expect("wieder armiert");
     let anchor = timeline.bar_start(first_bar - 2);
+    assert_eq!(anchor, est + runner.start_lead());
     advance(&mut sim, &mut runner, timeline.bar_start(first_bar + 4) + 4 * BLOCK as u64);
     assert_eq!(click_peak(&sim, rewound, anchor), 0.0);
     assert!(click_peak(&sim, anchor, anchor + 200) > 0.0, "der zweite Einzaehler klickt");
@@ -1453,8 +1627,10 @@ fn a_second_start_after_stop_all_with_an_armed_switch_clicks_again() {
     advance(&mut sim, &mut runner, later);
     let quiet_from = sim.pos();
     runner.start(sim.pos());
+    let timeline = runner.scheduler().timeline;
     let (start, first_bar) = runner.armed_at().expect("wieder armiert");
     let anchor = timeline.bar_start(first_bar - 2);
+    assert_eq!(anchor, quiet_from + runner.start_lead());
     advance(&mut sim, &mut runner, start + 3 * bar);
     assert_eq!(click_peak(&sim, quiet_from, anchor), 0.0);
     assert!(click_peak(&sim, anchor, anchor + 200) > 0.0, "der zweite Einzaehler klickt");
@@ -1466,9 +1642,9 @@ fn a_second_start_after_stop_all_with_an_armed_switch_clicks_again() {
 #[test]
 fn the_click_ends_with_the_score() {
     let (mut sim, mut runner) = loaded_with_click(SHORT, 2);
-    let timeline = runner.scheduler().timeline;
-    let bar = timeline.span_bars(0, 1);
+    let bar = runner.scheduler().timeline.span_bars(0, 1);
     runner.start(sim.pos());
+    let timeline = runner.scheduler().timeline;
     let (first, first_bar) = runner.armed_at().expect("armiert");
     let end = timeline.bar_start(first_bar + 2);
     advance(&mut sim, &mut runner, end + 4 * bar);
@@ -1529,9 +1705,11 @@ impl Live {
     }
 }
 
-/// Where the first section of [`STACK`] begins - the same for every run started at 0.
-fn stack_first_bar() -> u64 {
-    Live::new(STACK).first_bar
+/// Where the first section of [`STACK`] begins, and the grid of the run - the same for every run
+/// started at 0 (the start makes its own moment bar 1, so the grid is the run's, not the clock's).
+fn stack_first_bar() -> (u64, Timeline) {
+    let live = Live::new(STACK);
+    (live.first_bar, live.runner.scheduler().timeline)
 }
 
 /// Three passes on an empty track, Release in the middle of the third: three layers, each exactly
@@ -1539,8 +1717,8 @@ fn stack_first_bar() -> u64 {
 /// exactly one layer at index 0 - the third pass recorded to its end, and the change on that end.
 #[test]
 fn three_passes_of_stack_on_an_empty_track_are_three_seamless_layers() {
-    let first_bar = stack_first_bar();
-    let seam = runner_for(STACK).scheduler().timeline.bar_start(first_bar + 2);
+    let (first_bar, timeline) = stack_first_bar();
+    let seam = timeline.bar_start(first_bar + 2);
     let played = move |k: u64| if k == seam + R { 1.0 } else { fingerprint(k) * 0.5 };
     let mut live = Live::with(STACK, mono(played));
     assert_eq!(live.first_bar, first_bar);
@@ -1600,8 +1778,7 @@ fn stack_then_play_sends_only_the_latch_off() {
 /// An empty pass in the middle is dropped; the passes around it keep their grid positions.
 #[test]
 fn an_empty_pass_in_a_stack_is_dropped() {
-    let first_bar = stack_first_bar();
-    let timeline = runner_for(STACK).scheduler().timeline;
+    let (first_bar, timeline) = stack_first_bar();
     let (q0, q1) = (timeline.bar_start(first_bar + 2), timeline.bar_start(first_bar + 4));
     let played = move |k: u64| {
         if (q0 + R..q1 + R).contains(&k) { 0.0 } else { fingerprint(k) * 0.5 }
@@ -1620,8 +1797,7 @@ fn an_empty_pass_in_a_stack_is_dropped() {
 /// the `play` after it runs on without a refusal.
 #[test]
 fn an_empty_first_pass_of_a_stack_keeps_the_grid() {
-    let first_bar = stack_first_bar();
-    let timeline = runner_for(STACK).scheduler().timeline;
+    let (first_bar, timeline) = stack_first_bar();
     let q1 = timeline.bar_start(first_bar + 2);
     let played = move |k: u64| if k < q1 + R { 0.0 } else { fingerprint(k) * 0.5 };
     let mut live = Live::with(STACK, mono(played));
@@ -1728,10 +1904,12 @@ sections:
     tracks:
       voice: overdub
 ";
+    // As above: the count-in length is what moves the run against the rounding of the bar lines.
     let timeline = runner_for(yaml).scheduler().timeline;
     for start_bar in 0..80u64 {
-        let mut runner = runner_for(yaml);
-        let est = timeline.bar_start(start_bar);
+        let count_in = 1 + (start_bar % u64::from(MAX_COUNT_IN_BARS)) as u32;
+        let mut runner = runner_for(yaml).with_count_in(count_in);
+        let est = timeline.bar_start(start_bar) + start_bar * 1_009 % timeline.span_bars(0, 1);
         runner.start(est);
         let first_bar = runner.armed_at().expect("armed").1;
         let mut drive = Drive { commands: runner.take_commands(), first_bar, runner, pos: est };

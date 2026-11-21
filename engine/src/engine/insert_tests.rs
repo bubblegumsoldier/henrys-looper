@@ -625,6 +625,50 @@ mod clock {
         assert!(all.iter().any(|(t, _)| t.continuous == open && t.position < 0));
     }
 
+    /// The same with a real runner, started somewhere in a bar of the clock that idles under the
+    /// loaded score: nothing plays until the press plus the head start; from there the plugins count
+    /// up from minus the whole count-in, and position 0 is the first sample of the first section.
+    #[test]
+    fn a_score_start_counts_the_plugins_up_to_its_first_section() {
+        use crate::engine::runner::{CLOSED_CLICK_GATE, Runner};
+        use crate::engine::timeline::Timeline;
+        let yaml = "bpm: 90\ntime_signature: 3/4\ntracks:\n  a: {input: 1}\nsections:\n  - id: one\n    bars: 2\n    autorelease: true\n    tracks:\n      a: stop\n";
+        let score = crate::score::compile_score(yaml).expect("uebersetzt");
+        let (mut sim, mut tx) = with_rack(three_four(), silence());
+        let (watch, log) = Watch::new();
+        install(&mut tx, InsertTarget::Track(0), 0, watch, 0);
+        let timeline = Timeline::new(48_000, 90.0, TimeSignature::new(3, 4));
+        let mut runner = Runner::new(score, timeline, BIG_BLOCK as u32).expect("Runner");
+        sim.send(CLOSED_CLICK_GATE);
+        sim.run_to(77_777);
+        let est = sim.pos();
+        runner.start(est);
+        let anchor = est + runner.start_lead();
+        let (first, _) = runner.armed_at().expect("armiert");
+        let count_in = runner.scheduler().timeline.span_bars(0, runner.count_in_bars());
+        assert_eq!(first - anchor, count_in);
+        for cmd in runner.take_commands() {
+            sim.send(cmd);
+        }
+        sim.run_to(first + 20_000);
+        let all = calls(&log);
+        assert_gapless(&all);
+        for (t, _) in &all {
+            if t.continuous < anchor {
+                assert!(!t.playing, "vor dem ersten Schlag steht alles: {t:?}");
+                assert_eq!(t.position, 0);
+            } else {
+                assert!(t.playing, "{t:?}");
+                assert_eq!(t.position, t.continuous as i64 - first as i64, "{t:?}");
+            }
+        }
+        assert!(
+            all.iter()
+                .any(|(t, _)| t.continuous == anchor && t.position == -(count_in as i64)),
+            "der erste Schlag des Einzaehlers liegt genau count_in Takte vor Takt 1"
+        );
+    }
+
     /// A tempo change (or a score loaded with its own tempo, which arrives as the same command)
     /// reaches the plugins with the next block.
     #[test]

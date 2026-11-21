@@ -69,16 +69,27 @@
 //!
 //! # Nothing is heard of the clock while the score does not play
 //!
-//! The runner plans on a clock that runs from the moment the score is loaded - it needs a grid to
-//! put the count-in on. But a loaded score that has not been started, one that was stopped and one
-//! that has ended must be **silent**: no click, no loop. The loops take care of themselves (every
-//! track is empty before the start, and "Stop all" and the end stop every one of them). The click
-//! does not: it follows the clock. So the engine's click window ([`Command::ClickGate`]) is held
-//! closed while a score is loaded (the front end closes it on load, see [`CLOSED_CLICK_GATE`]),
-//! the runner opens it on the first bar of the count-in and closes it again on the sample the score ends or "Stop all" takes effect. The
-//! window is timed like everything else here, so the first click of the count-in and the last
-//! click of the score are exact to the sample - and the clock underneath, which every plan in this
-//! file is made on, never moves.
+//! The engine's clock runs from the moment the score is loaded (the front end starts it; stopping
+//! it would drop whatever is still waiting in the engine - see `Command::TransportStop`). But a
+//! loaded score that has not been started, one that was stopped and one that has ended must be
+//! **silent**: no click, no loop. The loops take care of themselves (every track is empty before
+//! the start, and "Stop all" and the end stop every one of them). The click does not: it follows
+//! the clock. So the engine's click window ([`Command::ClickGate`]) is held closed while a score is
+//! loaded (the front end closes it on load, see [`CLOSED_CLICK_GATE`]), the runner opens it on the
+//! first beat of the count-in and closes it again on the sample the score ends or "Stop all" takes
+//! effect. The window is timed like everything else here, so the first click of the count-in and
+//! the last click of the score are exact to the sample.
+//!
+//! # Start means now
+//!
+//! The phase of that idling clock means nothing, so the runner does not wait for its next bar line.
+//! [`Runner::start`] makes the moment of the press - plus the head start every timed command needs
+//! ([`Runner::start_lead`]) - bar 1 of the run: it sends `Command::TransportStart` for that sample,
+//! which moves the engine's `Timeline::zero` there (nothing is stopped, nothing waiting is dropped,
+//! and there is no loop to re-anchor: a score only starts on empty tracks), and moves its own grid
+//! the same way. The count-in is bars `0..count_in` of that grid, the first section begins on bar
+//! `count_in`, and every plan of the run is made on it - so a run is the same to the sample,
+//! relative to its own bar 1, whenever the button was pressed.
 //!
 //! # Monitoring is the one thing that cannot be timestamped
 //!
@@ -103,9 +114,8 @@ use super::timeline::Timeline;
 /// *bar*) proved too short in practice: the first bar is spent recognising the tempo, the second
 /// one is where the musician gets ready to come in, so the entry is hittable even at a fast tempo
 /// or an odd metre. A score that wants something else says so with `count_in:` (1 to 8). The lead
-/// is never shorter than this: the count-in starts on the next bar line the command queue can still
-/// be told about in time, so what the musician gets is the rest of the bar he pressed in *plus* the
-/// full count-in.
+/// is exactly this: the count-in starts the moment Start is pressed (plus [`Runner::start_lead`]),
+/// and that moment is bar 1 of the run - no rest of a bar is waited for.
 pub const DEFAULT_COUNT_IN_BARS: u32 = 2;
 /// Longest count-in that can be set. More than eight bars of click is waiting, not counting in.
 pub const MAX_COUNT_IN_BARS: u32 = 8;
@@ -407,6 +417,16 @@ impl Runner {
         self
     }
 
+    /// How long after the press the first beat of the count-in sounds, in samples: the scheduler's
+    /// head start (`Scheduler::guard`, four audio buffers plus 20 ms - 31 ms at 128 frames and
+    /// 48 kHz, 41 ms at 256). The same head start a free-looping Start has, and for the same reason:
+    /// the start is a timed command, and it has to be in the audio thread's waiting room before
+    /// the sample it names is rendered, or the first beat would be cut. Fixed - it does not depend
+    /// on where in a bar the button was pressed, because no bar line is waited for.
+    pub fn start_lead(&self) -> u64 {
+        self.sched.guard
+    }
+
     /// Bars of count-in the next start plays - after the clamp to at least one.
     pub fn count_in_bars(&self) -> u32 {
         self.count_in_bars
@@ -490,14 +510,23 @@ impl Runner {
             self.message = "The score is already running.".to_string();
             return self.message.clone();
         }
-        // The count-in begins on the first bar line the audio thread can still be told about in
-        // time, so the lead is never shorter than the count-in itself.
-        let anchor = self.sched.next_bar(est);
-        let anchor_bar = self.sched.timeline.bar_index_at(anchor);
-        let first_bar = anchor_bar + self.count_in_bars as u64;
+        // The count-in begins **now** - as soon as the command queue can still reach the audio
+        // thread in time ([`Runner::start_lead`]), not on a bar line of the clock that has been running
+        // since the load. That moment becomes bar 1 of the grid (`Timeline::zero`): the first beat
+        // of the count-in, and the first section exactly `count_in` bars later. Every plan of this
+        // run - section boundaries, takes, loop geometry, the click - is made on that grid, so the
+        // run is the same to the sample whenever the button was pressed. See "Start means now" in
+        // the module comment.
+        let anchor = self.sched.soon(est);
+        self.sched.timeline = self.sched.timeline.with_zero(anchor);
+        let first_bar = self.count_in_bars as u64;
         let first = self.sched.timeline.bar_start(first_bar);
         self.phase = Phase::CountIn;
-        // The click is heard from the first bar of the count-in on - not a sample earlier.
+        // The engine's clock moves its bar 1 to the same sample. Nothing waiting is dropped and
+        // nothing stops: the tracks are empty (a score starts only after a load or "Back to
+        // start", both of which leave them so), so there is no loop to re-anchor either.
+        self.out.push(Command::TransportStart { at: anchor });
+        // The click is heard from the first beat of the count-in on - not a sample earlier.
         self.out.push(Command::ClickGate {
             at: anchor,
             open: true,
@@ -796,7 +825,14 @@ impl Runner {
             }
             None => (None, String::new(), 0, 0, 0),
         };
-        let beat = (timeline.beat_index_at(pos) % timeline.beats_per_bar().max(1)) as u32 + 1;
+        // Before the start and after the end the clock's phase means nothing (the next start moves
+        // bar 1 anyway), so nothing counts: beat 1. During the head start of a Start the grid is
+        // already the new one and reads beat 1 too, because a position before `zero` is beat 0.
+        let beat = if matches!(self.phase, Phase::CountIn | Phase::Running) {
+            (timeline.beat_index_at(pos) % timeline.beats_per_bar().max(1)) as u32 + 1
+        } else {
+            1
+        };
         let tracks = match self.current {
             Some(p) => self.plans[p.index].want.clone(),
             None => match self.armed.as_ref().map(|a| a.target) {
