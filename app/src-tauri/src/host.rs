@@ -876,22 +876,20 @@ fn handle(
             let score_loaded = session.as_ref().map(|s| s.runner.is_some());
             sup.configure(*config, autostart, score_loaded);
             // The stage shows the score that is about to be loaded rather than the setup.
-            let shape = preview
-                .as_deref()
-                .and_then(|yaml| compile_score(yaml).ok())
-                .zip(sup.desired().cloned())
-                .map(|(score, desired)| {
-                    let quantize = desired.quantize.into();
-                    rebuilt_config(&desired, &score, None, quantize)
-                });
+            let score = preview.as_deref().and_then(|yaml| compile_score(yaml).ok());
+            let shape = score.as_ref().zip(sup.desired().cloned()).map(|(score, desired)| {
+                let quantize = desired.quantize.into();
+                rebuilt_config(&desired, score, None, quantize)
+            });
             sup.set_preview(shape);
             if session.is_none() {
                 let _ = app.emit(STATUS_EVENT, ready_event(sup));
             }
             emit_state(app, sup, session.is_some(), false);
             let _ = reply.send(Ok(sup.view(session.is_some(), false)));
-            // The first setup of this run: the moment the app starts the engine by itself.
-            let _ = ensure(session, midi, sup, app, Trigger::Boot, None);
+            // The first setup of this run: the moment the app starts the engine by itself - with
+            // the tracks of the score that is loaded again right after, so it is built once.
+            let _ = ensure(session, midi, sup, app, Trigger::Boot, score.as_ref());
         }
         Request::EngineState(reply) => {
             let _ = reply.send(Ok(sup.view(session.is_some(), false)));

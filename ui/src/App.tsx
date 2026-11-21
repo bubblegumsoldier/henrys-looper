@@ -27,7 +27,8 @@ import { useLooperEvents } from "./useWebSocket";
 import { TitleBar, type Mode } from "./shell/TitleBar";
 import { EnginePanel } from "./shell/EnginePanel";
 import { EngineBanner } from "./shell/EngineBanner";
-import { applySetupChanges, bootEngine } from "./shell/engine";
+import { applySetupChanges } from "./shell/engine";
+import { bootWithLastScore, watchLoadedScore } from "./shell/reloadScore";
 import { currentStatus } from "./status";
 import { Alarm } from "./shell/Toasts";
 import { fail } from "./shell/notes";
@@ -59,7 +60,11 @@ export default function App() {
 
   useScoreModelSync();
   // From here on the engine may start by itself (Setup › General).
-  useEffect(() => void bootEngine(), []);
+  // A score that was loaded when the app was closed is loaded again after the start.
+  useEffect(() => {
+    watchLoadedScore();
+    void bootWithLastScore();
+  }, []);
   useWindowTitle();
   // Fader moves go into the open song's `mixer:` section, undo moves the faders back.
   useEffect(() => startScoreMix(), []);

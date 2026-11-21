@@ -201,6 +201,12 @@ export function useFallbackDevice(): Promise<boolean> {
 
 export function stopEngine(): void {
   set({ busy: true });
+  // Stopped by hand, nothing is loaded any more - the next app start opens in free looping.
+  try {
+    localStorage.removeItem("looper.loadedScore");
+  } catch {
+    /* nothing to forget */
+  }
   api
     .engineStop()
     .then(() => set({ info: null }))

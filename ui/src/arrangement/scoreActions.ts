@@ -93,6 +93,25 @@ export function followLoaded(wasLoaded: boolean, push: () => Promise<void>): voi
 }
 const loadedListeners = new Set<() => void>();
 
+/**
+ * "Load" without the button: the open score goes to the runner (the engine starts first when it
+ * does not run). The Load button and the reload after the app opened (`shell/reloadScore.ts`) both
+ * come through here. Rejects with the runner's sentence.
+ */
+export async function loadOpenScore(): Promise<void> {
+  await docStore.flush();
+  await docStore.settled();
+  const text = scoreFile().text;
+  // No count-in of its own: the score's `count_in:` is what the runner takes.
+  const loaded = await scoreApi.load(text);
+  loadedText = text;
+  // The host has applied the score's `mixer:`; from now on fader and section move together.
+  markLoaded();
+  for (const l of loadedListeners) l();
+  setLoadedScore(loaded.score);
+  note(loaded.message);
+}
+
 export function useScoreActions(): ScoreActions {
   const [recent, setRecent] = useState<RecentFile[]>([]);
   const [defaultDir, setDefaultDir] = useState<string | null>(null);
@@ -271,17 +290,8 @@ export function useScoreActions(): ScoreActions {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      await docStore.flush();
-      await docStore.settled();
-      const text = scoreFile().text;
-      // No count-in of its own: the score's `count_in:` is what the runner takes.
-      const loaded = await scoreApi.load(text);
-      loadedText = text;
-      // The host has applied the score's `mixer:`; from now on fader and section move together.
-      markLoaded();
-      setLoadedRev((n) => n + 1);
-      setLoadedScore(loaded.score);
-      note(loaded.message);
+      // The listeners of `loadOpenScore` bump `loadedRev`.
+      await loadOpenScore();
     } catch (e) {
       fail((e as Error).message);
     } finally {

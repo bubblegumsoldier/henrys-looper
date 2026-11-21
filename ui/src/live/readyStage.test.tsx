@@ -18,6 +18,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { LiveView } from "./LiveView";
 import { pushStatus } from "../status";
 import { engineWords } from "../shell/engine";
+import { shouldReload } from "../shell/reloadScore";
 import { IDLE_STATUS, type EngineStateView, type FxStatus, type LooperStatus, type LooperTrackStatus } from "../types";
 
 const FX: FxStatus = {
@@ -123,6 +124,18 @@ describe("the stage without an engine", () => {
     pushStatus(IDLE_STATUS);
     const html = renderToStaticMarkup(<LiveView onOpenSetup={() => {}} onOpenArrangement={() => {}} />);
     expect(html).not.toContain("Start engine");
+  });
+});
+
+describe("loading the last score again", () => {
+  const on = { autostart: true, reloadScore: true };
+  const note = { path: "/scores/set.yaml", name: "set.yaml" };
+  it("only when it was loaded, both settings are on and the same file is open", () => {
+    expect(shouldReload(on, note, "/scores/set.yaml")).toBe("reload");
+    expect(shouldReload(on, null, "/scores/set.yaml")).toBe("skip");
+    expect(shouldReload({ ...on, reloadScore: false }, note, "/scores/set.yaml")).toBe("skip");
+    expect(shouldReload({ ...on, autostart: false }, note, "/scores/set.yaml")).toBe("skip");
+    expect(shouldReload(on, note, "/scores/other.yaml")).toBe("other-file");
   });
 });
 
