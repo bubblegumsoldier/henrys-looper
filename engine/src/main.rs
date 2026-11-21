@@ -109,6 +109,33 @@ enum Command {
         seconds: f64,
     },
 
+    /// Render a recorded WAV through one track's effect chain into a new WAV file, offline. Opens
+    /// no device and makes no sound.
+    Fxrender {
+        /// WAV file as the looper records it (24-bit, mono or stereo)
+        input: std::path::PathBuf,
+
+        /// WAV file to write (24-bit stereo)
+        output: std::path::PathBuf,
+
+        /// The track's mixer entry as written under `mixer.tracks` in a score, e.g.
+        /// "{preset: bass_from_guitar, octaver: {tone: 1200}}"
+        #[arg(long, default_value = "{preset: dry}")]
+        mix: String,
+
+        /// Tempo for the tempo-synchronous delay
+        #[arg(long, default_value_t = 120.0)]
+        bpm: f64,
+
+        /// Start in the input, in seconds
+        #[arg(long, default_value_t = 0.0)]
+        start: f64,
+
+        /// Seconds to render (default: to the end)
+        #[arg(long)]
+        seconds: Option<f64>,
+    },
+
     /// MIDI control (phase 5): list devices, show incoming events, learn buttons onto targets
     /// and save them in the controller profile. Makes no sound and opens no audio device.
     Midi {
@@ -162,6 +189,23 @@ fn main() -> ExitCode {
         Command::Live { dev, live } => engine::live::cmd_live(dev, live),
         Command::Score { dev, score } => engine::score_cli::cmd_score(dev, score),
         Command::Fxbench { rate, seconds } => engine::fx::bench::cmd_fxbench(*rate, *seconds),
+        Command::Fxrender {
+            input,
+            output,
+            mix,
+            bpm,
+            start,
+            seconds,
+        } => engine::fx::render::cmd_fxrender(
+            input,
+            output,
+            &engine::fx::render::RenderOpts {
+                mix: mix.clone(),
+                bpm: *bpm,
+                start: *start,
+                seconds: *seconds,
+            },
+        ),
         Command::Midi { midi } => midi::cli::cmd_midi(midi),
         Command::Calibrate { dev, calibrate } => engine::calibrate::cmd_calibrate(dev, calibrate),
         Command::Plugins { plugins } => plugin::cli::cmd_plugins(plugins),

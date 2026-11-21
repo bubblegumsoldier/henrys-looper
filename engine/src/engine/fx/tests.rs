@@ -350,11 +350,13 @@ fn preset_names_survive_the_round_trip_through_their_labels() {
         assert_eq!(FxPreset::parse(preset.label()), Some(preset));
     }
     assert_eq!(FxPreset::parse("STIMME"), Some(FxPreset::Voice));
-    assert_eq!(FxPreset::parse("bass"), None);
-    assert_eq!(FxSlot::from_number(1), Some(FxSlot::HighPass));
-    assert_eq!(FxSlot::from_number(5), Some(FxSlot::Reverb));
+    assert_eq!(FxPreset::parse("bass_from_guitar"), Some(FxPreset::BassFromGuitar));
+    assert_eq!(FxPreset::parse("tuba"), None);
+    assert_eq!(FxSlot::from_number(1), Some(FxSlot::Octaver));
+    assert_eq!(FxSlot::from_number(2), Some(FxSlot::HighPass));
+    assert_eq!(FxSlot::from_number(6), Some(FxSlot::Reverb));
     assert_eq!(FxSlot::from_number(0), None);
-    assert_eq!(FxSlot::from_number(6), None);
+    assert_eq!(FxSlot::from_number(7), None);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -499,13 +501,13 @@ fn the_status_letters_show_what_is_on() {
     let mut chain = Chain::new(RATE);
     chain.load_preset(FxPreset::Voice);
     let status = chain.status();
-    assert_eq!(status.letters(), "HEC-R", "Delay ist im Stimme-Preset aus");
+    assert_eq!(status.letters(), "-HEC-R", "Delay ist im Stimme-Preset aus");
     assert!(status.active());
     assert_eq!(status.preset, FxPreset::Voice);
 
     chain.load_preset(FxPreset::Dry);
     let status = chain.status();
-    assert_eq!(status.letters(), "-----");
+    assert_eq!(status.letters(), "------");
     assert!(!status.active());
-    assert_eq!(FxStatus::default().letters(), "-----");
+    assert_eq!(FxStatus::default().letters(), "------");
 }

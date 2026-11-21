@@ -1,12 +1,22 @@
-//! The effect chain of one track: high-pass, three-band EQ, compressor, delay, reverb.
+//! The effect chain of one track: octaver, high-pass, three-band EQ, compressor, delay, reverb.
 //!
 //! ```text
 //!   Ebenen-Summe  ─┐
-//!                  ├─► auf stereo ─► Hochpass ─► EQ ─► Kompressor ─► Delay ─► Hall ─► Panorama
-//!   Mithoer-Signal ┘   (nur mono)                                                       │
-//!                                                                                       ▼
-//!   Eingangssignal ────────────────────────────────────────────► Loop-Puffer  (trocken)  Mixbus
+//!                  ├─► auf stereo ─► Oktaver ─► Hochpass ─► EQ ─► Kompressor ─► Delay ─► Hall ─► Panorama
+//!   Mithoer-Signal ┘   (nur mono)                                                                 │
+//!                                                                                                 ▼
+//!   Eingangssignal ──────────────────────────────────────────────────────► Loop-Puffer  (trocken)  Mixbus
 //! ```
+//!
+//! # Why the octaver comes first
+//!
+//! Everything after it shapes a tone, and the tone that is to be shaped is the one an octave down.
+//! A high-pass in front of it would take the guitar's low E (82 Hz) away before it could become a
+//! bass's 41 Hz; an EQ in front of it would place its bands an octave too high; and a compressor in
+//! front of it would level the guitar instead of the bass it is turned into. It is also the only
+//! effect with latency (see `octaver`), and at the front that latency simply delays everything
+//! behind it by the same amount - which is what the loop compensation in
+//! `engine::process::collect_inserts` relies on.
 //!
 //! # The chain is stereo, whatever the track is
 //!
@@ -81,22 +91,26 @@ pub mod bench;
 pub mod biquad;
 pub mod delay;
 pub mod dynamics;
+pub mod octaver;
+pub mod render;
 pub mod reverb;
 pub mod smooth;
 
 pub use biquad::BandKind;
 pub use delay::DelayNote;
 pub use dynamics::CompSettings;
+pub use octaver::OctaverSettings;
 
 use super::frame::Frame;
 use biquad::{Biquad, Coeffs};
 use delay::Delay;
 use dynamics::Compressor;
+use octaver::Octaver;
 use reverb::Reverb;
 use smooth::Smoothed;
 
 /// Number of switchable effects in a chain.
-pub const FX_SLOTS: usize = 5;
+pub const FX_SLOTS: usize = 6;
 /// Number of EQ bands.
 pub const EQ_BANDS: usize = 3;
 
@@ -125,6 +139,7 @@ pub const REVERB_START_MIX: f32 = 0.2;
 /// path, and the numbering the user sees is this order plus one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxSlot {
+    Octaver,
     HighPass,
     Eq,
     Comp,
@@ -136,16 +151,18 @@ impl FxSlot {
     #[inline]
     pub fn index(self) -> usize {
         match self {
-            FxSlot::HighPass => 0,
-            FxSlot::Eq => 1,
-            FxSlot::Comp => 2,
-            FxSlot::Delay => 3,
-            FxSlot::Reverb => 4,
+            FxSlot::Octaver => 0,
+            FxSlot::HighPass => 1,
+            FxSlot::Eq => 2,
+            FxSlot::Comp => 3,
+            FxSlot::Delay => 4,
+            FxSlot::Reverb => 5,
         }
     }
 
     pub fn all() -> [FxSlot; FX_SLOTS] {
         [
+            FxSlot::Octaver,
             FxSlot::HighPass,
             FxSlot::Eq,
             FxSlot::Comp,
@@ -157,6 +174,7 @@ impl FxSlot {
     /// German name, for the display.
     pub fn label(self) -> &'static str {
         match self {
+            FxSlot::Octaver => "Octaver",
             FxSlot::HighPass => "High-pass",
             FxSlot::Eq => "EQ",
             FxSlot::Comp => "Compressor",
@@ -169,6 +187,7 @@ impl FxSlot {
     /// (`FxSlotName`) uses exactly these words, and so does `midi::Target`.
     pub fn name(self) -> &'static str {
         match self {
+            FxSlot::Octaver => "octaver",
             FxSlot::HighPass => "high_pass",
             FxSlot::Eq => "eq",
             FxSlot::Comp => "comp",
@@ -181,9 +200,10 @@ impl FxSlot {
         Self::all().into_iter().find(|slot| slot.name() == text)
     }
 
-    /// One letter for the compact status line: `HECDR`.
+    /// One letter for the compact status line: `OHECDR`.
     pub fn letter(self) -> char {
         match self {
+            FxSlot::Octaver => 'O',
             FxSlot::HighPass => 'H',
             FxSlot::Eq => 'E',
             FxSlot::Comp => 'C',
@@ -207,6 +227,8 @@ pub enum FxPreset {
     Dry,
     Voice,
     PiezoGuitar,
+    /// A monophonically played guitar turned into a bass: the octaver plus a bass voicing.
+    BassFromGuitar,
     /// Not loadable - reported when a parameter has been changed by hand since the last preset.
     Custom,
 }
@@ -217,13 +239,19 @@ impl FxPreset {
             FxPreset::Dry => "dry",
             FxPreset::Voice => "voice",
             FxPreset::PiezoGuitar => "guitar",
+            FxPreset::BassFromGuitar => "bass",
             FxPreset::Custom => "custom",
         }
     }
 
-    /// The three a user can ask for. `Custom` is a report, not a choice.
-    pub fn loadable() -> [FxPreset; 3] {
-        [FxPreset::Dry, FxPreset::Voice, FxPreset::PiezoGuitar]
+    /// The four a user can ask for. `Custom` is a report, not a choice.
+    pub fn loadable() -> [FxPreset; 4] {
+        [
+            FxPreset::Dry,
+            FxPreset::Voice,
+            FxPreset::PiezoGuitar,
+            FxPreset::BassFromGuitar,
+        ]
     }
 
     pub fn parse(text: &str) -> Option<Self> {
@@ -231,6 +259,7 @@ impl FxPreset {
             "trocken" | "dry" | "aus" => Some(FxPreset::Dry),
             "stimme" | "voice" | "gesang" => Some(FxPreset::Voice),
             "gitarre" | "piezo" | "guitar" => Some(FxPreset::PiezoGuitar),
+            "bass" | "bass_from_guitar" => Some(FxPreset::BassFromGuitar),
             _ => None,
         }
     }
@@ -281,6 +310,7 @@ impl BandSettings {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChainSettings {
     pub enabled: [bool; FX_SLOTS],
+    pub octaver: OctaverSettings,
     pub high_pass_hz: f32,
     pub bands: [BandSettings; EQ_BANDS],
     pub comp: CompSettings,
@@ -296,6 +326,7 @@ impl Default for ChainSettings {
     fn default() -> Self {
         Self {
             enabled: [false; FX_SLOTS],
+            octaver: OctaverSettings::default(),
             high_pass_hz: 80.0,
             bands: [BandSettings::default(); EQ_BANDS],
             comp: CompSettings::default(),
@@ -325,7 +356,8 @@ impl FxPreset {
             // compression that levels a singer-songwriter's dynamics, and enough reverb that the
             // voice stops sounding like a close-miked demo.
             FxPreset::Voice => ChainSettings {
-                enabled: [true, true, true, false, true],
+                enabled: [false, true, true, true, false, true],
+                octaver: OctaverSettings::default(),
                 // 80 Hz: under the lowest fundamental a sung male voice produces (about 85 Hz)
                 // and far under a female one, so nothing of the voice itself is touched. What
                 // goes is handling noise, the thump of a plosive and whatever the stage floor
@@ -401,7 +433,8 @@ impl FxPreset {
             // front of it: too much low-mid boom, and a hard, glassy peak in the upper mids that
             // everybody calls "quack". Both of those are what this preset is for.
             FxPreset::PiezoGuitar => ChainSettings {
-                enabled: [true, true, true, false, true],
+                enabled: [false, true, true, true, false, true],
+                octaver: OctaverSettings::default(),
                 // 100 Hz, higher than the voice on purpose. Honest caveat: the low E of a guitar
                 // in standard tuning is 82 Hz, so a 12 dB/oct high-pass at 100 Hz does take about
                 // 5 dB off that fundamental. That is deliberate - a piezo reproduces almost none
@@ -465,6 +498,79 @@ impl FxPreset {
                 reverb_damping: 0.6,
                 reverb_mix: 0.10,
             },
+
+            // -------------------------------------------------------------------------------
+            // Bass from guitar. Single notes played on the guitar, an octave lower and voiced
+            // like a bass. Tuned on a real piezo stem (a bass line played on the guitar) by
+            // measuring third-octave spectra and level spread of the render - see the octaver's
+            // module comment and the architecture document for the numbers.
+            FxPreset::BassFromGuitar => ChainSettings {
+                // Octaver, high-pass, EQ, compressor. No delay and no reverb: a bass in a room
+                // turns to mud, and the looper's other tracks bring the room.
+                enabled: [true, true, true, true, false, false],
+                octaver: OctaverSettings {
+                    // No guitar left: the point is a bass, not a guitar with a sub under it.
+                    dry: 0.0,
+                    sub: 1.0,
+                    // 2.5 kHz, 12 dB/oct: the halved spectrum has little up there anyway, and
+                    // what there is - the pick, halved to a thud - is better rounded off.
+                    tone_hz: 2_500.0,
+                    // 0.4 = +10 dB into the clipper. Measured: lifts 300 Hz - 1 kHz by 6 to 10 dB
+                    // relative to the fundamental, which brings the octave voice from "30 dB down
+                    // at 1 kHz" to roughly where a DI bass is. Above 0.6 a held note starts to
+                    // fuzz.
+                    drive: 0.4,
+                },
+                // 30 Hz: under the 41 Hz of the low E an octave down, over the subsonic thumps
+                // a pickup knock becomes at half speed.
+                high_pass_hz: 30.0,
+                bands: [
+                    // 70 Hz up 2 dB: weight. A piezo reproduces the guitar's fundamentals weakly,
+                    // and they are the bass's fundamentals now.
+                    BandSettings {
+                        kind: BandKind::Peak,
+                        hz: 70.0,
+                        q: 0.9,
+                        gain_db: 2.0,
+                    },
+                    // 800 Hz up 2 dB, broad: the "growl" that lets a bass line be followed on
+                    // small speakers, where 41 Hz does not exist.
+                    BandSettings {
+                        kind: BandKind::Peak,
+                        hz: 800.0,
+                        q: 0.8,
+                        gain_db: 2.0,
+                    },
+                    // 3 kHz shelf down 4 dB: what is left of string and fret noise.
+                    BandSettings {
+                        kind: BandKind::HighShelf,
+                        hz: 3_000.0,
+                        q: 0.707,
+                        gain_db: -4.0,
+                    },
+                ],
+                comp: CompSettings {
+                    // A bass is the instrument that has to be even: every note the same weight.
+                    // -20 dB and 4:1 catches nearly every note of a picked line - measured on the
+                    // stem, the spread between quiet and loud notes (10th to 90th percentile of
+                    // 0.5 s RMS) goes from 6.6 dB in to about 3.5 dB out.
+                    threshold_db: -20.0,
+                    ratio: 4.0,
+                    // 10 ms keeps the front of the note; faster and the bass loses its attack.
+                    attack_ms: 10.0,
+                    // 120 ms: back up before the next eighth note at 124 BPM (242 ms).
+                    release_ms: 120.0,
+                    knee_db: 6.0,
+                    // Puts the median level back where the guitar was.
+                    makeup_db: 6.0,
+                },
+                delay_note: DelayNote::DottedEighth,
+                delay_feedback: 0.3,
+                delay_mix: 0.0,
+                reverb_size: 0.6,
+                reverb_damping: 0.5,
+                reverb_mix: 0.0,
+            },
         }
     }
 
@@ -481,6 +587,10 @@ impl FxPreset {
 /// One parameter change. `Copy` and fixed size, so it travels in the existing command queue.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FxParam {
+    OctaverDry(f32),
+    OctaverSub(f32),
+    OctaverToneHz(f32),
+    OctaverDrive(f32),
     HighPassHz(f32),
     BandKind { band: usize, kind: BandKind },
     BandHz { band: usize, hz: f32 },
@@ -504,6 +614,10 @@ impl FxParam {
     /// The effect this knob belongs to.
     pub fn slot(self) -> FxSlot {
         match self {
+            FxParam::OctaverDry(_)
+            | FxParam::OctaverSub(_)
+            | FxParam::OctaverToneHz(_)
+            | FxParam::OctaverDrive(_) => FxSlot::Octaver,
             FxParam::HighPassHz(_) => FxSlot::HighPass,
             FxParam::BandKind { .. }
             | FxParam::BandHz { .. }
@@ -556,8 +670,8 @@ impl Default for FxStatus {
 }
 
 impl FxStatus {
-    /// `HEC-R` style summary: the letter of every effect that is on, a dash for one that is off.
-    /// Five characters, always, so the terminal display does not jump.
+    /// `-HEC-R` style summary: the letter of every effect that is on, a dash for one that is off.
+    /// Six characters, always, so the terminal display does not jump.
     pub fn letters(&self) -> String {
         FxSlot::all()
             .iter()
@@ -569,6 +683,17 @@ impl FxStatus {
                 }
             })
             .collect()
+    }
+
+    /// Frames the chain delays everything by in this state: the octaver's latency while it is
+    /// switched on and the chain is not bypassed. Computed rather than carried, to keep the
+    /// snapshot small - see `command::tests`.
+    pub fn latency_frames(&self, sample_rate: u32) -> u32 {
+        if !self.bypass && self.settings.enabled[FxSlot::Octaver.index()] {
+            octaver::latency_frames(sample_rate)
+        } else {
+            0
+        }
     }
 
     /// True when the chain is doing something audible.
@@ -588,6 +713,7 @@ pub struct Chain {
     bypass_mix: Smoothed,
     /// Wet share of each slot; 0.0 means the slot is skipped entirely.
     slot_mix: [Smoothed; FX_SLOTS],
+    octaver: Octaver,
     /// One filter instance per channel. A biquad's state is four *signal* samples, so sharing one
     /// between two channels would feed each channel the other's history - which is not a filter of
     /// anything, it is a ring modulator with extra steps.
@@ -615,6 +741,7 @@ impl Chain {
             bypass: true,
             bypass_mix: Smoothed::new(0.0, BYPASS_MS, sample_rate),
             slot_mix: [Smoothed::new(0.0, SWITCH_MS, sample_rate); FX_SLOTS],
+            octaver: Octaver::new(sample_rate),
             hp: [Biquad::new(Coeffs::high_pass(
                 sample_rate,
                 set.high_pass_hz,
@@ -682,6 +809,20 @@ impl Chain {
         }
     }
 
+    /// Frames by which the chain delays its input, as the engine has to make up for on the loop.
+    ///
+    /// The octaver's latency while it is switched on and the chain is not bypassed, zero otherwise.
+    /// It follows the switches, not the crossfades behind them: during the 20 ms in which the
+    /// octaver fades in or out, the delayed and the undelayed signal are mixed anyway.
+    #[inline]
+    pub fn latency(&self) -> u32 {
+        if !self.bypass && self.set.enabled[FxSlot::Octaver.index()] {
+            self.octaver.latency()
+        } else {
+            0
+        }
+    }
+
     /// What a quarter note is worth right now. Called once per audio block by the engine; the
     /// delay ignores it unless the value actually changed.
     #[inline]
@@ -715,6 +856,7 @@ impl Chain {
             // A slot that was skipped has stale state; start it from silence instead of from
             // whatever it happened to hold when it was switched off.
             match slot {
+                FxSlot::Octaver => self.octaver.reset(),
                 FxSlot::HighPass => {
                     for filter in &mut self.hp {
                         filter.reset();
@@ -754,6 +896,8 @@ impl Chain {
             self.slot_mix[i].set(if on { 1.0 } else { 0.0 });
         }
         self.set = settings;
+        self.octaver.set_settings(settings.octaver);
+        self.set.octaver = self.octaver.settings();
         self.set.high_pass_hz = settings.high_pass_hz.clamp(20.0, 1_000.0);
         for band in self.set.bands.iter_mut() {
             *band = band.clamped();
@@ -779,6 +923,10 @@ impl Chain {
     /// One knob. Marks the chain as edited, so the display stops claiming a preset it no longer is.
     pub fn set_param(&mut self, param: FxParam) {
         match param {
+            FxParam::OctaverDry(v) => self.set_octaver(|o| o.dry = v),
+            FxParam::OctaverSub(v) => self.set_octaver(|o| o.sub = v),
+            FxParam::OctaverToneHz(v) => self.set_octaver(|o| o.tone_hz = v),
+            FxParam::OctaverDrive(v) => self.set_octaver(|o| o.drive = v),
             FxParam::HighPassHz(hz) => {
                 self.set.high_pass_hz = hz.clamp(20.0, 1_000.0);
                 self.rebuild_high_pass();
@@ -900,6 +1048,13 @@ impl Chain {
         }
     }
 
+    fn set_octaver(&mut self, edit: impl FnOnce(&mut OctaverSettings)) {
+        let mut o = self.set.octaver;
+        edit(&mut o);
+        self.octaver.set_settings(o);
+        self.set.octaver = self.octaver.settings();
+    }
+
     fn set_comp(&mut self, edit: impl FnOnce(&mut CompSettings)) {
         let mut c = self.set.comp;
         edit(&mut c);
@@ -945,6 +1100,7 @@ impl Chain {
             band.reset();
         }
         self.comp.reset();
+        self.octaver.reset();
     }
 
     /// Longest silence after which nothing can come out of the chain any more.
@@ -998,8 +1154,16 @@ impl Chain {
 
         let mut y = x;
 
+        // 0. Octaver, first - see the module comment. It is the one effect that delays its whole
+        //    output, dry share included, so everything behind it stays aligned with it.
+        let m = self.slot_mix[FxSlot::Octaver.index()].next();
+        if m > 0.0 {
+            let w = self.octaver.process(y);
+            y = blend(y, w, m);
+        }
+
         // 1. High-pass, one filter instance per channel.
-        let m = self.slot_mix[0].next();
+        let m = self.slot_mix[FxSlot::HighPass.index()].next();
         if m > 0.0 {
             let w = Frame {
                 l: self.hp[0].process(y.l),
@@ -1009,7 +1173,7 @@ impl Chain {
         }
 
         // 2. Three EQ bands. A band at 0 dB is a wire, so it is not computed at all.
-        let m = self.slot_mix[1].next();
+        let m = self.slot_mix[FxSlot::Eq.index()].next();
         if m > 0.0 {
             let mut w = y;
             for i in 0..EQ_BANDS {
@@ -1024,7 +1188,7 @@ impl Chain {
         }
 
         // 3. Compressor - one detector, one gain, both channels. See `dynamics`.
-        let m = self.slot_mix[2].next();
+        let m = self.slot_mix[FxSlot::Comp.index()].next();
         if m > 0.0 {
             let w = self.comp.process(y);
             y = blend(y, w, m);
@@ -1032,7 +1196,7 @@ impl Chain {
 
         // 4. Delay - after the compressor, so the repeats are not themselves compressed and the
         //    tail keeps the dynamics of the note it came from.
-        let m = self.slot_mix[3].next();
+        let m = self.slot_mix[FxSlot::Delay.index()].next();
         if m > 0.0 {
             let w = self.delay.process(y);
             y = blend(y, w, m);
@@ -1040,7 +1204,7 @@ impl Chain {
 
         // 5. Reverb, last, so it hears the delay's repeats as well - which is what puts them in
         //    the same room instead of in front of it.
-        let m = self.slot_mix[4].next();
+        let m = self.slot_mix[FxSlot::Reverb.index()].next();
         if m > 0.0 {
             let w = self.reverb.process(y);
             y = blend(y, w, m);
@@ -1065,5 +1229,7 @@ fn blend(dry: Frame, wet: Frame, mix: f32) -> Frame {
     }
 }
 
+#[cfg(test)]
+mod octaver_tests;
 #[cfg(test)]
 mod tests;

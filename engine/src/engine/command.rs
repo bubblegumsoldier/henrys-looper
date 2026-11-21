@@ -984,11 +984,15 @@ mod tests {
     ///
     /// Then the output meters: peak and limiter reduction of eight device channels, because a bus
     /// meter cannot show the sum on a socket two buses share - 64 bytes, 2272, limit 2272.
+    ///
+    /// Then the octaver: its four knobs in every track's chain settings, 16 bytes per track -
+    /// 2400 bytes, limit 2400. Its latency is *not* carried; `FxStatus::latency_frames` computes
+    /// it from the switches.
     #[test]
     fn the_status_snapshot_stays_small_enough_to_memcpy_in_a_callback() {
         let size = std::mem::size_of::<Status>();
         assert!(
-            size <= 2_272,
+            size <= 2_400,
             "Der Status ist auf {size} Bytes gewachsen - das wandert bei jedem Snapshot durch \
              den Audio-Callback."
         );

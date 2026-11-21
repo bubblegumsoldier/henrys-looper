@@ -1019,9 +1019,9 @@ impl Control {
         );
     }
 
-    /// `x <1-5>` - one effect on or off.
+    /// `x <1-6>` - one effect on or off.
     fn fx_slot(&mut self, arg: Option<&str>, ts: TrackStatus) {
-        let usage = "x <1-5>  (1 High-pass, 2 EQ, 3 Compressor, 4 Delay, 5 Reverb)";
+        let usage = "x <1-6>  (1 Octaver, 2 High-pass, 3 EQ, 4 Compressor, 5 Delay, 6 Reverb)";
         let Some(slot) = arg
             .and_then(|a| a.parse::<usize>().ok())
             .and_then(FxSlot::from_number)
@@ -1547,7 +1547,7 @@ pub(crate) fn layer_list(ts: &TrackStatus, gains: &[f32]) -> String {
     format!("[{}]", parts.join(" "))
 }
 
-/// The effect column of a track line: `voice HEC-R 1/8.` - which preset, which effects are on,
+/// The effect column of a track line: `voice -HEC-R 1/8.` - which preset, which effects are on,
 /// and, when the delay is one of them, the note value it is locked to.
 pub(crate) fn fx_text(fx: &FxStatus) -> String {
     if fx.bypass {
@@ -1840,9 +1840,9 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
          \x20 k   Click on/off (it is on the Monitor bus)\n\
          \x20 t   change tempo, e.g. \"t 120\" or \"t 120 7 8\" (only while everything is empty)\n\
          Effects - apply to playback and Monitor, the recording always stays dry:\n\
-         \x20 v <name>      load preset: voice | guitar | dry\n\
+         \x20 v <name>      load preset: voice | guitar | bass | dry\n\
          \x20 f             whole effect chain on/off (off = passed through bit-identical)\n\
-         \x20 x <1-5>       single: 1 High-pass, 2 EQ, 3 Compressor, 4 Delay, 5 Reverb\n\
+         \x20 x <1-6>       single: 1 Octaver, 2 High-pass, 3 EQ, 4 Compressor, 5 Delay, 6 Reverb\n\
          \x20 d <value>     delay note value: 1/4 | 1/8. | 1/8 | 1/8T (derived from the tempo)\n\
          \x20 q   quit\n",
         defs.len(),
@@ -2149,7 +2149,7 @@ mod tests {
             fx: chain.status(),
             ..Default::default()
         };
-        assert_eq!(fx_text(&ts.fx), "voice HEC-R");
+        assert_eq!(fx_text(&ts.fx), "voice -HEC-R");
 
         chain.set_enabled(FxSlot::Delay, true);
         chain.set_param(FxParam::DelayNote(DelayNote::Quarter));
@@ -2157,7 +2157,7 @@ mod tests {
             fx: chain.status(),
             ..Default::default()
         };
-        assert_eq!(fx_text(&ts.fx), "custom HECDR 1/4");
+        assert_eq!(fx_text(&ts.fx), "custom -HECDR 1/4");
 
         chain.set_bypass(true);
         let ts = TrackStatus {

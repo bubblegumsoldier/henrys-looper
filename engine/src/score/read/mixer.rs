@@ -5,7 +5,8 @@ use super::super::error::{suggest_or_list};
 use super::super::map::OrderedMap;
 use super::super::mixer::{
     BAND_KIND_NAMES, BandLine, BusLevels, CompLine, DB_MAX, DELAY_NOTE_NAMES, DelayLine,
-    HighPassLine, InsertLine, MixerSource, PRESET_NAMES, ReverbLine, SwitchLine, TrackMixSource,
+    HighPassLine, InsertLine, MixerSource, OctaverLine, PRESET_NAMES, ReverbLine, SwitchLine,
+    TrackMixSource,
 };
 use crate::engine::insert::MAX_INSERTS;
 use super::super::yaml::Node;
@@ -13,8 +14,8 @@ use super::Reader;
 
 pub(super) const MIXER_FIELDS: [&str; 2] = ["buses", "tracks"];
 pub(super) const BUS_FIELDS: [&str; 4] = ["main", "monitor", "click", "inputs"];
-pub(super) const TRACK_MIX_FIELDS: [&str; 14] = [
-    "gain", "mute", "preset", "bypass", "high_pass", "eq", "band1", "band2", "band3", "comp",
+pub(super) const TRACK_MIX_FIELDS: [&str; 15] = [
+    "gain", "mute", "preset", "bypass", "octaver", "high_pass", "eq", "band1", "band2", "band3", "comp",
     "delay", "reverb", "instrument", "inserts",
 ];
 const INSERT_FIELDS: [&str; 2] = ["plugin", "bypass"];
@@ -159,6 +160,25 @@ impl Reader {
         }
         if let Some(n) = fields.get("inserts") {
             out.inserts = self.read_inserts(n, &field("inserts"));
+        }
+        if let Some(n) = fields.get("octaver") {
+            out.octaver = self.read_line(n, &field("octaver"), &["on", "dry", "sub", "tone", "drive"], |r, key, v, w| {
+                let mut line = OctaverLine::default();
+                match key {
+                    "on" => line.on = r.as_bool(v, w),
+                    "dry" => line.dry = r.read_range(v, w, 0.0, 1.0),
+                    "sub" => line.sub = r.read_range(v, w, 0.0, 1.0),
+                    "tone" => line.tone = r.read_range(v, w, 100.0, 8_000.0),
+                    _ => line.drive = r.read_range(v, w, 0.0, 1.0),
+                }
+                line
+            }, |a, b| OctaverLine {
+                on: a.on.or(b.on),
+                dry: a.dry.or(b.dry),
+                sub: a.sub.or(b.sub),
+                tone: a.tone.or(b.tone),
+                drive: a.drive.or(b.drive),
+            });
         }
         if let Some(n) = fields.get("high_pass") {
             out.high_pass = self.read_line(n, &field("high_pass"), &["on", "hz"], |r, key, v, w| {

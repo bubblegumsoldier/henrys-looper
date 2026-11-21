@@ -124,6 +124,22 @@ impl Coeffs {
         )
     }
 
+    /// 12 dB per octave low-pass, the mirror image of [`Coeffs::high_pass`]. Used by the octaver
+    /// for its tone control and its pitch detector.
+    pub fn low_pass(sample_rate: u32, hz: f32, q: f32) -> Self {
+        let w0 = std::f32::consts::TAU * safe_hz(hz, sample_rate) / sample_rate as f32;
+        let (sin, cos) = w0.sin_cos();
+        let alpha = sin / (2.0 * q.max(0.1));
+        Self::normalise(
+            (1.0 - cos) * 0.5,
+            1.0 - cos,
+            (1.0 - cos) * 0.5,
+            1.0 + alpha,
+            -2.0 * cos,
+            1.0 - alpha,
+        )
+    }
+
     /// Bell. `q` is the classic EQ Q: bandwidth in octaves shrinks as `q` grows.
     pub fn peaking(sample_rate: u32, hz: f32, q: f32, gain_db: f32) -> Self {
         let a = 10f32.powf(gain_db / 40.0);

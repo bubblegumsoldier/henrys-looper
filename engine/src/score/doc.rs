@@ -28,7 +28,8 @@ use super::compile_score;
 use super::error::{ScoreError, ScoreIssue};
 use super::map::OrderedMap;
 use super::mixer::{
-    BandLine, BusLevels, CompLine, DelayLine, HighPassLine, InsertLine, ReverbLine, SwitchLine,
+    BandLine, BusLevels, CompLine, DelayLine, HighPassLine, InsertLine, OctaverLine, ReverbLine,
+    SwitchLine,
     TrackMixSource,
 };
 use super::model::{CompiledScore, InstrumentSource, TrackState};
@@ -811,6 +812,15 @@ fn read_mix_field(mix: &mut TrackMixSource, field: &str, value: &Node<'_>) {
                         .collect(),
                 );
             }
+        }
+        "octaver" => {
+            mix.octaver = Some(OctaverLine {
+                on: on(),
+                dry: num("dry"),
+                sub: num("sub"),
+                tone: num("tone"),
+                drive: num("drive"),
+            })
         }
         "high_pass" => {
             mix.high_pass = Some(HighPassLine {
@@ -1604,6 +1614,18 @@ fn mix_lines(mix: &TrackMixSource) -> Vec<(&'static str, String)> {
     }
     if let Some(bypass) = mix.bypass {
         out.push(("bypass", bypass.to_string()));
+    }
+    if let Some(l) = &mix.octaver {
+        out.push((
+            "octaver",
+            flow(vec![
+                ("on", b(l.on)),
+                ("dry", n(l.dry)),
+                ("sub", n(l.sub)),
+                ("tone", n(l.tone)),
+                ("drive", n(l.drive)),
+            ]),
+        ));
     }
     if let Some(l) = &mix.high_pass {
         out.push(("high_pass", flow(vec![("on", b(l.on)), ("hz", n(l.hz))])));

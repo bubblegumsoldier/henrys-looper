@@ -537,14 +537,17 @@ impl EngineCore {
     }
 
     /// Apply rack changes and tell every track how far ahead to read its loop for the latency of
-    /// its plugins. A handful of atomic loads per track and block.
+    /// its plugins and of its built-in chain (the octaver, `fx::octaver`). A handful of atomic
+    /// loads per track and block.
     fn collect_inserts(&mut self) {
-        let Some(rack) = self.inserts.as_mut() else {
-            return;
-        };
-        rack.collect();
+        if let Some(rack) = self.inserts.as_mut() {
+            rack.collect();
+        }
+        let rack = self.inserts.as_ref();
         for (t, track) in self.tracks.iter_mut().enumerate() {
-            track.set_playback_advance(rack.track_latency(t));
+            let plugins = rack.map_or(0, |r| r.track_latency(t));
+            let chain = u64::from(track.fx().latency());
+            track.set_playback_advance(plugins + chain);
         }
     }
 

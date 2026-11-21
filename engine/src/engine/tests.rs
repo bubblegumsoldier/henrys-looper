@@ -1727,7 +1727,7 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
     let fx = status.tracks()[0].fx;
     assert!(fx.bypass);
     assert_eq!(fx.preset, FxPreset::Voice);
-    assert_eq!(fx.letters(), "HEC-R");
+    assert_eq!(fx.letters(), "-HEC-R");
 }
 
 /// The delay is tempo-synchronous, and the engine is where the tempo actually lives: a quarter
@@ -1760,7 +1760,7 @@ fn the_delay_time_comes_from_the_engine_timeline() {
     sim.run_blocks(8);
     let status = sim.latest_status().expect("Status");
     assert_eq!(status.tracks()[0].fx.delay_samples, 24_000);
-    assert_eq!(status.tracks()[0].fx.letters(), "HECDR");
+    assert_eq!(status.tracks()[0].fx.letters(), "-HECDR");
 
     // A tempo change moves it, because the delay asks the timeline rather than a millisecond
     // value somebody typed in.
@@ -1797,7 +1797,7 @@ fn touching_an_fx_knob_from_dry_switches_effect_and_chain_in() {
     sim.run_blocks(4);
     let fx = sim.latest_status().expect("Status").tracks()[0].fx;
     assert!(!fx.bypass);
-    assert_eq!(fx.letters(), "--C-R");
+    assert_eq!(fx.letters(), "---C-R");
     assert!(fx.settings.reverb_mix > 0.0);
     assert_eq!(fx.preset, FxPreset::Custom);
 
@@ -1806,7 +1806,7 @@ fn touching_an_fx_knob_from_dry_switches_effect_and_chain_in() {
     sim.run_blocks(4);
     let fx = sim.latest_status().expect("Status").tracks()[0].fx;
     assert!(fx.bypass);
-    assert_eq!(fx.letters(), "--C-R");
+    assert_eq!(fx.letters(), "---C-R");
 }
 
 // -------------------------------------------------------------------------------------------

@@ -768,7 +768,8 @@ impl Track {
     }
 
     /// Frames the loop playback is read ahead of the output position, to make up for the latency of
-    /// this track's plugin inserts (`super::insert`). Zero without plugins.
+    /// this track's plugin inserts (`super::insert`) and of its built-in chain (the octaver,
+    /// `super::fx::octaver`). Zero without either.
     #[inline]
     pub fn set_playback_advance(&mut self, frames: u64) {
         self.playback_advance = frames;

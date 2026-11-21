@@ -52,6 +52,13 @@ fn chains() -> Vec<(bool, FxPreset, ChainSettings)> {
     guitar_delay.enabled[FxSlot::Delay.index()] = true;
     guitar_delay.delay_note = DelayNote::Quarter;
     guitar_delay.bands[2].kind = BandKind::Peak;
+    let bass = FxPreset::BassFromGuitar.settings();
+    let mut bass_brighter = bass;
+    bass_brighter.octaver.tone_hz = 4_000.0;
+    bass_brighter.octaver.dry = 0.25;
+    let mut guitar_octave = FxPreset::PiezoGuitar.settings();
+    guitar_octave.enabled[FxSlot::Octaver.index()] = true;
+    guitar_octave.octaver.drive = 0.3;
     vec![
         (true, FxPreset::Dry, ChainSettings::default()),
         (false, FxPreset::Voice, voice),
@@ -60,6 +67,9 @@ fn chains() -> Vec<(bool, FxPreset, ChainSettings)> {
         (false, FxPreset::Custom, dry_reverb),
         (true, FxPreset::Custom, dry_reverb),
         (false, FxPreset::Custom, guitar_delay),
+        (false, FxPreset::BassFromGuitar, bass),
+        (false, FxPreset::Custom, bass_brighter),
+        (false, FxPreset::Custom, guitar_octave),
     ]
 }
 
@@ -90,6 +100,29 @@ fn an_effect_line_overrides_only_what_it_names() {
     // A single effect on a dry chain is audible without a word about bypass.
     let reverb = entry("{reverb: {on: true, mix: 0.3}}").resolve();
     assert!(!reverb.bypass);
+}
+
+#[test]
+fn the_bass_preset_and_an_octaver_line_read_as_written() {
+    let mix = entry("{preset: bass_from_guitar}").resolve();
+    assert_eq!(mix.settings, FxPreset::BassFromGuitar.settings());
+    assert_eq!(mix.shown_preset(), FxPreset::BassFromGuitar);
+    assert!(!mix.bypass);
+
+    let mix = entry("{preset: piezo_guitar, octaver: {on: true, dry: 0.5, sub: 0.8, tone: 1200, drive: 0.2}}")
+        .resolve();
+    let o = mix.settings.octaver;
+    assert!(mix.settings.enabled[FxSlot::Octaver.index()]);
+    assert_eq!((o.dry, o.sub, o.tone_hz, o.drive), (0.5, 0.8, 1_200.0, 0.2));
+    assert_eq!(mix.shown_preset(), FxPreset::Custom);
+
+    // Written back: the preset it differs least from, and only the octaver line.
+    let back = TrackMixSource::from_state(1.0, false, false, FxPreset::Custom, &mix.settings);
+    assert_eq!(back.preset.as_deref(), Some("piezo_guitar"));
+    let line = back.octaver.expect("octaver line");
+    assert_eq!(line.on, Some(true));
+    assert_eq!(line.tone, Some(1_200.0));
+    assert!(back.high_pass.is_none() && back.comp.is_none());
 }
 
 #[test]

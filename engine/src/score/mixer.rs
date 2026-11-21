@@ -12,6 +12,7 @@
 //!       preset: piezo_guitar
 //!       comp: {threshold: -12}
 //!       reverb: {on: false}
+//!     bass: {gain: -4, preset: bass_from_guitar, octaver: {tone: 1200}}
 //! ```
 //!
 //! # What it says, and what it does not
@@ -19,8 +20,8 @@
 //! * **Levels are in dB**, rounded to a tenth, because that is how a fader is read. `-100` and
 //!   anything below is silence. A track goes from silence to +12 dB (`MAX_TRACK_GAIN`), a bus,
 //!   the click and the monitored inputs to +12 dB as well.
-//! * **An effect chain is a preset plus what differs from it.** `preset:` names one of the three
-//!   ready-made chains (`dry` when omitted); every effect line (`high_pass`, `eq`, `band1`..`band3`,
+//! * **An effect chain is a preset plus what differs from it.** `preset:` names one of the four
+//!   ready-made chains (`dry` when omitted); every effect line (`octaver`, `high_pass`, `eq`, `band1`..`band3`,
 //!   `comp`, `delay`, `reverb`) overrides only the fields it names. A chain with no effect switched
 //!   on is bypassed unless `bypass: false` says otherwise - which is exactly what the presets do,
 //!   so `preset: voice` alone means "the voice chain, as the button loads it".
@@ -54,7 +55,7 @@ pub const DB_FLOOR: f64 = -100.0;
 pub const DB_MAX: f64 = 12.0;
 
 /// The preset words of the format, in the order the buttons stand in.
-pub const PRESET_NAMES: [&str; 3] = ["dry", "voice", "piezo_guitar"];
+pub const PRESET_NAMES: [&str; 4] = ["dry", "voice", "piezo_guitar", "bass_from_guitar"];
 pub const BAND_KIND_NAMES: [&str; 3] = ["peak", "low_shelf", "high_shelf"];
 pub const DELAY_NOTE_NAMES: [&str; 4] = ["quarter", "dotted_eighth", "eighth", "triplet_eighth"];
 
@@ -90,6 +91,22 @@ impl BusLevels {
             inputs: Some(gain_to_db(status.monitor_gain)),
         }
     }
+}
+
+/// `octaver: {on: true, dry: 0, sub: 1, tone: 1500, drive: 0.4}` - levels and drive 0..1, tone
+/// in Hz.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OctaverLine {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dry: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drive: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -173,12 +190,14 @@ pub struct TrackMixSource {
     pub gain: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mute: Option<bool>,
-    /// `dry`, `voice` or `piezo_guitar`.
+    /// `dry`, `voice`, `piezo_guitar` or `bass_from_guitar`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     /// The whole chain out of the signal path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub octaver: Option<OctaverLine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub high_pass: Option<HighPassLine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -263,6 +282,7 @@ pub fn preset_name(preset: FxPreset) -> &'static str {
         FxPreset::Dry | FxPreset::Custom => "dry",
         FxPreset::Voice => "voice",
         FxPreset::PiezoGuitar => "piezo_guitar",
+        FxPreset::BassFromGuitar => "bass_from_guitar",
     }
 }
 
@@ -271,6 +291,7 @@ pub fn parse_preset(text: &str) -> Option<FxPreset> {
         "dry" => Some(FxPreset::Dry),
         "voice" => Some(FxPreset::Voice),
         "piezo_guitar" => Some(FxPreset::PiezoGuitar),
+        "bass_from_guitar" => Some(FxPreset::BassFromGuitar),
         _ => None,
     }
 }
@@ -360,7 +381,8 @@ impl TrackMixSource {
 
     /// True when the entry says anything about the effect chain beyond its preset.
     pub fn has_effect_lines(&self) -> bool {
-        self.high_pass.is_some()
+        self.octaver.is_some()
+            || self.high_pass.is_some()
             || self.eq.is_some()
             || self.band1.is_some()
             || self.band2.is_some()
@@ -373,6 +395,13 @@ impl TrackMixSource {
     pub fn resolve(&self) -> TrackMix {
         let base = self.base();
         let mut s = base.settings();
+        if let Some(line) = &self.octaver {
+            set(&mut s.enabled[FxSlot::Octaver.index()], line.on);
+            set(&mut s.octaver.dry, f(line.dry));
+            set(&mut s.octaver.sub, f(line.sub));
+            set(&mut s.octaver.tone_hz, f(line.tone));
+            set(&mut s.octaver.drive, f(line.drive));
+        }
         if let Some(line) = &self.high_pass {
             set(&mut s.enabled[FxSlot::HighPass.index()], line.on);
             set(&mut s.high_pass_hz, f(line.hz));
@@ -472,6 +501,7 @@ impl TrackMixSource {
 
     fn line_count(&self) -> usize {
         [
+            self.octaver.is_some(),
             self.high_pass.is_some(),
             self.eq.is_some(),
             self.band1.is_some(),
@@ -503,6 +533,14 @@ fn describe_chain(base: FxPreset, settings: &ChainSettings) -> TrackMixSource {
     let num = |now: f32, was: f32| (now != was).then(|| clean(now));
     let mut out = TrackMixSource::default();
 
+    let octaver = OctaverLine {
+        on: on(FxSlot::Octaver),
+        dry: num(s.octaver.dry, b.octaver.dry),
+        sub: num(s.octaver.sub, b.octaver.sub),
+        tone: num(s.octaver.tone_hz, b.octaver.tone_hz),
+        drive: num(s.octaver.drive, b.octaver.drive),
+    };
+    out.octaver = (octaver != OctaverLine::default()).then_some(octaver);
     let high_pass = HighPassLine {
         on: on(FxSlot::HighPass),
         hz: num(s.high_pass_hz, b.high_pass_hz),
@@ -593,6 +631,19 @@ pub fn track_commands(track: usize, target: &TrackMix, current: &TrackStatus) ->
         }
     }
     let mut param = |param: FxParam| out.push(Command::SetFxParam { track, param });
+    let (o, bo) = (s.octaver, base.octaver);
+    if o.dry != bo.dry {
+        param(FxParam::OctaverDry(o.dry));
+    }
+    if o.sub != bo.sub {
+        param(FxParam::OctaverSub(o.sub));
+    }
+    if o.tone_hz != bo.tone_hz {
+        param(FxParam::OctaverToneHz(o.tone_hz));
+    }
+    if o.drive != bo.drive {
+        param(FxParam::OctaverDrive(o.drive));
+    }
     if s.high_pass_hz != base.high_pass_hz {
         param(FxParam::HighPassHz(s.high_pass_hz));
     }

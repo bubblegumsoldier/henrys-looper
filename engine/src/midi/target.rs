@@ -272,6 +272,10 @@ pub enum Control {
 /// *address*: a binding names a knob once and turns it a thousand times.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FxKnob {
+    OctaverDry,
+    OctaverSub,
+    OctaverToneHz,
+    OctaverDrive,
     HighPassHz,
     /// Band index, 0-based.
     BandHz(usize),
@@ -295,6 +299,11 @@ impl FxKnob {
     /// module that owns the parameter, not chosen again.
     pub fn range(self) -> Range {
         match self {
+            // fx/octaver.rs, `OctaverSettings::clamped`.
+            FxKnob::OctaverDry => Range::linear(0.0, 1.0),
+            FxKnob::OctaverSub => Range::linear(0.0, 1.0),
+            FxKnob::OctaverToneHz => Range::log(100.0, 8_000.0),
+            FxKnob::OctaverDrive => Range::linear(0.0, 1.0),
             // fx/mod.rs: `high_pass_hz.clamp(20.0, 1_000.0)`.
             FxKnob::HighPassHz => Range::log(20.0, 1_000.0),
             // fx/mod.rs, `BandSettings::clamped`.
@@ -321,6 +330,10 @@ impl FxKnob {
     /// The engine command this knob produces at `value`.
     pub fn to_param(self, value: f32) -> FxParam {
         match self {
+            FxKnob::OctaverDry => FxParam::OctaverDry(value),
+            FxKnob::OctaverSub => FxParam::OctaverSub(value),
+            FxKnob::OctaverToneHz => FxParam::OctaverToneHz(value),
+            FxKnob::OctaverDrive => FxParam::OctaverDrive(value),
             FxKnob::HighPassHz => FxParam::HighPassHz(value),
             FxKnob::BandHz(band) => FxParam::BandHz { band, hz: value },
             FxKnob::BandQ(band) => FxParam::BandQ { band, q: value },
@@ -342,6 +355,10 @@ impl FxKnob {
     /// English name, for a list a human reads.
     pub fn label(self) -> String {
         match self {
+            FxKnob::OctaverDry => "Octaver dry".to_string(),
+            FxKnob::OctaverSub => "Octaver sub".to_string(),
+            FxKnob::OctaverToneHz => "Octaver tone".to_string(),
+            FxKnob::OctaverDrive => "Octaver drive".to_string(),
             FxKnob::HighPassHz => "High-pass frequency".to_string(),
             FxKnob::BandHz(b) => format!("EQ band {} frequency", b + 1),
             FxKnob::BandQ(b) => format!("EQ band {} Q", b + 1),
@@ -363,6 +380,10 @@ impl FxKnob {
     /// The tail of the address, after `track.<ref>.fx.`.
     pub fn address(self) -> String {
         match self {
+            FxKnob::OctaverDry => "octaver.dry".to_string(),
+            FxKnob::OctaverSub => "octaver.sub".to_string(),
+            FxKnob::OctaverToneHz => "octaver.tone".to_string(),
+            FxKnob::OctaverDrive => "octaver.drive".to_string(),
             FxKnob::HighPassHz => "high_pass.hz".to_string(),
             FxKnob::BandHz(b) => format!("eq.{}.hz", b + 1),
             FxKnob::BandQ(b) => format!("eq.{}.q", b + 1),
@@ -384,7 +405,13 @@ impl FxKnob {
     /// Every knob of a chain, in signal order - what `midi targets` prints and what the later
     /// learn UI lists.
     pub fn all() -> Vec<FxKnob> {
-        let mut out = vec![FxKnob::HighPassHz];
+        let mut out = vec![
+            FxKnob::OctaverDry,
+            FxKnob::OctaverSub,
+            FxKnob::OctaverToneHz,
+            FxKnob::OctaverDrive,
+            FxKnob::HighPassHz,
+        ];
         for band in 0..EQ_BANDS {
             out.push(FxKnob::BandHz(band));
             out.push(FxKnob::BandQ(band));
@@ -901,6 +928,7 @@ fn preset_address(preset: FxPreset) -> &'static str {
         FxPreset::Dry => "trocken",
         FxPreset::Voice => "stimme",
         FxPreset::PiezoGuitar => "gitarre",
+        FxPreset::BassFromGuitar => "bass",
         FxPreset::Custom => "eigen",
     }
 }
@@ -1078,6 +1106,7 @@ fn source_word(source: TrackSource) -> &'static str {
 
 fn slot_word(slot: FxSlot) -> &'static str {
     match slot {
+        FxSlot::Octaver => "Octaver",
         FxSlot::HighPass => "High-pass",
         FxSlot::Eq => "EQ",
         FxSlot::Comp => "Compressor",
