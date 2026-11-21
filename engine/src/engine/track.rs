@@ -799,6 +799,40 @@ impl Track {
         monitor: Frame,
         collapsed: bool,
     ) -> ([Frame; BUS_COUNT], Spread) {
+        let (src, spread) = self.render_sources(pos, monitor, collapsed);
+        match spread {
+            Spread::Collapsed | Spread::Shared => {
+                let wet = self.fx[0].process(src[0]);
+                // Keep the idle chain settled rather than frozen mid-tail; one comparison per
+                // sample once it has run dry.
+                self.fx[1].process(Frame::SILENT);
+                let other = if spread == Spread::Shared { wet } else { Frame::SILENT };
+                ([wet, other], spread)
+            }
+            Spread::Split => (
+                [self.fx[0].process(src[0]), self.fx[1].process(src[1])],
+                Spread::Split,
+            ),
+        }
+    }
+
+    /// The chain of bus `bus` (0 = Main), for a block renderer that runs it in segments around
+    /// plugin inserts (`super::insert`, `fx::Chain::process_segment`).
+    #[inline]
+    pub fn chain_mut(&mut self, bus: usize) -> &mut Chain {
+        &mut self.fx[bus.min(BUS_COUNT - 1)]
+    }
+
+    /// What goes *into* each bus's chain at musical position `pos`: the loop (read ahead by
+    /// `playback_advance`) and the monitored input, summed per bus as [`Track::render`] describes.
+    /// Collapsed: everything in the first bus, the second silent. Shared: the same in both.
+    #[inline]
+    pub fn render_sources(
+        &mut self,
+        pos: u64,
+        monitor: Frame,
+        collapsed: bool,
+    ) -> ([Frame; BUS_COUNT], Spread) {
         let ahead = pos + self.playback_advance;
         let dry = if self.sounds_at(ahead) && !self.held {
             self.read(ahead)
@@ -827,24 +861,17 @@ impl Track {
             if !self.monitor_send.is_silent() {
                 src = src.added(monitor);
             }
-            let wet = self.fx[0].process(src);
-            self.fx[1].process(Frame::SILENT);
-            return ([wet, Frame::SILENT], Spread::Collapsed);
+            return ([src, Frame::SILENT], Spread::Collapsed);
         }
 
         if self.buses_share_sources() {
             let src = source(Bus::Main, self.loop_send, self.monitor_send);
-            let wet = self.fx[0].process(src);
-            // Keep the idle chain settled rather than frozen mid-tail; one comparison per sample
-            // once it has run dry.
-            self.fx[1].process(Frame::SILENT);
-            return ([wet; BUS_COUNT], Spread::Shared);
+            return ([src; BUS_COUNT], Spread::Shared);
         }
 
         let mut out = [Frame::SILENT; BUS_COUNT];
         for bus in Bus::ALL {
-            let src = source(bus, self.loop_send, self.monitor_send);
-            out[bus.index()] = self.fx[bus.index()].process(src);
+            out[bus.index()] = source(bus, self.loop_send, self.monitor_send);
         }
         (out, Spread::Split)
     }

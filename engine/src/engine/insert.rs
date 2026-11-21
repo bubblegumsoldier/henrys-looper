@@ -8,12 +8,29 @@
 //!  Summe aller Tracks eines Busses ─► Bus-Insert 1 … 8 ─► (+ Klick auf Monitor) ─► Bus-Lautstaerke
 //! ```
 //!
-//! **After the built-in chain, before the panner**, which is where a DAW channel strip has its
-//! inserts: the built-in chain is the "channel EQ and dynamics" every track has, a plugin is the
-//! extra colour on top, and the panner places the finished sound. The position is fixed rather than
-//! freely movable between the built-in effects: the built-in chain is one block with its own
-//! bypass, and splitting it to let a plugin sit between its EQ and its compressor would need the
-//! chain to become a list of slots itself - not worth it while nobody has asked for it.
+//! **Anywhere in the track's chain, before the panner.** The built-in effects keep their fixed
+//! order (octaver, high-pass, EQ, compressor, delay, reverb - presets and MIDI addresses depend on
+//! it); every track insert carries an [`InsertPosition`]: the built-in effect it sits in front of,
+//! or the end of the chain. The default - and what every rack file or score from before positions
+//! says - is the end, after the reverb, where a DAW channel strip has its inserts. A cabinet IR
+//! loader wants to sit in front of everything instead, on the dry signal:
+//!
+//! ```text
+//!  Ebenen-Summe + Mithoeren ─► [IR] ─► Oktaver ─► Hochpass ─► [De-Esser] ─► EQ ─► … ─► Hall ─► [Plugins am Ende] ─► Panorama
+//! ```
+//!
+//! The slot order is the plugins' order among themselves; the signal order is by position first
+//! and slot second ([`InsertRack::process_track_at`]). The app keeps the slots sorted by position,
+//! so slot order and signal order agree, and a MIDI address (`insert.<slot>`) does not change when
+//! a plugin is moved across built-in effects only. How the built-in chain is split around plugins
+//! is `fx::Chain::process_segment`; while no insert of a track sits before the end, the track
+//! renders exactly as it did before positions existed.
+//!
+//! **Moving a plugin while audio runs** would put a step into the signal: the chain behind the
+//! move point changes its input from one sample to the next. A reorder (`Move`, `Place`) of a
+//! track that is heard through plugins is therefore applied under a short dip: the track's output
+//! fades to zero over [`REORDER_FADE`] frames, the slots change while it is silent, and it fades
+//! back in. Installing, removing and bus moves stay immediate, as before.
 //!
 //! **What is recorded stays dry**, exactly as for the built-in chain: [`super::process::EngineCore`]
 //! records from the raw input slice and never sees an insert.
@@ -57,6 +74,7 @@ use rtrb::{Consumer, Producer, RingBuffer};
 
 use super::bus::{BUS_COUNT, Bus};
 use super::command::MAX_TRACKS;
+use super::fx::{FX_SLOTS, FxSlot};
 
 /// Insert slots per track and per bus. The design shows a handful; eight is more than a voice or a
 /// guitar ever needs and keeps the rack a fixed array.
@@ -70,6 +88,61 @@ pub const MAX_BLOCK: usize = 1024;
 /// How many messages the audio thread takes out of the queue per callback. Bounded work, and far
 /// more than a human can produce between two callbacks.
 const MESSAGES_PER_BLOCK: usize = 16;
+
+/// Frames over which a track fades out before a reorder and in after it (about 5 ms at 48 kHz).
+pub const REORDER_FADE: u32 = 256;
+
+/// Where in a track's chain an insert sits: in front of built-in effect `n`
+/// ([`FxSlot::index`]) or, with [`InsertPosition::END`], after the whole built-in chain. Buses have
+/// no built-in chain; their inserts are always at the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct InsertPosition(u8);
+
+impl InsertPosition {
+    /// After the reverb - where every insert sat before positions existed.
+    pub const END: InsertPosition = InsertPosition(FX_SLOTS as u8);
+
+    /// In front of `slot`.
+    pub fn before(slot: FxSlot) -> Self {
+        InsertPosition(slot.index() as u8)
+    }
+
+    /// The built-in effect this sits in front of; `None` at the end.
+    pub fn before_slot(self) -> Option<FxSlot> {
+        FxSlot::all().get(usize::from(self.0)).copied()
+    }
+
+    /// `before: eq` as the score and the rack file write it; absent is the end. `None` for a name
+    /// that is not a built-in effect.
+    pub fn parse(before: Option<&str>) -> Option<Self> {
+        match before {
+            None => Some(Self::END),
+            Some(name) => FxSlot::parse(name).map(Self::before),
+        }
+    }
+
+    /// The name of the built-in effect in front of which this sits, `None` at the end.
+    pub fn name(self) -> Option<&'static str> {
+        self.before_slot().map(FxSlot::name)
+    }
+
+    /// 0 (before the octaver) to [`FX_SLOTS`] (the end).
+    #[inline]
+    pub fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    /// From [`Self::index`]; anything past the chain is the end.
+    pub fn from_index(index: usize) -> Self {
+        InsertPosition(index.min(FX_SLOTS) as u8)
+    }
+}
+
+impl Default for InsertPosition {
+    fn default() -> Self {
+        Self::END
+    }
+}
 
 /// Something that processes a stereo block in place: a hosted plugin, or a test double.
 ///
@@ -227,11 +300,25 @@ impl InsertShared {
 pub struct Insert {
     pub processor: Box<dyn InsertProcessor>,
     pub shared: Arc<InsertShared>,
+    /// Where in the track's chain it runs. Ignored on a bus.
+    pub position: InsertPosition,
 }
 
 impl Insert {
+    /// An insert at the end of the chain.
     pub fn new(processor: Box<dyn InsertProcessor>, shared: Arc<InsertShared>) -> Self {
-        Self { processor, shared }
+        Self {
+            processor,
+            shared,
+            position: InsertPosition::END,
+        }
+    }
+
+    /// The same insert at `position` in the chain.
+    #[must_use]
+    pub fn at(mut self, position: InsertPosition) -> Self {
+        self.position = position;
+        self
     }
 }
 
@@ -269,6 +356,40 @@ pub enum InsertMsg {
         from: usize,
         to: usize,
     },
+    /// Move the insert in `from` to `to` (as `Move`) and put it at `position` in the chain.
+    /// `from == to` changes only the position.
+    Place {
+        target: InsertTarget,
+        from: usize,
+        to: usize,
+        position: InsertPosition,
+    },
+}
+
+/// A reorder waiting for its track to have faded out.
+#[derive(Clone, Copy, Debug)]
+struct Reorder {
+    from: usize,
+    to: usize,
+    position: Option<InsertPosition>,
+}
+
+/// The dip a track's output takes around a reorder: see the module comment.
+#[derive(Clone, Copy, Debug)]
+struct ReorderFade {
+    /// Current gain, 0..=1.
+    level: f32,
+    /// Change per frame: negative while fading out, positive while fading in, 0 when idle.
+    step: f32,
+    pending: Option<Reorder>,
+}
+
+impl ReorderFade {
+    const IDLE: Self = Self {
+        level: 1.0,
+        step: 0.0,
+        pending: None,
+    };
 }
 
 /// Control side of the rack's queues.
@@ -365,6 +486,8 @@ pub struct InsertRack {
     leaked: u64,
     /// The clock at the first frame of the block being processed; set by the engine per block.
     transport: PluginTransport,
+    /// Per track: the dip around a reorder.
+    fades: Vec<ReorderFade>,
 }
 
 impl InsertRack {
@@ -378,6 +501,7 @@ impl InsertRack {
             installed: 0,
             leaked: 0,
             transport: PluginTransport::standing(48_000.0),
+            fades: vec![ReorderFade::IDLE; MAX_TRACKS],
         }
     }
 
@@ -399,8 +523,29 @@ impl InsertRack {
     }
 
     /// Apply what the control thread sent. Bounded work per call.
+    ///
+    /// A reorder of a track waits for the track to fade out (see the module comment). While one
+    /// waits, the queue is not read further: messages keep their order, and the wait is a few
+    /// milliseconds.
     pub fn collect(&mut self) {
         for _ in 0..MESSAGES_PER_BLOCK {
+            let blocked = match self.endpoint.rx.peek() {
+                Ok(
+                    InsertMsg::Move {
+                        target: InsertTarget::Track(t),
+                        ..
+                    }
+                    | InsertMsg::Place {
+                        target: InsertTarget::Track(t),
+                        ..
+                    },
+                ) => self.fades.get(*t).is_some_and(|f| f.pending.is_some()),
+                Ok(_) => false,
+                Err(_) => break,
+            };
+            if blocked {
+                break;
+            }
             let Ok(msg) = self.endpoint.rx.pop() else {
                 break;
             };
@@ -432,21 +577,107 @@ impl InsertRack {
                         self.retire(old);
                     }
                 }
-                InsertMsg::Move { target, from, to } => {
-                    if let Some(slots) = self.slots_mut(target)
-                        && from < MAX_INSERTS
-                        && to < MAX_INSERTS
-                    {
-                        // Rotating moves `Option<Insert>` values - pointers - and allocates nothing.
-                        if from < to {
-                            slots[from..=to].rotate_left(1);
-                        } else if to < from {
-                            slots[to..=from].rotate_right(1);
-                        }
-                    }
-                }
+                InsertMsg::Move { target, from, to } => self.reorder(
+                    target,
+                    Reorder {
+                        from,
+                        to,
+                        position: None,
+                    },
+                ),
+                InsertMsg::Place {
+                    target,
+                    from,
+                    to,
+                    position,
+                } => self.reorder(
+                    target,
+                    Reorder {
+                        from,
+                        to,
+                        position: Some(position),
+                    },
+                ),
             }
         }
+    }
+
+    /// A reorder: on a track that is heard through plugins, under the dip; otherwise at once.
+    fn reorder(&mut self, target: InsertTarget, reorder: Reorder) {
+        if let InsertTarget::Track(t) = target
+            && self.track_has_inserts(t)
+            && let Some(fade) = self.fades.get_mut(t)
+        {
+            fade.pending = Some(reorder);
+            fade.step = -1.0 / REORDER_FADE as f32;
+            return;
+        }
+        self.apply_reorder(target, reorder);
+    }
+
+    fn apply_reorder(&mut self, target: InsertTarget, r: Reorder) {
+        let Some(slots) = self.slots_mut(target) else {
+            return;
+        };
+        if r.from >= MAX_INSERTS || r.to >= MAX_INSERTS {
+            return;
+        }
+        // Rotating moves `Option<Insert>` values - pointers - and allocates nothing.
+        if r.from < r.to {
+            slots[r.from..=r.to].rotate_left(1);
+        } else if r.to < r.from {
+            slots[r.to..=r.from].rotate_right(1);
+        }
+        if let Some(position) = r.position
+            && let Some(insert) = slots[r.to].as_mut()
+        {
+            insert.position = position;
+        }
+    }
+
+    /// Before a track's block is rendered: a reorder whose fade-out is complete is carried out
+    /// now, and the fade-in starts.
+    #[inline]
+    pub fn begin_track(&mut self, track: usize) {
+        let Some(fade) = self.fades.get_mut(track) else {
+            return;
+        };
+        if fade.level <= 0.0
+            && let Some(r) = fade.pending.take()
+        {
+            fade.step = 1.0 / REORDER_FADE as f32;
+            self.apply_reorder(InsertTarget::Track(track), r);
+        }
+    }
+
+    /// After a track's block is rendered (built-in chain and plugins): the dip, while one runs,
+    /// on the first `n` frames of both bus signals.
+    #[inline]
+    pub fn fade_track(&mut self, track: usize, n: usize) {
+        let (Some(fade), Some([a, b])) =
+            (self.fades.get_mut(track), self.track_scratch.get_mut(track))
+        else {
+            return;
+        };
+        if fade.step == 0.0 {
+            return;
+        }
+        for i in 0..n {
+            let g = fade.level;
+            a.l[i] *= g;
+            a.r[i] *= g;
+            b.l[i] *= g;
+            b.r[i] *= g;
+            fade.level = (fade.level + fade.step).clamp(0.0, 1.0);
+            if fade.step > 0.0 && fade.level >= 1.0 {
+                fade.step = 0.0;
+            }
+        }
+    }
+
+    /// Whether a reorder of `track` is waiting for its fade-out.
+    pub fn reorder_pending(&self, track: usize) -> bool {
+        self.fades.get(track).is_some_and(|f| f.pending.is_some())
     }
 
     fn slots_mut(&mut self, target: InsertTarget) -> Option<&mut Slots> {
@@ -488,6 +719,46 @@ impl InsertRack {
             .unwrap_or(false)
     }
 
+    /// Whether a track has an insert heard somewhere other than at the end of the chain - the
+    /// built-in chain then has to be split around it (`fx::Chain::process_segment`).
+    #[inline]
+    pub fn track_splits_chain(&self, track: usize) -> bool {
+        self.tracks.get(track).is_some_and(|s| {
+            s.iter()
+                .flatten()
+                .any(|i| !i.shared.bypass() && i.position < InsertPosition::END)
+        })
+    }
+
+    /// Whether a track has an insert heard at `position`.
+    #[inline]
+    pub fn track_has_inserts_at(&self, track: usize, position: InsertPosition) -> bool {
+        self.tracks.get(track).is_some_and(|s| {
+            s.iter()
+                .flatten()
+                .any(|i| !i.shared.bypass() && i.position == position)
+        })
+    }
+
+    /// Run the inserts of a track at `position`, in slot order, over its scratch block for `bus`,
+    /// the first `n` frames.
+    #[inline]
+    pub fn process_track_at(&mut self, track: usize, bus: usize, n: usize, position: InsertPosition) {
+        let (Some(slots), Some(blocks)) =
+            (self.tracks.get_mut(track), self.track_scratch.get_mut(track))
+        else {
+            return;
+        };
+        let block = &mut blocks[bus];
+        run_slots_at(
+            slots,
+            Some(position),
+            &mut block.l[..n],
+            &mut block.r[..n],
+            &self.transport,
+        );
+    }
+
     /// Run a track's inserts over its scratch block for `bus`, the first `n` frames.
     #[inline]
     pub fn process_track(&mut self, track: usize, bus: usize, n: usize) {
@@ -515,8 +786,21 @@ impl InsertRack {
 
 #[inline]
 fn run_slots(slots: &mut Slots, l: &mut [f32], r: &mut [f32], transport: &PluginTransport) {
+    run_slots_at(slots, None, l, r, transport);
+}
+
+/// Every insert of `slots` that is not bypassed - with `at`, only those at that position - in
+/// slot order.
+#[inline]
+fn run_slots_at(
+    slots: &mut Slots,
+    at: Option<InsertPosition>,
+    l: &mut [f32],
+    r: &mut [f32],
+    transport: &PluginTransport,
+) {
     for insert in slots.iter_mut().flatten() {
-        if insert.shared.bypass() {
+        if insert.shared.bypass() || at.is_some_and(|p| p != insert.position) {
             continue;
         }
         insert.processor.set_transport(transport);
@@ -587,6 +871,18 @@ pub mod testing {
         fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
             for (l, r) in left.iter_mut().zip(right.iter_mut()) {
                 std::mem::swap(l, r);
+            }
+        }
+    }
+
+    /// Adds a constant to both channels - a DC offset, which the high-pass removes and nothing
+    /// else in the chain does: proves on which side of the high-pass a plugin ran.
+    pub struct Offset(pub f32);
+
+    impl InsertProcessor for Offset {
+        fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
+            for s in left.iter_mut().chain(right.iter_mut()) {
+                *s += self.0;
             }
         }
     }

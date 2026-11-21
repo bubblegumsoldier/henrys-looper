@@ -64,6 +64,8 @@ mod tests;
 #[cfg(test)]
 mod insert_tests;
 #[cfg(test)]
+mod chain_order_tests;
+#[cfg(test)]
 mod fader_tests;
 #[cfg(test)]
 mod transport_tests;

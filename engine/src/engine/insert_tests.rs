@@ -287,7 +287,8 @@ fn moving_a_slot_reorders_the_chain() {
         to: 5,
     })
     .unwrap();
-    sim.run_blocks(1);
+    // The move happens under a short dip of the track (`REORDER_FADE` out, then in).
+    sim.run_blocks(6);
     assert_eq!(sim.out(sim.pos() - 1), Frame::mono(0.5), "Position 6 rechnet genauso");
     tx.send(InsertMsg::Remove {
         target: InsertTarget::Track(0),

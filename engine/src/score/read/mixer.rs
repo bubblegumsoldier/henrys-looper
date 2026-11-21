@@ -18,7 +18,9 @@ pub(super) const TRACK_MIX_FIELDS: [&str; 15] = [
     "gain", "mute", "preset", "bypass", "octaver", "high_pass", "eq", "band1", "band2", "band3", "comp",
     "delay", "reverb", "instrument", "inserts",
 ];
-const INSERT_FIELDS: [&str; 2] = ["plugin", "bypass"];
+const INSERT_FIELDS: [&str; 3] = ["plugin", "bypass", "before"];
+/// What `before:` of an insert may name: the built-in effects, in signal order.
+pub(crate) const BEFORE_NAMES: [&str; 6] = ["octaver", "high_pass", "eq", "comp", "delay", "reverb"];
 
 impl Reader {
     pub(super) fn read_mixer(
@@ -294,8 +296,9 @@ impl Reader {
         Some(text.to_string())
     }
 
-    /// `inserts: [{plugin: "au:aufx:dely:appl", bypass: false}, ...]`, slot order, at most
-    /// [`MAX_INSERTS`].
+    /// `inserts: [{plugin: "au:aufx:dely:appl", bypass: false, before: eq}, ...]`, signal order,
+    /// at most [`MAX_INSERTS`]. `before` names the built-in effect the plugin sits in front of;
+    /// absent is after the whole built-in chain.
     fn read_inserts(&mut self, node: &Node<'_>, what: &str) -> Option<Vec<InsertLine>> {
         let items = self.as_seq(node, what)?;
         if items.len() > MAX_INSERTS {
@@ -306,7 +309,7 @@ impl Reader {
             );
             return None;
         }
-        let mut out = Vec::with_capacity(items.len());
+        let mut out: Vec<InsertLine> = Vec::with_capacity(items.len());
         let mut ok = true;
         for (i, item) in items.iter().enumerate() {
             let label = format!("plugin {} of {what}", i + 1);
@@ -336,8 +339,47 @@ impl Reader {
                 },
                 None => None,
             };
+            let before = match fields.get("before") {
+                Some(n) => match self.read_word(n, &format!("'before' of {label}"), &BEFORE_NAMES) {
+                    Some(word) => Some(word),
+                    None => {
+                        ok = false;
+                        None
+                    }
+                },
+                None => None,
+            };
             match plugin {
-                Some(plugin) => out.push(InsertLine { plugin, bypass }),
+                Some(plugin) => {
+                    let line = InsertLine {
+                        plugin,
+                        bypass,
+                        before,
+                    };
+                    // The list is the signal order: a plugin may not sit further forward in the
+                    // chain than the one listed before it.
+                    if let Some(prev) = out.last()
+                        && line.position() < prev.position()
+                    {
+                        let at = |l: &InsertLine| match &l.before {
+                            Some(b) => format!("before {b}"),
+                            None => "at the end".to_string(),
+                        };
+                        self.error_with(
+                            Some(item.pos),
+                            format!(
+                                "{label} sits {}, in front of plugin {} ({}): {what} is in signal order.",
+                                at(&line),
+                                i,
+                                at(prev)
+                            ),
+                            "List the plugins in the order the signal passes them, the ones in \
+                             front of the built-in effects first.",
+                        );
+                        ok = false;
+                    }
+                    out.push(line);
+                }
                 None => ok = false,
             }
         }

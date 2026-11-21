@@ -234,6 +234,20 @@ pub struct InsertLine {
     /// Absent means `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bypass: Option<bool>,
+    /// The built-in effect the plugin sits in front of (`octaver`, `high_pass`, `eq`, `comp`,
+    /// `delay`, `reverb`). **Absent means after the whole built-in chain** - where every insert sat
+    /// before plugins could be placed, so a score written before this field sounds as it did. The
+    /// list stays in signal order: a plugin placed further forward may not follow one further back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+impl InsertLine {
+    /// Where in the chain the plugin sits; an unknown name (only possible from hand-built data,
+    /// the reader refuses it) counts as the end.
+    pub fn position(&self) -> crate::engine::insert::InsertPosition {
+        crate::engine::insert::InsertPosition::parse(self.before.as_deref()).unwrap_or_default()
+    }
 }
 
 /// The whole section.
