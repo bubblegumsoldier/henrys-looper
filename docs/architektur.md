@@ -423,6 +423,51 @@ konkurriert nur um CPU-Zeit.
    und `cargo tauri build --no-bundle`. Wer das „korrigiert", bricht den Start mit
    `ENOENT ... repos\ui\package.json`.
 
+### Die Engine startet von selbst (`app/src-tauri/src/supervisor.rs`)
+
+Die Engine ist ein technisches Detail der App, kein Schritt für den Musiker. Das Fenster schickt
+seine Startkonfiguration bei jedem Start und jeder Änderung an den Host (`engine_configure`); wann
+daraus ein laufendes Gerät wird, entscheidet `supervisor.rs` ohne Gerät, mit der Geräteliste als
+Eingabe – deshalb ist alles davon ohne Hardware getestet:
+
+| Auslöser | Startet? |
+|---|---|
+| **Boot** – erstes `engine_configure` eines Laufs | wenn „Start the engine when the app opens“ an ist (Vorgabe), einmal |
+| **Demand** – ein Druck, der die Engine braucht (Load, Start, Record, Monitor, Regler, Plugin-Fenster) | immer ein Versuch; danach wird der Druck ausgeführt, als käme er einen Moment später (`then_act`, erst nach dem ersten Status-Schnappschuss – Einzähler und Takt 1 regulär ab dort) |
+| **Passive** – Note-On oder CC über MIDI | wie Demand, aber nie nach einem Fehlschlag oder beim Warten |
+| **Plug** – das erwartete Interface ist da (alle 2 s nachgesehen) | ja |
+
+Ein Fehlschlag wird einmal versucht und mit Grund gezeigt („Engine could not start: …“, Retry);
+nichts wiederholt ihn von selbst. Wer die Engine im Engine-Panel stoppt, bekommt keinen Neustart
+von selbst, der nächste Druck startet sie wieder. Beim Beenden geht `quit` statt `stop` an den
+Host: ab da startet nichts mehr, auch keine MIDI-Note, die während des Plugin-Abbaus ankommt.
+
+**Gerätewahl.** Ein im Setup benanntes Gerät wird geöffnet, wenn es da ist, sonst wird gewartet.
+„Default device“ bevorzugt das zuletzt benutzte Interface (`engine.json` im Konfigurationsordner,
+nur Geräte mit Ein- und Ausgang, die nicht eingebaut sind). Fehlt es und landete der Standard auf
+Lautsprechern, wird gewartet statt ausgewichen; „Use … now“ ist die bewusste Wahl des Standards.
+
+**Rückkopplung.** Ist der Ausgang ein eingebauter Lautsprecher (CoreAudio-Transporttyp `bltn`,
+Name als Rückfall, Kopfhörer nie), startet die Engine mit `Command::SetMonitorMute`: alle
+mitgehörten Live-Eingänge schweigen am Ausgang, Lautstärke und Schalter bleiben, Instrumente
+klingen. Das Status-Event meldet `monitor_muted`, solange tatsächlich ein Monitor an ist;
+„Unmute anyway“ hebt es für den Rest des Laufs auf. Eine verweigerte Mikrofon-Freigabe
+(AVCaptureDevice) wird vor dem Öffnen erkannt und als eigener Fehler mit Weg in die
+Systemeinstellungen gemeldet.
+
+**Ohne Engine ruht die Bühne.** Statt eines leeren Status sendet der Host `ready_event`: Spuren,
+Takt, Tempo und Busse der Startkonfiguration (oder der Partitur, die gleich wieder geladen wird),
+`running: false`, `ready: true`, Meter in Ruhe. Klick und Tempo sind dann Einstellungen des
+nächsten Starts. Setup-Änderungen, die nur ein Neustart anwendet (Gerät, Rate, Puffer, Spurliste
+ohne geladene Partitur), meldet der Host als `restart_needed`; beim Verlassen des Setups baut die
+App neu auf – sofort, oder nach Rückfrage, wenn Loops verloren gingen (`engine_restart` lädt eine
+geladene Partitur auf der neuen Engine wieder).
+
+**Partitur wieder laden.** War beim Beenden eine Partitur geladen (`looper.loadedScore` im
+Fenster), wird sie nach dem Autostart wieder geladen, sofern dieselbe Datei offen ist, noch
+existiert und fehlerfrei übersetzt; die Engine wird gleich mit ihren Spuren gebaut. Sonst eine
+Notiz und freier Modus.
+
 ### Anbindung des vorhandenen Frontends
 
 `ui/` ist in gutem Zustand (Vite 5, React 18, CodeMirror 6, `tsc --noEmit` läuft sauber) und

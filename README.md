@@ -15,7 +15,7 @@ können sich jederzeit ändern. Die Oberfläche ist englisch, Doku und Code-Komm
 
 | Modus | Wofür |
 |---|---|
-| **Setup** (Zahnrad) | Audio-Gerät, Puffer, Spuren und Eingänge, Klick, Latenz, MIDI-Geräte, Plugins. *Start engine* öffnet das Interface. |
+| **Setup** (Zahnrad) | Audio-Gerät, Puffer, Spuren und Eingänge, Klick, Latenz, MIDI-Geräte, Plugins. Änderungen an Gerät und Spuren gelten beim Verlassen des Setups (die Engine baut sich selbst neu auf). |
 | **Live** | Die Bühnenansicht: je Spur eine Kachel mit *Record · Overdub · Play · Stop · Monitor*, Pegel, Ebenen. Ohne geladene Partitur ein freier Looper; mit Partitur oben Sektion, Takt, Schlag, *Release* und *Stop all*. |
 | **Arrangement** | Die Partitur grafisch (Raster Sektionen × Spuren, Inspektor) oder als YAML-Text; *File* (New/Open/Recent/Save) und *Load*. Darunter aufklappbar der **Mixer** (Fader, Pan, Mute/Solo, Effekte, VST3/AU-Plugins, Busse). Läuft eine Partitur, ist das Arrangement gesperrt. |
 | **MIDI Learn** | Jedes bedienbare Element lässt sich per Klick und Druck auf ein Pad/einen Regler belegen; die Seitenleiste zeigt alle Belegungen je Gerät. |
@@ -30,9 +30,23 @@ ui/node_modules/.bin/tauri build         # Bundle bauen
 open "target/release/bundle/macos/Henrys Looper.app"
 ```
 
-Typischer Ablauf: Setup → Gerät wählen → *Start engine* → Arrangement → *File › Open*
-(z. B. `examples/henry-3-4.rust.yaml`) → *Load* → Live → *Start* (Leertaste) → *Release*
-(Leertaste) an den Stellen, die bis Release loopen → *Stop all* (⇧S) → *Back to start*.
+**App öffnen, spielen.** Die Engine (Audio-Gerät, Echtzeit-Thread, Spuren, Plugins) ist Sache der
+App: Sie startet beim Öffnen von selbst (Setup › General: *Start the engine when the app opens*),
+und sonst mit dem ersten Druck, der sie braucht – *Load*, *Start*/Leertaste, *Record*, *Monitor*,
+eine MIDI-Note, ein Plugin-Fenster. Die Live-Ansicht ist immer vollständig da; ohne Engine ruht
+sie (Pille „Engine off – starts when you play“). War beim Beenden eine Partitur geladen, wird sie
+nach dem Start wieder geladen (*Reload the last score on start*) – dann genügt die Leertaste.
+
+Typischer Ablauf beim ersten Mal: Arrangement → *File › Open* (z. B.
+`examples/henry-3-4.rust.yaml`) → *Load* → Live → *Start* (Leertaste) → *Release* (Leertaste) an
+den Stellen, die bis Release loopen → *Stop all* (⇧S) → *Back to start*.
+
+Sicherheit: Fehlt das zuletzt benutzte Interface (z. B. die Scarlett), weicht die App **nicht**
+still auf die Laptop-Lautsprecher aus, sondern wartet („Scarlett 2i2 USB is not connected“) und
+startet, sobald es angesteckt ist; *Use … now* nimmt bewusst das Standardgerät. Laufen die
+Ausgänge über eingebaute Lautsprecher, startet die Engine mit stummem Mithören (Mikrofon würde
+rückkoppeln) und sagt es im Band unter der Titelleiste (*Unmute anyway*). Wer die Engine im
+Engine-Panel stoppt, bekommt keinen Neustart von selbst.
 
 Ohne Partitur (freies Loopen) steht die Uhr nach dem Engine-Start auf Takt 1: kein Klick, nichts
 zählt. *Start* (Leertaste) lässt sie laufen, *Stop* hält sie an; die Loops bleiben erhalten und
@@ -147,8 +161,9 @@ target/release/looper-engine thru --device Scarlett --buffer 128 --gain 0.1
 Vorgaben auf dem Mac: Host `coreaudio`, 48 kHz, 128 Frames. Die Latenzvorgabe von **596 Frames
 ist geschätzt, nicht gemessen** (CoreAudio-Angaben einer Scarlett 2i2 plus Tiefe des
 Eingangspuffers); vor ernsthaften Aufnahmen mit `calibrate` und Loopback-Kabel nachmessen.
-Beim ersten „Engine starten“ der gebündelten App fragt macOS nach dem Mikrofonzugriff; unter
-`tauri dev` gilt die Freigabe des Terminals. Kürzel nehmen ⌘ statt Strg (⌘+Enter übersetzt, ⌘+⇧+Enter lädt,
+Beim ersten Start der Engine in der gebündelten App fragt macOS nach dem Mikrofonzugriff; unter
+`tauri dev` gilt die Freigabe des Terminals. Ist der Zugriff verweigert, sagt die App das und
+bietet den Weg in die Systemeinstellungen an (kein Dauer-Neuversuch). Kürzel nehmen ⌘ statt Strg (⌘+Enter übersetzt, ⌘+⇧+Enter lädt,
 ⌘+N/⌘+O/⌘+S/⌘+⇧+S für Neu/Öffnen/Speichern/Speichern unter, ⌘+Klick zum MIDI-Lernen).
 Partituren liegen als `.yaml` standardmäßig in `~/Documents/Henrys Looper/`. Logdatei: `~/Library/Logs/de.getmika.henrys-looper/`,
 MIDI-Profile: `~/Library/Application Support/henrys-looper/midi/` (eine YAML-Datei je Gerät;
