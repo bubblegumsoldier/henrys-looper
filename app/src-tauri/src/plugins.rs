@@ -76,6 +76,7 @@ use looper_engine::plugin::{self, PluginInstance};
 
 use crate::layout;
 use crate::logfile::log;
+use crate::scorestate;
 
 /// Event for everything this module reports: the rack, parameter changes made in a plugin's own
 /// window, scan progress. See [`PluginEvent`].
@@ -524,6 +525,10 @@ struct Manager {
     dirty: bool,
     last_change: Option<Instant>,
     last_meter: Option<Instant>,
+    /// Tests: plain-Rust stand-ins instead of real plugins (`tests::fake_load`) - no installed
+    /// plugin is ever loaded by a test.
+    #[cfg(test)]
+    fake_plugins: bool,
 }
 
 /// `plugin-rack.json` as written since slots belong to names.
@@ -1091,7 +1096,7 @@ impl Manager {
         if self.position(owner, index).is_some() {
             self.remove_slot(owner, index)?;
         }
-        let mut instance = plugin::load(&entry.info)?;
+        let mut instance = self.instantiate(&entry.info)?;
         log!(
             "Plugin loaded: {} ({}) in {} slot {}",
             entry.info.name,
@@ -1320,6 +1325,47 @@ impl Manager {
         Ok(self.view())
     }
 
+    fn instantiate(&self, info: &plugin::PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
+        #[cfg(test)]
+        if self.fake_plugins {
+            return tests::fake_load(info);
+        }
+        plugin::load(info)
+    }
+
+    /// Every track's inserts with their states, by track name, for the tracks of the running
+    /// engine (or the last one) - what the score's plugin settings file keeps.
+    fn capture(&self) -> (Vec<String>, BTreeMap<String, Vec<scorestate::SidePlugin>>) {
+        let mut out: BTreeMap<String, Vec<scorestate::SidePlugin>> = BTreeMap::new();
+        for s in &self.slots {
+            let Owner::Track(name) = &s.owner else {
+                continue;
+            };
+            if !self.layout.contains(name) {
+                continue;
+            }
+            let state = match s.plugin.save_state() {
+                Ok(bytes) => Some(base64_encode(&bytes)),
+                Err(e) => {
+                    log!("{} on track \"{name}\" did not hand over its state: {e}", s.info.info.name);
+                    None
+                }
+            };
+            out.entry(name.clone()).or_default().push(scorestate::SidePlugin {
+                plugin_id: s.info.info.id.clone(),
+                name: s.info.info.name.clone(),
+                slot: Some(s.index),
+                bypass: s.shared.bypass(),
+                before: s.position.name().map(str::to_string),
+                state,
+            });
+        }
+        for list in out.values_mut() {
+            list.sort_by_key(|p| p.slot);
+        }
+        (self.layout.clone(), out)
+    }
+
     /// A human changed the slots of `owner`: the open score writes it into its `mixer:`.
     fn touched(&self, owner: &Owner) {
         if let Owner::Track(name) = owner {
@@ -1328,16 +1374,22 @@ impl Manager {
     }
 
     /// What a loaded score (or an undo in its `mixer:`) says sits in `track`'s insert slots, in
-    /// slot order. The same plugins in the same order stay as they are - only their bypass
-    /// follows - so their sound is kept. Anything else is rebuilt from the front: a plugin that
-    /// was already on this track comes back with the state it had, a new one with its default,
-    /// one that is not installed here is left out with a notice, and the score keeps its entry.
+    /// slot order. The same plugins in the same order stay as they are - only their bypass and
+    /// place follow - so their sound is kept. Anything else is rebuilt from the front: a plugin
+    /// that was already on this track comes back with the state it had, a new one with its
+    /// default, one that is not installed here is left out with a notice, and the score keeps its
+    /// entry. Right after a load, the score's own settings file (`crate::scorestate`) comes first:
+    /// its states replace both.
     fn apply_score(&mut self, track: &str, wanted: &[InsertLine]) {
         let owner = Owner::Track(track.to_string());
         let mut have: Vec<usize> = (0..self.slots.len())
             .filter(|p| self.slots[*p].owner == owner)
             .collect();
         have.sort_by_key(|p| self.slots[*p].index);
+        // The settings the score's own file has for these plugins - only right after the score
+        // was loaded (`crate::scorestate`); `None` per plugin where it has none.
+        let ids: Vec<&str> = wanted.iter().map(|w| w.plugin.as_str()).collect();
+        let fresh = scorestate::match_states(&ids, &scorestate::take_inserts(track));
         let same = have.len() == wanted.len()
             && have
                 .iter()
@@ -1345,6 +1397,17 @@ impl Manager {
                 .all(|(p, w)| self.slots[*p].info.info.id == w.plugin);
         if same {
             let mut changed = false;
+            // The score's settings replace what the plugins have now (a load, a Reload). The
+            // plugin is running; a state is set the way the "state" command sets it.
+            for (k, p) in have.iter().enumerate() {
+                if let Some(Some(state)) = fresh.get(k) {
+                    let slot = &mut self.slots[*p];
+                    match slot.plugin.load_state(state) {
+                        Ok(()) => changed = true,
+                        Err(e) => log!("State of {} from the score not loaded: {e}", slot.info.info.name),
+                    }
+                }
+            }
             for (p, w) in have.iter().zip(wanted) {
                 let on = w.bypass.unwrap_or(false);
                 if self.slots[*p].shared.bypass() != on {
@@ -1412,11 +1475,13 @@ impl Manager {
         }
         let mut missing = Vec::new();
         let mut index = 0;
-        for w in wanted {
-            let state = states
+        for (k, w) in wanted.iter().enumerate() {
+            // The score's own settings first; then the state this plugin had on this track.
+            let had = states
                 .iter()
                 .position(|(id, _)| *id == w.plugin)
                 .and_then(|at| states.remove(at).1);
+            let state = fresh.get(k).cloned().flatten().or(had);
             let how = LoadAs {
                 position: w.position(),
                 state: state.as_deref(),
@@ -1993,6 +2058,31 @@ pub fn copy_all(from: InsertTarget, to: InsertTarget) -> Result<RackView, String
     })
 }
 
+/// The running engine's track names and every track's inserts with their states, for the score's
+/// plugin settings file (`crate::scorestate`). Not on the main thread.
+pub fn capture() -> Result<(Vec<String>, BTreeMap<String, Vec<scorestate::SidePlugin>>), String> {
+    on_main(|m| Ok(m.capture()))
+}
+
+/// [`capture`] on the main thread itself (the way out of the app).
+pub fn capture_here() -> (Vec<String>, BTreeMap<String, Vec<scorestate::SidePlugin>>) {
+    MANAGER.with(|m| match m.try_borrow() {
+        Ok(m) => m.capture(),
+        Err(_) => (Vec::new(), BTreeMap::new()),
+    })
+}
+
+/// Hand the loaded score's leftover settings back once the managers have applied its `mixer:`
+/// (`crate::scorestate::finish_load`) - queued behind their work on the main thread.
+pub fn after_score_applied() {
+    match APP.get() {
+        Some(app) => {
+            let _ = app.run_on_main_thread(scorestate::finish_load);
+        }
+        None => scorestate::finish_load(),
+    }
+}
+
 /// The host's bypass of a slot: the plugin is not called, the signal passes unchanged.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_bypass(target: String, slot: usize, on: bool) -> Result<RackView, String> {
@@ -2274,6 +2364,250 @@ mod tests {
             homes,
             vec![Owner::Track("stimme".into()), Owner::Track("gitarre".into()), Owner::Position(4)]
         );
+    }
+
+    // ---- the manager with stand-in plugins: no installed plugin, no engine -------------------
+
+    /// A plugin whose whole state is a byte string; `fake:silent` never hands its state over.
+    struct Fake {
+        info: plugin::PluginInfo,
+        state: Vec<u8>,
+    }
+
+    struct Passthrough;
+    impl looper_engine::engine::insert::InsertProcessor for Passthrough {
+        fn process(&mut self, _left: &mut [f32], _right: &mut [f32]) {}
+    }
+
+    impl PluginInstance for Fake {
+        fn info(&self) -> &plugin::PluginInfo {
+            &self.info
+        }
+        fn params(&self) -> Vec<plugin::ParamInfo> {
+            Vec::new()
+        }
+        fn param(&self, _id: u32) -> f64 {
+            0.0
+        }
+        /// The state as text: how a test reads what the plugin was given.
+        fn param_text(&self, _id: u32, _value: f64) -> String {
+            String::from_utf8_lossy(&self.state).into_owned()
+        }
+        fn set_param(&mut self, _id: u32, _value: f64) {}
+        fn latency(&self) -> u32 {
+            0
+        }
+        fn save_state(&self) -> Result<Vec<u8>, String> {
+            if self.info.id == "fake:silent" {
+                return Err("no state today".into());
+            }
+            Ok(self.state.clone())
+        }
+        fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+            self.state = data.to_vec();
+            Ok(())
+        }
+        fn activate(
+            &mut self,
+            _sample_rate: f64,
+            _max_block: usize,
+        ) -> Result<Box<dyn looper_engine::engine::insert::InsertProcessor>, String> {
+            Ok(Box::new(Passthrough))
+        }
+        fn deactivate(&mut self) {}
+        fn has_editor(&self) -> bool {
+            false
+        }
+        fn open_editor(&mut self, _title: &str, _key: &str) -> Result<(), String> {
+            Err("none".into())
+        }
+        fn close_editor(&mut self) {}
+        fn editor_open(&self) -> bool {
+            false
+        }
+        fn take_changed(&mut self) -> Vec<u32> {
+            Vec::new()
+        }
+    }
+
+    pub(super) fn fake_load(info: &plugin::PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
+        Ok(Box::new(Fake {
+            info: info.clone(),
+            state: b"default".to_vec(),
+        }))
+    }
+
+    fn scanned(id: &str) -> Scanned {
+        Scanned {
+            info: plugin::PluginInfo {
+                id: id.into(),
+                format: plugin::Format::Vst3,
+                name: id.trim_start_matches("fake:").to_uppercase(),
+                vendor: "Test".into(),
+                version: "1".into(),
+                category: "Fx".into(),
+                kind: plugin::Kind::Effect,
+                path: None,
+            },
+            status: scan::Status::Ok,
+            message: None,
+            latency: 0,
+            params: 0,
+        }
+    }
+
+    fn manager(tracks: &[&str]) -> Manager {
+        Manager {
+            fake_plugins: true,
+            layout: tracks.iter().map(|t| t.to_string()).collect(),
+            catalog: ["fake:ir", "fake:dly", "fake:silent"].map(scanned).to_vec(),
+            ..Manager::default()
+        }
+    }
+
+    fn voice() -> Owner {
+        Owner::Track("voice".into())
+    }
+    fn guitar() -> Owner {
+        Owner::Track("guitar".into())
+    }
+
+    /// What a slot's plugin holds: (plugin id, state as text, place, bypass).
+    fn held(m: &Manager, owner: &Owner, index: usize) -> (String, String, InsertPosition, bool) {
+        let s = m.slot(owner, index).expect("belegt");
+        (s.info.info.id.clone(), s.plugin.param_text(0, 0.0), s.position, s.shared.bypass())
+    }
+
+    fn put(m: &mut Manager, owner: &Owner, index: usize, id: &str, state: &[u8], position: InsertPosition, bypass: bool) {
+        m.load_as(owner, Some(index), id, LoadAs { position, state: Some(state), bypass }).expect("laedt");
+    }
+
+    /// Copy one plugin, then the whole chain: same plugin, same state, same place, same bypass -
+    /// and independent afterwards. Places that would break signal order are refused.
+    #[test]
+    fn plugins_are_copied_with_their_settings_and_places() {
+        let mut m = manager(&["voice", "guitar"]);
+        put(&mut m, &voice(), 0, "fake:ir", b"IR-A", at(FxSlot::Octaver), false);
+        put(&mut m, &voice(), 1, "fake:dly", b"DLY", END, true);
+
+        m.copy_slot(&voice(), 0, &guitar()).unwrap();
+        assert_eq!(held(&m, &guitar(), 0), ("fake:ir".into(), "IR-A".into(), at(FxSlot::Octaver), false));
+        // Independent: the original changes, the copy does not.
+        m.slot_mut(&voice(), 0).unwrap().plugin.load_state(b"IR-B").unwrap();
+        assert_eq!(held(&m, &guitar(), 0).1, "IR-A");
+
+        // A copy onto a bus lands at the end of the bus chain.
+        m.copy_slot(&voice(), 0, &Owner::Bus(Bus::Main)).unwrap();
+        assert_eq!(held(&m, &Owner::Bus(Bus::Main), 0).2, END);
+
+        // A copy of the delay (end) goes behind the IR loader; a second IR copy in front of it.
+        m.copy_slot(&voice(), 1, &guitar()).unwrap();
+        m.copy_slot(&voice(), 0, &guitar()).unwrap();
+        let ids: Vec<String> = (0..3).map(|i| held(&m, &guitar(), i).0).collect();
+        assert_eq!(ids, ["fake:ir", "fake:ir", "fake:dly"]);
+        assert_eq!(held(&m, &guitar(), 1).1, "IR-B");
+
+        // The whole chain: the guitar's plugins are replaced by copies of the voice's.
+        m.copy_all(&voice(), &guitar()).unwrap();
+        assert_eq!(held(&m, &guitar(), 0), ("fake:ir".into(), "IR-B".into(), at(FxSlot::Octaver), false));
+        assert_eq!(held(&m, &guitar(), 1), ("fake:dly".into(), "DLY".into(), END, true));
+        assert!(m.slot(&guitar(), 2).is_err());
+
+        // Places: the delay in front of the EQ is fine (behind the IR at the octaver); the IR to
+        // the end while the delay stays at the EQ is not.
+        m.place_slot(&guitar(), 1, 1, Some(at(FxSlot::Eq))).unwrap();
+        assert_eq!(held(&m, &guitar(), 1).2, at(FxSlot::Eq));
+        assert!(m.place_slot(&guitar(), 0, 0, Some(END)).is_err());
+        // Moved past the delay as well, it is allowed - and the slots swap.
+        m.place_slot(&guitar(), 0, 1, Some(END)).unwrap();
+        assert_eq!(held(&m, &guitar(), 0).0, "fake:dly");
+        assert_eq!(held(&m, &guitar(), 1), ("fake:ir".into(), "IR-B".into(), END, false));
+
+        // What the rack file and the score's settings file would keep.
+        let (tracks, captured) = m.capture();
+        assert_eq!(tracks, ["voice", "guitar"]);
+        assert_eq!(captured["voice"][0].before.as_deref(), Some("octaver"));
+        assert_eq!(captured["voice"][1].state.as_deref(), Some(base64_encode(b"DLY").as_str()));
+        assert!(captured["voice"][1].bypass);
+    }
+
+    /// The score's settings file end to end: captured on one "computer", applied on another that
+    /// has the same plugins - states, places and bypass arrive, a state a plugin would not deliver
+    /// keeps the file's, Reload puts the file's settings back over a tweak, and a later undo in the
+    /// `mixer:` section does not.
+    #[test]
+    fn a_scores_plugin_settings_travel_with_it() {
+        let _turn = scorestate::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("looper-plugins-score-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let score = dir.join("Song.yaml");
+
+        // An older file with a state for the plugin that will not deliver one this time.
+        let mut old = scorestate::Sidecar::default();
+        old.tracks.insert(
+            "voice".into(),
+            scorestate::TrackPlugins {
+                instrument: None,
+                inserts: vec![scorestate::SidePlugin {
+                    plugin_id: "fake:silent".into(),
+                    name: "SILENT".into(),
+                    slot: Some(1),
+                    state: Some(base64_encode(b"KEPT")),
+                    ..Default::default()
+                }],
+            },
+        );
+        scorestate::write(&score, &old).unwrap();
+
+        let mut here = manager(&["voice"]);
+        put(&mut here, &voice(), 0, "fake:ir", b"IR-1", at(FxSlot::Octaver), false);
+        put(&mut here, &voice(), 1, "fake:silent", b"whatever", END, true);
+        let (tracks, inserts) = here.capture();
+        let captured = scorestate::Captured {
+            tracks,
+            inserts,
+            ..scorestate::Captured::default()
+        };
+        let merged = scorestate::merge(scorestate::read(&score).as_ref(), &captured);
+        scorestate::write(&score, &merged).unwrap();
+
+        // Another computer: same track name, nothing loaded, an unrelated local state would be
+        // there for the IR loader - the score's file wins.
+        let mut there = manager(&["voice"]);
+        scorestate::restore(None);
+        scorestate::switch(Some(score.clone()));
+        let wanted = vec![
+            InsertLine {
+                plugin: "fake:ir".into(),
+                bypass: None,
+                before: Some("octaver".into()),
+            },
+            InsertLine {
+                plugin: "fake:silent".into(),
+                bypass: Some(true),
+                before: None,
+            },
+        ];
+        there.apply_score("voice", &wanted);
+        assert_eq!(held(&there, &voice(), 0), ("fake:ir".into(), "IR-1".into(), at(FxSlot::Octaver), false));
+        assert_eq!(held(&there, &voice(), 1), ("fake:silent".into(), "KEPT".into(), END, true));
+        scorestate::finish_load();
+
+        // A tweak, then Reload (same file again): the file's settings come back.
+        there.slot_mut(&voice(), 0).unwrap().plugin.load_state(b"TWEAK").unwrap();
+        scorestate::switch(Some(score.clone()));
+        there.apply_score("voice", &wanted);
+        assert_eq!(held(&there, &voice(), 0).1, "IR-1");
+        scorestate::finish_load();
+
+        // An undo in the `mixer:` section later re-applies the list - and leaves the sound alone.
+        there.slot_mut(&voice(), 0).unwrap().plugin.load_state(b"TWEAK-2").unwrap();
+        there.apply_score("voice", &wanted);
+        assert_eq!(held(&there, &voice(), 0).1, "TWEAK-2");
+
+        scorestate::restore(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

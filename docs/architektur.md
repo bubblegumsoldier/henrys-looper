@@ -2141,8 +2141,9 @@ mixer:
   heißt (nicht Standardwert): eine Partitur von vor dieser Änderung nimmt niemandem das Klavier
   oder den Hall weg. `inserts: []` leert die Slots ausdrücklich; der Rückweg schreibt `[]`, wenn
   ein Mensch den letzten Effekt einer Spur entfernt hat.
-* Die Zustände bleiben lokal nach Spurname: `instruments.json` (jetzt mit einem „Regal“ der
-  zuletzt von einer Spur genommenen Instrumente samt Zustand, höchstens 32) und
+* Die Zustände stehen **neben der Partitur** (seit 2026-11, unten „Die Plugin-Einstellungen
+  gehören zum Stück“); lokal nach Spurname bleiben sie als Rückfall: `instruments.json` (mit
+  einem „Regal“ der zuletzt von einer Spur genommenen Instrumente samt Zustand, höchstens 32) und
   `plugin-rack.json`.
 
 *Laden* (`Session::queue_mix` → `app/src-tauri/src/pluginmix.rs` → Hauptthread): Sitzt das
@@ -2184,6 +2185,67 @@ Meldung), nie ein Fehler; die Bedienelemente dafür gibt es noch nicht.
 Meldung ab (sie hostet keine Instrumente und hört auf kein Keyboard); `--check` zeigt sie samt
 MIDI-Routing.
 
+**Die Plugin-Einstellungen gehören zum Stück** (gebaut 2026-11, `app/src-tauri/src/scorestate.rs`).
+Vorher lagen die Zustände nur lokal nach Spurname: zwei Stücke mit einer Spur „theme“ teilten
+(und überschrieben) sich die Einstellungen, und auf einem anderen Rechner kam ein Stück ohne sie an.
+
+*Format und Ort.* Neben der Partitur, gefunden über den Namen: `The Hardest Part.yaml` →
+`The Hardest Part.plugins.json`. Die YAML verweist nicht darauf und bleibt lesbar; ein
+Zustand ist ein undurchsichtiger Chunk (bei einem Sampler Megabytes), der in handgeschriebenes YAML
+nicht gehört. Eine JSON-Datei statt eines Ordners mit Binärdateien, weil sie sich **atomar**
+ersetzen lässt (temporäre Datei, dann umbenennen) — base64 kostet ein Drittel mehr Platz.
+
+```json
+{ "version": 1,
+  "tracks": {
+    "guitar": { "inserts": [ {"plugin_id": "vst3:…", "name": "IRDX Studio", "slot": 0,
+                              "before": "octaver", "state": "<base64>"},
+                             {"plugin_id": "au:aufx:dely:appl", "name": "AUDelay", "slot": 1,
+                              "bypass": true, "state": "<base64>"} ] },
+    "keys":   { "instrument": {"plugin_id": "au:aumu:dls :appl", "name": "DLSMusicDevice",
+                               "state": "<base64>"} } } }
+```
+
+*Lesen.* `score_load` bekommt vom UI den Pfad der Datei (`null` bei einer ungespeicherten
+Partitur). Die Datei daneben wird gelesen; beim Anwenden des `mixer:` nimmt jeder Manager die
+Zustände seiner Spur **einmal**: nach Reihenfolge, dann nach Id, **nie den Zustand eines anderen
+Plugins** (`match_states`). Sitzt dasselbe Plugin schon auf der Spur, bekommt es den Zustand
+(`load_state` auf das laufende Plugin, wie das Kommando `plugin_state_set`); sonst wird es mit ihm
+geladen, vor dem Start. Was die Datei nicht hat, kommt wie bisher aus den lokalen Dateien (der
+Zustand, den das Plugin auf einer Spur dieses Namens zuletzt hatte) — **bestehende Setups behalten
+beim ersten Laden nach dem Update ihren Klang**, das nächste Speichern schreibt ihn in die Datei.
+Nach dem Anwenden wird der Rest verworfen (`finish_load`, in der Hauptthread-Queue hinter den
+Managern), damit ein späteres Undo im `mixer:` keine Zustände aus der Datei zieht.
+
+*Schreiben — wann.* Plugin-Zustände ändern sich im Fenster des Plugins, ohne dass die App es
+merkt; geschrieben wird darum zu Zeitpunkten, die „behalten“ bedeuten, nie im Hintergrund:
+**⌘S / Save As der geladenen Partitur** (das UI sagt mit `loaded: true`, dass das gespeicherte
+Dokument das geladene ist; bei Save As danach neben der neuen Datei), **Laden einer anderen
+Partitur** (vorher die Zustände der bisherigen) und **Beenden der App**. Jedes Schreiben wird mit
+dem vorhandenen Inhalt zusammengeführt (`merge`): ein Plugin, das seinen Zustand nicht liefert,
+behält den der Datei; eine Spur, deren Plugins hier fehlen, behält ihren Eintrag; Spuren, die die
+laufende Engine nicht hat, bleiben stehen. Eine unlesbare alte Datei wird als `….plugins.json.bak`
+aufgehoben. Ein Fehler beim Schreiben der Zustände lässt das Speichern der Partitur gelingen
+(nur im Log).
+
+*Reload* liest die Datei neu: was seit dem letzten Speichern im Plugin gedreht wurde, ist weg —
+wie alles andere seit dem Speichern, das ist die Bedeutung von Reload. Es wird vorher **nicht**
+geschrieben (sonst wäre der Dreh gerettet und der Reload wirkungslos); halb angewendet wird nichts:
+eine Partitur mit Fehlern setzt nichts zurück und liest keine Zustände, ein abgelehntes Laden
+lässt die bisherige Partitur die aktuelle.
+
+*Ohne Datei.* Eine nie gespeicherte Partitur und der freie Modus ohne Partitur verhalten sich wie
+bisher (nur lokal nach Spurname). Ein Mitschnitt legt die Datei, wie zuletzt gespeichert, als
+`score.plugins.json` neben `score.yaml` (Abschnitt 16).
+
+*Kopieren und Plätze* laufen durch: die Datei hat `before` und `bypass` je Slot; eine Kopie (`Copy
+to…`) ist eine gewöhnliche Belegung der Zielspur und wird beim nächsten Speichern mitgeschrieben.
+
+*Tests* (Stellvertreter-Plugins, keine installierten): `scorestate::tests` (Ort, atomarer
+Rundlauf, kaputte Datei, Zusammenführen ohne Verlust, Zuordnung nach Reihenfolge und Id, einmalige
+Übergabe) und `plugins::tests::a_scores_plugin_settings_travel_with_it` (auf einem „Rechner“
+erfasst, auf einem anderen angewendet, Reload über einem Dreh, Undo ohne Dateizugriff).
+
 ## 16. Mitschnitt der Performance als Stems
 
 Jeder Durchlauf wird auf Platte geschrieben, als Stems für eine DAW. Code: `engine/src/capture/`
@@ -2208,6 +2270,7 @@ gewählte Ordner. Einstellungen in `recording.json` im Konfigurationsordner
 | `01 voice (dry).wav` | Loop-Wiedergabe (hörbare Ebenen mit Ebenen-Gain) + roher Live-Eingang während Record/Overdub/Hear-through; vor allem anderen, ohne Monitor-Lautstärke. Kanalzahl der Spur (mono bleibt mono). Abschaltbar |
 | `Mix.wav` | Main-Bus nach seinen Inserts, vor der Main-Lautstärke, **ohne Klick** (auch bei zusammengelegten Bussen) |
 | `score.yaml` | Kopie der geladenen Partitur (nur Partitur-Lauf) |
+| `score.plugins.json` | Kopie der Plugin-Einstellungen der Partitur, wie zuletzt gespeichert (nur Partitur-Lauf aus einer Datei, die eine hat; Abschnitt 15) |
 | `session.json` | Titel, Modus, Startzeit, BPM, Taktart, Samplerate, Länge, Spuren (mit `midi: null` als Platz für spätere `.mid`-Dateien), Sektionsmarker (Frame, Sekunden, Takt ab 1, Sektions-Id), Aussetzer-Zähler, Klartext-Erklärung der Dateien |
 
 Alle Dateien: 24 Bit PCM, Samplerate der Engine, gleich lang, Frame 0 = Takt 1. Über 4 GB wird

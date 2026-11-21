@@ -303,9 +303,13 @@ export const scoreApi = {
    * `reset`: the Arrangement's Reload - whatever plays, records or is recorded is reset first
    * (score stopped, every track cleared, a running recording finished), without asking, and the
    * engine is rebuilt if the tracks differ. A score that does not compile resets nothing.
+   *
+   * `path`: the file the text belongs to (null for an unsaved score). Its plugin settings are read
+   * from the file next to it (`<name>.plugins.json`); those of the previously loaded file are
+   * written first when it is another one.
    */
-  load: (yaml: string, countIn?: number, reset?: boolean) =>
-    call<ScoreLoaded>("score_load", { yaml, count_in: countIn ?? null, reset: reset ?? false }),
+  load: (yaml: string, countIn?: number, reset?: boolean, path?: string | null) =>
+    call<ScoreLoaded>("score_load", { yaml, count_in: countIn ?? null, reset: reset ?? false, path: path ?? null }),
   /** Count-in, then the first section. */
   start: () => call<string>("score_start"),
   /** The release button. Pressing it twice skips nothing. */
@@ -345,8 +349,11 @@ export const filesApi = {
   info: () => call<FilesInfo>("score_files_info"),
   /** Read a `.yaml`/`.yml` score (at most 1 MB) and put it on top of the recent list. */
   open: (path: string) => call<OpenedFile>("score_file_open", { path }),
-  /** Write atomically. A name without extension gets `.yaml`; the answer has the real path. */
-  save: (path: string, yaml: string) => call<SavedFile>("score_file_save", { path, yaml }),
+  /**
+   * Write atomically. A name without extension gets `.yaml`; the answer has the real path.
+   * `loaded`: this is the score the engine plays - its plugin settings are written next to it.
+   */
+  save: (path: string, yaml: string, loaded = false) => call<SavedFile>("score_file_save", { path, yaml, loaded }),
   /** The file as it is on disk now (null when gone), without touching the recent list. */
   peek: (path: string) => call<string | null>("score_file_peek", { path }),
   /** Drop a recent entry (a file that has gone). */

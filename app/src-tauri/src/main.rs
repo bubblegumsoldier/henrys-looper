@@ -27,6 +27,7 @@ mod pluginmix;
 mod plugins;
 mod proto;
 mod recording;
+mod scorestate;
 mod schedule;
 mod supervisor;
 
@@ -746,14 +747,28 @@ async fn score_file_open(path: String, app: tauri::AppHandle) -> Result<files::O
 
 /// Write a score file atomically. A name without extension gets `.yaml`; the answer carries the
 /// path really written.
+///
+/// `loaded`: the document is the score the engine plays. Its plugin settings are then written
+/// next to it (`The Hardest Part.plugins.json`, see `scorestate`), and a Save As makes the new
+/// file the loaded one. A failure there is logged and does not fail the save of the score.
 #[tauri::command(rename_all = "snake_case")]
 async fn score_file_save(
     path: String,
     yaml: String,
+    loaded: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<files::SavedFile, String> {
     offload(move || {
         let written = files::write_score_file(std::path::Path::new(&path), &yaml)?;
+        if loaded == Some(true) {
+            match scorestate::save(&written) {
+                Ok(side) => {
+                    log!("Plugin settings saved to {}.", side.display());
+                    scorestate::saved_as(written.clone());
+                }
+                Err(e) => log!("Plugin settings of {} not saved: {e}", written.display()),
+            }
+        }
         let recent = files::remember(&config_dir(&app), &written);
         Ok(files::SavedFile {
             name: written
@@ -903,10 +918,26 @@ async fn score_load(
     yaml: String,
     count_in: Option<u32>,
     reset: Option<bool>,
+    path: Option<String>,
     engine: State<'_, EngineHandle>,
 ) -> Result<ScoreLoaded, String> {
     let handle = engine.inner().clone();
-    offload(move || handle.score_load(yaml, count_in, reset.unwrap_or(false))).await
+    offload(move || {
+        // `path`: the file the score came from - its plugin settings are next to it
+        // (`scorestate`). The previous score's settings are written first when it is another file.
+        let previous = scorestate::switch(path.map(std::path::PathBuf::from));
+        match handle.score_load(yaml, count_in, reset.unwrap_or(false)) {
+            Ok(loaded) => {
+                plugins::after_score_applied();
+                Ok(loaded)
+            }
+            Err(e) => {
+                scorestate::restore(previous);
+                Err(e)
+            }
+        }
+    })
+    .await
 }
 
 /// Start the count-in and arm the first section.
@@ -1341,6 +1372,8 @@ fn shut_down(app: &tauri::AppHandle) {
             log!("On the way out: the engine did not stop within 3 s.");
         }
     }
+    // The loaded score's plugin settings, next to it - before the plugins are unloaded.
+    scorestate::save_current_on_main();
     let kept = plugins::shutdown().saturating_add(instruments::shutdown());
     let modules = looper_engine::plugin::shutdown();
     log!(
