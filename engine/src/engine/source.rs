@@ -412,7 +412,9 @@ impl FeedHandle {
 
 /// A fresh fast queue: the producer goes into the driver callback.
 pub fn port_feed() -> (Producer<LiveEvent>, FeedHandle) {
-    let (tx, rx) = RingBuffer::new(FEED_QUEUE);
+    let (mut tx, rx) = RingBuffer::new(FEED_QUEUE);
+    // The MIDI driver's callback pushes into it (`crate::rt::prefault_ring`).
+    crate::rt::prefault_ring(&mut tx);
     let home = Arc::new(FeedHome {
         rx: Mutex::new(Some(rx)),
     });
@@ -617,9 +619,12 @@ pub struct SourceEndpoint {
 
 pub fn source_channel(capacity: usize) -> (InstrumentSender, FeedSender, SourceEndpoint) {
     let (itx, irx) = RingBuffer::new(capacity);
-    let (iret_tx, iret_rx) = RingBuffer::new(capacity * 2 + MAX_TRACKS);
+    let (mut iret_tx, iret_rx) = RingBuffer::new(capacity * 2 + MAX_TRACKS);
     let (ftx, frx) = RingBuffer::new(capacity);
-    let (fret_tx, fret_rx) = RingBuffer::new(capacity * 2 + MAX_PORTS);
+    let (mut fret_tx, fret_rx) = RingBuffer::new(capacity * 2 + MAX_PORTS);
+    // The audio thread pushes into both return queues (`crate::rt::prefault_ring`).
+    crate::rt::prefault_ring(&mut iret_tx);
+    crate::rt::prefault_ring(&mut fret_tx);
     (
         InstrumentSender {
             tx: itx,
@@ -783,6 +788,14 @@ pub struct SourceOut {
     pub r: Vec<f32>,
 }
 
+/// An empty event list with [`PENDING_EVENTS`] of room whose pages exist: the audio thread pushes
+/// into it (`crate::rt::touch_spare`).
+fn resident_events<T>() -> Vec<T> {
+    let mut v = Vec::with_capacity(PENDING_EVENTS);
+    crate::rt::touch_spare(&mut v);
+    v
+}
+
 /// The audio thread's side: one source slot per track, the port feeds, the event stage and the
 /// output buffers. Everything here is allocated in [`SourceRack::new`].
 pub struct SourceRack {
@@ -838,20 +851,27 @@ impl SourceRack {
             slots: (0..MAX_TRACKS).map(|_| None).collect(),
             routes: [TrackRoute::NONE; MAX_TRACKS],
             feeds: (0..MAX_PORTS).map(|_| None).collect(),
-            pending: (0..MAX_TRACKS)
-                .map(|_| Vec::with_capacity(PENDING_EVENTS))
-                .collect(),
+            pending: (0..MAX_TRACKS).map(|_| resident_events()).collect(),
             trackers: vec![[NoteTracker::default(); SOURCES]; MAX_TRACKS],
             flush_live: [false; MAX_TRACKS],
             panic_all: false,
-            scratch: Vec::with_capacity(PENDING_EVENTS + 64 * SOURCES),
+            scratch: {
+                let mut v = Vec::with_capacity(PENDING_EVENTS + 64 * SOURCES);
+                crate::rt::touch_spare(&mut v);
+                v
+            },
             spare_buses: (1..MAX_SOURCE_BUSES)
-                .map(|_| (vec![0.0; MAX_BLOCK], vec![0.0; MAX_BLOCK]))
+                .map(|_| {
+                    (
+                        crate::rt::resident_zeros(MAX_BLOCK),
+                        crate::rt::resident_zeros(MAX_BLOCK),
+                    )
+                })
                 .collect(),
             out: (0..MAX_TRACKS)
                 .map(|_| SourceOut {
-                    l: vec![0.0; capacity],
-                    r: vec![0.0; capacity],
+                    l: crate::rt::resident_zeros(capacity),
+                    r: crate::rt::resident_zeros(capacity),
                 })
                 .collect(),
             capacity,
@@ -862,12 +882,8 @@ impl SourceRack {
             transport: PluginTransport::standing(48_000.0),
             midi: [false; MAX_TRACKS],
             transpose: [0; MAX_TRACKS],
-            heard: (0..MAX_TRACKS)
-                .map(|_| Vec::with_capacity(PENDING_EVENTS))
-                .collect(),
-            sent: (0..MAX_TRACKS)
-                .map(|_| Vec::with_capacity(PENDING_EVENTS))
-                .collect(),
+            heard: (0..MAX_TRACKS).map(|_| resident_events()).collect(),
+            sent: (0..MAX_TRACKS).map(|_| resident_events()).collect(),
             tap: false,
             busy_ns: 0,
         }

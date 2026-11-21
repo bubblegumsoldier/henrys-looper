@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use super::session::{
-    self, Dropouts, Marker, OverrunMarker, SCORE_FILE, SESSION_FILE, SessionFile, TrackEntry, file_specs,
+    self, Dropouts, Marker, OverrunDetail, OverrunMarker, SCORE_FILE, SESSION_FILE, SessionFile, TrackEntry, file_specs,
 };
 use super::writer::{self, Written};
 use super::{CapturePort, CaptureSpec, Layout, Shared, capture_pair};
@@ -166,6 +166,9 @@ impl Recording {
             std::thread::Builder::new()
                 .name("looper-recorder".into())
                 .spawn(move || {
+                    // Deliberately left at the default class: a utility class would let macOS
+                    // throttle its writes behind a sampler streaming from the same disk, and the
+                    // queue would overflow into gaps. It cannot preempt the audio thread either way.
                     let written = writer::write_all(reader, &folder, &specs);
                     finalize(&info, &folder, &written, &meta, &shared, &specs)
                 })
@@ -241,7 +244,7 @@ impl Recording {
     }
 
     /// An audio overrun at engine position `at`. Ignored before the run's frame 0.
-    pub fn overrun(&self, at: u64, kind: &str, load_percent: f32) {
+    pub fn overrun(&self, at: u64, kind: &str, load_percent: f32, detail: OverrunDetail) {
         if at < self.start {
             return;
         }
@@ -254,6 +257,9 @@ impl Recording {
                 seconds: frame as f64 / self.sample_rate.max(1) as f64,
                 kind: kind.to_string(),
                 load_percent,
+                block_ms: detail.block_ms,
+                wake_gap_ms: detail.wake_gap_ms,
+                cause: detail.cause,
             });
         }
     }

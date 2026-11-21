@@ -293,9 +293,15 @@ pub fn capture_pair(spec: &CaptureSpec) -> (Box<CaptureSession>, CaptureReader) 
         .max(1024);
     let queue =
         ((spec.sample_rate as f64 * spec.queue_seconds) as usize).max(4 * max_block as usize);
-    let (data_tx, data_rx) = rtrb::RingBuffer::<f32>::new(queue * width);
-    let (gap_tx, gap_rx) = rtrb::RingBuffer::<Gap>::new(256);
-    let (midi_tx, midi_rx) = rtrb::RingBuffer::<MidiCapture>::new(MIDI_QUEUE);
+    let (mut data_tx, data_rx) = rtrb::RingBuffer::<f32>::new(queue * width);
+    let (mut gap_tx, gap_rx) = rtrb::RingBuffer::<Gap>::new(256);
+    let (mut midi_tx, midi_rx) = rtrb::RingBuffer::<MidiCapture>::new(MIDI_QUEUE);
+    // Every page of the queues and the collecting ring exists before the audio thread sees them:
+    // the queue alone is ~20 MB for the owner's eight tracks, and it would otherwise fault once per
+    // block through the first four seconds of every recording.
+    crate::rt::prefault_ring(&mut data_tx);
+    crate::rt::prefault_ring(&mut gap_tx);
+    crate::rt::prefault_ring(&mut midi_tx);
     let shared = Arc::new(Shared::new());
     let slots = (0..spec.layout.tracks.len())
         .map(|t| Slots {
@@ -309,7 +315,7 @@ pub fn capture_pair(spec: &CaptureSpec) -> (Box<CaptureSession>, CaptureReader) 
         start: spec.start,
         width,
         slots,
-        acc: vec![0.0; ring_frames as usize * width],
+        acc: crate::rt::resident_zeros(ring_frames as usize * width),
         ring_frames,
         mask: ring_frames - 1,
         next: spec.start,

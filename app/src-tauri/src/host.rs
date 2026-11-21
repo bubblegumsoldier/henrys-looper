@@ -37,7 +37,9 @@ use tauri::{AppHandle, Emitter};
 
 use looper_engine::audio::{self, DeviceOpts};
 use looper_engine::capture::capture_channel;
-use looper_engine::load::{LoadClock, LoadShared};
+use looper_engine::fifo::input_fifo;
+use looper_engine::load::{LateDetail, LoadClock, LoadShared};
+use looper_engine::rt;
 use looper_engine::capture::run::{Mode as RecordMode, SectionWatch};
 use looper_engine::engine::bus::{
     Bus, BusOutput, BusSend, MAX_BUS_GAIN, TrackSource, routing_note,
@@ -108,9 +110,9 @@ pub const ENGINE_EVENT: &str = "looper://engine";
 /// section boundary.
 pub const NOTICE_EVENT: &str = "looper://notice";
 
-/// Input FIFO size in multiples of the audio buffer. Same value as the CLI: a few dozen kB, and
-/// the difference between a hiccup and a permanently misaligned recording.
-const INPUT_FIFO_BUFFERS: u32 = 64;
+/// How far back the page-fault counters are kept for an overrun line: a little more than an
+/// overrun's coalescing time plus a host turn.
+const FAULT_WINDOW: Duration = Duration::from_millis(100);
 /// Status snapshots per second the audio thread produces.
 const STATUS_HZ: u32 = 200;
 /// Status events per second sent to the frontend. Twenty is smooth for a position display and a
@@ -633,7 +635,14 @@ impl EngineHandle {
 // ---------------------------------------------------------------------------------------------
 
 fn host_thread(rx: Receiver<Request>, app: AppHandle) {
+    // This thread feeds the audio callback - commands ahead of their time, MIDI pads, buffers - on
+    // a 4 ms tick: it must get the CPU before the UI and the recorder do. (It cannot preempt the
+    // callback itself, which CoreAudio runs as a real-time thread above every QoS class.)
+    let qos = looper_engine::rt::set_qos(looper_engine::rt::Qos::UserInteractive);
     log!("Audio thread ready (engine not running yet).");
+    if !qos {
+        log!("The host thread kept its default scheduling class.");
+    }
     let mut session: Option<Session> = None;
     // The MIDI side lives here rather than inside `Session`, because it outlives one: a controller
     // stays connected across a stop and a restart of the engine, and the learn mode has to work
@@ -2099,6 +2108,10 @@ struct HostStats {
     underruns: AtomicU64,
     /// Input callbacks that could not push - frames lost, alignment gone.
     overruns: AtomicU64,
+    /// Input callbacks whose frame count differed from the one before. Each such change makes
+    /// coreaudio-rs (under cpal) query the device format and resize its input buffer - a HAL call
+    /// and an allocation on the input's real-time thread, before our callback runs.
+    input_resizes: AtomicU64,
     cb_nanos_max: AtomicU64,
 }
 
@@ -2146,6 +2159,16 @@ struct Session {
     stats: Arc<HostStats>,
     /// What the output callback's load clock publishes (`looper_engine::load`).
     load: Arc<LoadShared>,
+    /// Records of late callbacks, from the output callback (`looper_engine::load::LateDetail`).
+    late_details: rtrb::Consumer<LateDetail>,
+    /// The process's page-fault counters at recent host turns, for the overrun line: whether the
+    /// process faulted (and read pages from disk) around a late callback (`rt::process_faults`).
+    fault_history: VecDeque<(Instant, u64, u64)>,
+    /// Allocations and frees on the audio thread as last logged; and the callback thread's
+    /// scheduling, once logged.
+    logged_rt: (u64, u64),
+    logged_priority: bool,
+    logged_resizes: u64,
     /// Overruns made out of it: counted, logged, marked in the recording (`crate::loadwatch`).
     load_watch: LoadWatch,
     scheduler: Scheduler,
@@ -2286,9 +2309,9 @@ impl Session {
         let scratch_frames = (buffer_frames * 16) as usize;
 
         let stats = Arc::new(HostStats::default());
-        let (mut producer, mut consumer) = rtrb::RingBuffer::<f32>::new(
-            (buffer_frames * INPUT_FIFO_BUFFERS) as usize * in_channels,
-        );
+        // The input FIFO: 64 blocks of room, a backlog left by a late input callback is taken
+        // back down to one block (`looper_engine::fifo`).
+        let (mut fifo_in, mut fifo_out) = input_fifo(buffer_frames as usize, in_channels);
         let (cmd_tx, cmd_rx) = command_channel(256);
         let (status_tx, status_rx) = status_channel(1024);
         // The return queue has room for every buffer that can be inside the engine at once, so the
@@ -2379,24 +2402,20 @@ impl Session {
         // ---- input stream: whole frames into the FIFO, nothing else ------------------------
         let stats_in = Arc::clone(&stats);
         let stats_in_err = Arc::clone(&stats);
+        let mut last_input_len = 0usize;
         let input = audio::build_input(
             &setup.input,
             &setup.in_plan,
             move |data: &[f32], _: &InputCallbackInfo, _offset: usize| {
                 let t0 = Instant::now();
-                let mut overrun = false;
-                for frame in data.chunks_exact(in_channels) {
-                    // Whole frames only: half a frame in the FIFO would shift every channel of
-                    // every later recording against each other.
-                    if producer.slots() < in_channels {
-                        overrun = true;
-                        break;
+                if data.len() != last_input_len {
+                    if last_input_len != 0 {
+                        stats_in.input_resizes.fetch_add(1, Ordering::Relaxed);
                     }
-                    for &sample in frame {
-                        let _ = producer.push(sample);
-                    }
+                    last_input_len = data.len();
                 }
-                if overrun {
+                // Whole frames only (`looper_engine::fifo`); what does not fit is lost input.
+                if fifo_in.push(data) > 0 {
                     stats_in.overruns.fetch_add(1, Ordering::Relaxed);
                 }
                 stats_in.record_callback(t0);
@@ -2411,11 +2430,29 @@ impl Session {
         let mut out_scratch = vec![0.0f32; scratch_frames * BUS_SAMPLES];
         // The load clock is owned by the callback; `load` is the control thread's window on it.
         let (mut load_clock, load) = LoadClock::new(rate);
+        let late_details = load_clock
+            .take_details()
+            .ok_or_else(|| "The load clock's queue was taken twice.".to_string())?;
+        let mut first_callback = true;
         let output = audio::build_output(
             &setup.output,
             &setup.out_plan,
             move |data: &mut [f32], info: &OutputCallbackInfo, _offset: usize| {
+                // Everything this callback does is counted: an allocation or a free in here is a
+                // real-time fault, and the profile says where (`looper_engine::rt`).
+                let _armed = rt::arm();
+                if first_callback {
+                    // The stack pages a rare, deep path (a first MIDI take, a plugin's odd branch)
+                    // would otherwise fault in on its first run, much later.
+                    first_callback = false;
+                    rt::prefault_stack();
+                }
                 let t0 = Instant::now();
+                let cpu0 = rt::thread_times();
+                let rt0 = rt::counts();
+                core.begin_profile();
+                let waiting = fifo_out.waiting();
+                let mut taken = 0usize;
                 let frames = data.len() / out_channels;
                 // When the first frame of this callback is heard, on the clock MIDI is stamped
                 // with - what places a played note (`looper_engine::engine::source`).
@@ -2431,20 +2468,15 @@ impl Session {
                         callback_ns: callback_ns + ahead,
                         block_frames: frames as u32,
                     });
-                    let mut got = 0usize;
-                    while got < n && consumer.slots() >= in_channels {
-                        for c in 0..in_channels {
-                            if let Ok(v) = consumer.pop() {
-                                in_scratch[got * in_channels + c] = v;
-                            }
-                        }
-                        got += 1;
-                    }
-                    if got < n {
+                    // One block of input per block of output, plus any backlog beyond one block
+                    // of cushion (`looper_engine::fifo`).
+                    let pulled = fifo_out.pull(&mut in_scratch, n);
+                    if pulled.short {
                         stats_out.underruns.fetch_add(1, Ordering::Relaxed);
                     }
+                    taken += pulled.frames;
                     core.process(
-                        &in_scratch[..got * in_channels],
+                        &in_scratch[..pulled.frames * in_channels],
                         &mut out_scratch[..n * BUS_SAMPLES],
                     );
                     // The one place a bus becomes a socket: placed, metered and safety-limited by
@@ -2459,7 +2491,20 @@ impl Session {
                     done += n;
                 }
                 stats_out.record_callback(t0);
-                load_clock.finish(t0, frames, core.take_plugin_ns());
+                let mut profile = core.take_profile();
+                let spent = rt::counts().since(rt0);
+                profile.allocs = spent.allocs.min(u64::from(u32::MAX)) as u32;
+                profile.frees = spent.frees.min(u64::from(u32::MAX)) as u32;
+                if let (Some(before), Some(after)) = (cpu0, rt::thread_times()) {
+                    let used = after.since(before);
+                    profile.user_ns = used.user_ns.min(u64::from(u32::MAX)) as u32;
+                    profile.system_ns = used.system_ns.min(u64::from(u32::MAX)) as u32;
+                    profile.cpu_known = true;
+                    load_clock.note_thread(after.priority, after.policy);
+                }
+                profile.fifo_frames = waiting.min(u32::MAX as usize) as u32;
+                profile.input_frames = taken.min(u32::MAX as usize) as u32;
+                load_clock.finish_profiled(t0, frames, &profile);
             },
             move |err| stats_out_err.count_error(err),
         )?;
@@ -2571,6 +2616,11 @@ impl Session {
             pool,
             stats,
             load,
+            late_details,
+            fault_history: VecDeque::new(),
+            logged_rt: (0, 0),
+            logged_priority: false,
+            logged_resizes: 0,
             load_watch: LoadWatch::default(),
             scheduler: Scheduler::new(
                 timeline,
@@ -3633,13 +3683,51 @@ impl Session {
             input_late: self.stats.underruns.load(Ordering::Relaxed),
         };
         let pos = self.estimated_pos();
-        let done = self.load_watch.observe(now, counts, &reading, pos, || {
-            let (_, display) = crate::recording::local_stamp(Duration::ZERO);
-            display.rsplit(' ').next().unwrap_or_default().to_string()
-        });
+        // The process's page faults at this turn, for the overrun line (a system call here, on
+        // the host thread - never in the callback).
+        if let Some((minor, major)) = rt::process_faults() {
+            self.fault_history.push_back((now, minor, major));
+            while self
+                .fault_history
+                .front()
+                .is_some_and(|(at, _, _)| now.duration_since(*at) > FAULT_WINDOW)
+            {
+                self.fault_history.pop_front();
+            }
+        }
+        let mut details = [None; looper_engine::load::DETAIL_QUEUE];
+        let mut n = 0;
+        while n < details.len()
+            && let Ok(d) = self.late_details.pop()
+        {
+            details[n] = Some(d);
+            n += 1;
+        }
+        let details: Vec<LateDetail> = details.iter().take(n).flatten().copied().collect();
+        let done = self
+            .load_watch
+            .observe_with(now, counts, &reading, &details, pos, || {
+                let (_, display) = crate::recording::local_stamp(Duration::ZERO);
+                display.rsplit(' ').next().unwrap_or_default().to_string()
+            });
         if let Some(incident) = done {
+            let slow = incident
+                .details
+                .iter()
+                .max_by_key(|d| d.busy_ns)
+                .copied();
+            let detail = looper_engine::capture::session::OverrunDetail {
+                block_ms: slow.map(|d| d.busy_ns as f64 / 1e6),
+                wake_gap_ms: incident
+                    .details
+                    .iter()
+                    .map(|d| d.interval_ns)
+                    .max()
+                    .map(|ns| ns as f64 / 1e6),
+                cause: slow.map(|d| crate::loadwatch::cause(&d)),
+            };
             self.recorder
-                .overrun(incident.frame, &incident.kind_text(), incident.percent);
+                .overrun(incident.frame, &incident.kind_text(), incident.percent, detail);
             if let Some((held, worst)) = self.load_watch.admit_log(now, &incident) {
                 if held > 0 {
                     log!(
@@ -3648,6 +3736,43 @@ impl Session {
                 }
                 log!("{}", self.overrun_line(&incident, &reading));
             }
+        }
+        // The audio thread must never allocate. Say so when it did, at most every few seconds.
+        if (reading.rt_allocs, reading.rt_frees) != self.logged_rt {
+            let (a, f) = self.logged_rt;
+            log!(
+                "Real-time fault: the audio callback allocated {} time(s) and freed {} time(s) \
+                 ({} / {} in this session). The next overrun line names the block.",
+                reading.rt_allocs - a,
+                reading.rt_frees - f,
+                reading.rt_allocs,
+                reading.rt_frees
+            );
+            self.logged_rt = (reading.rt_allocs, reading.rt_frees);
+        }
+        let resizes = self.stats.input_resizes.load(Ordering::Relaxed);
+        if resizes != self.logged_resizes {
+            log!(
+                "The input stream changed its block size {} time(s) ({} in this session): each \
+                 change makes the CoreAudio layer under cpal query the device and resize its \
+                 buffer on the input's real-time thread.",
+                resizes - self.logged_resizes,
+                resizes
+            );
+            self.logged_resizes = resizes;
+        }
+        if !self.logged_priority && reading.priority != 0 {
+            self.logged_priority = true;
+            log!(
+                "Audio callback thread: priority {}, policy {} ({}).",
+                reading.priority,
+                reading.policy,
+                if reading.priority >= 90 {
+                    "real-time, as CoreAudio sets it up"
+                } else {
+                    "NOT real-time - expect dropouts"
+                }
+            );
         }
         if let Some((held, worst)) = self.load_watch.flush_log(now) {
             log!(
@@ -3659,32 +3784,60 @@ impl Session {
     }
 
     /// One log line for an overrun: when, what, how bad, and where the music was.
+    ///
+    /// Every late callback is described on its own (`crate::loadwatch::describe`): the late
+    /// block with its own duration, the late wake-up with the gap before it. The "last second"
+    /// figures are the running averages and may not include the late block yet (they are
+    /// published four times a second).
     fn overrun_line(&self, incident: &Incident, reading: &looper_engine::load::LoadReading) -> String {
         let rate = f64::from(self.info.sample_rate.max(1));
         let budget = f64::from(reading.block_frames) * 1000.0 / rate;
-        let load = if incident.percent > 0.0 {
-            format!(
-                "{:.0} % of the {budget:.2} ms budget ({:.2} ms)",
-                incident.percent,
-                f64::from(incident.percent) * budget / 100.0
-            )
+        let names: Vec<String> = self.tracks.iter().map(|ui| ui.name.clone()).collect();
+        let what = if incident.details.is_empty() {
+            if incident.percent > 0.0 {
+                format!(
+                    "the last late callback took {:.0} % of the {budget:.2} ms budget ({:.2} ms)",
+                    incident.percent,
+                    f64::from(incident.percent) * budget / 100.0
+                )
+            } else {
+                format!(
+                    "no callback was late (budget {budget:.2} ms): the driver or the input \
+                     stream missed a cycle on its own"
+                )
+            }
         } else {
-            format!("reported by the driver, budget {budget:.2} ms")
+            incident
+                .details
+                .iter()
+                .map(|d| crate::loadwatch::describe(d, &names))
+                .collect::<Vec<_>>()
+                .join(" | ")
         };
         let mut line = format!(
-            "Audio overrun #{} at {} ({}): {load}; last second peak {:.0} %, average {:.0} %, \
-             plugins {:.0} %; engine frame {} ({:.3} s), {} frames at {} Hz.",
+            "Audio overrun #{} at {} ({}) at engine frame {} ({:.3} s), {} frames at {} Hz: \
+             {what}. Last second: peak {:.0} %, average {:.0} %, plugins {:.0} %.",
             incident.number,
             incident.wall,
             incident.kind_text(),
-            reading.peak_percent,
-            reading.avg_percent,
-            reading.plugin_percent,
             incident.frame,
             incident.frame as f64 / rate,
             reading.block_frames,
             self.info.sample_rate,
+            reading.peak_percent,
+            reading.avg_percent,
+            reading.plugin_percent,
         );
+        if let (Some(first), Some(last)) = (self.fault_history.front(), self.fault_history.back())
+            && last.1 >= first.1
+        {
+            line += &format!(
+                " Page faults of the whole process in the last {:.0} ms: {} ({} read from disk).",
+                last.0.duration_since(first.0).as_secs_f64() * 1000.0,
+                last.1 - first.1,
+                last.2.saturating_sub(first.2)
+            );
+        }
         if let (Some(runner), Some((status, _))) = (self.runner.as_ref(), self.last)
             && self.score_is_playing()
         {

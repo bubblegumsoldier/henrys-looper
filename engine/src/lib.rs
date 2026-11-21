@@ -16,13 +16,20 @@ pub mod capture;
 pub mod click;
 pub mod duplex;
 pub mod engine;
+pub mod fifo;
 pub mod latency;
 pub mod load;
 pub mod meter;
 pub mod midi;
 pub mod plugin;
+pub mod rt;
 pub mod score;
 pub mod soak;
+
+/// The engine's own tests count allocations inside the audio path (`rt`, `engine::rt_tests`).
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: rt::CountingAlloc = rt::CountingAlloc;
 
 use std::sync::mpsc::{Receiver, channel};
 

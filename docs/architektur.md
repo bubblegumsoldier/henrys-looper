@@ -270,7 +270,10 @@ Nur Atomics, vorab allozierte Puffer und lock-freie Queues (`rtrb`).
 Puffer werden im **Steuer-Thread** alloziert, genullt und einmal je Speicherseite beschrieben
 (sonst blendet das System die Seiten erst beim ersten Schreiben im Audio-Thread ein), wandern über eine Install-Queue in
 den Audio-Thread (der einen Vorrat hält) und über eine Retire-Queue zurück. Entfernte Layer
-werden nicht im Callback freigegeben.
+werden nicht im Callback freigegeben. Dasselbe gilt für jede Queue und jeden Puffer, in den der
+Callback schreibt (`rt::prefault_ring`, `rt::touch_spare`, Abschnitt 18). Geprüft wird das nicht
+nur durch Lesen: `engine/src/engine/rt_tests.rs` fährt die Partitur des Besitzers mit einem
+zählenden Allokator und verlangt null Allokationen und Freigaben im Callback.
 
 ## 6. Datenmodell
 
@@ -2411,8 +2414,9 @@ Steuer-Thread):
   Inserts in `insert.rs`); sie summieren jetzt die Nanosekunden, `EngineCore::take_plugin_ns`
   holt sie einmal je Callback ab. Zwei Additionen, keine weitere Uhr.
 - **Späte Blöcke**: Rechenzeit > Budget.
-- **Späte Weckrufe**: Abstand zweier Callback-Starts > 2 × Blockdauer — der Callback war schnell,
-  das System hat ihn zu spät geweckt.
+- **Späte Weckrufe**: Abstand zweier Callback-Starts > 2 × Blockdauer. Entweder lief der Callback
+  davor zu lang (dann folgt der Weckruf dem späten Block), oder das System hat ihn zu spät geweckt;
+  welches von beiden, sagt sein Profil (unten).
 - **Treiber-Overloads**: cpal 0.18 registriert auf macOS selbst einen Listener auf
   `kAudioDeviceProcessorOverload` und meldet ihn als `ErrorKind::Xrun` — der vorhandene
   `xruns`-Zähler des Hosts *ist* also CoreAudios Overload-Meldung; kein eigener Listener nötig.
@@ -2459,6 +2463,194 @@ Mittel, Plugins, Overruns mit Aufschlüsselung, letzter Overrun, Puffer/Budget u
 
 Nicht gemacht: Die CLI (`live`, `score`, `soak`) misst die Last nicht; dort bleibt es bei
 `Callback max` und den Xruns.
+
+### Was die Zeile vom 21.11., 17:26 wirklich sagte
+
+`Audio overrun #1 … (late block + late wake-up + driver overload): 7 % of the 2.67 ms budget
+(0.19 ms); last second peak 5 %, average 3 % … Section "verse_2", bar 1.` Die 7 % gehörten **nicht**
+zum späten Block. Ein Overrun fasst alles zusammen, was innerhalb von 60 ms steigt; genannt wurde
+die Last des **letzten** späten Callbacks (`last_frame`/`last_permille` werden von jedem überschrieben).
+Ein später Block zieht fast immer einen späten Weckruf nach sich: Der nächste Callback beginnt erst,
+wenn der lange fertig ist – mehr als zwei Budgets nach dem Start des vorigen. Dieser zweite war
+schnell (0,19 ms = 7 %), seine Zahl stand in der Zeile, die Dauer des langsamen ging verloren. Dass
+er mehr als 5,33 ms nach seinem Vorgänger begann, heißt: Der späte Block selbst lief mehrere
+Millisekunden. „Last second peak 5 %“ widerspricht dem nicht: Spitze und Mittel werden viermal je
+Sekunde veröffentlicht, die Zeile wird 60 ms nach dem Overrun geschrieben – meist bevor das
+Fenster mit dem späten Block veröffentlicht ist. Die Rechenlast der App war also klein, **ein**
+Block war es nicht. Sein Frame (im Mitschnitt 2 939 316, der des Weckrufs, der späte Block 128
+davor) liegt rund 44 ms **vor** dem Taktstrich von `verse_2`, auf der Ausgabeachse.
+
+Derselbe Mitschnitt zählt `engine_dropouts: 2` – bei einem einzigen Overrun mit „driver overload“:
+cpal meldet CoreAudios Overload einmal je Stream. Der Mitschnitt von 14:57 (Schnitt in `theme_b`
+133 ms nach Beginn von `intro_b`) zählt ebenfalls 2, ohne Overrun-Zeile (die gab es noch nicht).
+Wahrscheinlich war es auch dort **ein** Overload, also ein im Treiber verlorener Zyklus – kein
+übergelaufener FIFO (dafür hätte der Output-Callback 170 ms stehen müssen).
+
+### Jeder späte Callback bringt sein Profil mit
+
+Damit der nächste Aussetzer seine Ursache nennt, führt jeder Callback ein Profil
+(`load::BlockProfile`, gefüllt von `EngineCore` und dem Output-Callback des Hosts):
+
+| Feld | woher |
+|---|---|
+| Zeit je Phase: `prepare` (Puffer, Kommandos, Racks, Aufnahme-Übergabe, Clips, FIFO), `instruments`, `commands` (Anwenden fälliger Kommandos), `mix` (Loops, Mithören, Ketten, Inserts, Fader, Klick, Stem-/Mix-Abgriff), `record` (Takes, Live-Signal, MIDI), `capture` (Übergabe an den Schreib-Thread), `status`, `output` (Platzierung, Limiter) | eine Uhrablesung je Phasengrenze (`EngineCore::lap`) |
+| Zeit je Spur | im Blockpfad (sobald ein Insert steckt – beim Besitzer immer): je Spur und Block, Plugins eingeschlossen |
+| Plugin-Zeit | die Racks wie bisher |
+| angewendete Kommandoarten | Bitmaske über `Command::kind` (`RestartLoop`, `CutTake`, `StartRecord` …) |
+| Allokationen / Freigaben im Callback | `rt::CountingAlloc` (s. u.) |
+| User- und System-CPU des Threads, daraus „nicht laufend“ = Wanduhr − CPU | `thread_info(THREAD_EXTENDED_INFO)` am Anfang und Ende, ~0,5 µs je Aufruf |
+| Frames im Eingangs-FIFO zu Beginn, davon genommen | `fifo::FifoReader` |
+
+War ein Callback spät (eigene Dauer über dem Budget **oder** Start mehr als zwei Budgets nach dem
+vorigen), schiebt `LoadClock` einen `LateDetail` in eine lock-freie Queue (32 Plätze): sein Profil,
+das des vorigen Callbacks, die eigene Dauer, den Abstand zum vorigen Start, die Wartezeit nach dem
+Ende des vorigen. Der Host hängt sie an den Overrun und schreibt **jeden späten Callback einzeln**
+ins Log (`loadwatch::describe`), mit einer kurzen Ursache (`loadwatch::cause`):
+
+* eigener Block zu lang → Allokationen im Callback; „nicht laufend X ms“ (verdrängt, oder Warten
+  auf Lock oder Page-in); „X ms im Kernel“ (Seitenfehler, Systemaufrufe); „X ms in Plugins“; sonst
+  die langsamste Phase;
+* nur spät geweckt → „der Callback davor lief X ms“ oder „vom System X ms zu spät geweckt – der
+  davor war schnell“ (Treiber, Kernel, anderer Echtzeit-Thread);
+* nur der Treiber meldet → „kein Callback war spät: Treiber oder Eingang hat einen Zyklus verloren“.
+
+Dazu die **Seitenfehler des ganzen Prozesses** in den letzten 100 ms (`getrusage`, im Host-Thread
+je Runde, nicht im Callback) – davon „von Platte gelesen“. Beispiel (aus dem Test, der den Fall vom
+21.11. nachstellt):
+
+```
+late block at frame 12800: took 6.00 ms (225 % of 2.67 ms), started 2.67 ms after the previous
+callback (which took 0.08 ms); CPU 5.92 ms (system 0.02), not running 0.08 ms; phases (ms): mix 5.80,
+commands 0.15; plugins 5.60 ms; slowest tracks (ms): Drums 5.70; commands applied: StartRecord,
+RestartLoop; allocations 0 / frees 0; input FIFO 0 frames waiting, 0 taken - 5.60 ms inside plugins
+| late wake-up at frame 12928: took 0.19 ms (7 % of 2.67 ms), started 6.10 ms after the previous
+callback (which took 6.00 ms); … - the callback before it ran 6.00 ms (over its 2.67 ms budget)
+```
+
+In `session.json` bekommt jeder Overrun zusätzlich `block_ms` (Dauer des langsamsten späten
+Callbacks), `wake_gap_ms` (größter Abstand zweier Starts) und `cause`. Einmal je Sitzung loggt der
+Host Priorität und Policy des Callback-Threads (97 = Echtzeit, wie CoreAudio ihn anlegt), und
+sofort, wenn im Callback alloziert wurde. Ändert der Eingang seine Blockgröße, steht auch das im
+Log: coreaudio-rs (unter cpal) fragt dann im Echtzeit-Thread des Eingangs das Gerät ab und
+vergrößert seinen Puffer – vor unserem Callback, also für den Zähler unsichtbar.
+
+**Kosten** des Profils: etwa 15–25 Uhrablesungen je Block (Commpage, je ~20 ns), zwei
+`thread_info` (gemessen 465 ns je Aufruf) – zusammen gut 1 µs je Callback, 0,05 % des Budgets bei
+128 Frames. `bench_loop_playback` (Abschnitt 19) zeigt 194 ns je Frame gegen 183 vorher – innerhalb
+der dort genannten ±15 %, gemessen während die App lief. (Mit 206 ns, wenn die Simulation
+`place_output` wie bisher Frame für Frame ruft: dort liest die Ausgangsphase die Uhr je Frame, in
+der App je Block.)
+
+### Der Zähl-Allokator
+
+`rt::CountingAlloc` ist der globale Allokator der App, der CLI und der Engine-Tests: das
+System-Malloc, das bei jedem Aufruf ein thread-lokales Flag liest. Ist der Thread „im Callback“
+(`rt::arm()`, der Output-Callback setzt es für seine ganze Dauer), wird gezählt – in thread-lokalen
+Zellen, ohne Atomics. **Immer an**: außerhalb kostet es eine TLS-Lesung je Allokation, im Callback
+eines korrekten Programms passiert nichts. Kein Schalter in Setup, keine Umgebungsvariable – es gibt
+nichts abzuwägen.
+
+### Geprüft gegen die Partitur des Besitzers
+
+`engine/src/engine/rt_tests.rs` fährt die Partitur vom Abend des 21.11. (`tests/data/
+hardest-part-live.yaml`, ohne `sheet:`) durch den echten `EngineCore`, mit allem, was die App
+anhängt: Inserts vor dem Octaver auf `theme`, `theme_b`, `chorus_guitar` (Testdoppel mit 8 Frames
+Latenz, wie IRDX), ein Instrument (Testdoppel) auf `Drums` mit MIDI-Loop und Raster 1/8, Pads
+während des Drum-Takes in `verse_2` (einer kurz vor dem Taktstrich), die laufende Aufnahme mit
+Schreib-Thread (17 Dateien), danach „Stop all“, Ende der Aufnahme, Reload-Clear. Geprüft:
+
+* **null Allokationen und Freigaben im Callback**, über alles – mit und ohne Plugins;
+* dass der Lauf das Gemeinte enthält: `StartRecord`, `StopRecord`, `StartPlay`, `StopPlay`,
+  `RestartLoop`, `CutTake`, `MonitorFade`, `SetMonitor`, `DropWaiting`, `ClearAll`, `ClickGate`,
+  `TransportStart`, `SetLoopKind` wurden angewendet, der Drum-Take hält die Pads;
+* ein Gegenbeweis: ein Plugin, das in `process` alloziert, wird mit Block und Profil gefangen;
+* **keine Sperre auf dem Audiopfad**: Locks lassen sich nicht zählen, also liest
+  `no_lock_on_the_audio_path` den Quelltext aller Module, durch die der Callback läuft. Die einzige
+  Sperre dort (`source::FeedHome`) nimmt nur der Steuer-Thread; ein `PortFeed`, der im Callback
+  fiele, würde zudem als Freigabe gezählt.
+
+**Seitenfehler** zählt der Allokator nicht. Dafür gibt es einen Diagnose-Test
+(`page_faults_of_the_owners_score`, `--ignored`, mit `RT_PROBE_NO_RECORDING=1` ohne Schreib-Thread),
+der jeden `process`-Aufruf mit dem Fehlerzähler des Prozesses klammert. Vorher **2284 Seitenfehler
+in 1750 Callbacks** eines Laufs, jetzt **0** (zweiter Lauf im selben Prozess; im ersten noch einer:
+Code, der zum ersten Mal läuft). Gefunden und behoben:
+
+| Was | wann es faultete | jetzt |
+|---|---|---|
+| Aufnahme-Queue (`rtrb`, uninitialisiert, ~20 MB bei acht Spuren mit trockenen Stems) | jeder Block in den ersten 4 s **jeder** Aufnahme | `rt::prefault_ring` beim Anlegen |
+| Sammelring der Aufnahme | erste Runde | `rt::resident_zeros` |
+| Status-Queue (2,4 KB je Schnappschuss) | jeder siebte Schnappschuss in den ersten Sekunden | `prefault_ring` |
+| Vorlauf-Slot je Ebene (`Track::pre_rolls`, 128 KB je Spur) | beim **ersten Take jeder Ebene**, im Block des `StartRecord` | `resident_zeros` |
+| News-Queue der MIDI-Clips (16 384 Einträge) | erstes Ereignis eines MIDI-Takes, danach alle paar hundert | `prefault_ring` |
+| MIDI-Clips (`raw`, `play`), Event-Listen der Instrumente, Rack-Scratch | erstes Ereignis / erster Block | `rt::touch_spare`, `resident_zeros` |
+| Rückgabe-Queues (Puffer, Clips, Inserts, Instrumente, Feeds), Kommando-Queue | erste Rückgabe | `prefault_ring` |
+| Stack des Callback-Threads | erster tiefe Pfad (erster MIDI-Take, seltener Plugin-Zweig) | erster Callback berührt 128 KB vorab (`rt::prefault_stack`, höchstens den halben Stack) |
+
+Ein Seitenfehler auf frischem Speicher kostet sonst wenige Mikrosekunden – unter Speicherdruck
+(großes Sample-Instrument, Browser, komprimierter Speicher) muss der Kernel aber erst eine Seite
+freimachen, und das kann Millisekunden dauern, im Audio-Thread. Zwei davon lagen genau auf
+Sektionswechseln: der erste Take einer Ebene und der erste Ton eines MIDI-Takes.
+
+### Der Eingangs-FIFO
+
+`engine/src/fifo.rs` (App und CLI). 64 Blöcke Platz (170 ms bei 128 Frames): Damit Eingang
+**verloren** geht, müsste der Output-Callback 170 ms stillstehen. Ein einzelner später Callback
+kann das nicht; zu knapp bemessen ist der FIFO nicht. Ein verlorener Treiber-Zyklus (CoreAudio-
+Overload) fehlt dagegen schon im Gerät – der FIFO bekommt ihn nie zu sehen.
+
+Gefunden wurde etwas anderes: Der Output-Callback nahm je Block **höchstens** einen Block. Kam ein
+Eingangs-Callback zu spät (Ausgang fand den FIFO kurz, „input late“), blieb sein Block danach für
+den Rest der Sitzung im FIFO liegen – jedes Mal so viel Mithör-Verzögerung mehr, wie der Eingang zu
+spät war (die Doku versprach „holt es beim nächsten Mal auf“, der Code tat es nicht). Jetzt nimmt
+der Output alles mit, was über **einen Block Polster** hinaus wartet. Die Engine schreibt alle
+Frames in die Takes (ein Eingangsblock darf länger sein als sein Ausgangsblock), das Mithören hört
+die ersten `n` und überspringt den Rest einmal – an der Stelle, an der der späte Eingang ohnehin
+eine Lücke gerissen hat. Der Polster-Block fängt den nächsten späten Eingang ohne Lücke ab. Kosten:
+höchstens ein Block (2,67 ms) Mithör-Verzögerung, und nur nach einem solchen Ereignis; vorher waren
+es beliebig viele. Die Kompensation `m = k − R` bleibt unberührt (sie zählt Frames, nicht Zeit).
+Bewiesen mit `fifo_tests::a_take_through_a_jittery_fifo_is_the_input_shifted_by_the_latency`
+(Eingang mal vor, mal nach dem Ausgang, drei Blöcke zurückgehalten und auf einmal geliefert: der
+Take ist Sample für Sample der Eingang um `R` verschoben, nichts verloren, Rückstand höchstens zwei
+Blöcke, nichts alloziert) und `fifo::tests::a_late_input_no_longer_stays_as_delay` (vorher blieben
+nach einem um drei Blöcke späten Eingang vier Blöcke im FIFO, jetzt zwei).
+
+Nicht gebaut: einen vom Treiber verlorenen Zyklus mit Stille aufzufüllen. Ob nur der Eingang oder
+beide Streams ihn verloren haben, lässt sich im Callback nicht sicher sagen; falsch aufgefüllt
+würde jeder spätere Take um einen Block verrutschen.
+
+### Threads neben dem Callback
+
+* **Callback-Thread**: der HAL-IO-Thread von CoreAudio (cpal registriert AUHAL-Render-Callbacks).
+  CoreAudio legt ihn als Time-Constraint-Thread (Priorität 97) an und führt ihn in der Workgroup des
+  Geräts; cpal tut dafür nichts und muss nichts tun. Der Host loggt die Priorität beim Start.
+  Worker-Threads eines Plugins (Faltung, Sample-Streaming) treten der Workgroup nicht bei – VST3
+  kennt dafür keinen Weg. Wartet ein Plugin im Callback auf einen eigenen Thread, sieht man das im
+  Profil als „not running“ in der Plugin-Spur.
+* **Host-Thread** (Runner, MIDI, Pool, Status, Log): jetzt `QOS_CLASS_USER_INTERACTIVE`, weil er im
+  4-ms-Takt Kommandos, Pads und Puffer liefert. Er teilt keine Sperre mit dem Callback (nur
+  `rtrb`-Queues und Atomics) und kann ihn nicht verdrängen.
+* **Schreib-Thread der Aufnahme**: bleibt mit Absicht in der Standardklasse. `utility` würde seine
+  Schreibzugriffe hinter anderem Plattenverkehr (Sample-Streaming) drosseln lassen; die 4-s-Queue
+  liefe dann über. Er schreibt 17 Dateien über je 256-KB-Puffer, bringt jede Sekunde die Header
+  auf Stand (flush, kein fsync) und ruft `fsync` nur einmal am Ende – kein Ausbruch an Take-Enden.
+* **Was der Host beim Sektionswechsel tut**: Runner-Tick, Marker in den Aufnahme-Metadaten (eigene
+  Sperre, nur Steuer- und Schreib-Thread), Notice- und Status-Event an die Oberfläche (JSON), eine
+  Logzeile; der Pool ersetzt den Puffer, den ein neuer Take genommen hat (bis zu ~10 MB, im
+  Steuer-Thread geschrieben). Nichts davon teilt eine Sperre mit dem Callback.
+
+### 128 oder 256 Frames?
+
+128 bleibt die Voreinstellung. Die gemessene Rechenlast (Spitze 5 %, Mittel 3 %) lässt das Zwanzigfache
+an Reserve; ein größerer Puffer behebt keinen Fehler, er versteckt Ausreißer bis zu einer bestimmten
+Länge. Was er kostet: Bei 256 Frames wächst der Roundtrip um zwei Blöcke (≈ 5,3 ms, `R` ≈ 852 statt
+596 Frames, neu kalibrieren), das Mithören wird um dieselbe Zeit später – für Stimme über Kopfhörer
+an der Grenze des Spürbaren. Was er bringt: Ein Stillstand bis ~5 ms statt ~2,5 ms bleibt folgenlos.
+
+Die Entscheidung hängt deshalb an dem, was die nächste Zeile sagt: Steht dort „woken … late by the
+system“ oder „not running … ms“ (Kernel, Treiber, Page-in) oder ein einmaliger Plugin-Ausreißer unter
+~5 ms, ist 256 für Auftritte mit SSD5 eine vertretbare Versicherung. Steht dort eine Allokation, eine
+Phase der Engine oder ein Plugin, das regelmäßig über dem Budget liegt, ist es ein Fehler, den 256
+nur seltener macht.
 
 ## 19. Kein Knacksen: Blenden an jeder Kante eines Loops
 

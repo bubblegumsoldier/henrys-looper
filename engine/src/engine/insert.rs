@@ -427,7 +427,10 @@ pub struct InsertEndpoint {
 /// retire queue that is full would force the audio thread to drop a plugin, so it is generous.
 pub fn insert_channel(capacity: usize) -> (InsertSender, InsertEndpoint) {
     let (tx, rx) = RingBuffer::new(capacity);
-    let (retire, retired) = RingBuffer::new(capacity * 2 + MAX_INSERTS * (MAX_TRACKS + BUS_COUNT));
+    let (mut retire, retired) =
+        RingBuffer::new(capacity * 2 + MAX_INSERTS * (MAX_TRACKS + BUS_COUNT));
+    // The audio thread pushes into it (`crate::rt::prefault_ring`).
+    crate::rt::prefault_ring(&mut retire);
     (InsertSender { tx, retired }, InsertEndpoint { rx, retire })
 }
 
@@ -457,8 +460,8 @@ pub struct Block {
 impl Block {
     fn new() -> Self {
         Self {
-            l: vec![0.0; MAX_BLOCK],
-            r: vec![0.0; MAX_BLOCK],
+            l: crate::rt::resident_zeros(MAX_BLOCK),
+            r: crate::rt::resident_zeros(MAX_BLOCK),
         }
     }
 

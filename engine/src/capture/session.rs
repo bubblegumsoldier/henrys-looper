@@ -114,6 +114,23 @@ pub struct OverrunMarker {
     pub kind: String,
     /// Processing time of the late callback in percent of its time budget; 0 when unknown.
     pub load_percent: f32,
+    /// The late block's own duration in ms, when a callback was late (`crate::load::LateDetail`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_ms: Option<f64>,
+    /// Time from the previous callback's start to the late one's, in ms (normally one block).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wake_gap_ms: Option<f64>,
+    /// What the callback's profile points at, in words - the same text as the log line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+}
+
+/// What the host knows about an overrun beyond its kind and load (`OverrunMarker`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverrunDetail {
+    pub block_ms: Option<f64>,
+    pub wake_gap_ms: Option<f64>,
+    pub cause: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]

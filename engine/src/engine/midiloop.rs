@@ -191,12 +191,18 @@ pub struct MidiClip {
 impl MidiClip {
     /// Control thread: a clip with room for `capacity` events.
     pub fn new(id: u32, capacity: usize) -> Box<Self> {
+        // The audio thread pushes every note of a take into these; their pages exist now
+        // (`crate::rt::touch_spare`), not at the 512th note of a take.
+        let mut raw = Vec::with_capacity(capacity);
+        let mut play = Vec::with_capacity(capacity);
+        crate::rt::touch_spare(&mut raw);
+        crate::rt::touch_spare(&mut play);
         Box::new(Self {
             id,
             max_frames: 0,
             base: 0,
-            raw: Vec::with_capacity(capacity),
-            play: Vec::with_capacity(capacity),
+            raw,
+            play,
             external: false,
             tracker: NoteTracker::default(),
             notes: 0,
@@ -216,6 +222,7 @@ impl MidiClip {
         self.play.clear();
         if self.play.capacity() < self.raw.capacity() {
             self.play = Vec::with_capacity(self.raw.capacity());
+            crate::rt::touch_spare(&mut self.play);
         }
         self.external = false;
         self.tracker = NoteTracker::default();
@@ -698,10 +705,16 @@ pub struct ClipPool {
 /// Fresh clip queues: the pool for the control thread, the endpoint for the engine.
 pub fn clip_channel(capacity: usize) -> (ClipPool, ClipEndpoint) {
     let (itx, irx) = RingBuffer::new(CLIP_STOCK);
-    let (rtx, rrx) = RingBuffer::new(MAX_TRACKS * 20 + 4 * CLIP_STOCK);
+    let (mut rtx, rrx) = RingBuffer::new(MAX_TRACKS * 20 + 4 * CLIP_STOCK);
     let (ltx, lrx) = RingBuffer::new(256);
-    let (lbtx, lbrx) = RingBuffer::new(512);
-    let (ntx, nrx) = RingBuffer::new(CLIP_EVENTS);
+    let (mut lbtx, lbrx) = RingBuffer::new(512);
+    let (mut ntx, nrx) = RingBuffer::new(CLIP_EVENTS);
+    // The three queues the audio thread pushes into, resident before it does: the news queue is
+    // CLIP_EVENTS entries, one fault per few hundred notes of a take otherwise - the first one on
+    // the first note (`crate::rt::prefault_ring`).
+    crate::rt::prefault_ring(&mut rtx);
+    crate::rt::prefault_ring(&mut lbtx);
+    crate::rt::prefault_ring(&mut ntx);
     (
         ClipPool {
             install: itx,

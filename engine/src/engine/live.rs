@@ -26,8 +26,9 @@
 //! So the compensation `m = k - R` works on stream frame numbers, not on arrival times, and the
 //! FIFO transit cancels out. It only decides *when* the engine gets to write a sample, not *where*
 //! - which is why a FIFO underrun (fewer frames available than the block needs) costs nothing but
-//! a little delay: the engine simply consumes fewer frames this round and picks them up next time,
-//! and `in_index` still counts input frames.
+//! a little delay: the engine simply consumes fewer frames this round and picks them up with a
+//! later block (`crate::fifo` takes a backlog beyond one block of cushion in one go), and
+//! `in_index` still counts input frames.
 //!
 //! Two conditions this rests on, both of them cheap to keep:
 //!
@@ -78,9 +79,6 @@ use super::schedule::{Lead, Quantize, Scheduled, Scheduler};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
 
-/// Input FIFO size in units of the audio buffer size. Generous on purpose: it costs a few dozen kB
-/// and it is the difference between a hiccup and a permanently misaligned recording.
-const INPUT_FIFO_BUFFERS: u32 = 64;
 /// Status snapshots per second the audio thread produces. The display consumes 10 of them.
 const STATUS_HZ: u32 = 200;
 /// Terminal refresh rate, as required: no more than ten updates per second.
@@ -1312,8 +1310,9 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
     let slots = spare_slots_for(&kinds, SPARE_SLOTS);
 
     let stats = Arc::new(LiveStats::default());
-    let (mut producer, mut consumer) =
-        rtrb::RingBuffer::<f32>::new((buffer_frames * INPUT_FIFO_BUFFERS) as usize * in_channels);
+    // The same FIFO as the app's (`crate::fifo`): 64 blocks of room, a backlog taken back down to
+    // one block of cushion.
+    let (mut fifo_in, mut fifo_out) = crate::fifo::input_fifo(buffer_frames as usize, in_channels);
     let (cmd_tx, cmd_rx) = command_channel(256);
     let (status_tx, status_rx) = status_channel(1024);
     // The return queue has room for every buffer that can be inside the engine at once, so the
@@ -1363,19 +1362,8 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
         &setup.in_plan,
         move |data: &[f32], _: &InputCallbackInfo, _offset: usize| {
             let t0 = Instant::now();
-            let mut overrun = false;
-            for frame in data.chunks_exact(in_channels) {
-                // Whole frames only: half a frame in the FIFO would shift every channel of every
-                // later recording against each other.
-                if producer.slots() < in_channels {
-                    overrun = true;
-                    break;
-                }
-                for &sample in frame {
-                    let _ = producer.push(sample);
-                }
-            }
-            if overrun {
+            // Whole frames only; what does not fit is lost input (`crate::fifo`).
+            if fifo_in.push(data) > 0 {
                 stats_in.overruns.fetch_add(1, Ordering::Relaxed);
             }
             stats_in.record_callback(t0);
@@ -1397,20 +1385,12 @@ pub fn start_engine(spec: EngineSpec) -> Result<RunningEngine, String> {
             let mut done = 0usize;
             while done < frames {
                 let n = (frames - done).min(scratch_frames);
-                let mut got = 0usize;
-                while got < n && consumer.slots() >= in_channels {
-                    for c in 0..in_channels {
-                        if let Ok(v) = consumer.pop() {
-                            in_scratch[got * in_channels + c] = v;
-                        }
-                    }
-                    got += 1;
-                }
-                if got < n {
+                let pulled = fifo_out.pull(&mut in_scratch, n);
+                if pulled.short {
                     stats_out.underruns.fetch_add(1, Ordering::Relaxed);
                 }
                 core.process(
-                    &in_scratch[..got * in_channels],
+                    &in_scratch[..pulled.frames * in_channels],
                     &mut out_scratch[..n * BUS_SAMPLES],
                 );
                 // The one place a bus becomes a socket: placed, metered and safety-limited by the

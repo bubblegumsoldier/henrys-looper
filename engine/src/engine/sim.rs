@@ -28,6 +28,8 @@ use super::midiloop::{CLIP_EVENTS, ClipPool, clip_channel, frames_per_tick};
 use super::process::{EngineConfig, EngineCore, loop_capacity, spare_slots_for};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{MAX_LAYERS, Track, TrackLatency};
+use crate::load::BlockProfile;
+use crate::rt::{self, RtCounts};
 
 /// One simulated track: which input it records, whether it monitors from the start, where it sits
 /// in the stereo field, and what it compensates.
@@ -233,6 +235,17 @@ pub struct Sim {
     /// The control thread's clip pool, once [`Sim::with_clips`] attached the MIDI-loop stage.
     pub clips: Option<ClipPool>,
     timeline: Timeline,
+    /// Allocations and frees inside `process`/`place_output` - the audio callback's part - over the
+    /// whole run (`crate::rt`), and the first block in which any happened with its profile.
+    pub rt: RtCounts,
+    pub rt_first: Option<(u64, RtCounts, BlockProfile)>,
+    /// Every command kind applied so far (`Command::kind` bits).
+    pub applied: u64,
+    /// When set, every `process` call is bracketed with the process's page-fault counter, and
+    /// each call during which it moved is noted in `faults` (position, faults, profile). The
+    /// counter is process-wide: only meaningful while nothing else runs.
+    pub fault_probe: bool,
+    pub faults: Vec<(u64, u64, BlockProfile)>,
 }
 
 impl Sim {
@@ -315,6 +328,11 @@ impl Sim {
             rate: spec.sample_rate,
             clips: None,
             timeline,
+            rt: RtCounts::default(),
+            rt_first: None,
+            applied: 0,
+            fault_probe: false,
+            faults: Vec::new(),
         }
     }
 
@@ -448,7 +466,19 @@ impl Sim {
                 block_frames: self.block as u32,
             });
         }
-        self.core.process(&self.in_buf, &mut self.out_buf);
+        // The callback's part runs armed: every allocation or free in it is counted.
+        let before = rt::counts();
+        let faults_before = if self.fault_probe { rt::process_faults() } else { None };
+        {
+            let _armed = rt::arm();
+            self.core.begin_profile();
+            self.core.process(&self.in_buf, &mut self.out_buf);
+        }
+        if let (Some((minor0, major0)), Some((minor, major))) = (faults_before, rt::process_faults())
+            && (minor > minor0 || major > major0)
+        {
+            self.faults.push((self.pos, minor - minor0 + major - major0, self.core.take_profile()));
+        }
         for frame in self.out_buf.chunks_exact(BUS_SAMPLES) {
             for bus in Bus::ALL {
                 for c in 0..BUS_CHANNELS {
@@ -461,14 +491,28 @@ impl Sim {
             for (c, value) in self.dev_frame.iter().enumerate() {
                 self.raw[c].push(*value);
             }
-            self.core
-                .place_output(frame, &mut self.dev_frame, self.output_channels);
+            {
+                let _armed = rt::arm();
+                self.core
+                    .place_output(frame, &mut self.dev_frame, self.output_channels);
+            }
             for (c, value) in self.dev_frame.iter().enumerate() {
                 self.dev[c].push(*value);
             }
             self.out_l.push(self.dev_frame[0]);
             self.out_r
                 .push(self.dev_frame.get(1).copied().unwrap_or(self.dev_frame[0]));
+        }
+        let spent = rt::counts().since(before);
+        let profile = self.core.take_profile();
+        self.applied |= profile.command_mask;
+        if !spent.is_zero() {
+            self.rt.allocs += spent.allocs;
+            self.rt.frees += spent.frees;
+            self.rt.bytes += spent.bytes;
+            if self.rt_first.is_none() {
+                self.rt_first = Some((self.pos, spent, profile));
+            }
         }
         self.pos += self.block as u64;
     }
