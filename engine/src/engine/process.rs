@@ -507,6 +507,14 @@ impl EngineCore {
         self.capture = Some(Box::new(CaptureSlot::new(endpoint)));
     }
 
+    /// How far ahead of the output position track `track` reads its loop right now: the latency of
+    /// its active plugin inserts plus that of its built-in chain, as worked out at the start of the
+    /// last [`Self::process`] call. The offline renderer (`crate::render`) reads its input exactly
+    /// this far ahead, the way the loop is read live.
+    pub fn read_ahead_of(&self, track: usize) -> u64 {
+        self.read_ahead(track)
+    }
+
     #[cfg(test)]
     pub fn track(&self, index: usize) -> &Track {
         &self.tracks[index]

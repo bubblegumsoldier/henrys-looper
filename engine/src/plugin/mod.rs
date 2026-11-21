@@ -41,7 +41,7 @@ pub mod editor;
 mod vst3;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::engine::insert::InsertProcessor;
 use crate::engine::source::SourceProcessor;
@@ -181,6 +181,13 @@ pub fn load(info: &PluginInfo) -> Result<Box<dyn PluginInstance>, String> {
         let _ = info;
         Err(UNSUPPORTED.to_string())
     }
+}
+
+/// The plugins one VST3 bundle holds, read from its factory - which loads the bundle into this
+/// process. For a bundle named on the command line (`looper-engine render --plugin-bundle`).
+#[cfg(target_os = "macos")]
+pub fn enumerate_vst3(bundle: &std::path::Path) -> Result<Vec<PluginInfo>, String> {
+    vst3::enumerate(bundle)
 }
 
 /// Take down the plugin libraries no instance uses any more - VST3 modules get their factory

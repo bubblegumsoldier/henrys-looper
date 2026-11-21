@@ -136,6 +136,53 @@ enum Command {
         seconds: Option<f64>,
     },
 
+    /// Mix a finished recording again from its dry stems, offline, through the live engine's own
+    /// channel strips (built-in effects, plugin inserts, fader, pan): one stem per track and
+    /// Mix.wav. Opens no device and makes no sound; never writes into the recording.
+    Render {
+        /// The recording folder (the one with session.json)
+        recording: std::path::PathBuf,
+
+        /// Folder to write the stems and Mix.wav into (created if missing)
+        #[arg(long)]
+        out: std::path::PathBuf,
+
+        /// An edited copy of the score: its mixer: section and the tracks' pan are rendered.
+        /// Default: the score.yaml in the recording
+        #[arg(long)]
+        score: Option<std::path::PathBuf>,
+
+        /// The plugin settings file (<score>.plugins.json). Default: score.plugins.json in the
+        /// recording
+        #[arg(long)]
+        plugins: Option<std::path::PathBuf>,
+
+        /// Tracks whose recorded stem is taken as it is, comma-separated. Instrument tracks always
+        /// are
+        #[arg(long, value_delimiter = ',')]
+        stems_from_recording: Vec<String>,
+
+        /// Render only these tracks, comma-separated (no Mix.wav then)
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
+
+        /// Leave every plugin insert out, with a warning per insert
+        #[arg(long)]
+        no_plugins: bool,
+
+        /// A .vst3 bundle to find plugins in before the scan cache (repeatable)
+        #[arg(long)]
+        plugin_bundle: Vec<std::path::PathBuf>,
+
+        /// Compare every rendered stem (and the mix) with the recorded one: residual per section
+        #[arg(long)]
+        compare: bool,
+
+        /// Frames per process call, as the audio device would deliver them
+        #[arg(long, default_value_t = looper_engine::render::DEFAULT_BLOCK)]
+        block: usize,
+    },
+
     /// MIDI control (phase 5): list devices, show incoming events, learn buttons onto targets
     /// and save them in the controller profile. Makes no sound and opens no audio device.
     Midi {
@@ -206,6 +253,29 @@ fn main() -> ExitCode {
                 seconds: *seconds,
             },
         ),
+        Command::Render {
+            recording,
+            out,
+            score,
+            plugins,
+            stems_from_recording,
+            only,
+            no_plugins,
+            plugin_bundle,
+            compare,
+            block,
+        } => looper_engine::render::cmd_render(&looper_engine::render::RenderOpts {
+            recording: recording.clone(),
+            out: out.clone(),
+            score: score.clone(),
+            plugins: plugins.clone(),
+            stems_from_recording: stems_from_recording.clone(),
+            only: only.clone(),
+            no_plugins: *no_plugins,
+            plugin_bundles: plugin_bundle.clone(),
+            compare: *compare,
+            block: *block,
+        }),
         Command::Midi { midi } => midi::cli::cmd_midi(midi),
         Command::Calibrate { dev, calibrate } => engine::calibrate::cmd_calibrate(dev, calibrate),
         Command::Plugins { plugins } => plugin::cli::cmd_plugins(plugins),

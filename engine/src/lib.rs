@@ -22,6 +22,7 @@ pub mod load;
 pub mod meter;
 pub mod midi;
 pub mod plugin;
+pub mod render;
 pub mod rt;
 pub mod score;
 pub mod soak;
