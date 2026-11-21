@@ -119,10 +119,14 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
     let signal = test_signal(samples, sample_rate);
     let mut rows = Vec::new();
 
-    // The octaver as the bass preset sets it: drive on, so the saturation is in the number too.
-    // The splice search runs every 15 to 30 ms and is included, averaged over the run.
+    // The octaver at its most expensive: the bass preset's settings plus drive, which the preset
+    // leaves at 0 since 2026-11-21 but a hand can turn up. The splice search runs every 15 to
+    // 30 ms and is included, averaged over the run.
     let mut octaver = Octaver::new(sample_rate);
-    octaver.set_settings(FxPreset::BassFromGuitar.settings().octaver);
+    octaver.set_settings(super::OctaverSettings {
+        drive: 0.4,
+        ..FxPreset::BassFromGuitar.settings().octaver
+    });
     rows.push(Row {
         name: "Octaver",
         ns_per_sample: time(&signal, |x| octaver.process(x)),

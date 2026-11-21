@@ -108,6 +108,11 @@ fn the_bass_preset_and_an_octaver_line_read_as_written() {
     assert_eq!(mix.settings, FxPreset::BassFromGuitar.settings());
     assert_eq!(mix.shown_preset(), FxPreset::BassFromGuitar);
     assert!(!mix.bypass);
+    // Chosen by ear on 2026-11-21: the preset is exactly the bare-octave render that won, i.e.
+    // this entry on a dry chain - same settings, same bypass, so the same samples.
+    let bare = entry("{octaver: {on: true, dry: 0, sub: 1, tone: 8000}}").resolve();
+    assert_eq!(bare.settings, FxPreset::BassFromGuitar.settings());
+    assert_eq!(bare.bypass, mix.bypass);
 
     let mix = entry("{preset: piezo_guitar, octaver: {on: true, dry: 0.5, sub: 0.8, tone: 1200, drive: 0.2}}")
         .resolve();

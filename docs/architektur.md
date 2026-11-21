@@ -573,10 +573,28 @@ umschalten würde.
 
 Vier Presets, jeder Wert im Code begründet: `stimme` (80 Hz Hochpass, Präsenz +2,5 dB bei 3 kHz,
 3:1 ab -18 dBFS mit +6 dB Makeup, 18 % Hall), `gitarre` (100 Hz Hochpass, -4 dB Quäkband bei
-3 kHz, 2,5:1 mit langsamem Attack, 10 % Hall), `bass` (Oktaver ohne Original, Drive 0,4, Tone
-2,5 kHz; Hochpass 30 Hz; +2 dB bei 70 Hz und 800 Hz, -4 dB Kuhschwanz ab 3 kHz; 4:1 ab -20 dBFS,
-10 ms Attack, +6 dB Makeup; kein Delay, kein Hall), `trocken` (alles aus, Kette umgangen). In der
-Partitur heißen sie `voice`, `piezo_guitar`, `bass_from_guitar`, `dry`.
+3 kHz, 2,5:1 mit langsamem Attack, 10 % Hall), `bass` (nur der Oktaver: `dry` 0, `sub` 1, Tone
+8 kHz, Drive 0; alles andere aus), `trocken` (alles aus, Kette umgangen). In der Partitur heißen
+sie `voice`, `piezo_guitar`, `bass_from_guitar`, `dry`.
+
+**`bass` ist am 2026-11-21 nach Gehör festgelegt.** Zuerst war er nach Messung „wie ein Bass"
+gestimmt (Drive 0,4, Tone 2,5 kHz, Hochpass 30 Hz, +2 dB bei 70 Hz und 800 Hz, -4 dB Kuhschwanz
+ab 3 kHz, 4:1 ab -20 dBFS mit 10 ms Attack und +6 dB Makeup). Im Hörvergleich am selben Stem hat
+die nackte Oktave gewonnen; das Preset ist jetzt genau dieser Render,
+`{octaver: {on: true, dry: 0, sub: 1, tone: 8000}}` auf einer trockenen Kette - offline nachgeprüft
+bytegleich. Die gestimmte Variante bleibt als `mixer:`-Eintrag zum Ausprobieren:
+
+```yaml
+bass:
+  preset: bass_from_guitar
+  octaver: {tone: 2500, drive: 0.4}
+  high_pass: {on: true, hz: 30}
+  eq: {on: true}
+  band1: {hz: 70, q: 0.9, gain: 2}
+  band2: {hz: 800, q: 0.8, gain: 2}
+  band3: {kind: high_shelf, hz: 3000, gain: -4}
+  comp: {on: true, threshold: -20, ratio: 4, attack: 10, release: 120, knee: 6, makeup: 6}
+```
 
 ### Oktaver (`engine/src/engine/fx/octaver.rs`)
 
@@ -633,8 +651,9 @@ Aufnahme bleibt trocken wie immer.
 YIN-Tonhöhe alle 10 ms): in 99,2 % der stimmhaften Frames liegt der Ausgang innerhalb ±3 % bei der
 halben Eingangsfrequenz (Median-Verhältnis 0,4999); die Tonhöhe schwankt von Frame zu Frame im
 Median um 1,0 Cent (Eingang 0,4), im 95. Perzentil um 11 Cent; Ausreißer über 50 Cent gibt es nur
-an Tonwechseln (16 von 2373 Frames). Mit dem Bass-Preset schrumpft der Pegelabstand zwischen
-leisen und lauten Tönen (10./90. Perzentil des 0,5-s-RMS) von 6,6 dB auf etwa 3,5 dB. Auf einer
+an Tonwechseln (16 von 2373 Frames). Das ist zugleich die Messung des heutigen Bass-Presets (nur
+Oktaver); die frühere gestimmte Variante (oben) brachte den Pegelabstand zwischen leisen und lauten
+Tönen (10./90. Perzentil des 0,5-s-RMS) von 6,6 dB auf etwa 3,5 dB, klang aber schlechter. Auf einer
 Melodiestimme mit nachklingenden Saiten sind es noch 96,6 % Oktave, aber das 95. Perzentil der
 Schwankung steigt auf 15 bis 28 Cent - dort ist es hörbar unruhiger. Nachmessen:
 `looper-engine fxrender <stem> <out> --mix "{preset: bass_from_guitar}"` rendert offline durch
@@ -711,7 +730,7 @@ Lauf als die Tabelle oben, daher eigene Zeilen; die Hochpass-Zeile desselben Lau
 |---|---:|---:|---:|
 | Oktaver (Drive an, Splice-Suche gemittelt) | 16,8 | 0,08 | 0,64 |
 | Hochpass (derselbe Lauf) | 6,7 | 0,03 | 0,26 |
-| Kette „bass" | 40,1 | 0,19 | 1,54 |
+| Kette „bass" (seit 2026-11-21 nur Oktaver, ohne Drive) | 18,0 | 0,09 | 0,69 |
 | Kette komplett, alle sechs | 78,1 | 0,37 | 3,00 |
 
 Die Suche nach der Sprungweite kostet rund 20 000 Multiplikationen auf einmal, höchstens einmal je

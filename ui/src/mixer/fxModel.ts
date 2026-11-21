@@ -41,7 +41,7 @@ export const FX_PRESETS: { name: LoadablePreset; label: string; hint: string }[]
   {
     name: "bass_from_guitar",
     label: "Bass",
-    hint: "Single notes on the guitar, one octave down and voiced as a bass: octaver with drive, 2.5 kHz low-pass, 4:1 compression",
+    hint: "Single notes on the guitar, one octave down: the octaver alone, no original, nothing else in the chain",
   },
 ];
 

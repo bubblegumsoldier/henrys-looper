@@ -463,13 +463,16 @@ impl TrackMixSource {
         shown: FxPreset,
         settings: &ChainSettings,
     ) -> Self {
-        let mut best: Option<(usize, FxPreset, TrackMixSource)> = None;
+        let mut best: Option<((usize, usize), FxPreset, TrackMixSource)> = None;
         // The shown preset first, so it wins a tie.
         let mut order: Vec<FxPreset> = vec![shown];
         order.extend(FxPreset::loadable().into_iter().filter(|p| *p != shown));
         for base in order.into_iter().filter(|p| *p != FxPreset::Custom) {
             let entry = describe_chain(base, settings);
-            let lines = entry.line_count();
+            // Fewest lines first, then fewest fields: the bass preset is "dry plus one octaver
+            // line", so a tweaked bass chain is one line from either - and `preset:
+            // bass_from_guitar` plus `{tone: 1800}` says more with less than four fields on dry.
+            let lines = (entry.line_count(), entry.field_count());
             if best.as_ref().is_none_or(|(n, _, _)| lines < *n) {
                 best = Some((lines, base, entry));
             }
@@ -497,6 +500,17 @@ impl TrackMixSource {
             track.fx.preset,
             &track.fx.settings,
         )
+    }
+
+    /// Fields written inside the effect lines, counted on the serialised entry.
+    fn field_count(&self) -> usize {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::Object(map)) => map
+                .values()
+                .map(|v| v.as_object().map_or(1, |o| o.len()))
+                .sum(),
+            _ => 0,
+        }
     }
 
     fn line_count(&self) -> usize {

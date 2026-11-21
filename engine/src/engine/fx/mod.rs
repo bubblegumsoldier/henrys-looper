@@ -500,76 +500,29 @@ impl FxPreset {
             },
 
             // -------------------------------------------------------------------------------
-            // Bass from guitar. Single notes played on the guitar, an octave lower and voiced
-            // like a bass. Tuned on a real piezo stem (a bass line played on the guitar) by
-            // measuring third-octave spectra and level spread of the render - see the octaver's
-            // module comment and the architecture document for the numbers.
+            // Bass from guitar. Single notes played on the guitar, an octave lower - and nothing
+            // else. Chosen by ear on 2026-11-21: the owner compared a voiced variant (drive 0.4,
+            // 2.5 kHz tone, 30 Hz high-pass, +2 dB at 70 Hz and 800 Hz, -4 dB shelf at 3 kHz, 4:1
+            // compression) with the bare octave on the same stem and preferred the bare octave.
+            // So this preset is exactly the render that won: `{octaver: {on: true, dry: 0, sub:
+            // 1, tone: 8000}}` on a dry chain. Everything not named there stays at the values of
+            // `ChainSettings::default()` and switched off. The voiced variant is still one
+            // `mixer:` entry away for whoever wants to try it - see the architecture document.
             FxPreset::BassFromGuitar => ChainSettings {
-                // Octaver, high-pass, EQ, compressor. No delay and no reverb: a bass in a room
-                // turns to mud, and the looper's other tracks bring the room.
-                enabled: [true, true, true, true, false, false],
+                // The octaver alone. Half-speed playback keeps the guitar's own dynamics and its
+                // whole (halved) spectrum, which is what made it sound like a played string.
+                enabled: [true, false, false, false, false, false],
                 octaver: OctaverSettings {
                     // No guitar left: the point is a bass, not a guitar with a sub under it.
                     dry: 0.0,
                     sub: 1.0,
-                    // 2.5 kHz, 12 dB/oct: the halved spectrum has little up there anyway, and
-                    // what there is - the pick, halved to a thud - is better rounded off.
-                    tone_hz: 2_500.0,
-                    // 0.4 = +10 dB into the clipper. Measured: lifts 300 Hz - 1 kHz by 6 to 10 dB
-                    // relative to the fundamental, which brings the octave voice from "30 dB down
-                    // at 1 kHz" to roughly where a DI bass is. Above 0.6 a held note starts to
-                    // fuzz.
-                    drive: 0.4,
+                    // 8 kHz, the top of the range: the tone filter is still in the path (12
+                    // dB/oct), but well above anything a halved piezo spectrum still has.
+                    tone_hz: 8_000.0,
+                    // No saturation: by ear, the clean octave won.
+                    drive: 0.0,
                 },
-                // 30 Hz: under the 41 Hz of the low E an octave down, over the subsonic thumps
-                // a pickup knock becomes at half speed.
-                high_pass_hz: 30.0,
-                bands: [
-                    // 70 Hz up 2 dB: weight. A piezo reproduces the guitar's fundamentals weakly,
-                    // and they are the bass's fundamentals now.
-                    BandSettings {
-                        kind: BandKind::Peak,
-                        hz: 70.0,
-                        q: 0.9,
-                        gain_db: 2.0,
-                    },
-                    // 800 Hz up 2 dB, broad: the "growl" that lets a bass line be followed on
-                    // small speakers, where 41 Hz does not exist.
-                    BandSettings {
-                        kind: BandKind::Peak,
-                        hz: 800.0,
-                        q: 0.8,
-                        gain_db: 2.0,
-                    },
-                    // 3 kHz shelf down 4 dB: what is left of string and fret noise.
-                    BandSettings {
-                        kind: BandKind::HighShelf,
-                        hz: 3_000.0,
-                        q: 0.707,
-                        gain_db: -4.0,
-                    },
-                ],
-                comp: CompSettings {
-                    // A bass is the instrument that has to be even: every note the same weight.
-                    // -20 dB and 4:1 catches nearly every note of a picked line - measured on the
-                    // stem, the spread between quiet and loud notes (10th to 90th percentile of
-                    // 0.5 s RMS) goes from 6.6 dB in to about 3.5 dB out.
-                    threshold_db: -20.0,
-                    ratio: 4.0,
-                    // 10 ms keeps the front of the note; faster and the bass loses its attack.
-                    attack_ms: 10.0,
-                    // 120 ms: back up before the next eighth note at 124 BPM (242 ms).
-                    release_ms: 120.0,
-                    knee_db: 6.0,
-                    // Puts the median level back where the guitar was.
-                    makeup_db: 6.0,
-                },
-                delay_note: DelayNote::DottedEighth,
-                delay_feedback: 0.3,
-                delay_mix: 0.0,
-                reverb_size: 0.6,
-                reverb_damping: 0.5,
-                reverb_mix: 0.0,
+                ..ChainSettings::default()
             },
         }
     }
