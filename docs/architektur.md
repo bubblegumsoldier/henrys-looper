@@ -2267,6 +2267,15 @@ Steuer-Thread):
   `kAudioDeviceProcessorOverload` und meldet ihn als `ErrorKind::Xrun` — der vorhandene
   `xruns`-Zähler des Hosts *ist* also CoreAudios Overload-Meldung; kein eigener Listener nötig.
   Bei Ein- und Ausgang auf demselben Gerät meldet er eine Überlast einmal je Stream.
+- **Eingang verloren / zu spät** (`input lost`, `input late`): die beiden FIFO-Zähler des Hosts.
+  *Verloren* (FIFO voll, Frames verworfen) ist die eine Art, die einen laufenden Take schneidet:
+  Die Frames nach der Lücke landen direkt hinter denen davor, ein Sprung von einem Sample, den der
+  Loop bei jedem Durchlauf wiederholt (so `theme_b` im Mitschnitt vom 21.11., Abschnitt 19 — dort
+  war es eine Treiber-Überlast, die einen ganzen Zyklus verlor). *Zu spät* (FIFO leer) verliert
+  nichts, lässt aber das Mithören für den Rest des Blocks verstummen. Beide waren bisher nur in
+  `dropouts.engine_dropouts` gezählt; jetzt sind sie eigene Arten im Overrun (Log, Zähler der
+  Anzeige, `overruns` in `session.json`), an der Positionsschätzung des Hosts — ein Knackser in
+  einem Take lässt sich so einem Eintrag zuordnen.
 
 **Kosten**: je Callback eine zusätzliche Uhrablesung (`Instant::now` liest auf macOS die
 Commpage, kein Syscall), ein paar Ganzzahl-Operationen und Atomics; viermal je Sekunde drei

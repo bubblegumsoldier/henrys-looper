@@ -29,11 +29,20 @@ pub struct Counts {
     pub late_wakeups: u64,
     /// cpal `Xrun`s - CoreAudio's processor overload on macOS.
     pub overloads: u64,
+    /// Input callbacks that found the input FIFO full: input frames were **lost**. The one kind
+    /// that cuts a running take - the frames after the gap are recorded right after the frames
+    /// before it, a one-sample jump in the loop on every pass (the owner's `theme_b`, 2026-11-21).
+    pub input_lost: u64,
+    /// Output callbacks that found the input FIFO short: nothing lost, but the monitored input is
+    /// silent for the rest of that block.
+    pub input_late: u64,
 }
 
 const LATE_BLOCK: u8 = 1;
 const LATE_WAKEUP: u8 = 2;
 const OVERLOAD: u8 = 4;
+const INPUT_LOST: u8 = 8;
+const INPUT_LATE: u8 = 16;
 
 /// One overrun: what rose, where, how bad.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,6 +72,12 @@ impl Incident {
         }
         if self.kinds & OVERLOAD != 0 {
             parts.push("driver overload");
+        }
+        if self.kinds & INPUT_LOST != 0 {
+            parts.push("input lost");
+        }
+        if self.kinds & INPUT_LATE != 0 {
+            parts.push("input late");
         }
         parts.join(" + ")
     }
@@ -102,6 +117,12 @@ impl LoadWatch {
         }
         if counts.overloads > self.seen.overloads {
             kinds |= OVERLOAD;
+        }
+        if counts.input_lost > self.seen.input_lost {
+            kinds |= INPUT_LOST;
+        }
+        if counts.input_late > self.seen.input_late {
+            kinds |= INPUT_LATE;
         }
         self.seen = counts;
 
@@ -227,14 +248,46 @@ mod tests {
     }
 
     fn counts(late_blocks: u64, late_wakeups: u64, overloads: u64) -> Counts {
+        counts_with_input(late_blocks, late_wakeups, overloads, 0, 0)
+    }
+
+    fn counts_with_input(
+        late_blocks: u64,
+        late_wakeups: u64,
+        overloads: u64,
+        input_lost: u64,
+        input_late: u64,
+    ) -> Counts {
         Counts {
             late_blocks,
             late_wakeups,
             overloads,
+            input_lost,
+            input_late,
         }
     }
 
     const MS: Duration = Duration::from_millis(1);
+
+    /// Lost input frames (the input FIFO ran full) are an overrun of their own kind, so a jump
+    /// inside a take can be matched to it in `session.json`; together with the driver's overload
+    /// that caused them they are one overrun.
+    #[test]
+    fn lost_input_is_its_own_kind_and_joins_the_overload_that_caused_it() {
+        let mut w = LoadWatch::default();
+        let t0 = Instant::now();
+        let r = reading(None, 0.0);
+        let c = counts_with_input(0, 0, 1, 1, 0);
+        assert!(w.observe(t0, c, &r, 497_000, || "14:57:43".into()).is_none());
+        let done = w.observe(t0 + 70 * MS, c, &r, 498_000, || unreachable!()).unwrap();
+        assert_eq!(done.kind_text(), "driver overload + input lost");
+        assert_eq!(done.frame, 497_000, "the host's estimate");
+        let c = counts_with_input(0, 0, 1, 1, 1);
+        assert!(w.observe(t0 + 500 * MS, c, &r, 520_000, || "14:57:44".into()).is_none());
+        let done = w.observe(t0 + 600 * MS, c, &r, 530_000, || unreachable!()).unwrap();
+        assert_eq!(done.kind_text(), "input late");
+        assert_eq!(w.incidents, 2);
+    }
 
     #[test]
     fn a_late_block_and_the_drivers_overload_right_after_are_one_overrun() {

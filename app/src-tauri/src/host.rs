@@ -3616,6 +3616,8 @@ impl Session {
             late_blocks: reading.late_blocks,
             late_wakeups: reading.late_wakeups,
             overloads: self.stats.xruns.load(Ordering::Relaxed),
+            input_lost: self.stats.overruns.load(Ordering::Relaxed),
+            input_late: self.stats.underruns.load(Ordering::Relaxed),
         };
         let pos = self.estimated_pos();
         let done = self.load_watch.observe(now, counts, &reading, pos, || {
