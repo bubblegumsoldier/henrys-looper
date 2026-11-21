@@ -337,8 +337,11 @@ sections:
             "Refrain, Frame {i}: {heard} statt {want} (erster Takt beider Loops)"
         );
     }
-    // And the bar before the chorus is silent - the one-bar section has nothing playing.
-    let before = run.sim.bus(Bus::Main, chorus - 1).l;
+    // And the bar before the chorus is silent - the one-bar section has nothing playing - up to the
+    // last fade length, in which both loops fade in what leads into their first frame (their
+    // pre-roll), so the chorus does not begin with a click.
+    let edge = crate::engine::track::edge_frames(48_000);
+    let before = run.sim.bus(Bus::Main, chorus - edge - 1).l;
     assert!(before.abs() < 1e-6, "{before}");
 }
 

@@ -34,8 +34,11 @@
 //!   twice. When it does reach Main it is in the stem the way the room heard it: through the
 //!   effects, and `R` frames late, like everything the hear-through path plays.
 //! * **Dry stem** (`01 voice (dry).wav`, the track's own channel count): loop playback (all
-//!   audible layers with their layer gains, nothing else) plus the raw live input while the track
-//!   records, overdubs or hears through, latency-aligned the same way. Before effects, inserts,
+//!   audible layers with their layer gains, read through `Track::play_frame` - with the same seam,
+//!   start and stop fades as the mix, so the stem holds what was heard) plus the raw live input
+//!   while the track records, overdubs or hears through, latency-aligned the same way and faded
+//!   at the same edges (monitoring switched, a take's end handed over to the loop, a take's start
+//!   out of silence). Before effects, inserts,
 //!   fader, mute/solo and panner, and without the monitor volume. On a mono track this is mono.
 //! * **Mix** (`Mix.wav`, stereo): the Main bus after its inserts, before the Main bus volume and
 //!   without the click. With no bus inserts it is exactly the sum of the stems minus their live
@@ -338,19 +341,24 @@ pub fn capture_pair(spec: &CaptureSpec) -> (Box<CaptureSession>, CaptureReader) 
     (session, reader)
 }
 
-/// Whether this track's live input already reaches the Main bus through its own strip - in which
-/// case it is in the stem already, and the latency-aligned complement must not add it again.
+/// How much of this track's live input input frame `k` already reached the Main bus through its
+/// own strip - that much of it is in the stem already, and the latency-aligned complement adds
+/// only the rest. 1 or 0, except while monitoring fades in or out: the two then crossfade instead
+/// of one of them cutting in.
+///
+/// Asked for the frame's own input index, in the block that frame was heard in - not for the
+/// monitoring of the moment the complement is placed, which can be a section later in musical
+/// time: a take that ends just before monitoring is switched off would otherwise get its last
+/// frames into the stem twice.
 #[inline]
-pub fn live_reaches_main(track: &Track, collapsed: bool) -> bool {
-    if !track.monitor() {
-        return false;
-    }
+pub fn live_reach(track: &Track, collapsed: bool, k: u64) -> f32 {
     let send: BusSend = track.monitor_send();
-    if collapsed {
+    let routed = if collapsed {
         !send.is_silent()
     } else {
         send.on(Bus::Main)
-    }
+    };
+    if routed { track.monitor_level(k) } else { 0.0 }
 }
 
 impl CaptureSession {
@@ -396,13 +404,11 @@ impl CaptureSession {
             return;
         };
         self.add2(base + slots.stem, stem);
-        if let Some(dry) = slots.dry
-            && track.playing()
-            && !track.held()
-        {
+        if let Some(dry) = slots.dry {
             // The loop on its own grid, without the read-ahead for plugin latency: the dry stem is
-            // musical position, not what was fed to a plugin.
-            let f = track.read(pos);
+            // musical position, not what was fed to a plugin. Read through the same function the
+            // mix reads it through, fades included - the stem holds what was heard.
+            let f = track.play_frame(pos);
             self.acc[base + dry] += f.l;
             if slots.dry_channels == 2 {
                 self.acc[base + dry + 1] += f.r;
@@ -418,9 +424,10 @@ impl CaptureSession {
         }
     }
 
-    /// One live input frame of one track, already at its musical position `pos = k - R`. `live`
-    /// says whether the track is recording, overdubbing or hearing through right now - only then
-    /// is the input music rather than the room.
+    /// One live input frame of one track, already at its musical position `pos = k - R`. `weight`
+    /// says how much of it is music rather than the room: 1 while the track is recording,
+    /// overdubbing or hearing through, 0 otherwise, in between while either fades in or out.
+    /// `reach` is what [`live_reach`] said for it: that share is in the stem already.
     #[inline]
     pub fn live_frame(
         &mut self,
@@ -428,12 +435,17 @@ impl CaptureSession {
         pos: u64,
         raw: Frame,
         track: &Track,
-        live: bool,
-        collapsed: bool,
+        weight: f32,
+        reach: f32,
     ) {
-        if !live || pos < self.start {
+        if weight <= 0.0 || pos < self.start {
             return;
         }
+        let raw = if weight >= 1.0 {
+            raw
+        } else {
+            Frame::new(raw.l * weight, raw.r * weight)
+        };
         let Some(base) = self.slot(pos) else {
             // Before the oldest open frame - it arrived later than the lag allows - or so far
             // ahead that it cannot be a real position. Either way it is left out and counted.
@@ -452,8 +464,10 @@ impl CaptureSession {
                 self.acc[base + dry + 1] += raw.r;
             }
         }
-        if !live_reaches_main(track, collapsed) {
-            let placed = track.strip(raw, track.fader_level());
+        if reach < 1.0 {
+            let share = 1.0 - reach;
+            let rest = Frame::new(raw.l * share, raw.r * share);
+            let placed = track.strip(rest, track.fader_level());
             self.add2(base + slots.stem, placed);
         }
     }

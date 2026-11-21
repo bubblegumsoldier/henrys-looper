@@ -150,22 +150,38 @@ fn scores_with_whole_loops_sound_exactly_as_before() {
     assert_eq!(got, GOLDEN.to_vec());
 }
 
-/// Taken on `origin/octaver` (2a135a0), before the re-anchoring existed - except "whole loops",
-/// which changed on purpose once (`stop-all-fix`): its section `back` overdubs `theme`, which was
-/// silent in `pause`. The engine records a layer over a loop that does not play, and the runner
-/// used to start it only at the end of that take - one pass of silence where the musician should
-/// hear the loop he layers onto (the owner's "backing vocals do not play from the start"). Now
-/// the loop plays from the section start (`Runner::comes_back`). Everything before `back` is still
-/// bit for bit what it was: [`whole_loops_change_only_from_the_overdub_on_a_returning_loop`].
+/// Taken on `origin/octaver` (2a135a0), before the re-anchoring existed, and since changed on
+/// purpose twice:
+///
+/// * "whole loops" (`stop-all-fix`): its section `back` overdubs `theme`, which was silent in
+///   `pause`. The engine records a layer over a loop that does not play, and the runner used to
+///   start it only at the end of that take - one pass of silence where the musician should hear
+///   the loop he layers onto. Now the loop plays from the section start (`Runner::comes_back`);
+///   everything before `back` stayed bit for bit what it was
+///   ([`whole_loops_change_only_from_the_overdub_on_a_returning_loop`]).
+/// * all four (`audio-clean`): loop playback and monitoring got their declicking fades
+///   (`Track::play_frame`). Checked against the previous output sample by sample: every frame of
+///   both buses is bit-identical except runs of about 480 frames (one 10 ms fade; a few frames
+///   longer where two tracks' seams lie a few frames apart) right before a loop's seam, start,
+///   stop or re-anchoring and right after a monitoring switch - about 0.2 % of all frames.
+///
+/// Before the fades: 0x239a_6ea4_e2fa_f135, 0xf3c7_eb75_2ba3_7c7b, 0x916c_672b_6618_fad1,
+/// 0xa280_b7c2_ff5b_f75d. When the two were merged (`integration`), the merged output was compared
+/// sample by sample with both parents: against `stop-all-fix` + `load-meter` it differs only in
+/// those fade runs (480-484 frames), against `audio-clean` only in "whole loops" from the fade
+/// before `back` on - the overdub change above - and nowhere else.
 const GOLDEN: [(&str, u64); 4] = [
-    ("henry-3-4", 0x239a_6ea4_e2fa_f135),
-    ("waltz", 0xf3c7_eb75_2ba3_7c7b),
-    ("solo-loop", 0x916c_672b_6618_fad1),
-    ("whole loops", 0xa280_b7c2_ff5b_f75d),
+    ("henry-3-4", 0xcd12_e6da_5f4f_0c7d),
+    ("waltz", 0xb80a_7581_3166_0428),
+    ("solo-loop", 0xeac7_ad07_0b49_9a75),
+    ("whole loops", 0xaf35_6d9f_4435_8ab7),
 ];
 
 /// "whole loops" up to the start of `back`, hashed on the code before the change above.
-const WHOLE_LOOPS_BEFORE_BACK: u64 = 0x818f_c23a_4ee3_4e10;
+/// Taken again with the fades (`audio-clean`); before them 0x818f_c23a_4ee3_4e10. The merge
+/// comparison above shows the stretch is bit for bit `audio-clean`'s up to the fade-in in front of
+/// `back`, which belongs to the loop that now plays from `back`'s first sample.
+const WHOLE_LOOPS_BEFORE_BACK: u64 = 0x0223_0af7_c903_7b2b;
 
 #[test]
 fn whole_loops_change_only_from_the_overdub_on_a_returning_loop() {

@@ -117,6 +117,121 @@ const FADER_MS: f32 = 10.0;
 /// limit of the machine.
 pub const MAX_LAYERS: usize = 16;
 
+/// Length of every declicking fade and crossfade of loop playback and monitoring, in
+/// milliseconds. See [`Track::play_frame`] for where they sit and why there.
+pub const EDGE_MS: f64 = 10.0;
+
+/// Most frames a fade can have, whatever the sample rate: 10 ms at 96 kHz fit. It sizes the
+/// pre-roll every layer keeps and the input history every track keeps.
+pub const EDGE_MAX: usize = 1024;
+
+/// Samples one layer's pre-roll takes: `EDGE_MAX` stereo frames.
+const PRE_SAMPLES: usize = 2 * EDGE_MAX;
+
+/// Switches of a track's audibility that can be pending at once. Arming happens at most one fade
+/// length ahead, so more than two never overlap in practice; a full set folds its oldest.
+const MAX_SWITCHES: usize = 4;
+
+/// Frames of one fade at `sample_rate`.
+pub fn edge_frames(sample_rate: u32) -> u64 {
+    ((f64::from(sample_rate) * EDGE_MS / 1000.0).round() as u64).clamp(1, EDGE_MAX as u64)
+}
+
+/// Rising half of a raised cosine over `n` frames, sampled at the centre of frame `d`: never
+/// exactly 0 or 1 inside the window, and `fade_in(d) + fade_out(d) == 1` - an amplitude-
+/// complementary crossfade. Chosen over an equal-power one because what clicks here is low-
+/// frequency content, and that is nearly the same on both sides of a few milliseconds: summing
+/// two correlated signals at equal power would bulge by up to 3 dB, which is a thump of its own.
+/// The cosine shape has no corner at either end, so the fade adds no splatter of its own.
+#[inline(always)]
+pub fn fade_in(d: u64, n: u64) -> f32 {
+    let x = (d as f32 + 0.5) / n.max(1) as f32;
+    0.5 - 0.5 * (std::f32::consts::PI * x).cos()
+}
+
+#[inline(always)]
+pub fn fade_out(d: u64, n: u64) -> f32 {
+    1.0 - fade_in(d, n)
+}
+
+/// Index of musical position `pos` in a loop of `len` frames whose index 0 sits at `origin`,
+/// also for positions *before* `origin` (the lead-in of a re-anchored loop).
+#[inline(always)]
+fn loop_index(pos: u64, origin: u64, len: u64) -> u64 {
+    if pos >= origin {
+        (pos - origin) % len
+    } else {
+        let back = (origin - pos) % len;
+        if back == 0 { 0 } else { len - back }
+    }
+}
+
+#[inline(always)]
+fn scaled(f: Frame, g: f32) -> Frame {
+    Frame::new(f.l * g, f.r * g)
+}
+
+/// Frames from index `i` forward to index `target` in a loop of `len`: `1..=len`, `len` when they
+/// are the same index.
+#[inline(always)]
+fn ahead_to(target: u64, i: u64, len: u64) -> u64 {
+    if target > i { target - i } else { target + len - i }
+}
+
+/// One change of a track's audibility, on the read axis.
+///
+/// `at` is where the change *counts* (the first position that belongs to the new state). The gain
+/// ramps from `g0` to the new state over `w0..w1`. Armed ahead of time the window ends on `at`, so
+/// a loop that stops at `at` is silent from `at` on and one that starts at `at` has its first frame
+/// untouched; an untimed or late change ramps from where it was applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Switch {
+    at: u64,
+    on: bool,
+    w0: u64,
+    w1: u64,
+    g0: f32,
+}
+
+/// The crossfade from the old grid to the new one around a re-anchoring at `grid.restart`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RestartFade {
+    at: u64,
+    w0: u64,
+    w1: u64,
+}
+
+/// What the audibility envelope says at one position.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Env {
+    Silent,
+    Full,
+    /// Inside a switch window. `aligned` is set for a window armed ahead of time from a whole
+    /// state: then every layer whose seam is the switch position takes only the part of its
+    /// crossfade that belongs to the side that sounds (see [`Part`]).
+    Ramp {
+        gain: f32,
+        aligned: Option<(u64, bool)>,
+    },
+}
+
+/// Which share of each layer's signal a position contributes, see [`Track::sum_layers`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Part {
+    /// Everything: body plus the lead-in of the next pass, i.e. the seam crossfade.
+    Steady,
+    /// Everything, scaled.
+    Gain(f32),
+    /// The last `fade` frames before a stop (or before the old grid ends) at `E`: a layer whose seam
+    /// is `E` contributes its body only - it fades out through its own seam crossfade, and the next
+    /// pass, which will not be heard, adds nothing. Every other layer fades out.
+    Before(u64),
+    /// The last `fade` frames before a start (or before the new grid begins) at `E`: a layer whose
+    /// seam is `E` contributes only the pre-roll leading into it, so its first frame plays
+    /// untouched. Every other layer fades in.
+    After(u64),
+}
+
 /// The latency compensation of one track, in **frames**, as two numbers that mean different
 /// things.
 ///
@@ -257,6 +372,25 @@ impl LayerStore {
 }
 
 /// One recorded layer: storage somebody else allocated, plus how it is mixed.
+///
+/// # The seam, the end and the pre-roll
+///
+/// A take begins and ends in the middle of whatever the musician plays, so its first and its last
+/// sample rarely meet - and every pass of a loop plays the one right after the other. Played
+/// back raw that is a step at every wrap, and with the low-frequency content of a piezo guitar a
+/// clearly audible click. So every layer remembers three things beside its samples:
+///
+/// * `seam` - the loop index its take began at (0 for the take that defined the loop, the grid
+///   position of an overdub otherwise);
+/// * `pre` - the input that arrived in the `fade` frames *before* that first sample, copied from
+///   the track's input history when the take wrote its first frame;
+/// * `end` - the index right after its last sample: the seam again for a whole pass, somewhere
+///   else for an overdub cut short.
+///
+/// On playback the last `fade` frames before the seam are crossfaded from the layer's own body
+/// into its pre-roll, which runs, sample by sample, into the first frame of the take - it *is* the
+/// signal that led into it. The first frame and everything after it play untouched; the downbeat
+/// a loop starts on keeps its attack. Before an `end` that is not the seam the body fades out.
 pub struct Layer {
     store: LayerStore,
     /// Channel count of an audio buffer. A copy of the track's - every layer of a track has the
@@ -264,16 +398,80 @@ pub struct Layer {
     channels: Channels,
     gain: f32,
     muted: bool,
+    seam: u64,
+    end: u64,
+    /// Which of the track's pre-roll slots is this layer's (`Track::pre_rolls`). Kept outside the
+    /// layer so a layer stays a few dozen bytes: the mix walks every layer every frame.
+    pre_slot: usize,
+    pre_ready: bool,
+    /// Frames this layer's take wrote, and the index of the last one - what `end` comes from.
+    written: u64,
+    last: u64,
 }
 
 impl Layer {
-    fn new(store: LayerStore, channels: Channels) -> Self {
+    fn new(store: LayerStore, channels: Channels, pre_slot: usize) -> Self {
         Self {
             store,
             channels,
             gain: 1.0,
             muted: false,
+            seam: 0,
+            end: 0,
+            pre_slot,
+            pre_ready: false,
+            written: 0,
+            last: 0,
         }
+    }
+
+    /// The loop index this layer's take began at.
+    #[inline]
+    pub fn seam(&self) -> u64 {
+        self.seam
+    }
+
+    /// One frame of this layer at loop index `i`, split into the part that belongs to the pass
+    /// containing `i` (its body, faded out before an early end) and the lead-in of the pass that
+    /// begins at the seam, plus how far ahead that seam is. Silent on a MIDI layer. `pre` is the
+    /// layer's pre-roll: interleaved stereo, `pre[2k], pre[2k+1]` the input `edge - k` frames
+    /// before the take's first frame.
+    #[inline(always)]
+    fn parts(&self, i: u64, len: u64, fade: u64, edge: u64, pre: &[f32]) -> (Frame, Frame, u64) {
+        let samples = self.samples();
+        let n = self.channels.count();
+        let base = i as usize * n;
+        let l = samples.get(base).copied().unwrap_or(0.0);
+        let r = if n == 2 {
+            samples.get(base + 1).copied().unwrap_or(0.0)
+        } else {
+            l
+        };
+        let mut body = Frame::new(l * self.gain, r * self.gain);
+        let to_seam = ahead_to(self.seam, i, len);
+        if to_seam > fade && self.end == self.seam {
+            // Everywhere but the last fade before the seam of a whole pass: the sample itself.
+            return (body, Frame::SILENT, to_seam);
+        }
+        let to_end = ahead_to(self.end, i, len);
+        if self.end != self.seam && to_end <= fade {
+            let g = fade_out(fade - to_end, fade);
+            body = Frame::new(body.l * g, body.r * g);
+        }
+        let lead = if to_seam <= fade {
+            let k = (edge - to_seam) as usize;
+            let g = fade_in(fade - to_seam, fade) * self.gain;
+            let fo = fade_out(fade - to_seam, fade);
+            // A whole pass ends on its seam: the body fades out against the pre-roll there.
+            if self.end == self.seam {
+                body = Frame::new(body.l * fo, body.r * fo);
+            }
+            let at = |n: usize| pre.get(n).copied().unwrap_or(0.0);
+            Frame::new(at(2 * k) * g, at(2 * k + 1) * g)
+        } else {
+            Frame::SILENT
+        };
+        (body, lead, to_seam)
     }
 
     /// How many frames this layer can cover: the buffer length of an audio layer, the maximum loop
@@ -429,6 +627,35 @@ pub struct Track {
     /// with its very first frame instead of losing the first `playback_advance` of them. The
     /// `StartPlay` sent with it makes it permanent; a stop clears it.
     restart_play: bool,
+    /// Frames of every fade at this track's sample rate ([`edge_frames`]).
+    edge: u64,
+    /// The last `edge` input frames this track recorded or could have recorded, by musical
+    /// position - what a take's pre-roll is copied from. Stereo interleaved, allocated here.
+    history: Vec<f32>,
+    /// One past the newest position in `history`, and the first one of the unbroken run it holds.
+    history_end: u64,
+    history_from: u64,
+    /// Slot of `history_end` in `history`, counted along so the per-frame path has no division.
+    history_slot: usize,
+    /// The pre-roll of every layer, `MAX_LAYERS` slots of [`PRE_SAMPLES`], allocated here; bit `n`
+    /// of `pre_free` says slot `n` is unused.
+    pre_rolls: Vec<f32>,
+    pre_free: u32,
+    /// Set when a take has just written its first frame (its start), until the engine asks.
+    fresh_take: Option<u64>,
+    /// Audibility of the loop before the first pending switch (playing and not held).
+    sound_base: bool,
+    switches: [Switch; MAX_SWITCHES],
+    switch_count: usize,
+    restart_fade: Option<RestartFade>,
+    /// A play state armed ahead (`arm_playing`): it becomes `playing` when the output reaches the
+    /// position.
+    play_pending: Option<(u64, bool)>,
+    /// Monitoring fades over `edge` input frames from `monitor_from` to `monitor_to`, starting at
+    /// input index `monitor_k0`.
+    monitor_k0: u64,
+    monitor_from: f32,
+    monitor_to: f32,
 }
 
 impl Track {
@@ -467,6 +694,28 @@ impl Track {
             strip_peak: [0.0; 2],
             source_base: 0,
             restart_play: false,
+            edge: edge_frames(sample_rate),
+            history: vec![0.0; 2 * EDGE_MAX],
+            history_end: 0,
+            history_from: 0,
+            history_slot: 0,
+            pre_rolls: vec![0.0; MAX_LAYERS * PRE_SAMPLES],
+            pre_free: (1u32 << MAX_LAYERS) - 1,
+            fresh_take: None,
+            sound_base: false,
+            switches: [Switch {
+                at: 0,
+                on: false,
+                w0: 0,
+                w1: 0,
+                g0: 0.0,
+            }; MAX_SWITCHES],
+            switch_count: 0,
+            restart_fade: None,
+            play_pending: None,
+            monitor_k0: 0,
+            monitor_from: if monitor { 1.0 } else { 0.0 },
+            monitor_to: if monitor { 1.0 } else { 0.0 },
         }
         .instrument_defaults()
     }
@@ -736,7 +985,9 @@ impl Track {
     fn buses_share_sources(&self) -> bool {
         let uniform = |send: BusSend| send.on(Bus::Main) == send.on(Bus::Monitor);
         uniform(self.loop_send)
-            && (!self.monitor || self.monitor_send.is_silent() || uniform(self.monitor_send))
+            && (!self.monitor_active()
+                || self.monitor_send.is_silent()
+                || uniform(self.monitor_send))
     }
 
     /// What this track contributes to each output bus at musical position `pos`.
@@ -800,11 +1051,7 @@ impl Track {
         collapsed: bool,
     ) -> ([Frame; BUS_COUNT], Spread) {
         let ahead = pos + self.playback_advance;
-        let dry = if self.sounds_at(ahead) && !self.held {
-            self.read(ahead)
-        } else {
-            Frame::SILENT
-        };
+        let dry = self.play_frame(ahead);
         let (gain_l, gain_r) = pan_gains(self.pan);
         self.note_output_peak(Frame::new(dry.l * gain_l, dry.r * gain_r));
 
@@ -906,19 +1153,466 @@ impl Track {
         self.playing
     }
 
+    /// Start or stop the loop **at once**, without a fade: for what happens together with its
+    /// content changing (a track that is cleared, a new loop that begins) and for the MIDI loop,
+    /// which has no samples to fade. Audio playback that is started or stopped as music goes
+    /// through [`Track::arm_playing`] or [`Track::fade_playing`].
     #[inline]
     pub fn set_playing(&mut self, on: bool) {
+        self.play_pending = None;
         self.playing = on;
         if !on {
             self.restart_play = false;
         }
+        self.sound_base = on && !self.held;
+        self.switch_count = 0;
+        if !on {
+            self.restart_fade = None;
+        }
     }
 
-    /// Whether the loop is heard at read position `pos`: playing, or about to be by an armed
-    /// re-anchoring whose position the read-ahead has reached.
+    /// Start or stop the loop so that it counts from read position `at` on: armed at least one fade
+    /// length ahead (`now` is the read position about to be rendered), a stop fades out over the
+    /// frames *before* `at` and is silent from `at` on, a start fades in what leads into `at` and
+    /// plays `at` itself untouched. Armed later than that, the fade is shortened or - when `at` has
+    /// passed - begins at `now`.
+    ///
+    /// Only the sound is early. The play *state* - what the status reports and the engine's own
+    /// logic asks - changes when the output reaches `output_at`, exactly as before the fades
+    /// ([`Track::settle_play`]).
+    pub fn arm_playing(&mut self, on: bool, at: u64, now: u64, output_at: u64) {
+        let target = on && !self.held;
+        self.arm_switch(at, target, now);
+        self.play_pending = Some((output_at, on));
+    }
+
+    /// Start or stop the loop now, with a fade that begins at read position `now`: an untimed stop
+    /// ("Stop all" acts on its own sample, but the engine's `Stop` is untimed).
+    pub fn fade_playing(&mut self, on: bool, now: u64) {
+        self.play_pending = None;
+        self.playing = on;
+        if !on {
+            self.restart_play = false;
+        }
+        self.arm_switch(now, on && !self.held, now);
+    }
+
+    /// Take over a play state armed ahead once the output has reached its position.
+    #[inline]
+    pub fn settle_play(&mut self, out_pos: u64) {
+        if let Some((at, on)) = self.play_pending
+            && at <= out_pos
+        {
+            self.play_pending = None;
+            self.playing = on;
+            if !on {
+                self.restart_play = false;
+            }
+        }
+    }
+
+    /// Whether a MIDI loop plays at read position `pos`: playing, or about to be by an armed
+    /// re-anchoring whose position the read-ahead has reached. (An audio loop asks
+    /// [`Track::play_frame`], which fades.)
     #[inline(always)]
     pub fn sounds_at(&self, pos: u64) -> bool {
         self.playing || (self.restart_play && self.grid.restart.is_some_and(|at| pos >= at))
+    }
+
+    /// Whether the loop is heard at read position `pos` according to what is armed: the state
+    /// after every switch whose position has been reached. No ramp, no content check.
+    #[inline(always)]
+    fn audible_at(&self, pos: u64) -> bool {
+        let mut on = self.sound_base;
+        for s in &self.switches[..self.switch_count] {
+            if s.at <= pos {
+                on = s.on;
+            }
+        }
+        on
+    }
+
+    /// The audibility envelope at read position `pos`, for fades of length `fade`.
+    #[inline(always)]
+    fn env(&self, pos: u64, fade: u64) -> Env {
+        let mut current: Option<&Switch> = None;
+        for s in &self.switches[..self.switch_count] {
+            if s.w0 <= pos {
+                current = Some(s);
+            }
+        }
+        let Some(s) = current else {
+            return if self.sound_base { Env::Full } else { Env::Silent };
+        };
+        if pos >= s.w1 {
+            return if s.on { Env::Full } else { Env::Silent };
+        }
+        let n = s.w1 - s.w0;
+        let target = if s.on { 1.0 } else { 0.0 };
+        let gain = s.g0 + (target - s.g0) * fade_in(pos - s.w0, n);
+        let whole = s.g0 == 1.0 - target;
+        let aligned = (whole && s.w1 == s.at && n == fade).then_some((s.at, s.on));
+        Env::Ramp { gain, aligned }
+    }
+
+    /// The envelope's gain at `pos`, as a number.
+    #[inline]
+    fn env_gain(&self, pos: u64) -> f32 {
+        match self.env(pos, self.fade_len()) {
+            Env::Silent => 0.0,
+            Env::Full => 1.0,
+            Env::Ramp { gain, .. } => gain,
+        }
+    }
+
+    /// Record a change of audibility to `on`, counting from `at`. A change at or before a pending
+    /// one replaces it (the later command wins, as in the engine's waiting room); a change to the
+    /// state that is armed anyway does nothing.
+    fn arm_switch(&mut self, at: u64, on: bool, now: u64) {
+        while self.switch_count > 0 && self.switches[self.switch_count - 1].at >= at {
+            self.switch_count -= 1;
+        }
+        let armed = match self.switch_count {
+            0 => self.sound_base,
+            n => self.switches[n - 1].on,
+        };
+        if armed == on {
+            return;
+        }
+        let fade = self.fade_len();
+        let (w0, w1, at) = if at >= now + fade {
+            (at - fade, at, at)
+        } else if at > now {
+            (now, at, at)
+        } else {
+            (now, now + fade, now)
+        };
+        let g0 = self.env_gain(w0);
+        if self.switch_count == MAX_SWITCHES {
+            self.sound_base = self.switches[0].on;
+            self.switches.copy_within(1.., 0);
+            self.switch_count -= 1;
+        }
+        self.switches[self.switch_count] = Switch {
+            at,
+            on,
+            w0,
+            w1,
+            g0,
+        };
+        self.switch_count += 1;
+    }
+
+    /// Forget switches and fades that lie wholly before read position `pos`. Called once per block
+    /// with the lowest position anything still reads (the dry stem reads without the read-ahead).
+    #[inline]
+    pub fn fold_edges(&mut self, pos: u64, input_index: u64) {
+        let mut done = 0;
+        while done < self.switch_count
+            && self.switches[done].w1 <= pos
+            && self.switches[done].at <= pos
+        {
+            self.sound_base = self.switches[done].on;
+            done += 1;
+        }
+        if done > 0 {
+            self.switches.copy_within(done..self.switch_count, 0);
+            self.switch_count -= done;
+        }
+        if self.restart_fade.is_some_and(|r| r.w1 <= pos) {
+            self.restart_fade = None;
+        }
+        if input_index >= self.monitor_k0 + self.edge {
+            self.monitor_from = self.monitor_to;
+        }
+    }
+
+    /// Fade length for this track's loop: the configured one - or none at all for a loop shorter
+    /// than eight fades (80 ms), which no musician records; only tests build loops that short, and
+    /// they read them sample by sample.
+    #[inline(always)]
+    pub fn fade_len(&self) -> u64 {
+        if self.grid.loop_len >= 8 * self.edge {
+            self.edge
+        } else {
+            0
+        }
+    }
+
+    /// Frames of one fade at this track's sample rate.
+    #[inline]
+    pub fn edge(&self) -> u64 {
+        self.edge
+    }
+
+    /// What the loop plays at read position `pos`: the sum of its audible layers with every seam
+    /// crossfaded, every start, stop and re-anchoring faded. This is the one function both the
+    /// mix and the dry stem read the loop through, so the stem holds what was heard.
+    ///
+    /// Where the fades sit, and why there:
+    ///
+    /// * **Seams** - inside each layer, the last `fade` frames before its seam crossfade into its
+    ///   pre-roll ([`Layer`]). The first frame of a pass plays untouched.
+    /// * **Start at `P`** (armed ahead) - the `fade` frames before `P` fade in what leads into `P`:
+    ///   a layer whose seam is `P` (a loop that starts from its top, the usual case) contributes
+    ///   only its pre-roll, so the attack on the downbeat is untouched, and nothing of the pass
+    ///   before - which was not heard - leaks in. Any other layer fades in from its own content.
+    /// * **Stop at `P`** (armed ahead) - silent from `P` on, the `fade` frames before fade out; a
+    ///   layer whose seam is `P` simply runs out through its own seam fade.
+    /// * **Re-anchoring at `P`** - the old grid fades out and the new one fades in over the same
+    ///   frames before `P`, each with the start/stop rule above, so the new top plays untouched.
+    /// * **Late or untimed** changes ("Stop all", the transport) fade from where they act.
+    #[inline]
+    pub fn play_frame(&self, pos: u64) -> Frame {
+        let len = self.grid.loop_len;
+        if len == 0 || self.layers.is_empty() || self.midi_loop {
+            return Frame::SILENT;
+        }
+        let fade = self.fade_len();
+        if let Some(r) = self.restart_fade
+            && pos >= r.w0
+            && pos < r.w1
+        {
+            let old = r.at.checked_sub(1).is_some_and(|p| self.audible_at(p));
+            let new = self.audible_at(r.at);
+            let n = r.w1 - r.w0;
+            let d = pos - r.w0;
+            let whole = n == fade && r.w1 == r.at;
+            let mut out = Frame::SILENT;
+            if old {
+                let part = if whole {
+                    Part::Before(r.at)
+                } else {
+                    Part::Gain(fade_out(d, n))
+                };
+                out = out.added(self.sum_layers(self.grid.origin, pos, part, fade));
+            }
+            if new {
+                let part = if whole {
+                    Part::After(r.at)
+                } else {
+                    Part::Gain(fade_in(d, n))
+                };
+                out = out.added(self.sum_layers(r.at, pos, part, fade));
+            }
+            return out;
+        }
+        let origin = self.grid.origin_at(pos);
+        if pos < origin {
+            return Frame::SILENT;
+        }
+        let part = match self.env(pos, fade) {
+            Env::Silent => return Frame::SILENT,
+            Env::Full => Part::Steady,
+            Env::Ramp {
+                aligned: Some((at, true)),
+                ..
+            } => Part::After(at),
+            Env::Ramp {
+                aligned: Some((at, false)),
+                ..
+            } => Part::Before(at),
+            Env::Ramp { gain, .. } => Part::Gain(gain),
+        };
+        self.sum_layers(origin, pos, part, fade)
+    }
+
+    /// The audible layers at read position `pos` on the grid whose index 0 is `origin`, each
+    /// contributing what `part` says.
+    #[inline(always)]
+    fn sum_layers(&self, origin: u64, pos: u64, part: Part, fade: u64) -> Frame {
+        let len = self.grid.loop_len;
+        let i = loop_index(pos, origin, len);
+        if part == Part::Steady {
+            // The common case, kept as lean as the plain read it replaced: one comparison per
+            // layer decides whether this index is in its seam fade at all.
+            let n = self.channels.count();
+            let base = i as usize * n;
+            let (mut left, mut right) = (0.0f32, 0.0f32);
+            for layer in &self.layers {
+                if layer.muted {
+                    continue;
+                }
+                if layer.end == layer.seam && ahead_to(layer.seam, i, len) > fade {
+                    let samples = layer.samples();
+                    let l = samples.get(base).copied().unwrap_or(0.0) * layer.gain;
+                    left += l;
+                    right += if n == 2 {
+                        samples.get(base + 1).copied().unwrap_or(0.0) * layer.gain
+                    } else {
+                        l
+                    };
+                } else {
+                    let pre = self.pre_of(layer.pre_slot);
+                    let (body, lead, _) = layer.parts(i, len, fade, self.edge, pre);
+                    let v = body.added(lead);
+                    left += v.l;
+                    right += v.r;
+                }
+            }
+            return match self.channels {
+                Channels::Mono => Frame::mono(left),
+                Channels::Stereo => Frame::new(left, right),
+            };
+        }
+        let mut out = Frame::SILENT;
+        for layer in &self.layers {
+            if layer.muted {
+                continue;
+            }
+            let (body, lead, to_seam) =
+                layer.parts(i, len, fade, self.edge, self.pre_of(layer.pre_slot));
+            let v = match part {
+                Part::Steady => body.added(lead),
+                Part::Gain(g) => scaled(body.added(lead), g),
+                Part::Before(e) if to_seam == e - pos => body,
+                Part::Before(e) => scaled(body.added(lead), fade_out(pos + fade - e, fade)),
+                Part::After(e) if to_seam == e - pos => lead,
+                Part::After(e) => scaled(body.added(lead), fade_in(pos + fade - e, fade)),
+            };
+            out = out.added(v);
+        }
+        match self.channels {
+            Channels::Mono => Frame::mono(out.l),
+            Channels::Stereo => out,
+        }
+    }
+
+    /// What layer `layer` plays at loop index `idx` once the loop is heard steadily: its content,
+    /// crossfaded into its pre-roll over the last fade frames before its seam. For tests that
+    /// compare playback with the recorded layers.
+    #[cfg(test)]
+    pub fn steady_layer(&self, layer: usize, idx: u64) -> Frame {
+        let (body, lead) = self.layer_parts(layer, idx);
+        self.fan(body.added(lead))
+    }
+
+    /// Only the lead-in part of the same: what a layer whose own pass is still being recorded
+    /// already adds before its seam.
+    #[cfg(test)]
+    pub fn lead_layer(&self, layer: usize, idx: u64) -> Frame {
+        let (_, lead) = self.layer_parts(layer, idx);
+        self.fan(lead)
+    }
+
+    #[cfg(test)]
+    fn layer_parts(&self, layer: usize, idx: u64) -> (Frame, Frame) {
+        match self.layers.get(layer) {
+            Some(l) if !l.muted => {
+                let pre = self.pre_of(l.pre_slot);
+                let (body, lead, _) = l.parts(idx, self.grid.loop_len, self.fade_len(), self.edge, pre);
+                (body, lead)
+            }
+            _ => (Frame::SILENT, Frame::SILENT),
+        }
+    }
+
+    #[cfg(test)]
+    fn fan(&self, f: Frame) -> Frame {
+        match self.channels {
+            Channels::Mono => Frame::mono(f.l),
+            Channels::Stereo => f,
+        }
+    }
+
+    /// A free pre-roll slot for a new layer, zeroed - in the audio thread, but bounded: one fade
+    /// of samples. There is always one, since a track never holds more than `MAX_LAYERS` layers.
+    fn claim_pre(&mut self) -> usize {
+        let slot = (self.pre_free.trailing_zeros() as usize).min(MAX_LAYERS - 1);
+        self.pre_free &= !(1 << slot);
+        let base = slot * PRE_SAMPLES;
+        self.pre_rolls[base..base + 2 * self.edge as usize].fill(0.0);
+        slot
+    }
+
+    #[inline(always)]
+    fn pre_of(&self, slot: usize) -> &[f32] {
+        let base = slot * PRE_SAMPLES;
+        &self.pre_rolls[base..base + PRE_SAMPLES]
+    }
+
+    /// Remember one input frame at musical position `pos` - every frame this track could record,
+    /// whether a take runs or not, so a take that begins finds what led into it.
+    #[inline(always)]
+    pub fn remember(&mut self, pos: u64, frame: Frame) {
+        if pos != self.history_end {
+            // A jump (the first frame, a changed compensation): start a new run. The slot of a
+            // position is `pos % edge`; in a run it simply counts up.
+            self.history_from = pos;
+            self.history_slot = (pos % self.edge) as usize;
+        }
+        let slot = self.history_slot * 2;
+        self.history[slot] = frame.l;
+        self.history[slot + 1] = frame.r;
+        self.history_slot += 1;
+        if self.history_slot as u64 == self.edge {
+            self.history_slot = 0;
+        }
+        self.history_end = pos + 1;
+    }
+
+    /// The start of a take that has just written its first frame, once.
+    #[inline]
+    pub fn take_fresh_take(&mut self) -> Option<u64> {
+        self.fresh_take.take()
+    }
+
+    /// The pre-roll of the newest layer, `k` frames into it (`0..edge`), for the recorder.
+    #[inline]
+    pub fn pre_roll(&self, layer: usize, k: usize) -> Frame {
+        match self.layers.get(layer) {
+            Some(l) => {
+                let pre = self.pre_of(l.pre_slot);
+                Frame::new(pre[2 * k], pre[2 * k + 1])
+            }
+            None => Frame::SILENT,
+        }
+    }
+
+    /// Whether the transport stands; it fades the loop like a stop or a start that acts now. What
+    /// was armed for later belongs to the run the transport change ends.
+    pub fn hold(&mut self, held: bool, now: u64) {
+        self.settle_play(u64::MAX);
+        self.held = held;
+        self.arm_switch(now, self.playing && !held, now);
+    }
+
+    /// Monitoring as heard at input index `k`: 1 while on, 0 while off, a fade over `edge` input
+    /// frames after a switch.
+    #[inline(always)]
+    pub fn monitor_level(&self, k: u64) -> f32 {
+        if self.monitor_from == self.monitor_to || k >= self.monitor_k0 + self.edge {
+            return self.monitor_to;
+        }
+        if k < self.monitor_k0 {
+            return self.monitor_from;
+        }
+        self.monitor_from + (self.monitor_to - self.monitor_from) * fade_in(k - self.monitor_k0, self.edge)
+    }
+
+    /// Whether monitoring contributes anything right now: on, or still fading out.
+    #[inline(always)]
+    pub fn monitor_active(&self) -> bool {
+        self.monitor || self.monitor_from != self.monitor_to
+    }
+
+    /// Switch monitoring with a fade that begins at input index `k`.
+    pub fn fade_monitor(&mut self, on: bool, k: u64) {
+        self.fade_monitor_from(on, k, 1.0);
+    }
+
+    /// The same, when what is heard right now is only `reached` of this track's own level - a
+    /// longer configured fade (`Command::MonitorFade`) that this switch ends: the ramp starts where
+    /// that fade had got to.
+    pub fn fade_monitor_from(&mut self, on: bool, k: u64, reached: f32) {
+        if self.is_instrument() || (on == self.monitor && reached >= 1.0) {
+            return;
+        }
+        let from = self.monitor_level(k) * reached;
+        self.monitor = on;
+        self.monitor_from = from;
+        self.monitor_to = if on { 1.0 } else { 0.0 };
+        self.monitor_k0 = k;
     }
 
     /// Arm a re-anchoring at musical position `at`: from there on the loop plays from its top, on
@@ -930,7 +1624,10 @@ impl Track {
     /// open with no end or an end after `at` - its length is not known yet, and moving its top
     /// would tear it. An overdub may run up to `at`: it keeps the old grid for every frame before.
     /// Bounded work, nothing allocated.
-    pub fn arm_restart(&mut self, at: u64, play: bool) -> bool {
+    ///
+    /// `now` is the read position about to be rendered: armed one fade length ahead, the old grid
+    /// fades out and the new one fades in over the frames before `at` (see [`Track::play_frame`]).
+    pub fn arm_restart(&mut self, at: u64, play: bool, now: u64) -> bool {
         if self.layers.is_empty() || self.grid.loop_len == 0 {
             return false;
         }
@@ -942,6 +1639,19 @@ impl Track {
         }
         self.grid.arm_restart(at);
         self.restart_play = play;
+        let fade = self.fade_len();
+        let (w0, w1) = if at >= now + fade {
+            (at - fade, at)
+        } else if at > now {
+            (now, at)
+        } else {
+            (now, now + fade)
+        };
+        self.restart_fade = Some(RestartFade { at, w0, w1 });
+        if play {
+            let on = !self.held;
+            self.arm_switch(at, on, now);
+        }
         true
     }
 
@@ -953,9 +1663,12 @@ impl Track {
 
     /// Whether the transport stands. A held track keeps its layers and its play state but is not
     /// heard - its monitored input still is.
+    /// At once, without a fade - for a track that is silent anyway. See [`Track::hold`].
     #[inline]
     pub fn set_held(&mut self, held: bool) {
         self.held = held;
+        self.sound_base = self.playing && !held;
+        self.switch_count = 0;
     }
 
     #[inline]
@@ -973,6 +1686,7 @@ impl Track {
         // A re-anchoring armed for later belongs to the run that has just been replaced.
         self.grid.restart = None;
         self.restart_play = false;
+        self.restart_fade = None;
     }
 
     #[inline]
@@ -987,6 +1701,9 @@ impl Track {
     pub fn set_monitor(&mut self, on: bool) {
         if !self.is_instrument() {
             self.monitor = on;
+            let level = if on { 1.0 } else { 0.0 };
+            self.monitor_from = level;
+            self.monitor_to = level;
         }
     }
 
@@ -1123,6 +1840,29 @@ impl Track {
                 *slot = frame.channel(c);
             }
         }
+        if !layer.pre_ready {
+            // The take's first frame: where it sits on the grid is its seam, and what arrived in
+            // the `edge` frames before it is its pre-roll. Bounded: `edge` frames copied, once.
+            layer.pre_ready = true;
+            layer.seam = index;
+            layer.end = index;
+            let edge = self.edge;
+            for k in 0..edge {
+                let p = pos + k;
+                let Some(p) = p.checked_sub(edge) else {
+                    continue;
+                };
+                if p >= self.history_from && p < self.history_end {
+                    let slot = (p % edge) as usize * 2;
+                    let at = layer.pre_slot * PRE_SAMPLES + 2 * k as usize;
+                    self.pre_rolls[at] = self.history[slot];
+                    self.pre_rolls[at + 1] = self.history[slot + 1];
+                }
+            }
+            self.fresh_take = Some(pos);
+        }
+        layer.written += 1;
+        layer.last = index;
     }
 
     /// Musical position at which the running take has to end at the latest, if any.
@@ -1143,8 +1883,9 @@ impl Track {
     pub fn begin_loop_take(&mut self, start: u64, store: impl Into<LayerStore>) {
         let store = store.into();
         self.check_store(&store);
-        self.playing = false;
-        self.layers.push(Layer::new(store, self.channels));
+        self.set_playing(false);
+        let slot = self.claim_pre();
+        self.layers.push(Layer::new(store, self.channels, slot));
         self.grid.begin_loop(start, self.layers.len() - 1);
     }
 
@@ -1152,7 +1893,8 @@ impl Track {
     pub fn begin_overdub_take(&mut self, start: u64, store: impl Into<LayerStore>) {
         let store = store.into();
         self.check_store(&store);
-        self.layers.push(Layer::new(store, self.channels));
+        let slot = self.claim_pre();
+        self.layers.push(Layer::new(store, self.channels, slot));
         self.grid.begin_overdub(start, self.layers.len() - 1);
     }
 
@@ -1240,7 +1982,23 @@ impl Track {
 
     /// Close the take. `end` is the musical position just after its last sample.
     pub fn finish_take(&mut self, end: u64) {
-        self.grid.finish_take(end);
+        let Some(take) = self.grid.finish_take(end) else {
+            return;
+        };
+        let len = self.grid.loop_len;
+        if let Some(layer) = self.layers.get_mut(take.layer)
+            && len > 0
+        {
+            if take.defines_loop {
+                layer.seam = 0;
+                layer.end = 0;
+            } else if layer.written < len {
+                // Cut short: the layer ends inside the loop and fades out there.
+                layer.end = (layer.last + 1) % len;
+            } else {
+                layer.end = layer.seam;
+            }
+        }
     }
 
     /// Frames the running take's storage can hold.
@@ -1257,6 +2015,7 @@ impl Track {
     /// Emptying a track resets its geometry: the next take defines a new loop.
     pub fn pop_layer(&mut self) -> Option<LayerStore> {
         let layer = self.layers.pop()?;
+        self.pre_free |= 1 << layer.pre_slot;
         if self.layers.is_empty() {
             self.grid.reset();
             self.set_playing(false);
@@ -1272,6 +2031,7 @@ impl Track {
         // Moves at most `MAX_LAYERS` small headers - a memmove of a few hundred bytes, no
         // allocation and no deallocation.
         let layer = self.layers.remove(index);
+        self.pre_free |= 1 << layer.pre_slot;
         if self.layers.is_empty() {
             self.grid.reset();
             self.set_playing(false);
@@ -1377,6 +2137,9 @@ impl Track {
     /// because the loops were emptied. Resetting it would mean re-measuring after every song.
     pub fn restore_defaults(&mut self) {
         self.monitor = self.monitor_default;
+        let level = if self.monitor { 1.0 } else { 0.0 };
+        self.monitor_from = level;
+        self.monitor_to = level;
         // The pan is part of the arrangement, not of the channel: two mono tracks placed left and
         // right are a setup decision, and emptying the loops must not drag both back to the middle.
         // It is restored to what the track was *started* with, which is what "wie frisch gestartet"
@@ -1431,7 +2194,7 @@ mod tests {
         let advance = 30u64;
         t.set_playback_advance(advance);
         let at = 5_037u64;
-        assert!(t.arm_restart(at, true));
+        assert!(t.arm_restart(at, true, 0));
         // Output position `at - advance` feeds the chain with the loop's index 0.
         let (before, _) = t.render_unpanned(at - advance - 1, Frame::SILENT, false);
         assert_eq!(before[0], Frame::SILENT, "noch still");
@@ -1453,13 +2216,13 @@ mod tests {
     #[test]
     fn a_re_anchoring_needs_a_loop_whose_length_is_known() {
         let mut empty = Track::mono(0, false, 48_000);
-        assert!(!empty.arm_restart(10, true));
+        assert!(!empty.arm_restart(10, true, 0));
         let mut t = track_with_layer(100);
         t.write(1_000, Frame::mono(1.0));
-        assert!(!t.arm_restart(2_000, true), "Take offen");
+        assert!(!t.arm_restart(2_000, true, 0), "Take offen");
         t.set_take_end(1_050);
-        assert!(!t.arm_restart(1_040, true), "Re-Anker mitten im Take");
-        assert!(t.arm_restart(1_050, true), "Take endet vorher, wartet nur auf seine letzten Frames");
+        assert!(!t.arm_restart(1_040, true, 0), "Re-Anker mitten im Take");
+        assert!(t.arm_restart(1_050, true, 0), "Take endet vorher, wartet nur auf seine letzten Frames");
     }
 
     #[test]

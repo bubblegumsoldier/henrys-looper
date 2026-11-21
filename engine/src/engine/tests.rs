@@ -41,6 +41,18 @@ fn layer_content(sim: &Sim, track: usize, layer: usize) -> Vec<f32> {
         .to_vec()
 }
 
+/// What layer `layer` of track `track` is heard as at loop index `idx` once its loop plays
+/// steadily: its content, and in the last fade frames before its seam the crossfade into its
+/// pre-roll (`Track::play_frame`). Mono tracks only - the left side.
+fn steady(sim: &Sim, track: usize, layer: usize, idx: usize) -> f32 {
+    sim.core.track(track).steady_layer(layer, idx as u64).l
+}
+
+/// Frames of one fade at the rate these tests run at.
+fn edge() -> u64 {
+    crate::engine::track::edge_frames(RATE)
+}
+
 // -------------------------------------------------------------------------------------------
 // 1. A command timed for the middle of a buffer acts at that sample, not at a buffer edge
 // -------------------------------------------------------------------------------------------
@@ -97,14 +109,26 @@ fn start_play_acts_exactly_at_its_sample() {
     });
     sim.run_to(play_at + 4 * BLOCK as u64);
 
+    // The start sample is the first one heard at full level. The fade before it - the frames of
+    // the loop that lead into it - is what keeps the start from clicking; before that, silence.
+    let edge = edge();
     assert_eq!(
-        sim.out_l[(play_at - 1) as usize],
+        sim.out_l[(play_at - edge - 1) as usize],
         0.0,
-        "vor dem Startsample muss Stille sein"
+        "vor der Einblendung muss Stille sein"
     );
     let loop_len = sim.core.track(0).loop_len();
+    let idx = |p: u64| ((p - start) % loop_len) as usize;
+    for j in 0..edge {
+        let p = play_at - edge + j;
+        assert_eq!(
+            sim.out_l[p as usize],
+            steady(&sim, 0, 0, idx(p)) * crate::engine::track::fade_in(j, edge),
+            "Einblendung, Frame {j}"
+        );
+    }
     let content = layer_content(&sim, 0, 0);
-    let expected = content[((play_at - start) % loop_len) as usize];
+    let expected = content[idx(play_at)];
     assert_ne!(expected, 0.0, "Testaufbau: erwartetes Sample ist nicht still");
     assert_eq!(
         sim.out_l[play_at as usize], expected,
@@ -635,26 +659,32 @@ fn loop_seam_loses_and_repeats_nothing() {
     let content = layer_content(&sim, 0, 0);
     assert_eq!(content.len() as u64, len);
 
+    // Every pass is the ramp, sample for sample - except the last `edge` frames before the seam,
+    // which crossfade into the pre-roll: what was played before the take began, silence here. So
+    // they fade out, and the next pass begins with its own first frame, untouched.
+    let edge = edge();
     let history = &sim.out_l;
     for j in 0..3 * len {
         let got = history[(end + j) as usize];
-        let want = content[(j % len) as usize];
-        assert_eq!(
-            got,
-            want,
-            "Ausgabe bei Loop-Durchlauf {} Index {}",
-            j / len,
-            j % len
-        );
+        let i = j % len;
+        let want = if i >= len - edge {
+            content[i as usize] * crate::engine::track::fade_out(i - (len - edge), edge)
+        } else {
+            content[i as usize]
+        };
+        assert_eq!(got, want, "Ausgabe bei Loop-Durchlauf {} Index {i}", j / len);
     }
-    // Independent of the buffer contents: the signal rises everywhere except at the seam, and the
-    // seam occurs exactly every `len` samples. A swallowed or doubled sample breaks one of the two.
+    // Independent of the buffer contents: the signal rises everywhere except in the fade before
+    // the seam and at the seam, and the seam occurs exactly every `len` samples - each pass starts
+    // on the ramp's lowest value. A swallowed or doubled sample breaks one of the two.
     for j in 1..3 * len {
         let prev = history[(end + j - 1) as usize];
         let got = history[(end + j) as usize];
-        if j % len == 0 {
+        let i = j % len;
+        if i == 0 {
             assert!(got < prev, "Nahtstelle nicht bei Index {j}");
-        } else {
+            assert_eq!(got, -0.5, "Durchlauf beginnt mit seinem ersten Frame");
+        } else if i < len - edge {
             assert!(got > prev, "Sample verschluckt oder doppelt bei Index {j}");
         }
     }
@@ -722,12 +752,17 @@ fn clear_stop_and_monitor_do_what_they_say() {
     // Monitoring passes the consumed input straight through.
     assert_eq!(sim.out_l[BLOCK], fingerprint(BLOCK as u64));
 
+    // Switched off, it fades out over one fade length from the block the switch acts in - no
+    // click - and is silent after that.
     sim.send(Command::SetMonitor {
         track: 0,
         on: false,
     });
-    sim.run_to(8 * BLOCK as u64);
-    assert_eq!(sim.out_l[7 * BLOCK], 0.0);
+    sim.run_to(12 * BLOCK as u64);
+    let off = 4 * BLOCK;
+    assert!(sim.out_l[off].abs() > 0.0 && sim.out_l[off].abs() < fingerprint(off as u64).abs());
+    assert_eq!(sim.out_l[off + edge() as usize], 0.0);
+    assert_eq!(sim.out_l[11 * BLOCK], 0.0);
 
     sim.send(Command::StartRecord { track: 0, at: start });
     sim.send(Command::StopRecord { track: 0, at: end });
@@ -985,7 +1020,8 @@ fn record_layers(bars: u32, count: usize, gap: u64) -> (Sim, u64, u64) {
     (sim, origin, len)
 }
 
-/// Three layers on one track: the output is the sample-by-sample sum of the three buffers.
+/// Three layers on one track: the output is the sample-by-sample sum of the three layers as they
+/// are heard (each with its seam crossfade, `Track::steady_layer`).
 #[test]
 fn three_layers_play_back_as_their_exact_sum() {
     let (mut sim, origin, len) = record_layers(4, 3, 0);
@@ -1010,7 +1046,7 @@ fn three_layers_play_back_as_their_exact_sum() {
     sim.run_to(from + len + BLOCK as u64);
     for i in 0..len {
         let idx = ((from + i - origin) % len) as usize;
-        let want = layers[0][idx] + layers[1][idx] + layers[2][idx];
+        let want = steady(&sim, 0, 0, idx) + steady(&sim, 0, 1, idx) + steady(&sim, 0, 2, idx);
         assert_eq!(
             sim.out_l[(from + i) as usize],
             want,
@@ -1036,7 +1072,7 @@ fn a_muted_layer_drops_out_of_the_sum_exactly() {
     sim.run_to(from + len + BLOCK as u64);
     for i in 0..len {
         let idx = ((from + i - origin) % len) as usize;
-        let want = layers[0][idx] + layers[2][idx];
+        let want = steady(&sim, 0, 0, idx) + steady(&sim, 0, 2, idx);
         assert_eq!(
             sim.out_l[(from + i) as usize],
             want,
@@ -1092,7 +1128,7 @@ fn a_removed_layer_returns_its_buffer_and_leaves_the_others_alone() {
         let idx = ((from + i - origin) % len) as usize;
         assert_eq!(
             sim.out_l[(from + i) as usize],
-            before[0][idx] + before[2][idx],
+            steady(&sim, 0, 0, idx) + steady(&sim, 0, 1, idx),
             "Rest-Ebenen bei Loop-Index {idx}"
         );
     }
@@ -1298,18 +1334,21 @@ fn monitoring_and_playback_coexist_without_touching_the_recording() {
     sim.run_to(over_start + len + R + 4 * BLOCK as u64);
 
     // The output during the overdub is loop plus live input, sample for sample. The layer being
-    // recorded contributes nothing yet - its samples are still in the cable. Read before the
-    // safety limiter: the two add up to full scale at times, and what the limiter makes of that is
-    // `output_tests`' business.
+    // recorded contributes nothing of its own yet - its samples are still in the cable - only, in
+    // the last fade frames of the pass, the pre-roll that leads into its first frame on the next
+    // pass. Read before the safety limiter: the two add up to full scale at times, and what the
+    // limiter makes of that is `output_tests`' business.
+    let lead = |idx: usize| sim.core.track(0).lead_layer(1, idx as u64).l;
     for i in 0..len {
         let pos = over_start + i;
         let idx = ((pos - origin) % len) as usize;
         assert_eq!(
             sim.raw(0, pos),
-            first[idx] + fingerprint(pos),
+            (steady(&sim, 0, 0, idx) + lead(idx)) + fingerprint(pos),
             "Loop plus Mithoeren bei Position {pos}"
         );
     }
+    let _ = &first;
 
     // And the recording is untouched by the monitoring: the second layer holds exactly what was
     // played, latency-compensated, and nothing of what was heard.
@@ -1704,9 +1743,10 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
         "das Preset aendert die Wiedergabe nicht ({different} von {len})"
     );
 
-    // Bypass: back to the bare loop, sample for sample. One second of settling, because the
-    // crossfade only becomes an exact zero once it is under -100 dB. Read before the safety
-    // limiter, which the loud preset made work and which is still releasing a hair of it.
+    // Bypass: back to the bare loop, sample for sample - the loop as it is heard, with its seam
+    // crossfade. One second of settling, because the crossfade only becomes an exact zero once it
+    // is under -100 dB. Read before the safety limiter, which the loud preset made work and which
+    // is still releasing a hair of it.
     sim.send(Command::SetFxBypass {
         track: 0,
         on: true,
@@ -1715,7 +1755,7 @@ fn the_chain_colours_the_playback_and_the_bypass_takes_it_back_exactly() {
     sim.run_to(bypassed_from + len);
     for i in 0..len {
         let pos = bypassed_from + i;
-        let dry = loop_content[((pos - origin) % len) as usize];
+        let dry = steady(&sim, 0, 0, ((pos - origin) % len) as usize);
         assert_eq!(
             sim.raw(0, pos), dry,
             "Position {pos} ist im Bypass nicht bitgleich mit dem Loop"
@@ -1892,16 +1932,20 @@ fn a_stereo_track_records_two_inputs_and_plays_them_back_on_their_own_side() {
     );
 
     // ... and the playback puts each of them on its own bus channel, sample for sample. The track
-    // is centred, so both pan gains are exactly 1.0 and this is a bit-exact comparison.
+    // is centred, so both pan gains are exactly 1.0 and this is a bit-exact comparison - with the
+    // loop as it is heard (its seam crossfade), and outside the fade the recorded frames as such.
     let from = origin + 2 * len;
     sim.run_to(from + len + BLOCK as u64);
     for i in 0..len {
         let idx = ((from + i - origin) % len) as usize;
         assert_eq!(
             sim.out(from + i),
-            Frame::new(left[idx], right[idx]),
+            sim.core.track(0).steady_layer(0, idx as u64),
             "Ausgabe bei Loop-Index {idx}"
         );
+        if (idx as u64) < len - edge() {
+            assert_eq!(sim.out(from + i), Frame::new(left[idx], right[idx]));
+        }
     }
 }
 
@@ -2219,14 +2263,13 @@ fn a_centred_mono_track_is_equally_loud_on_both_sides_and_hard_left_silences_the
         at: origin + len,
     });
     sim.run_to(origin + len + R + 4 * BLOCK as u64);
-    let content = layer_content(&sim, 0, 0);
 
-    // Centre: both sides carry the loop, bit for bit.
+    // Centre: both sides carry the loop as it is heard, bit for bit.
     let centre_from = origin + 2 * len;
     sim.run_to(centre_from + len + BLOCK as u64);
     let mut loud = 0usize;
     for i in 0..len {
-        let want = content[((centre_from + i - origin) % len) as usize];
+        let want = steady(&sim, 0, 0, ((centre_from + i - origin) % len) as usize);
         let got = sim.out(centre_from + i);
         assert_eq!(got.l, want, "links bei Position {}", centre_from + i);
         assert_eq!(got.r, want, "rechts bei Position {}", centre_from + i);
@@ -2248,7 +2291,7 @@ fn a_centred_mono_track_is_equally_loud_on_both_sides_and_hard_left_silences_the
     let left_from = origin + (sim.pos() - origin).div_ceil(len) * len;
     sim.run_to(left_from + len + BLOCK as u64);
     for i in 0..len {
-        let want = content[((left_from + i - origin) % len) as usize];
+        let want = steady(&sim, 0, 0, ((left_from + i - origin) % len) as usize);
         let got = sim.out(left_from + i);
         assert_eq!(got.l, want, "links bei Position {}", left_from + i);
         assert_eq!(got.r, 0.0, "rechts muss still sein, Position {}", left_from + i);
@@ -2479,7 +2522,22 @@ fn record_and_play(sim: &mut Sim, start: u64, len: u64, play_at: u64) -> Vec<f32
         track: 0,
         at: play_at,
     });
-    layer_content(sim, 0, 0)
+    heard_loop(sim, 0)
+}
+
+/// The loop of track `track` as it is heard once it plays steadily, index by index: every layer
+/// with its seam crossfade (`Track::play_frame`).
+fn heard_loop(sim: &Sim, track: usize) -> Vec<f32> {
+    let t = sim.core.track(track);
+    (0..t.loop_len())
+        .map(|i| {
+            let mut v = 0.0f32;
+            for layer in 0..t.layer_count() {
+                v += t.steady_layer(layer, i).l;
+            }
+            v
+        })
+        .collect()
 }
 
 /// **The core test.** The click is on the monitor bus, and it is provably nowhere near Main - not

@@ -802,6 +802,21 @@ pub fn buffer_channel(install_capacity: usize, retire_capacity: usize) -> (Buffe
     )
 }
 
+/// A zeroed buffer whose memory really exists. `vec![0.0; n]` asks the system for zeroed pages,
+/// which it hands out lazily: the first write to each page then faults - in the audio thread,
+/// once per 16 KB of a take, wherever a take happens to cross a page. Writing one zero per page
+/// here makes every page resident before the buffer leaves the control thread. The writes go
+/// through `black_box`, so the compiler cannot prove them redundant and drop them.
+pub fn resident_zeros(len: usize) -> Vec<f32> {
+    let mut buffer = vec![0.0f32; len];
+    // 1024 floats = 4 KB, the smallest page size there is; on 16 KB pages this touches each four
+    // times, which costs nothing worth counting.
+    for i in (0..len).step_by(1024) {
+        *std::hint::black_box(&mut buffer[i]) = 0.0;
+    }
+    buffer
+}
+
 /// The control thread's stock of empty layer buffers, one stock per channel count.
 ///
 /// Its whole job is that an overdub never has to wait for `malloc`: the engine is kept supplied
@@ -890,7 +905,7 @@ impl LayerPool {
             let mut available = status.map(|s| s.spares[kind] as usize).unwrap_or(0) + queued;
             let len = self.buffer_len(kind);
             while available < self.slots[kind] {
-                let buffer = self.reserve[kind].pop().unwrap_or_else(|| vec![0.0f32; len]);
+                let buffer = self.reserve[kind].pop().unwrap_or_else(|| resident_zeros(len));
                 match self.channel.install_tx.push(buffer) {
                     Ok(()) => {
                         self.pushed[kind] += 1;

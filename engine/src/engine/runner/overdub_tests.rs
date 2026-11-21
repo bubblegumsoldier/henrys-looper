@@ -215,7 +215,7 @@ fn the_dry_run_finds_the_owners_overdub() {
 }
 
 /// `skip_end: 1.5` on a two-bar take at 120 BPM: the last 36 000 frames of the take are silent,
-/// with the 96-frame fade into the cut, and everything before is bit for bit the take without it -
+/// with the loop's 10 ms edge fade into the cut, and everything before is bit for bit the take without it -
 /// compared with the same run without the option, so the cut sits on the very sample the
 /// latency-compensated take puts it. The loop keeps its length; the input stays monitored.
 #[test]
@@ -237,12 +237,12 @@ fn skip_end_leaves_the_last_beats_of_a_take_silent_and_keeps_its_length() {
     let len = a.loop_len();
     let (ca, cb) = (a.layer(0).unwrap().content(len), b.layer(0).unwrap().content(len));
     let from = len - 36_000;
-    let fade = crate::engine::process::CUT_FADE;
+    let fade = crate::engine::track::edge_frames(RATE);
     for i in 0..len {
         let want = if i >= from {
             0.0
         } else if i + fade > from {
-            ca[i as usize] * (from - i) as f32 / fade as f32
+            ca[i as usize] * crate::engine::track::fade_out(fade - (from - i), fade)
         } else {
             ca[i as usize]
         };
