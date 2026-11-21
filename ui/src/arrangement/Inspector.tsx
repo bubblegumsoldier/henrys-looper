@@ -17,7 +17,7 @@ import { GRID_CHOICES, TransposeControl } from "../live/MidiLoopRows";
 import { inputLabel } from "./Grid";
 import { STATES, STATE_LOOK, busHas, busWord, duration, plural } from "./labels";
 import * as ops from "./ops";
-import { MONITOR_STATES, RESTART_STATES, beatsPerBar, clipOptions, deriveLayers, resolveSection, secondsPerBar, sectionSpans, totalBars } from "./resolve";
+import { MONITOR_STATES, RESTART_STATES, SKIP_END_STATES, beatsPerBar, clipOptions, deriveLayers, resolveSection, secondsPerBar, sectionSpans, totalBars } from "./resolve";
 import type { Selection } from "./selection";
 
 interface Props {
@@ -600,6 +600,30 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
               label="Restart the loop here"
               onChange={(v) => edit((d) => ops.setCellOptions(d, { section: index, track }, { restart: v }))}
             />
+          </div>
+        </div>
+      )}
+      {SKIP_END_STATES.includes(st.state) && (
+        <div className="frow">
+          <label>Leave out the end</label>
+          <div title="Beats (quarter notes) at the end of the take that are not recorded - a pickup into the next part sung or played there does not end up in the loop. The loop keeps its length; the input stays audible. Decimals allowed. Empty: the track's default.">
+            <input
+              className="field num"
+              type="number"
+              min={0}
+              max={64}
+              step={0.25}
+              value={opts.skip_end ?? ""}
+              placeholder={t.skip_end !== undefined ? `${t.skip_end} (track)` : "0"}
+              disabled={!editable}
+              onChange={(e) => {
+                const raw = e.target.value.trim();
+                const v = raw === "" ? null : Number(raw);
+                if (v !== null && (!Number.isFinite(v) || v < 0)) return;
+                edit((d) => ops.setCellOptions(d, { section: index, track }, { skip_end: v }));
+              }}
+            />{" "}
+            beats
           </div>
         </div>
       )}

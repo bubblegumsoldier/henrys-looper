@@ -561,6 +561,7 @@ export function Grid({ doc, errors, editable, run, sel, setSel, zoom, setZoom, z
                 lay = layer.open ? `${layer.layers}+ layers` : layer.layers > 1 ? `${layer.layers} layers` : layer.layers === 0 ? "nothing yet" : "";
               if (opts.restart && st.state !== "record" && st.state !== "stop" && st.state !== "hear_through") lay = lay ? `${lay} · from top` : "from top";
               if (opts.monitor && st.state === "play") lay = lay ? `${lay} · + input` : "+ input";
+              if (opts.skip_end && (st.state === "record" || st.state === "overdub")) lay = lay ? `${lay} · last ${opts.skip_end} out` : `last ${opts.skip_end} out`;
               const cls = [
                 "clip",
                 look.cls,

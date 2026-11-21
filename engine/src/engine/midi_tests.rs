@@ -1705,3 +1705,45 @@ fn a_midi_loop_that_comes_back_plays_its_first_note() {
         assert!(sounding(&rig).is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// `skip_end`: the end of a take that is not recorded (`Command::CutTake`)
+// ---------------------------------------------------------------------------------------------
+
+/// A MIDI take with a cut one beat before its end: a note before the cut is kept as played, a note
+/// held across it ends on the cut (also when its off only comes after the take), and nothing that
+/// starts after the cut is taken. The loop keeps its full length.
+#[test]
+fn a_cut_midi_take_ends_held_notes_on_the_cut_and_takes_nothing_after_it() {
+    for latency in [0u32, 100] {
+        let mut rig = rig_with(latency, 0);
+        record_first_pass(&mut rig);
+        let cut = L - 28_800;
+        rig.sim.send(Command::CutTake { track: 0, at: 0, from: cut });
+        play(&mut rig, 10_000, [0x90, 60, 100]);
+        play(&mut rig, 20_000, [0x80, 60, 0]);
+        play(&mut rig, L - 40_000, [0x90, 62, 100]);
+        play(&mut rig, L - 30_000, [0x90, 65, 100]);
+        play(&mut rig, L - 20_000, [0x90, 64, 100]);
+        play(&mut rig, L - 15_000, [0x80, 64, 0]);
+        play(&mut rig, L - 10_000, [0x80, 62, 0]);
+        play(&mut rig, L + 3_000, [0x80, 65, 0]);
+        rig.sim.run_to(2 * L + 2 * C);
+        assert_eq!(rig.sim.core.track(0).loop_len(), L, "Latenz {latency}");
+        let mut got: Vec<(i64, [u8; 3])> = play_list(&rig, 0).iter().map(|e| (e.frame, e.msg)).collect();
+        got.sort();
+        let cut = cut as i64;
+        assert_eq!(
+            got,
+            vec![
+                (10_000, [0x90, 60, 100]),
+                (20_000, [0x80, 60, 0]),
+                ((L - 40_000) as i64, [0x90, 62, 100]),
+                ((L - 30_000) as i64, [0x90, 65, 100]),
+                (cut, [0x80, 62, 0]),
+                (cut, [0x80, 65, 0]),
+            ],
+            "Latenz {latency}"
+        );
+    }
+}

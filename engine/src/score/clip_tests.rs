@@ -63,7 +63,8 @@ fn clip_options_compile_and_a_repeat_carries_them_with_the_clip() {
         ClipOptions {
             restart: false,
             bars: Some(2),
-            monitor: false
+            monitor: false,
+            skip_end: None
         }
     );
     assert!(chorus.clip("theme").restart);
@@ -242,4 +243,47 @@ fn after_a_release_section_it_is_a_note() {
 
 fn issues_of(text: &str) -> Vec<(Option<u32>, String)> {
     issues(text)
+}
+
+// ---------------------------------------------------------------------------------------------
+// `skip_end`
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn skip_end_goes_with_record_and_overdub_and_has_to_leave_something() {
+    for clip in ["{state: record, skip_end: 2}", "{state: overdub, skip_end: 1.5}", "{state: record, bars: 1, skip_end: 3.75}"] {
+        assert!(issues(&with_clip(2, clip)).is_empty(), "{clip}");
+    }
+    // 0 switches a track default off and is allowed everywhere.
+    assert!(issues(&with_clip(2, "{state: play, skip_end: 0}")).is_empty());
+    for state in ["stack", "play", "stop", "hear_through"] {
+        let (line, message) = one_issue(&with_clip(2, &format!("{{state: {state}, skip_end: 1}}")));
+        assert_eq!(line, 9);
+        assert!(message.contains("goes with record and overdub"), "{state}: {message}");
+    }
+    let (_, message) = one_issue(&with_clip(1, "{state: record, skip_end: 4}"));
+    assert!(message.contains("4 beats out of a take of 4 beats"), "{message}");
+    let (_, message) = one_issue(&with_clip(2, "{state: record, skip_end: -1}"));
+    assert!(message.contains("between 0 and 64"), "{message}");
+    // A track default, judged on the takes it applies to; a clip overrides it.
+    let text = "bpm: 100\ntracks:\n  a: {input: 1, skip_end: 6}\nsections:\n  - id: s\n    bars: 1\n    tracks:\n      a: record\n";
+    let (line, message) = one_issue(text);
+    assert_eq!(line, 3, "at the track default");
+    assert!(message.contains("of the track"), "{message}");
+    assert!(issues(&text.replace("a: record", "a: {state: record, skip_end: 1}")).is_empty());
+    let score = compile_score(&text.replace("bars: 1", "bars: 2")).expect("compiles");
+    assert_eq!(score.tracks[0].skip_end, Some(6000));
+}
+
+#[test]
+fn skip_end_round_trips_through_the_document() {
+    let text = "bpm: 100\ntracks:\n  a: {input: 1, skip_end: 2}\nsections:\n  - id: s\n    bars: 2\n    tracks:\n      a: {state: record, bars: 1, skip_end: 1.5}\n";
+    let score = compile_score(text).expect("compiles");
+    assert_eq!(score.sections[0].clip("a").skip_end, Some(1500));
+    let doc = parse_doc(text).expect("parses");
+    assert_eq!(doc.tracks[0].skip_end, Some(2.0));
+    assert_eq!(doc.sections[0].tracks[0].skip_end, Some(1.5));
+    let rendered = render_doc(&doc);
+    assert!(rendered.contains("a: {input: 1, skip_end: 2}"), "{rendered}");
+    assert!(rendered.contains("a: {state: record, bars: 1, skip_end: 1.5}"), "{rendered}");
 }

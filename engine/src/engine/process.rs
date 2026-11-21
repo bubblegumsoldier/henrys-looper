@@ -145,6 +145,19 @@ use super::source::{HostClock, SourceEndpoint, SourceRack, heard_at, place_event
 use super::timeline::Timeline;
 use super::track::{MAX_LAYERS, Track, TrackLatency};
 
+/// Frames of the fade that leads into a take's cut (`Command::CutTake`): 2 ms at 48 kHz - long
+/// enough not to click, far too short to be heard as a fade.
+pub const CUT_FADE: u64 = 96;
+
+#[inline(always)]
+fn scaled(frame: Frame, gain: f32) -> Frame {
+    if gain == 1.0 {
+        frame
+    } else {
+        Frame::new(frame.l * gain, frame.r * gain)
+    }
+}
+
 #[path = "midiproc.rs"]
 mod midiproc;
 
@@ -263,6 +276,9 @@ pub struct EngineCore {
     instrument_delay: Option<u64>,
     /// Continuous overdub per track (`super::latch`).
     latch: Latches,
+    /// `Command::CutTake` per track: (start of the take it belongs to, position from which that
+    /// take records silence). A take with another start ignores it - see [`Self::cut_gain`].
+    pub(super) cuts: [Option<(u64, u64)>; MAX_TRACKS],
     /// End of a running count-in (`Command::CountIn`): until then the click sounds whatever its
     /// switch says, and the loops stay held.
     count_in: Option<u64>,
@@ -330,6 +346,7 @@ impl EngineCore {
             clock: None,
             instrument_delay: None,
             latch: Latches::default(),
+            cuts: [None; MAX_TRACKS],
             count_in: None,
             gate: true,
             gate_bar1: None,
@@ -1239,9 +1256,31 @@ impl EngineCore {
             }
             return wrote;
         }
+        let frame = scaled(frame, self.cut_gain(t, take.start, pos));
         self.tracks[t].write(pos, frame);
         self.latch.note(t, frame);
         true
+    }
+
+    /// How much of the input a take of `t` that began at `start` records at musical position
+    /// `pos`: everything, nothing from its cut on (`Command::CutTake`, the score's `skip_end`), and
+    /// a straight fade over [`CUT_FADE`] frames into the cut, so the layer does not end in a click.
+    /// The silence is written, not skipped: the take keeps its length and its later frames are
+    /// defined. Only the recording is touched - the monitored input is heard as it is.
+    #[inline]
+    pub(super) fn cut_gain(&self, t: usize, start: u64, pos: u64) -> f32 {
+        match self.cuts.get(t).copied().flatten() {
+            Some((at, from)) if at == start => {
+                if pos >= from {
+                    0.0
+                } else if pos + CUT_FADE > from {
+                    (from - pos) as f32 / CUT_FADE as f32
+                } else {
+                    1.0
+                }
+            }
+            _ => 1.0,
+        }
     }
 
     /// Write one frame into whatever take is open on this track, if the position belongs to it.
@@ -1263,6 +1302,7 @@ impl EngineCore {
         {
             return false;
         }
+        let frame = scaled(frame, self.cut_gain(track, take.start, pos));
         self.tracks[track].write(pos, frame);
         true
     }
@@ -1316,6 +1356,10 @@ impl EngineCore {
                 }
             }
             Command::LatchOverdub { track, on, .. } => self.latch.set(track, on),
+            Command::CutTake { track, at, from } => {
+                self.cuts[track] = Some((at, from));
+                self.midi_cut_known(track);
+            }
             Command::StopRecord { track, at } => {
                 // The loop length is known now, even though the last R samples of the take are
                 // still travelling in from the interface. Publishing it here is what makes the

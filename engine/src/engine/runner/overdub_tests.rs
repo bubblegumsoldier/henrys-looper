@@ -213,3 +213,40 @@ fn the_dry_run_finds_the_owners_overdub() {
     assert_eq!(skipped[0].track, "a");
     assert_eq!(skipped[0].state, ScoreState::Overdub);
 }
+
+/// `skip_end: 1.5` on a two-bar take at 120 BPM: the last 36 000 frames of the take are silent,
+/// with the 96-frame fade into the cut, and everything before is bit for bit the take without it -
+/// compared with the same run without the option, so the cut sits on the very sample the
+/// latency-compensated take puts it. The loop keeps its length; the input stays monitored.
+#[test]
+fn skip_end_leaves_the_last_beats_of_a_take_silent_and_keeps_its_length() {
+    let yaml = |clip: &str| {
+        format!(
+            "bpm: 120\ntracks:\n  a: {{input: 1}}\nsections:\n  - id: rec\n    bars: 2\n    autorelease: true\n    tracks:\n      a: {clip}\n  - id: after\n    bars: 2\n    autorelease: true\n    tracks:\n      a: play\n"
+        )
+    };
+    let mut plain = Run::new(&yaml("record"));
+    let mut cut = Run::new(&yaml("{state: record, skip_end: 1.5}"));
+    for run in [&mut plain, &mut cut] {
+        let to = run.section(2);
+        run.run_to(to);
+    }
+    assert!(cut.at(cut.section(1) - 10_000).monitor, "im ausgelassenen Schlag zu hoeren");
+    let (a, b) = (plain.sim.core.track(0), cut.sim.core.track(0));
+    assert_eq!(a.loop_len(), b.loop_len());
+    let len = a.loop_len();
+    let (ca, cb) = (a.layer(0).unwrap().content(len), b.layer(0).unwrap().content(len));
+    let from = len - 36_000;
+    let fade = crate::engine::process::CUT_FADE;
+    for i in 0..len {
+        let want = if i >= from {
+            0.0
+        } else if i + fade > from {
+            ca[i as usize] * (from - i) as f32 / fade as f32
+        } else {
+            ca[i as usize]
+        };
+        assert!((cb[i as usize] - want).abs() < 1e-6, "Frame {i}: {} statt {want}", cb[i as usize]);
+    }
+    assert!(ca[(from + 10) as usize] != 0.0, "ohne die Option ist dort Klang");
+}

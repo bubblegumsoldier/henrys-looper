@@ -21,6 +21,18 @@ describe("clip grid", () => {
 });
 
 describe("clip options", () => {
+  it("sets skip_end on record and overdub, drops it on a state that takes no take", () => {
+    const doc = henry();
+    const name = doc.tracks[0].name;
+    const find = (d: ReturnType<typeof henry>, s: number) => d.sections[s].tracks.find((t) => t.track === name);
+    const cut = ops.setCellOptions(doc, { section: 0, track: 0 }, { skip_end: 1.5 });
+    expect(find(cut, 0)).toMatchObject({ state: "record", skip_end: 1.5 });
+    expect(clipOptions(cut, 0, name).skip_end).toBe(1.5);
+    expect(find(ops.setCellState(cut, [{ section: 0, track: 0 }], "overdub"), 0)?.skip_end).toBe(1.5);
+    expect(find(ops.setCellState(cut, [{ section: 0, track: 0 }], "play"), 0)?.skip_end).toBeUndefined();
+    expect(find(ops.setCellOptions(cut, { section: 0, track: 0 }, { skip_end: null }), 0)?.skip_end).toBeUndefined();
+  });
+
   it("sets monitor on a play clip only, and a state change away from play drops it", () => {
     const doc = henry();
     const name = doc.tracks[0].name;

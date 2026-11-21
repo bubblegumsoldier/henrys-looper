@@ -330,6 +330,11 @@ impl EngineCore {
                 break;
             };
             let frame = pass_end(on, len);
+            let frame = self
+                .midi
+                .as_deref()
+                .and_then(|m| m.tails[t].cut)
+                .map_or(frame, |cut| frame.min(cut.max(on)));
             let msg = match note {
                 Some(n) => [0x80 | c, n, 0],
                 None => [0xB0 | c, 64, 0],
@@ -338,6 +343,26 @@ impl EngineCore {
         }
         if let Some(midi) = self.midi.as_deref_mut() {
             midi.tails[t].reset();
+        }
+    }
+
+    /// `Command::CutTake` arrived for the MIDI take that runs on `t` (it is sent right behind the
+    /// take's start): from now on its notes know where the take stops taking them.
+    pub(super) fn midi_cut_known(&mut self, t: usize) {
+        let Some(take) = self.tracks[t].take() else {
+            return;
+        };
+        let Some((at, from)) = self.cuts[t] else {
+            return;
+        };
+        if at != take.start {
+            return;
+        }
+        if let Some(midi) = self.midi.as_deref_mut()
+            && midi.takes[t].live
+        {
+            let base = midi.takes[t].base;
+            midi.takes[t].cut = Some(from as i64 - base as i64);
         }
     }
 
@@ -375,6 +400,11 @@ impl EngineCore {
             return;
         };
         midi.takes[t].start(clip, base);
+        if let Some((at, from)) = self.cuts[t]
+            && at == take.start
+        {
+            midi.takes[t].cut = Some(from as i64 - base as i64);
+        }
         midi.accept_from[t] = if from_idle {
             take.start.saturating_sub(preroll)
         } else {
@@ -467,6 +497,8 @@ impl EngineCore {
             return false;
         };
         let settled = tail.settled();
+        // A take with a cut: what is still held ends on the cut.
+        let frame = tail.cut.map_or(frame, |cut| frame.min(cut));
         // Longer than the loop cannot be played back: it ends before its pass is over.
         let frame = if frame - start >= len as i64 {
             pass_end(start, len)
@@ -495,8 +527,22 @@ impl EngineCore {
         if take.end.is_some_and(|end| pos >= end) {
             return;
         }
-        let frame = pos as i64 - notes.base as i64;
+        let mut frame = pos as i64 - notes.base as i64;
         let c = msg[0] & 0x0F;
+        // The end of the take that is not recorded (`skip_end`): nothing new starts there, and
+        // what is let go there ends on the cut.
+        if let Some((at, from)) = self.cuts[t]
+            && at == take.start
+        {
+            let cut = from as i64 - notes.base as i64;
+            notes.cut = Some(cut);
+            if frame >= cut {
+                if is_on(msg) || (is_pedal(msg) && msg[2] >= 64) {
+                    return;
+                }
+                frame = cut;
+            }
+        }
         let keep = if is_on(msg) {
             notes.open_note(c, msg[1], frame);
             true

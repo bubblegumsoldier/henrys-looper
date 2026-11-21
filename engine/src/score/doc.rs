@@ -100,6 +100,9 @@ pub struct DocTrack {
     /// `grid: 1/16`, as written (reserved).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<String>,
+    /// `skip_end: 2` - beats at the end of every record/overdub of this track that are not taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_end: Option<f64>,
     #[serde(default, skip_serializing_if = "Comments::is_empty")]
     pub comments: Comments,
     /// 1-based source line. Output only; ignored when a document comes back from the UI.
@@ -124,6 +127,7 @@ impl DocTrack {
             monitor_bus: None,
             loop_kind: None,
             grid: None,
+            skip_end: None,
             comments: Comments::default(),
             line: None,
         }
@@ -180,6 +184,9 @@ pub struct DocSectionTrack {
     /// `{state: play, monitor: true}`: the loop plays and the live input is heard on top.
     #[serde(default, skip_serializing_if = "is_false")]
     pub monitor: bool,
+    /// `{state: record, skip_end: 2}`: the last beats of the take are not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_end: Option<f64>,
     #[serde(default, skip_serializing_if = "Comments::is_empty")]
     pub comments: Comments,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -592,6 +599,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                     "monitor" => t.monitor = boolean(v),
                                     "latency" => t.latency = int(v).map(|i| i as u32),
                                     "latency_trim" => t.latency_trim = int(v).map(|i| i as i32),
+                                    "skip_end" => t.skip_end = number(v),
                                     "bus" => t.bus = text_of(v),
                                     "monitor_bus" => t.monitor_bus = text_of(v),
                                     _ => {}
@@ -672,7 +680,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                         for state in states {
                                             // `voice: record` or `keys: {state: play, grid: 1/16}`,
                                             // also with `restart: true` or `bars: 2`.
-                                            let (word, grid, restart, bars, monitor) = match &state.value.kind {
+                                            let (word, grid, restart, bars, monitor, skip_end) = match &state.value.kind {
                                                 NodeKind::Map(fields) => {
                                                     let node = |k: &str| {
                                                         fields
@@ -687,9 +695,10 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                                         node("restart").and_then(boolean).unwrap_or(false),
                                                         node("bars").and_then(int).map(|i| i as u32),
                                                         node("monitor").and_then(boolean).unwrap_or(false),
+                                                        node("skip_end").and_then(number),
                                                     )
                                                 }
-                                                _ => (state.value.as_str(), None, false, None, false),
+                                                _ => (state.value.as_str(), None, false, None, false, None),
                                             };
                                             let (Some(track), Some(word)) = (state.key.as_str(), word)
                                             else {
@@ -709,6 +718,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                                 restart,
                                                 bars,
                                                 monitor,
+                                                skip_end,
                                                 comments: Comments::default(),
                                                 line: Some(state.key.pos.line),
                                             });
@@ -1500,6 +1510,9 @@ pub fn render_doc(doc: &ScoreDoc) -> String {
                     if state.monitor {
                         options.push("monitor: true".to_string());
                     }
+                    if let Some(skip) = state.skip_end {
+                        options.push(format!("skip_end: {}", num(skip)));
+                    }
                     let value = if options.is_empty() {
                         state.state.as_str().to_string()
                     } else {
@@ -1826,6 +1839,9 @@ fn track_flow(track: &DocTrack) -> String {
     if let Some(grid) = &track.grid {
         fields.push(format!("grid: {}", flow_scalar(grid)));
     }
+    if let Some(skip) = track.skip_end {
+        fields.push(format!("skip_end: {}", num(skip)));
+    }
     format!("{{{}}}", fields.join(", "))
 }
 
@@ -2032,6 +2048,7 @@ pub fn template_with(tracks: Vec<DocTrack>, instruments: Vec<(String, String)>) 
         restart: false,
         bars: None,
         monitor: false,
+        skip_end: None,
         comments: Comments::default(),
         line: None,
     };

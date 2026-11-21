@@ -306,6 +306,8 @@ struct TrackRun {
     /// An instrument track: heard whenever it is played (unless the score says monitor: false,
     /// which the engine was started with), so the sections never switch its monitoring.
     instrument: bool,
+    /// The track's default `skip_end` in thousandths of a quarter note; 0 for none.
+    skip_end: u32,
     /// What the last scheduled section asks of it.
     target: ScoreState,
     /// Whether the runner believes the track is audible once that section has begun.
@@ -458,6 +460,7 @@ impl Runner {
                 name: track.name.clone(),
                 can_monitor: track.monitor,
                 instrument: track.is_instrument(),
+                skip_end: track.skip_end.unwrap_or(0),
                 // Before anything is scheduled every track is silent and empty, which is exactly
                 // the state a freshly started engine is in.
                 target: ScoreState::Stop,
@@ -1176,6 +1179,30 @@ impl Runner {
         self.tracks[track].sounding = true;
     }
 
+    /// `skip_end`: the take `start..end` of `track` leaves its last beats out - the clip's value,
+    /// else the track's. Sent right behind the take's own commands ([`Command::CutTake`]); the
+    /// take keeps its length and its monitoring, only what is written ends early. Never before the
+    /// take's start (a pass cut short by its section may be shorter than the skip).
+    fn cut_take(&mut self, track: usize, clip: ClipOptions, start: u64, end: u64) {
+        let milli = clip.skip_end.unwrap_or(self.tracks[track].skip_end);
+        if milli == 0 {
+            return;
+        }
+        let frames = self.quarter_frames() * f64::from(milli) / 1000.0;
+        let from = end.saturating_sub(frames.round() as u64).max(start);
+        self.out.push(Command::CutTake {
+            track,
+            at: start,
+            from,
+        });
+    }
+
+    /// One quarter note in samples, whatever the beat unit of the time signature.
+    fn quarter_frames(&self) -> f64 {
+        let timeline = &self.sched.timeline;
+        timeline.samples_per_beat() * f64::from(timeline.signature().beat_unit) / 4.0
+    }
+
     /// Passes [`Self::place_pass`] could not place, oldest first - see [`dry_run`].
     pub fn skipped(&self) -> &[Skipped] {
         &self.skipped
@@ -1316,6 +1343,7 @@ impl Runner {
                     let take_end = self.sched.timeline.bar_start(start_bar + bars as u64);
                     let scheduled = self.sched.record_at(track, &name, start, bars);
                     self.push(scheduled);
+                    self.cut_take(track, clip, start, take_end);
                     let t = &mut self.tracks[track];
                     t.origin = start;
                     t.origin_bar = start_bar;
@@ -1372,6 +1400,7 @@ impl Runner {
                         self.sched
                             .overdub_at(track, &name, take_start, take_end, layers);
                     self.push(scheduled);
+                    self.cut_take(track, clip, take_start, take_end);
                     let take_end_bar = self.sched.timeline.bar_index_at(take_end);
                     let t = &mut self.tracks[track];
                     if defines_loop {

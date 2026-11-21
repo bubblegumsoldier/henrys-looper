@@ -847,6 +847,8 @@ export interface DocTrack {
   loop?: string;
   /** Note grid of the track's MIDI layers (`none`, `1/4`, `1/8`, `1/16`, `1/8t`, `1/16t`). */
   grid?: string;
+  /** `skip_end: 2` - beats at the end of every record/overdub of this track that are not recorded. */
+  skip_end?: number;
   comments?: DocComments;
   line?: number;
 }
@@ -890,6 +892,8 @@ export interface DocSectionTrack {
   restart?: boolean;
   /** `{state: play, monitor: true}`: the loop plays and the live input is heard on top. */
   monitor?: boolean;
+  /** `{state: record, skip_end: 2}`: the last beats (quarter notes) of the take are not recorded. */
+  skip_end?: number;
   /** `{state: record, bars: 2}`: a take shorter than the section; the loop plays for the rest. */
   bars?: number;
   comments?: DocComments;

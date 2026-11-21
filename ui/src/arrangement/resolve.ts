@@ -84,6 +84,8 @@ export interface ClipOptions {
   /** `{state: play, monitor: true}`: the input is heard on top of the loop. */
   monitor?: boolean;
   bars?: number;
+  /** `skip_end`: beats at the end of the take that are not recorded (the clip's own value). */
+  skip_end?: number;
 }
 
 /**
@@ -94,7 +96,13 @@ export interface ClipOptions {
 export function clipOptions(doc: ScoreDoc, section: number, track: string): ClipOptions {
   for (const at of repeatChain(doc, section)) {
     const own = doc.sections[at].tracks.find((t) => t.track === track);
-    if (own) return { restart: own.restart === true, bars: own.bars, ...(own.monitor ? { monitor: true } : {}) };
+    if (own)
+      return {
+        restart: own.restart === true,
+        bars: own.bars,
+        ...(own.monitor ? { monitor: true } : {}),
+        ...(own.skip_end !== undefined ? { skip_end: own.skip_end } : {}),
+      };
   }
   return { restart: false };
 }
@@ -104,6 +112,8 @@ export const RESTART_STATES: ScoreState[] = ["play", "overdub", "stack"];
 export const TAKE_BARS_STATES: ScoreState[] = ["record"];
 /** `monitor: true` goes with play only: the takes and hear_through hear the input anyway. */
 export const MONITOR_STATES: ScoreState[] = ["play"];
+/** `skip_end` goes with the takes that end: record and overdub. */
+export const SKIP_END_STATES: ScoreState[] = ["record", "overdub"];
 
 export type SectionField = "bars" | "autorelease" | "quantize";
 

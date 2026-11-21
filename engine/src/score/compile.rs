@@ -68,6 +68,7 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
             instrument: spec.instrument.clone(),
             loop_kind: spec.loop_kind,
             grid: spec.grid.clone(),
+            skip_end: spec.skip_end,
         })
         .collect();
 

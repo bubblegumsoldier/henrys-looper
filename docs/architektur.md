@@ -908,6 +908,38 @@ restart, monitor`; im Arrangement „+ input" am Clip und *Hear the input over t
 Clip-Inspektor (nur bei Play, nicht bei Instrument-Tracks). Bewiesen in `score/clip_tests.rs` und
 `runner/overdub_tests.rs` (Loop lückenlos, Mithören an und wieder aus, keine Ebene dazu, Stop all).
 
+### Das Ende eines Takes auslassen (`skip_end`)
+
+Am Ende einer aufgenommenen Sektion singt oder spielt der Besitzer oft schon den Auftakt in den
+nächsten Teil; der landete im Loop und klang bei der Wiedergabe falsch. `mic: {state: record,
+skip_end: 2}`: die letzten zwei Schläge (Viertel, Dezimalen erlaubt: `1.5`) des Takes werden nicht
+aufgenommen. Der Loop behält seine volle Länge, sein Ende ist still; davor eine kurze Blende
+(`process::CUT_FADE`, 96 Frames = 2 ms), damit die Ebene nicht in einem Knack endet. Der Eingang
+bleibt währenddessen zu hören (das Mithören des Takes läuft weiter), und der Mitschnitt hat ihn
+ungeschnitten — beschnitten wird nur, was in die Ebene geschrieben wird.
+
+* **Engine:** `Command::CutTake { track, at, from }`, vom Runner direkt hinter den Kommandos des
+  Takes geschickt (`at` = Start des Takes, `from` = Ende − skip). Ab der musikalischen Position
+  `from` schreibt der Take Stille (`EngineCore::cut_gain` beim Schreiben, in `record_frame`), er
+  endet weiter dort, wo sein `StopRecord` sagt. Weil die Position musikalisch ist, sitzt der
+  Schnitt latenzkompensiert genau auf dem Sample (bewiesen durch Vergleich mit demselben Take ohne
+  Option, `runner/overdub_tests.rs`). Gilt nur für den Take, der bei `at` beginnt; ein späterer
+  ignoriert ihn. Die Kanten-Blenden, die `audio-clean` in der Wiedergabe einführt, sind davon
+  unabhängig — diese Blende liegt in der Aufnahme.
+* **MIDI-Loop:** keine neue Note ab dem Schnitt; eine gehaltene Note endet auf dem Schnitt, auch
+  wenn ihr Note-Off erst nach dem Take kommt (`OpenNotes::cut`, auch im Nachlauf). Bewiesen in
+  `midi_tests.rs` (mit und ohne Instrument-Latenz).
+* **Wo:** `record` (mit und ohne `bars:`) und `overdub` (bei einem Durchlauf, den seine Sektion
+  kürzt, höchstens bis zum Take-Anfang). `stack`, `play`, `stop`, `hear_through`: **Fehler** — ein
+  Stapel nimmt Durchlauf um Durchlauf auf, jeder bräuchte sein eigenes Ende.
+* **Standard je Track:** `tracks: {mic: {input: 1, skip_end: 1}}` gilt für jedes `record`/`overdub`
+  dieses Tracks; der Clip überschreibt ihn, `skip_end: 0` am Clip schaltet ihn aus.
+* **Prüfung:** 0 … 64; kürzer als der Take (bei `record` die `bars` des Clips bzw. der Sektion, bei
+  `overdub` die Sektion), sonst Fehler mit Zeile — am Clip oder am Track-Standard.
+* **Anzeige:** `score --check` zeigt `mic=record(skip_end 2)` und am Track „takes skip the last 1
+  beats"; im Arrangement „last 2 out" am Clip und *Leave out the end* im Clip-Inspektor (Record,
+  Overdub; leer = Track-Standard). Der Track-Standard wird bisher nur im Text bearbeitet.
+
 ### Ein Overdub bleibt in seiner Sektion — und hört den Loop, auf den es schichtet
 
 Zwei Fehler, gefunden im Lauf des Besitzers vom 21.11. 14:57 (`chorus_3` 4 Takte und

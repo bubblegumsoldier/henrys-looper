@@ -52,6 +52,12 @@ pub struct ClipOptions {
     /// them. Only on `play`: the takes and `hear_through` monitor anyway, `stop` plays nothing.
     #[serde(default, skip_serializing_if = "is_false")]
     pub monitor: bool,
+    /// `{state: record, skip_end: 2}`: the last beats of the take are not recorded - the loop keeps
+    /// its length, its end is silent (a pickup into the next part sung at the end of the take).
+    /// In thousandths of a quarter note, so a written `1.5` is exact; `Some(0)` switches a track's
+    /// default off for this clip. On `record` and `overdub`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_end: Option<u32>,
 }
 
 impl ClipOptions {
@@ -230,6 +236,10 @@ pub struct TrackSource {
     /// confused with a section's `quantize:`, which is about *when a section changes*.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<String>,
+    /// `skip_end: 2` - the default for every `record` and `overdub` of this track: its last beats
+    /// are not recorded (see `ClipOptions::skip_end`, which overrides it). Thousandths of a quarter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_end: Option<u32>,
 }
 
 /// How an instrument track is played: which MIDI device, which channel, which keys.
@@ -466,6 +476,9 @@ pub struct CompiledTrack {
     /// The note grid of the track's MIDI layers, see [`TrackSource::grid`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<String>,
+    /// The track's default `skip_end`, in thousandths of a quarter note (`TrackSource::skip_end`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_end: Option<u32>,
 }
 
 impl CompiledTrack {

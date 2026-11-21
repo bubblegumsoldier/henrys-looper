@@ -38,7 +38,7 @@ const ROOT_FIELDS: [&str; 10] = [
     "mixer",
     "sheet",
 ];
-const TRACK_FIELDS: [&str; 10] = [
+const TRACK_FIELDS: [&str; 11] = [
     "input",
     "midi",
     "pan",
@@ -49,9 +49,10 @@ const TRACK_FIELDS: [&str; 10] = [
     "monitor_bus",
     "loop",
     "grid",
+    "skip_end",
 ];
 const TRACK_MIDI_FIELDS: [&str; 4] = ["device", "channel", "notes", "transpose"];
-const CLIP_FIELDS: [&str; 5] = ["state", "grid", "restart", "bars", "monitor"];
+const CLIP_FIELDS: [&str; 6] = ["state", "grid", "restart", "bars", "monitor", "skip_end"];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
 /// Fields one binding may carry. The *keys* of `midi:` are not a closed list any more - any address
 /// of the parameter tree does, and the two Ableton-era names `next_section` and `stop_all` are
@@ -123,6 +124,8 @@ pub fn read_score_noted(yaml_text: &str) -> (Result<ScoreSource, ScoreError>, Ve
         reader.issues.extend(issues);
         let issues = clip_monitor_issues(score, &reader.clip_monitor_pos);
         reader.issues.extend(issues);
+        let issues = skip_end_issues(score, &reader.clip_skip_pos, &reader.track_skip_pos);
+        reader.issues.extend(issues);
         if reader.issues.is_empty() {
             // Played through without a device: an overdub that cannot happen in its section.
             let (errors, overdub_notes) = overdub_issues(score, &reader.state_pos);
@@ -165,6 +168,10 @@ struct Reader {
     clip_bars_pos: HashMap<(String, String), Pos>,
     /// Where each clip's `monitor:` value stands, the same way.
     clip_monitor_pos: HashMap<(String, String), Pos>,
+    /// Where each clip's `skip_end:` value stands, the same way.
+    clip_skip_pos: HashMap<(String, String), Pos>,
+    /// Where each track's default `skip_end:` stands, by track name.
+    track_skip_pos: HashMap<String, Pos>,
 }
 
 /// A take of its own length (`{state: record, bars: N}`) has to fit into its section: a take never
@@ -244,6 +251,65 @@ fn clip_monitor_issues(
             };
             let pos = monitor_pos.get(&(section.id.clone(), name.to_string())).copied();
             let mut issue = ScoreIssue::new(pos, why).with_suggestion(hint);
+            if pos.is_none() {
+                issue.line = section.source_line;
+            }
+            issues.push(issue);
+        }
+    }
+    issues
+}
+
+/// `skip_end` has to leave something of the take: shorter than the take, in quarter notes. The
+/// take is the clip's `bars` (or the section) for `record`, the section for `overdub` (a pass may
+/// be shorter at run time; then the cut is clamped to the take's start). A track's default is
+/// judged where it applies - on its record and overdub clips that do not set their own.
+fn skip_end_issues(
+    score: &ScoreSource,
+    clip_pos: &HashMap<(String, String), Pos>,
+    track_pos: &HashMap<String, Pos>,
+) -> Vec<ScoreIssue> {
+    let compiled = super::compile::compile(score);
+    let quarters_per_bar = f64::from(compiled.beats_per_bar) * 4.0 / f64::from(compiled.beat_unit.max(1));
+    let mut issues = Vec::new();
+    for section in &compiled.sections {
+        for (name, state) in section.tracks.iter() {
+            if !matches!(state, TrackState::Record | TrackState::Overdub) {
+                continue;
+            }
+            let clip = section.clip(name);
+            let Some(track) = compiled.tracks.iter().find(|t| t.name == name) else {
+                continue;
+            };
+            let (milli, own) = match (clip.skip_end, track.skip_end) {
+                (Some(v), _) => (v, true),
+                (None, Some(v)) => (v, false),
+                (None, None) => continue,
+            };
+            let bars = if *state == TrackState::Record {
+                clip.bars.unwrap_or(section.bars).min(section.bars)
+            } else {
+                section.bars
+            };
+            let take = f64::from(bars) * quarters_per_bar;
+            let skip = f64::from(milli) / 1000.0;
+            if skip < take {
+                continue;
+            }
+            let pos = if own {
+                clip_pos.get(&(section.id.clone(), name.to_string())).copied()
+            } else {
+                track_pos.get(name).copied()
+            };
+            let mut issue = ScoreIssue::new(
+                pos,
+                format!(
+                    "Track '{name}' would leave {skip} beats out of a take of {take} beats in                      Section '{}' ('skip_end'{}) - nothing would be recorded.",
+                    section.id,
+                    if own { "" } else { " of the track" }
+                ),
+            )
+            .with_suggestion("'skip_end' has to be shorter than the take.");
             if pos.is_none() {
                 issue.line = section.source_line;
             }
@@ -908,6 +974,16 @@ impl Reader {
             Some(node) => self.read_grid(&format!("'grid' of Track '{name}'"), node).map(Some),
             None => Some(None),
         };
+        let skip_end = match fields.get("skip_end") {
+            Some(node) => {
+                let value = self.read_skip_end(node, &format!("'skip_end' of Track '{name}'"));
+                if value.is_some() {
+                    self.track_skip_pos.insert(name.to_string(), node.pos);
+                }
+                value.map(Some)
+            }
+            None => Some(None),
+        };
         let (input, input_right, instrument) = match input? {
             InputSpec::Channels(left, right) => (left, right, None),
             InputSpec::Instrument => (0, None, Some(midi?.unwrap_or_default())),
@@ -924,7 +1000,24 @@ impl Reader {
             instrument,
             loop_kind: loop_kind?,
             grid: grid?,
+            skip_end: skip_end?,
         })
+    }
+
+    /// `skip_end: 2` / `1.5`: beats (quarter notes) at the end of a take that are not recorded.
+    /// 0 is allowed (it switches a track's default off for one clip); at most 64; stored in
+    /// thousandths so a decimal is exact.
+    fn read_skip_end(&mut self, node: &Node<'_>, what: &str) -> Option<u32> {
+        let value = self.as_number(node, what)?;
+        if !value.is_finite() || !(0.0..=64.0).contains(&value) {
+            self.error_with(
+                Some(node.pos),
+                format!("{what} must be between 0 and 64 beats, found {value}."),
+                "It counts quarter notes at the end of the take that are not recorded, e.g. 'skip_end: 2' or 'skip_end: 1.5'.",
+            );
+            return None;
+        }
+        Some((value * 1000.0).round() as u32)
     }
 
     /// `midi: {device: "KeyLab 49", channel: 1, notes: 36-51}` of an instrument track.
@@ -1598,6 +1691,14 @@ impl Reader {
                         clip.restart = on;
                         clip_nodes.push(("restart", node.pos));
                     }
+                    if let Some(node) = fields.get("skip_end")
+                        && let Some(value) = self.read_skip_end(node, &format!("'skip_end' of {what}"))
+                    {
+                        clip.skip_end = Some(value);
+                        clip_nodes.push(("skip_end", node.pos));
+                        self.clip_skip_pos
+                            .insert((section.to_string(), name.to_string()), node.pos);
+                    }
                     if let Some(node) = fields.get("monitor")
                         && let Some(on) = self.as_bool(node, &format!("'monitor' of {what}"))
                     {
@@ -1722,6 +1823,22 @@ impl Reader {
                      For the input alone, use hear_through.",
                 );
             }
+        }
+        if clip.skip_end.is_some_and(|v| v > 0)
+            && !matches!(state, TrackState::Record | TrackState::Overdub)
+        {
+            let why = match state {
+                TrackState::Stack => "a stack records pass after pass, and every pass would need its own end",
+                _ => "it is the end of a take that is left out",
+            };
+            self.error_with(
+                pos("skip_end"),
+                format!(
+                    "'skip_end' goes with record and overdub, but Track '{name}' is on {} in                      Section '{section}': {why}.",
+                    state.as_str()
+                ),
+                format!("'{name}: {{state: record, skip_end: 2}}' leaves the last two beats of the take out."),
+            );
         }
         if clip.bars.is_some() && state != TrackState::Record {
             let why = match state {

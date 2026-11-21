@@ -440,6 +440,9 @@ pub struct OpenNotes {
     pub live: bool,
     /// For a tail: the position at which it gives up waiting.
     pub until: u64,
+    /// Frame (on the clip's raw data) from which the take records no new note and at which a
+    /// note still held ends - `Command::CutTake`, the score's `skip_end`. `None`: no cut.
+    pub cut: Option<i64>,
 }
 
 impl OpenNotes {
@@ -452,6 +455,7 @@ impl OpenNotes {
             open: 0,
             live: false,
             until: 0,
+            cut: None,
         }
     }
 
@@ -471,6 +475,7 @@ impl OpenNotes {
         self.pedal = [CLOSED; 16];
         self.open = 0;
         self.live = false;
+        self.cut = None;
     }
 
     #[inline]

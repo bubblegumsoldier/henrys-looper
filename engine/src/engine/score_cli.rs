@@ -267,7 +267,7 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
         }
         let effective = def.latency.resolve(default_latency);
         println!(
-            "  {} {:<10} input {} ({}), pan {}, Monitor {}, latency {} frames ({:.2} ms, {}), Loop -> {}, Monitor bus {}",
+            "  {} {:<10} input {} ({}), pan {}, Monitor {}, latency {} frames ({:.2} ms, {}), Loop -> {}, Monitor bus {}{}",
             track.index + 1,
             track.name,
             def.input.label(),
@@ -279,6 +279,10 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
             latency_origin(def.latency, default_latency),
             def.loop_send.label(),
             def.monitor_send.label(),
+            match track.skip_end {
+                Some(milli) if milli > 0 => format!(", takes skip the last {} beats", beats_text(milli)),
+                _ => String::new(),
+            },
         );
     }
     println!("Sections:");
@@ -297,6 +301,9 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
                 }
                 if clip.monitor {
                     options.push("monitor".to_string());
+                }
+                if let Some(milli) = clip.skip_end {
+                    options.push(format!("skip_end {}", beats_text(milli)));
                 }
                 format!(
                     "{}={}{}",
@@ -587,4 +594,10 @@ pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
     println!("{}", stats_report(&stats));
     println!("Xruns total:         {}", stats.xruns.load(Ordering::Relaxed));
     Ok(())
+}
+
+/// Thousandths of a quarter note as written: `2`, `1.5`, `0.25`.
+fn beats_text(milli: u32) -> String {
+    let text = format!("{:.3}", f64::from(milli) / 1000.0);
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
 }

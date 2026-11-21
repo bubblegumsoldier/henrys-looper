@@ -88,6 +88,12 @@ pub enum Command {
     /// `EngineCore::next_due`); each axis switches when it reaches `at` itself (`LoopGrid::restart`).
     /// Refused as `Busy` while the take defining the loop is still open across `at`.
     RestartLoop { track: usize, at: u64, play: bool },
+    /// The end of the take that begins at `at` on this track is not recorded: from musical position
+    /// `from` on it writes silence (a short fade leads into it) and takes no new MIDI notes - a
+    /// held note ends there. The take keeps its length, so the loop does too; the input stays
+    /// monitored. The score's `skip_end` (a pickup into the next part sung at the end of a take).
+    /// Sent right after the take's own commands, for the take's start; a later take ignores it.
+    CutTake { track: usize, at: u64, from: u64 },
     /// Throw this track's layers away; the buffers go back to the control thread.
     ClearTrack { track: usize, at: u64 },
     /// Reset every track to the state of a fresh start and return every buffer. Commands that were
@@ -242,6 +248,7 @@ impl Command {
             | Command::StopPlay { at, .. }
             | Command::RestartLoop { at, .. }
             | Command::ClearTrack { at, .. }
+            | Command::CutTake { at, .. }
             | Command::ClearAll { at }
             | Command::DropWaiting { at }
             | Command::LatchOverdub { at, .. }
@@ -288,6 +295,7 @@ impl Command {
             | Command::StopPlay { track, .. }
             | Command::RestartLoop { track, .. }
             | Command::ClearTrack { track, .. }
+            | Command::CutTake { track, .. }
             | Command::LatchOverdub { track, .. }
             | Command::SetMonitor { track, .. }
             | Command::SetPan { track, .. }
