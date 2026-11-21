@@ -18,7 +18,7 @@ import type { DocTrack, LooperStatus, ModelIssue, ScoreDoc } from "../types";
 import { STATE_LOOK, plural } from "./labels";
 import { MAX_TRACKS, nameProblem } from "./ops";
 import * as ops from "./ops";
-import { beatsPerBar, deriveLayers, resolveSection, type SectionSpan } from "./resolve";
+import { beatsPerBar, clipOptions, deriveLayers, resolveSection, type SectionSpan } from "./resolve";
 import { cellKey, clickCell, selectedSections, type Selection } from "./selection";
 import type { Run } from "./useDoc";
 import { anchoredScroll, clampZoom, fitZoom, snapZoom, wheelZoomFactor } from "./zoom";
@@ -551,12 +551,15 @@ export function Grid({ doc, errors, editable, run, sel, setSel, zoom, setZoom, z
               const inherited = st.from.kind === "repeat";
               const overridden = s.repeat !== undefined && st.from.kind === "own";
               const err = errs.cells.get(`${si}:${t.name}`);
+              const opts = clipOptions(doc, si, t.name);
+              const take = opts.bars !== undefined && opts.bars < span.bars ? opts.bars : undefined;
               let lay = "";
-              if (st.state === "record") lay = layer?.stacked ? "Layer 1" : `${span.bars} bars`;
+              if (st.state === "record") lay = take !== undefined ? `${take} of ${span.bars} bars` : layer?.stacked ? "Layer 1" : `${span.bars} bars`;
               else if (st.state === "overdub" && layer?.writes) lay = `Layer ${layer.writes}`;
               else if (st.state === "stack" && layer?.writes) lay = `Layer ${layer.writes}+`;
               else if (st.state === "play" && layer)
                 lay = layer.open ? `${layer.layers}+ layers` : layer.layers > 1 ? `${layer.layers} layers` : layer.layers === 0 ? "nothing yet" : "";
+              if (opts.restart && st.state !== "record" && st.state !== "stop" && st.state !== "hear_through") lay = lay ? `${lay} · from top` : "from top";
               const cls = [
                 "clip",
                 look.cls,

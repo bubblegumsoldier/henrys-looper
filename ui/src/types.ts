@@ -850,6 +850,10 @@ export interface DocSectionTrack {
   state: ScoreState;
   /** The clip's own note grid, overriding the track's while the section runs. */
   grid?: string;
+  /** `{state: play, restart: true}`: the loop starts from its top at this section's start. */
+  restart?: boolean;
+  /** `{state: record, bars: 2}`: a take shorter than the section; the loop plays for the rest. */
+  bars?: number;
   comments?: DocComments;
   line?: number;
 }

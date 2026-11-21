@@ -17,7 +17,7 @@ import { GRID_CHOICES, TransposeControl } from "../live/MidiLoopRows";
 import { inputLabel } from "./Grid";
 import { STATES, STATE_LOOK, busHas, busWord, duration, plural } from "./labels";
 import * as ops from "./ops";
-import { beatsPerBar, deriveLayers, resolveSection, secondsPerBar, sectionSpans, totalBars } from "./resolve";
+import { RESTART_STATES, beatsPerBar, clipOptions, deriveLayers, resolveSection, secondsPerBar, sectionSpans, totalBars } from "./resolve";
 import type { Selection } from "./selection";
 
 interface Props {
@@ -507,10 +507,19 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
   const look = STATE_LOOK[st.state];
   const bars = r.bars.value;
   const name = <b>{t.name}</b>;
+  const opts = clipOptions(doc, index, t.name);
+  const take = opts.bars !== undefined && opts.bars < bars ? opts.bars : undefined;
   let what: ReactNode;
   switch (st.state) {
     case "record":
-      what = <>{name} records a new {bars}-bar loop. Whatever this track held before is replaced.{layers?.stacked && " Later sections stack more layers on it."}</>;
+      what =
+        take !== undefined ? (
+          <>
+            {name} records a new {take}-bar loop in the first {take === 1 ? "bar" : `${take} bars`}, then plays it for the rest of the section. Whatever this track held before is replaced.
+          </>
+        ) : (
+          <>{name} records a new {bars}-bar loop. Whatever this track held before is replaced.{layers?.stacked && " Later sections stack more layers on it."}</>
+        );
       break;
     case "overdub":
       what = layers && layers.layers > 1 ? <>{name} keeps playing and records layer {layers.writes} on top.</> : <>{name} has no loop yet at this point, so this overdub records the first one.</>;
@@ -555,8 +564,43 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
       </div>
       <div className="hint">
         {what}
+        {opts.restart && RESTART_STATES.includes(st.state) && <> The loop starts from its top at the start of this section.</>}
         {needsMonitor && t.monitor === false && <span className="warnline"> Monitoring is off for {t.name}, so you will not hear the input.</span>}
       </div>
+      {st.state === "record" && bars > 1 && (
+        <div className="frow">
+          <label>Take length</label>
+          <div>
+            <select
+              className="field sel"
+              value={take ?? ""}
+              disabled={!editable}
+              title="A take shorter than the section: it records this many bars, then the new loop plays for the rest of the section"
+              onChange={(e) => edit((d) => ops.setCellOptions(d, { section: index, track }, { bars: e.target.value === "" ? null : Number(e.target.value) }))}
+            >
+              <option value="">Whole section ({bars} bars)</option>
+              {Array.from({ length: bars - 1 }, (_, i) => i + 1).map((b) => (
+                <option key={b} value={b}>
+                  {b} {b === 1 ? "bar" : "bars"}, then loop
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      )}
+      {RESTART_STATES.includes(st.state) && (
+        <div className="frow">
+          <label>From the top</label>
+          <div title="Start the loop from its top at this section's start, even if it keeps playing from the section before. A loop that comes back after a pause does that anyway.">
+            <Toggle
+              on={opts.restart}
+              disabled={!editable}
+              label="Restart the loop here"
+              onChange={(v) => edit((d) => ops.setCellOptions(d, { section: index, track }, { restart: v }))}
+            />
+          </div>
+        </div>
+      )}
       {t.loop === "midi" && (
         <div className="frow">
           <label>{T.noteGrid}</label>

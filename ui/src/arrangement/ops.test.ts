@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { henry } from "./fixtures";
 import * as ops from "./ops";
 import { STATE_BY_KEY, STATE_LOOK, STATES } from "./labels";
-import { deriveLayers, inheritedState, resolveSection, sectionSpans, totalBars } from "./resolve";
+import { clipOptions, deriveLayers, inheritedState, resolveSection, sectionSpans, totalBars } from "./resolve";
 
 describe("clip grid", () => {
   it("sets and drops a clip's own note grid without changing its state", () => {
@@ -17,6 +17,42 @@ describe("clip grid", () => {
     expect(same.sections[5].tracks.find((t) => t.track === name)?.grid).toBe("1/16");
     const dropped = ops.setCellGrid(same, cell, undefined);
     expect(dropped.sections[5].tracks.find((t) => t.track === name)?.grid).toBeUndefined();
+  });
+});
+
+describe("clip options", () => {
+  it("sets restart and a take length, keeps them through a state change that takes them and drops them otherwise", () => {
+    const doc = henry();
+    const name = doc.tracks[0].name;
+    const find = (d: ReturnType<typeof henry>, s: number) => d.sections[s].tracks.find((t) => t.track === name);
+    // Section 0 records the guitar: a take of two bars.
+    const short = ops.setCellOptions(doc, { section: 0, track: 0 }, { bars: 2 });
+    expect(find(short, 0)).toMatchObject({ state: "record", bars: 2 });
+    expect(clipOptions(short, 0, name)).toEqual({ restart: false, bars: 2 });
+    // Restart does not go with record: it is not written.
+    expect(find(ops.setCellOptions(short, { section: 0, track: 0 }, { restart: true }), 0)?.restart).toBeUndefined();
+    // Overdub takes no take length - switching drops it, and the compiler would have refused it.
+    expect(find(ops.setCellState(short, [{ section: 0, track: 0 }], "overdub"), 0)?.bars).toBeUndefined();
+    expect(find(ops.setCellOptions(short, { section: 0, track: 0 }, { bars: null }), 0)?.bars).toBeUndefined();
+
+    // Section 5 does not state the guitar (it is on stop): restart on a play clip.
+    const played = ops.setCellState(doc, [{ section: 5, track: 0 }], "play");
+    const restarted = ops.setCellOptions(played, { section: 5, track: 0 }, { restart: true });
+    expect(find(restarted, 5)).toMatchObject({ state: "play", restart: true });
+    // Picking the same state again keeps it; stop drops it.
+    expect(find(ops.setCellState(restarted, [{ section: 5, track: 0 }], "play"), 5)?.restart).toBe(true);
+    expect(find(ops.setCellState(restarted, [{ section: 5, track: 0 }], "stop"), 5)?.restart).toBeUndefined();
+    expect(find(ops.setCellOptions(restarted, { section: 5, track: 0 }, { restart: false }), 5)?.restart).toBeUndefined();
+  });
+
+  it("are inherited with the state through a repeat, and replaced by a clip of its own", () => {
+    const doc = henry();
+    // Section 3 repeats section 2 (voice_2), which overdubs the voice.
+    const name = doc.tracks[1].name;
+    const set = ops.setCellOptions(doc, { section: 2, track: 1 }, { restart: true });
+    expect(clipOptions(set, 3, name).restart).toBe(true);
+    const own = ops.setCellState(set, [{ section: 3, track: 1 }], "play");
+    expect(clipOptions(own, 3, name).restart).toBe(false);
   });
 });
 

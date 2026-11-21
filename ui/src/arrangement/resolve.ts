@@ -78,6 +78,29 @@ export function inheritedState(doc: ScoreDoc, section: number, track: string): {
   return { state: DEFAULT_STATE, from: { kind: "default" } };
 }
 
+/** What a clip says beyond its state (`restart`, `bars`). */
+export interface ClipOptions {
+  restart: boolean;
+  bars?: number;
+}
+
+/**
+ * The options of one clip: those of the section that states the track - itself, or the template
+ * it inherits the state from. A section that restates a track has only its own (the compiler's
+ * rule in `score/compile.rs`).
+ */
+export function clipOptions(doc: ScoreDoc, section: number, track: string): ClipOptions {
+  for (const at of repeatChain(doc, section)) {
+    const own = doc.sections[at].tracks.find((t) => t.track === track);
+    if (own) return { restart: own.restart === true, bars: own.bars };
+  }
+  return { restart: false };
+}
+
+/** Which states a clip option goes with - the compiler refuses it with any other. */
+export const RESTART_STATES: ScoreState[] = ["play", "overdub", "stack"];
+export const TAKE_BARS_STATES: ScoreState[] = ["record"];
+
 export type SectionField = "bars" | "autorelease" | "quantize";
 
 export function inheritedField<K extends SectionField>(

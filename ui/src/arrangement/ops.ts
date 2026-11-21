@@ -18,7 +18,7 @@
 //! since a copied comment would describe the original.
 
 import type { DocMidiBinding, DocSection, DocSectionTrack, DocTrack, Quantize, ScoreDoc, ScoreState } from "../types";
-import { inheritedField, inheritedState, resolveDoc } from "./resolve";
+import { RESTART_STATES, TAKE_BARS_STATES, inheritedField, inheritedState, resolveDoc } from "./resolve";
 
 /** The engine runs at most this many tracks (`max_tracks`). */
 export const MAX_TRACKS = 8;
@@ -171,10 +171,12 @@ export function setCellState(doc: ScoreDoc, cells: Cell[], state: ScoreState): S
     if (track === undefined || !section) continue;
     const inherited = inheritedState(d, cell.section, track);
     const at = section.tracks.findIndex((t) => t.track === track);
-    if (inherited.state === state && !(at >= 0 && section.tracks[at].grid)) {
+    // Clip options that do not go with the new state go - the compiler would refuse them.
+    const kept = at >= 0 ? fitOptions({ ...section.tracks[at], state }) : undefined;
+    if (inherited.state === state && !(kept && (kept.grid || kept.restart || kept.bars !== undefined))) {
       if (at >= 0) section.tracks.splice(at, 1);
-    } else if (at >= 0) {
-      section.tracks[at] = { ...section.tracks[at], state };
+    } else if (kept) {
+      section.tracks[at] = kept;
     } else {
       section.tracks.push({ track, state });
     }
@@ -204,6 +206,43 @@ export function setCellGrid(doc: ScoreDoc, cell: Cell, grid: string | undefined)
     section.tracks.push({ track, state: inheritedState(d, cell.section, track).state, grid });
     sortStates(d, cell.section);
   }
+  return done(d);
+}
+
+/** Drop the clip options the entry's state does not take (`restart` / `bars`). */
+function fitOptions(entry: DocSectionTrack): DocSectionTrack {
+  const out = { ...entry };
+  if (!RESTART_STATES.includes(out.state)) delete out.restart;
+  if (!TAKE_BARS_STATES.includes(out.state)) delete out.bars;
+  return out;
+}
+
+/**
+ * The clip options of one clip: `restart` (the loop starts from its top at the section start)
+ * and `bars` (a take shorter than the section). `false` / `undefined` remove the option. A clip
+ * without a state of its own gets the state it shows now, like [`setCellGrid`].
+ */
+export function setCellOptions(doc: ScoreDoc, cell: Cell, patch: { restart?: boolean; bars?: number | null }): ScoreDoc {
+  const d = draft(doc);
+  const track = d.tracks[cell.track]?.name;
+  const section = d.sections[cell.section];
+  if (track === undefined || !section) return doc;
+  let at = section.tracks.findIndex((t) => t.track === track);
+  if (at < 0) {
+    section.tracks.push({ track, state: inheritedState(d, cell.section, track).state });
+    sortStates(d, cell.section);
+    at = section.tracks.findIndex((t) => t.track === track);
+  }
+  const entry = { ...section.tracks[at] };
+  if (patch.restart !== undefined) {
+    if (patch.restart) entry.restart = true;
+    else delete entry.restart;
+  }
+  if (patch.bars !== undefined) {
+    if (patch.bars === null) delete entry.bars;
+    else entry.bars = patch.bars;
+  }
+  section.tracks[at] = fitOptions(entry);
   return done(d);
 }
 
@@ -314,7 +353,11 @@ export function deleteSection(doc: ScoreDoc, index: number): ScoreDoc {
       if (s[key] === undefined && gone[key] !== undefined) (s as unknown as Record<string, unknown>)[key] = gone[key];
     }
     for (const state of gone.tracks) {
-      if (!s.tracks.some((t) => t.track === state.track)) s.tracks.push({ track: state.track, state: state.state });
+      if (!s.tracks.some((t) => t.track === state.track)) {
+        // The clip options travel with the state, as the compiler lets a repeat inherit them.
+        const { restart, bars } = state;
+        s.tracks.push({ track: state.track, state: state.state, ...(restart ? { restart } : {}), ...(bars !== undefined ? { bars } : {}) });
+      }
     }
     if (gone.repeat !== undefined && gone.repeat !== s.id) s.repeat = gone.repeat;
     else delete s.repeat;
