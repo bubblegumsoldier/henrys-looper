@@ -177,6 +177,9 @@ pub struct DocSectionTrack {
     /// `{state: record, bars: 2}`: a take shorter than the section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bars: Option<u32>,
+    /// `{state: play, monitor: true}`: the loop plays and the live input is heard on top.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub monitor: bool,
     #[serde(default, skip_serializing_if = "Comments::is_empty")]
     pub comments: Comments,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -669,7 +672,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                         for state in states {
                                             // `voice: record` or `keys: {state: play, grid: 1/16}`,
                                             // also with `restart: true` or `bars: 2`.
-                                            let (word, grid, restart, bars) = match &state.value.kind {
+                                            let (word, grid, restart, bars, monitor) = match &state.value.kind {
                                                 NodeKind::Map(fields) => {
                                                     let node = |k: &str| {
                                                         fields
@@ -683,9 +686,10 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                                         get("grid").map(str::to_string),
                                                         node("restart").and_then(boolean).unwrap_or(false),
                                                         node("bars").and_then(int).map(|i| i as u32),
+                                                        node("monitor").and_then(boolean).unwrap_or(false),
                                                     )
                                                 }
-                                                _ => (state.value.as_str(), None, false, None),
+                                                _ => (state.value.as_str(), None, false, None, false),
                                             };
                                             let (Some(track), Some(word)) = (state.key.as_str(), word)
                                             else {
@@ -704,6 +708,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                                                 grid,
                                                 restart,
                                                 bars,
+                                                monitor,
                                                 comments: Comments::default(),
                                                 line: Some(state.key.pos.line),
                                             });
@@ -1492,6 +1497,9 @@ pub fn render_doc(doc: &ScoreDoc) -> String {
                     if state.restart {
                         options.push("restart: true".to_string());
                     }
+                    if state.monitor {
+                        options.push("monitor: true".to_string());
+                    }
                     let value = if options.is_empty() {
                         state.state.as_str().to_string()
                     } else {
@@ -2023,6 +2031,7 @@ pub fn template_with(tracks: Vec<DocTrack>, instruments: Vec<(String, String)>) 
         grid: None,
         restart: false,
         bars: None,
+        monitor: false,
         comments: Comments::default(),
         line: None,
     };

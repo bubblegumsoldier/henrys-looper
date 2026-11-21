@@ -62,7 +62,8 @@ fn clip_options_compile_and_a_repeat_carries_them_with_the_clip() {
         chorus.clip("chorus_guitar"),
         ClipOptions {
             restart: false,
-            bars: Some(2)
+            bars: Some(2),
+            monitor: false
         }
     );
     assert!(chorus.clip("theme").restart);
@@ -143,4 +144,102 @@ fn clip_options_round_trip_through_the_document() {
     doc.sections[1].tracks[2].grid = None;
     let text = render_doc(&doc);
     assert!(text.contains("      theme: play\n"), "{text}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// `{state: play, monitor: true}`
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn monitor_goes_with_play_and_nowhere_else() {
+    assert!(issues(&with_clip(2, "{state: play, monitor: true}")).is_empty());
+    assert!(issues(&with_clip(2, "{state: play, restart: true, monitor: true}")).is_empty());
+    // `monitor: false` says nothing and is allowed everywhere.
+    assert!(issues(&with_clip(2, "{state: record, monitor: false}")).is_empty());
+    for state in ["record", "overdub", "stack"] {
+        let (line, message) = one_issue(&with_clip(2, &format!("{{state: {state}, monitor: true}}")));
+        assert_eq!(line, 9);
+        assert!(message.contains(&format!("'monitor' on {state} does nothing")), "{message}");
+    }
+    let (_, message) = one_issue(&with_clip(2, "{state: hear_through, monitor: true}"));
+    assert!(message.contains("hear_through is the input alone"), "{message}");
+    let (_, message) = one_issue(&with_clip(2, "{state: stop, monitor: true}"));
+    assert!(message.contains("is on stop"), "{message}");
+}
+
+#[test]
+fn monitor_is_refused_on_a_track_that_is_never_heard_or_always_heard() {
+    let text = "bpm: 100\ntracks:\n  a: {input: 1, monitor: false}\nsections:\n  - id: s\n    bars: 2\n    tracks:\n      a: {state: play, monitor: true}\n";
+    let (line, message) = one_issue(text);
+    assert_eq!(line, 8);
+    assert!(message.contains("'monitor: false'"), "{message}");
+    let text = "bpm: 100\ntracks:\n  keys: {input: instrument}\nsections:\n  - id: s\n    bars: 2\n    tracks:\n      keys: {state: play, monitor: true}\n";
+    let (_, message) = one_issue(text);
+    assert!(message.contains("instrument track"), "{message}");
+}
+
+#[test]
+fn monitor_compiles_into_the_clip_and_round_trips() {
+    let text = with_clip(2, "{state: play, restart: true, monitor: true}");
+    let score = compile_score(&text).expect("compiles");
+    let clip = score.sections[0].clip("a");
+    assert!(clip.monitor && clip.restart);
+    let doc = parse_doc(&text).expect("parses");
+    assert!(doc.sections[0].tracks[0].monitor);
+    let rendered = render_doc(&doc);
+    assert!(rendered.contains("      a: {state: play, restart: true, monitor: true}\n"), "{rendered}");
+    assert_eq!(render_doc(&parse_doc(&rendered).expect("parses")), rendered);
+}
+
+// ---------------------------------------------------------------------------------------------
+// An overdub that has no pass of its loop inside its section
+// ---------------------------------------------------------------------------------------------
+
+/// The owner's score of the 2026-11-21 14:57 run, as far as it matters: a ten-bar loop recorded in
+/// `chorus_2`, silent in the bridge, back in a four-bar `chorus_3` (re-anchored there), and
+/// `chorus_3_all` six bars later - where the loop's next pass would begin in bar 7 of a six-bar
+/// section.
+fn owners_chorus_3(chorus_3_all: &str) -> String {
+    format!(
+        "bpm: 94\ntracks:\n  bv: {{input: 1}}\nsections:\n  - id: chorus_2\n    bars: 10\n    autorelease: true\n    tracks:\n      bv: record\n  - id: bridge\n    bars: 8\n    autorelease: true\n  - id: chorus_3\n    bars: 4\n    autorelease: true\n    tracks:\n      bv: overdub\n  - id: chorus_3_all\n    bars: 6\n    autorelease: true\n    tracks:\n      bv: {chorus_3_all}\n  - id: end\n    bars: 1\n"
+    )
+}
+
+#[test]
+fn an_overdub_without_a_pass_in_its_section_is_an_error_with_its_line() {
+    let (line, message) = one_issue(&owners_chorus_3("overdub"));
+    assert_eq!(line, 22, "the state in chorus_3_all");
+    assert!(
+        message.contains("Track 'bv' is on overdub in Section 'chorus_3_all'")
+            && message.contains("10-bar loop"),
+        "{message}"
+    );
+    let Err(ScoreError { issues }) = compile_score(&owners_chorus_3("overdub")) else {
+        unreachable!()
+    };
+    let hint = issues[0].suggestion.clone().unwrap_or_default();
+    assert!(hint.contains("restart: true") && hint.contains("bar 7"), "{hint}");
+    // What the hint says, works - and so does play, or a stack that restarts.
+    for fixed in ["{state: overdub, restart: true}", "play", "{state: stack, restart: true}"] {
+        assert!(issues_of(&owners_chorus_3(fixed)).is_empty(), "{fixed}");
+    }
+    let (_, message) = one_issue(&owners_chorus_3("stack"));
+    assert!(message.contains("is on stack"), "{message}");
+}
+
+/// After a section that waits for Release, where the overdub falls depends on the press: a note,
+/// not an error.
+#[test]
+fn after_a_release_section_it_is_a_note() {
+    let text = "bpm: 120\ntracks:\n  a: {input: 1}\nsections:\n  - id: rec\n    bars: 4\n    autorelease: true\n    tracks:\n      a: record\n  - id: wait\n    bars: 1\n    autorelease: false\n    tracks:\n      a: play\n  - id: short\n    bars: 2\n    autorelease: true\n    tracks:\n      a: overdub\n";
+    assert!(issues_of(text).is_empty());
+    let notes = super::score_notes(text);
+    assert!(
+        notes.iter().any(|n| n.message.contains("as early as possible") && n.line == Some(19)),
+        "{notes:?}"
+    );
+}
+
+fn issues_of(text: &str) -> Vec<(Option<u32>, String)> {
+    issues(text)
 }

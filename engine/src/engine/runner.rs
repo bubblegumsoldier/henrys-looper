@@ -241,6 +241,53 @@ struct Armed {
     before: Vec<Now>,
 }
 
+/// An `overdub` or `stack` that had no pass of its loop inside its section, so nothing was
+/// scheduled for it - see `Runner::place_pass`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Skipped {
+    /// Index of the section (after `repeat:` is resolved).
+    pub section: usize,
+    pub track: String,
+    pub state: ScoreState,
+    pub loop_bars: u32,
+    /// Bars from the section's start to the loop's next pass.
+    pub next_pass: u64,
+}
+
+/// Play a score through the runner without an engine: every section in order, each `autorelease`
+/// one as written and each that waits for Release released as early as its own grid allows (in
+/// the last bar of its first pass - so it gets exactly its written length). Returns the passes the
+/// runner could not place ([`Skipped`]). This is how `score --check` and the editor learn about
+/// them: with the runner's own rule, not with a second copy of it. A few hundred microseconds.
+pub fn dry_run(score: &CompiledScore) -> Vec<Skipped> {
+    let timeline = Timeline::new(48_000, score.bpm, score.signature());
+    let Ok(mut runner) = Runner::new(score.clone(), timeline, 128) else {
+        return Vec::new();
+    };
+    runner.start(0);
+    // Every section is armed once, plus the end; more turns than that would be a bug, not a score.
+    for _ in 0..(runner.plans.len() * 2 + 4) {
+        runner.out.clear();
+        runner.notices.clear();
+        if runner.phase.is_over() {
+            break;
+        }
+        match runner.armed_at() {
+            Some((at, _)) => runner.tick(at),
+            None => match runner.current {
+                Some(current) => {
+                    let timeline = runner.sched.timeline;
+                    let last = timeline.bar_start(current.start_bar + u64::from(current.bars.max(1)) - 1);
+                    runner.tick(last);
+                    runner.next(last);
+                }
+                None => break,
+            },
+        }
+    }
+    runner.skipped
+}
+
 /// One track as the sounding section has it - see [`Armed::before`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Now {
@@ -359,6 +406,8 @@ pub struct Runner {
     /// Where the click window opens for the run that was started last (the first bar of the
     /// count-in); 0 before any start. A close must never land before it - see [`Runner::stop_all`].
     gate_open_at: u64,
+    /// Passes `place_pass` could not place - see [`Skipped`].
+    skipped: Vec<Skipped>,
 }
 
 impl Runner {
@@ -446,6 +495,7 @@ impl Runner {
             out: Vec::new(),
             notices: Vec::new(),
             gate_open_at: 0,
+            skipped: Vec::new(),
         })
     }
 
@@ -783,6 +833,7 @@ impl Runner {
         self.current = None;
         self.armed = None;
         self.phase = Phase::Idle;
+        self.skipped.clear();
         self.message = format!(
             "Back to start: all tracks cleared, \"{}\" is ready to play again.",
             self.score.title
@@ -968,7 +1019,10 @@ impl Runner {
     fn apply_monitor(&mut self, index: usize) {
         for track in 0..self.tracks.len() {
             let state = self.plans[index].want[track];
-            let want = state.records() || state == ScoreState::HearThrough;
+            // `{state: play, monitor: true}`: the loop plays and the input is heard on top.
+            let want = state.records()
+                || state == ScoreState::HearThrough
+                || (state == ScoreState::Play && self.plans[index].clips[track].monitor);
             self.set_monitor(track, want);
         }
     }
@@ -1052,6 +1106,79 @@ impl Runner {
             t.take_end = pass_end;
             t.take_end_bar = bar;
         }
+    }
+
+    /// Where an `overdub` (or the first pass of a `stack`) on a loop the track already has ends,
+    /// given the grid point `at` it starts on - or `None` when it cannot happen in this section.
+    ///
+    /// **An overdub stays inside its section.** The pass starts on the loop's own grid, and a loop
+    /// that plays on into a section (no `restart`) may be in its middle there; when no point of its
+    /// grid lies inside the section at all, there is nothing to record: nothing is scheduled, the
+    /// loop just plays on, and the musician is told (`score --check` says it before the run, see
+    /// [`dry_run`]). Before this rule the pass was scheduled after the section had ended and ran
+    /// into whatever came next - an overdub in the `end` section of a score that never asked for one.
+    ///
+    /// A pass that starts inside is one whole pass when it fits; in an `autorelease` section, whose
+    /// end is certain, one that does not fit ends with the section (a shorter layer, as an overdub
+    /// in a section shorter than the loop always was). A section that waits for Release keeps the
+    /// whole pass: Release is pushed behind a running take anyway (`change_position`).
+    fn place_pass(
+        &mut self,
+        index: usize,
+        track: usize,
+        want: ScoreState,
+        at: u64,
+        start_bar: u64,
+        end: u64,
+    ) -> Option<u64> {
+        let plan_bars = self.plans[index].bars;
+        let autorelease = self.plans[index].autorelease;
+        let (len, len_bars) = (self.tracks[track].len, self.tracks[track].len_bars);
+        let at_bar = self.bar_near(at);
+        let end_bar = start_bar + u64::from(plan_bars);
+        if at_bar >= end_bar {
+            let name = self.tracks[track].name.clone();
+            self.notices.push(format!(
+                "\"{name}\": no pass of its {len_bars}-bar loop starts inside \"{}\" - nothing is \
+                 recorded there, the loop plays on.",
+                self.plans[index].id
+            ));
+            self.skipped.push(Skipped {
+                section: index,
+                track: name,
+                state: want,
+                loop_bars: len_bars,
+                next_pass: at_bar - start_bar,
+            });
+            return None;
+        }
+        let whole = at_bar + u64::from(len_bars) <= end_bar;
+        Some(if whole || (!autorelease && plan_bars >= len_bars) {
+            at + len
+        } else {
+            end
+        })
+    }
+
+    /// An overdub or stack layers onto a loop that has to be **heard** while it is recorded on.
+    /// A loop that was silent in the section before (`stop`, `hear_through`) is started on the
+    /// sample the pass begins - which is the section start, because such a loop is re-anchored
+    /// there ([`Self::restarts`]). Without this the engine recorded the layer over a silent loop
+    /// and only started playing at the take's end: the owner's chorus_3 run of 2026-11-21 14:57,
+    /// `backing_vocals: overdub` after the bridge - "the backing vocals do not play from the
+    /// start" (what was heard in bars 1-2 was his live voice through the monitor, then nothing).
+    fn comes_back(&mut self, track: usize, name: &str, at: u64) {
+        if self.tracks[track].sounding {
+            return;
+        }
+        let scheduled = self.sched.play_at(track, name, at);
+        self.push(scheduled);
+        self.tracks[track].sounding = true;
+    }
+
+    /// Passes [`Self::place_pass`] could not place, oldest first - see [`dry_run`].
+    pub fn skipped(&self) -> &[Skipped] {
+        &self.skipped
     }
 
     /// The first point of the current section's quantisation grid at or after `est` plus the head
@@ -1169,10 +1296,12 @@ impl Runner {
                 // overdub planned below then finds as its grid. `play`: the `StartPlay` follows
                 // right away for the same sample, so the engine may sound it from there on its
                 // read-ahead axis too (plugin and chain latency).
+                // An overdub or stack on a loop that comes back plays it too, from here: its
+                // `StartPlay` follows below (`Runner::comes_back`).
                 self.out.push(Command::RestartLoop {
                     track,
                     at: start,
-                    play: want == ScoreState::Play,
+                    play: want == ScoreState::Play || !self.tracks[track].sounding,
                 });
                 let t = &mut self.tracks[track];
                 t.origin = start;
@@ -1227,11 +1356,17 @@ impl Runner {
                             t.len,
                             start.saturating_sub(slack),
                         );
-                        // One whole pass, unless the section is genuinely shorter than the loop.
-                        // The comparison is in **bars**, for the same rounding reason.
-                        let stop = if plan.bars >= t.len_bars { at + t.len } else { end };
+                        // An overdub stays inside its section - see `Runner::place_pass`.
+                        let Some(stop) = self.place_pass(index, track, want, at, start_bar, end)
+                        else {
+                            self.tracks[track].target = want;
+                            continue;
+                        };
                         (at, stop, false)
                     };
+                    if !defines_loop {
+                        self.comes_back(track, &name, take_start);
+                    }
                     let layers = self.tracks[track].layers;
                     let scheduled =
                         self.sched
@@ -1265,12 +1400,22 @@ impl Runner {
                         (start, end, true)
                     } else {
                         let slack = self.slack();
+                        let len = t.len;
                         let at = Scheduler::loop_grid_at_or_after(
                             t.origin,
-                            t.len,
+                            len,
                             start.saturating_sub(slack),
                         );
-                        (at, at + t.len, false)
+                        // No pass starting inside the section: no stack here either. A first pass
+                        // that does start inside is a whole pass, as every pass of a stack is.
+                        if self
+                            .place_pass(index, track, want, at, start_bar, end)
+                            .is_none()
+                        {
+                            self.tracks[track].target = want;
+                            continue;
+                        }
+                        (at, at + len, false)
                     };
                     self.out.push(Command::LatchOverdub {
                         track,
@@ -1280,6 +1425,7 @@ impl Runner {
                     let scheduled = if defines_loop {
                         self.sched.record_at(track, &name, start, plan.bars)
                     } else {
+                        self.comes_back(track, &name, take_start);
                         let layers = self.tracks[track].layers;
                         self.sched
                             .overdub_at(track, &name, take_start, take_end, layers)
@@ -1479,3 +1625,6 @@ mod golden_tests;
 
 #[cfg(test)]
 mod stop_tests;
+
+#[cfg(test)]
+mod overdub_tests;

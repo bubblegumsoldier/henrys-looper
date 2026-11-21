@@ -51,7 +51,7 @@ const TRACK_FIELDS: [&str; 10] = [
     "grid",
 ];
 const TRACK_MIDI_FIELDS: [&str; 4] = ["device", "channel", "notes", "transpose"];
-const CLIP_FIELDS: [&str; 4] = ["state", "grid", "restart", "bars"];
+const CLIP_FIELDS: [&str; 5] = ["state", "grid", "restart", "bars", "monitor"];
 const SECTION_FIELDS: [&str; 6] = ["id", "repeat", "bars", "autorelease", "quantize", "tracks"];
 /// Fields one binding may carry. The *keys* of `midi:` are not a closed list any more - any address
 /// of the parameter tree does, and the two Ableton-era names `next_section` and `stop_all` are
@@ -121,6 +121,14 @@ pub fn read_score_noted(yaml_text: &str) -> (Result<ScoreSource, ScoreError>, Ve
         // Needs `repeat:` resolved, so it runs on a score that is otherwise clean.
         let issues = take_length_issues(score, &reader.clip_bars_pos);
         reader.issues.extend(issues);
+        let issues = clip_monitor_issues(score, &reader.clip_monitor_pos);
+        reader.issues.extend(issues);
+        if reader.issues.is_empty() {
+            // Played through without a device: an overdub that cannot happen in its section.
+            let (errors, overdub_notes) = overdub_issues(score, &reader.state_pos);
+            reader.issues.extend(errors);
+            notes.extend(overdub_notes);
+        }
         // Needs the resolved sections too: anchors name them, and their bars are what the text
         // between two anchors is measured against.
         let (errors, sheet_notes) = sheet_issues(score, &document, yaml_text);
@@ -155,6 +163,8 @@ struct Reader {
     state_pos: HashMap<(String, String), Pos>,
     /// Where each clip's `bars:` value stands, the same way.
     clip_bars_pos: HashMap<(String, String), Pos>,
+    /// Where each clip's `monitor:` value stands, the same way.
+    clip_monitor_pos: HashMap<(String, String), Pos>,
 }
 
 /// A take of its own length (`{state: record, bars: N}`) has to fit into its section: a take never
@@ -191,6 +201,112 @@ fn take_length_issues(
         }
     }
     issues
+}
+
+/// `{state: play, monitor: true}` asks for the track's live input on top of its loop. Two tracks
+/// cannot give that, and saying so beats silently not doing it: a track the score set to
+/// `monitor: false` (the input is never heard - that is what the option is for), and an instrument
+/// track (its keys are heard whenever it plays anyway; to silence them it is `monitor: false`).
+fn clip_monitor_issues(
+    score: &ScoreSource,
+    monitor_pos: &HashMap<(String, String), Pos>,
+) -> Vec<ScoreIssue> {
+    let compiled = super::compile::compile(score);
+    let mut issues = Vec::new();
+    for section in &compiled.sections {
+        for (name, clip) in section.clips.iter() {
+            if !clip.monitor {
+                continue;
+            }
+            let Some(track) = compiled.tracks.iter().find(|t| t.name == name) else {
+                continue;
+            };
+            let (why, hint) = if track.is_instrument() {
+                (
+                    format!(
+                        "'monitor' does nothing on the instrument track '{name}' (Section '{}'): \
+                         what is played on it is heard whenever it plays.",
+                        section.id
+                    ),
+                    "Remove 'monitor'.".to_string(),
+                )
+            } else if !track.monitor {
+                (
+                    format!(
+                        "Track '{name}' is set to 'monitor: false', so its input is never heard - \
+                         but Section '{}' asks to hear it ('monitor: true').",
+                        section.id
+                    ),
+                    format!("Remove one of the two: 'monitor: false' under tracks, or 'monitor' on the clip."),
+                )
+            } else {
+                continue;
+            };
+            let pos = monitor_pos.get(&(section.id.clone(), name.to_string())).copied();
+            let mut issue = ScoreIssue::new(pos, why).with_suggestion(hint);
+            if pos.is_none() {
+                issue.line = section.source_line;
+            }
+            issues.push(issue);
+        }
+    }
+    issues
+}
+
+/// An `overdub` (or the first pass of a `stack`) on a loop that keeps playing into a section is
+/// recorded on the loop's own grid - and a section that is shorter than the loop, entered in the
+/// middle of it, may have no point of that grid inside it at all. Nothing can be recorded there.
+/// The runner then schedules nothing (`engine::runner`, "An overdub stays inside its section");
+/// this says so before the run. Found by playing the score through the runner without a device
+/// (`runner::dry_run`), so the rule is the runner's own and not a second copy of it.
+///
+/// An error while every section up to that one goes on by itself (`autorelease: true`) - then
+/// where each section begins is certain. After a section that waits for Release it depends on
+/// when Release is pressed, so it is a note: "with Release at the earliest moment".
+fn overdub_issues(
+    score: &ScoreSource,
+    state_pos: &HashMap<(String, String), Pos>,
+) -> (Vec<ScoreIssue>, Vec<ScoreIssue>) {
+    let compiled = super::compile::compile(score);
+    let mut errors = Vec::new();
+    let mut notes = Vec::new();
+    for skipped in crate::engine::runner::dry_run(&compiled) {
+        let section = &compiled.sections[skipped.section];
+        let certain = compiled.sections[..=skipped.section]
+            .iter()
+            .all(|s| s.autorelease);
+        let pos = state_pos
+            .get(&(section.id.clone(), skipped.track.clone()))
+            .copied();
+        let message = format!(
+            "Track '{}' is on {} in Section '{}', but no pass of its {}-bar loop starts inside the \
+             section's {} bar{}{} - nothing would be recorded.",
+            skipped.track,
+            skipped.state.as_str(),
+            section.id,
+            skipped.loop_bars,
+            section.bars,
+            if section.bars == 1 { "" } else { "s" },
+            if certain { "" } else { " (with Release pressed as early as possible)" },
+        );
+        let mut issue = ScoreIssue::new(pos, message).with_suggestion(format!(
+            "Start the loop from its top here ('{}: {{state: {}, restart: true}}'), or make the \
+             section at least {} bars long - its next pass begins in bar {} of it.",
+            skipped.track,
+            skipped.state.as_str(),
+            skipped.next_pass + 1,
+            skipped.next_pass + 1
+        ));
+        if pos.is_none() {
+            issue.line = section.source_line;
+        }
+        if certain {
+            errors.push(issue);
+        } else {
+            notes.push(issue);
+        }
+    }
+    (errors, notes)
 }
 
 /// The sheet's anchors and timing, checked against the sections (`score::sheet`). Positions are
@@ -1482,6 +1598,14 @@ impl Reader {
                         clip.restart = on;
                         clip_nodes.push(("restart", node.pos));
                     }
+                    if let Some(node) = fields.get("monitor")
+                        && let Some(on) = self.as_bool(node, &format!("'monitor' of {what}"))
+                    {
+                        clip.monitor = on;
+                        clip_nodes.push(("monitor", node.pos));
+                        self.clip_monitor_pos
+                            .insert((section.to_string(), name.to_string()), node.pos);
+                    }
                     if let Some(node) = fields.get("bars")
                         && let Some(bars) =
                             self.as_int(node, &format!("'bars' of {what}"), 1, MAX_BARS)
@@ -1571,6 +1695,32 @@ impl Reader {
                     ),
                     "Remove 'restart'; it goes with play, overdub or stack.",
                 ),
+            }
+        }
+        if clip.monitor {
+            let why = match state {
+                TrackState::Play => None,
+                TrackState::Record | TrackState::Overdub | TrackState::Stack => Some(format!(
+                    "'monitor' on {} does nothing (Track '{name}' in Section '{section}'): a take \
+                     always lets the input be heard.",
+                    state.as_str()
+                )),
+                TrackState::HearThrough => Some(format!(
+                    "'monitor' on hear_through does nothing (Track '{name}' in Section \
+                     '{section}'): hear_through is the input alone."
+                )),
+                TrackState::Stop => Some(format!(
+                    "'monitor' goes with a loop that plays, but Track '{name}' is on stop in \
+                     Section '{section}'."
+                )),
+            };
+            if let Some(why) = why {
+                self.error_with(
+                    pos("monitor"),
+                    why,
+                    "'monitor: true' goes with play: the loop plays and the input is heard on top. \
+                     For the input alone, use hear_through.",
+                );
             }
         }
         if clip.bars.is_some() && state != TrackState::Record {

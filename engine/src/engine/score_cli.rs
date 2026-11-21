@@ -295,6 +295,9 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
                 if clip.restart {
                     options.push("restart".to_string());
                 }
+                if clip.monitor {
+                    options.push("monitor".to_string());
+                }
                 format!(
                     "{}={}{}",
                     t.name,

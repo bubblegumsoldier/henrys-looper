@@ -17,7 +17,7 @@ import { GRID_CHOICES, TransposeControl } from "../live/MidiLoopRows";
 import { inputLabel } from "./Grid";
 import { STATES, STATE_LOOK, busHas, busWord, duration, plural } from "./labels";
 import * as ops from "./ops";
-import { RESTART_STATES, beatsPerBar, clipOptions, deriveLayers, resolveSection, secondsPerBar, sectionSpans, totalBars } from "./resolve";
+import { MONITOR_STATES, RESTART_STATES, beatsPerBar, clipOptions, deriveLayers, resolveSection, secondsPerBar, sectionSpans, totalBars } from "./resolve";
 import type { Selection } from "./selection";
 
 interface Props {
@@ -565,6 +565,8 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
       <div className="hint">
         {what}
         {opts.restart && RESTART_STATES.includes(st.state) && <> The loop starts from its top at the start of this section.</>}
+        {opts.monitor && st.state === "play" && <> The live input is heard on top of the loop; nothing is recorded.</>}
+        {opts.monitor && st.state === "play" && t.monitor === false && <span className="warnline"> Monitoring is off for {t.name} - the score will not compile like this.</span>}
         {needsMonitor && t.monitor === false && <span className="warnline"> Monitoring is off for {t.name}, so you will not hear the input.</span>}
       </div>
       {st.state === "record" && bars > 1 && (
@@ -597,6 +599,19 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
               disabled={!editable}
               label="Restart the loop here"
               onChange={(v) => edit((d) => ops.setCellOptions(d, { section: index, track }, { restart: v }))}
+            />
+          </div>
+        </div>
+      )}
+      {MONITOR_STATES.includes(st.state) && !t.instrument && (
+        <div className="frow">
+          <label>Input too</label>
+          <div title="The loop plays and the track's live input is heard on top, through its effects - for a voice sung live over the recorded ones, on the same track. Nothing is recorded.">
+            <Toggle
+              on={opts.monitor === true}
+              disabled={!editable}
+              label="Hear the input over the loop"
+              onChange={(v) => edit((d) => ops.setCellOptions(d, { section: index, track }, { monitor: v }))}
             />
           </div>
         </div>

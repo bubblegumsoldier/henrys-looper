@@ -46,6 +46,12 @@ pub struct ClipOptions {
     /// the new loop plays for the rest of the section. Only on `record`, `1..=bars` of the section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bars: Option<u32>,
+    /// `{state: play, monitor: true}`: the loop plays **and** the track's live input is heard
+    /// (through its effect chain, on its monitor bus - exactly as `hear_through` hears it), and
+    /// nothing is recorded. A third voice sung live over the recorded ones, on the track that holds
+    /// them. Only on `play`: the takes and `hear_through` monitor anyway, `stop` plays nothing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub monitor: bool,
 }
 
 impl ClipOptions {

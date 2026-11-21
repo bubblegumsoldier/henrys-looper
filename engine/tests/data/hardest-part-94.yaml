@@ -149,7 +149,9 @@ sections:
       chorus_guitar: play
       Drums: play
       mic: play
-      backing_vocals: overdub
+      # The third voice live on top of the recorded ones (the owner has play here; the test data
+      # uses the clip option for it, so Stop all is proven to close that monitor too).
+      backing_vocals: {state: play, monitor: true}
 
   # To be continued. For now: everything stops.
   - id: end

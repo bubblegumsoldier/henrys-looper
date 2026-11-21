@@ -18,7 +18,7 @@
 //! since a copied comment would describe the original.
 
 import type { DocMidiBinding, DocSection, DocSectionTrack, DocTrack, Quantize, ScoreDoc, ScoreState } from "../types";
-import { RESTART_STATES, TAKE_BARS_STATES, inheritedField, inheritedState, resolveDoc } from "./resolve";
+import { MONITOR_STATES, RESTART_STATES, TAKE_BARS_STATES, inheritedField, inheritedState, resolveDoc } from "./resolve";
 
 /** The engine runs at most this many tracks (`max_tracks`). */
 export const MAX_TRACKS = 8;
@@ -173,7 +173,7 @@ export function setCellState(doc: ScoreDoc, cells: Cell[], state: ScoreState): S
     const at = section.tracks.findIndex((t) => t.track === track);
     // Clip options that do not go with the new state go - the compiler would refuse them.
     const kept = at >= 0 ? fitOptions({ ...section.tracks[at], state }) : undefined;
-    if (inherited.state === state && !(kept && (kept.grid || kept.restart || kept.bars !== undefined))) {
+    if (inherited.state === state && !(kept && (kept.grid || kept.restart || kept.monitor || kept.bars !== undefined))) {
       if (at >= 0) section.tracks.splice(at, 1);
     } else if (kept) {
       section.tracks[at] = kept;
@@ -214,6 +214,7 @@ function fitOptions(entry: DocSectionTrack): DocSectionTrack {
   const out = { ...entry };
   if (!RESTART_STATES.includes(out.state)) delete out.restart;
   if (!TAKE_BARS_STATES.includes(out.state)) delete out.bars;
+  if (!MONITOR_STATES.includes(out.state)) delete out.monitor;
   return out;
 }
 
@@ -222,7 +223,7 @@ function fitOptions(entry: DocSectionTrack): DocSectionTrack {
  * and `bars` (a take shorter than the section). `false` / `undefined` remove the option. A clip
  * without a state of its own gets the state it shows now, like [`setCellGrid`].
  */
-export function setCellOptions(doc: ScoreDoc, cell: Cell, patch: { restart?: boolean; bars?: number | null }): ScoreDoc {
+export function setCellOptions(doc: ScoreDoc, cell: Cell, patch: { restart?: boolean; bars?: number | null; monitor?: boolean }): ScoreDoc {
   const d = draft(doc);
   const track = d.tracks[cell.track]?.name;
   const section = d.sections[cell.section];
@@ -234,6 +235,10 @@ export function setCellOptions(doc: ScoreDoc, cell: Cell, patch: { restart?: boo
     at = section.tracks.findIndex((t) => t.track === track);
   }
   const entry = { ...section.tracks[at] };
+  if (patch.monitor !== undefined) {
+    if (patch.monitor) entry.monitor = true;
+    else delete entry.monitor;
+  }
   if (patch.restart !== undefined) {
     if (patch.restart) entry.restart = true;
     else delete entry.restart;
@@ -355,8 +360,14 @@ export function deleteSection(doc: ScoreDoc, index: number): ScoreDoc {
     for (const state of gone.tracks) {
       if (!s.tracks.some((t) => t.track === state.track)) {
         // The clip options travel with the state, as the compiler lets a repeat inherit them.
-        const { restart, bars } = state;
-        s.tracks.push({ track: state.track, state: state.state, ...(restart ? { restart } : {}), ...(bars !== undefined ? { bars } : {}) });
+        const { restart, bars, monitor } = state;
+        s.tracks.push({
+          track: state.track,
+          state: state.state,
+          ...(restart ? { restart } : {}),
+          ...(bars !== undefined ? { bars } : {}),
+          ...(monitor ? { monitor } : {}),
+        });
       }
     }
     if (gone.repeat !== undefined && gone.repeat !== s.id) s.repeat = gone.repeat;

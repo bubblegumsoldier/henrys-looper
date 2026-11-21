@@ -881,6 +881,71 @@ phasenrichtig in der Folgesektion) und `a_short_take_that_does_not_divide_its_se
 der Clip-Inspektor hat *Take length* (bei Record) und *Restart the loop here* (bei Play, Overdub,
 Stack). Wechselt ein Clip den Zustand, fallen Optionen weg, die der neue nicht nimmt.
 
+### Loop spielt, Eingang ist zu hören (`{state: play, monitor: true}`)
+
+Der Wunsch: im letzten Refrain eine dritte Stimme live über Lead und Backings singen — alle acht
+Tracks sind belegt, also gibt es keinen freien Track für `hear_through`. `mic: {state: play,
+monitor: true}`: der Loop spielt wie bei `play`, **und** der Live-Eingang des Tracks ist zu hören —
+durch seine Effektkette, auf seinem Monitor-Bus, genau wie bei `hear_through`. Aufgenommen wird
+nichts. Der Runner schaltet das Mithören an der Sektionsgrenze (wie bei jeder Sektion), der Loop
+läuft ohne Lücke weiter. Im Mitschnitt erscheint der Eingang so wie bei einem `hear_through`-Track
+(der Mitschnitt nimmt den Live-Eingang jedes Tracks, dessen Mithören an ist). Die Stummschaltung
+des Mithörens bei eingebauten Lautsprechern gilt auch hier (sie wirkt in der Engine auf jedes
+Mithören). „Stop all" schaltet es mit allem anderen aus.
+
+| Frage | Entscheidung |
+|---|---|
+| `record`, `overdub`, `stack` | **Fehler** „'monitor' on record does nothing" — ein Take lässt den Eingang ohnehin hören |
+| `hear_through` | **Fehler** — das ist der Eingang allein |
+| `stop` | **Fehler** — dazu gehört ein Loop, der spielt; der Hinweis nennt `hear_through` |
+| Track mit `monitor: false` | **Fehler** an der Clip-Option: beides zugleich kann nicht gelten, eins muss weg |
+| Instrument-Track | **Fehler** — dessen Spiel ist immer zu hören, solange er spielt |
+| `monitor: false` am Clip | sagt nichts, überall erlaubt |
+| mit `restart: true` | geht zusammen |
+
+`score --check`: `mic=play(monitor)`; Dokument `DocSectionTrack.monitor`, Reihenfolge `grid, bars,
+restart, monitor`; im Arrangement „+ input" am Clip und *Hear the input over the loop* im
+Clip-Inspektor (nur bei Play, nicht bei Instrument-Tracks). Bewiesen in `score/clip_tests.rs` und
+`runner/overdub_tests.rs` (Loop lückenlos, Mithören an und wieder aus, keine Ebene dazu, Stop all).
+
+### Ein Overdub bleibt in seiner Sektion — und hört den Loop, auf den es schichtet
+
+Zwei Fehler, gefunden im Lauf des Besitzers vom 21.11. 14:57 (`chorus_3` 4 Takte und
+`chorus_3_all` 6 Takte, beide `backing_vocals: overdub`, der Loop 10 Takte aus `chorus_2`):
+
+1. **Ein Overdub auf einem Loop, der nach einer Pause wiederkommt, war stumm.** Die Engine nimmt
+   eine Ebene auch über einen Loop auf, der nicht spielt; der Runner schickte das `StartPlay` erst
+   am Takeende. In `chorus_3` lief also der ganze Overdub über einem stummen Loop („the backing
+   vocals do not play from the start"); was in Takt 1–2 im Stem zu hören war, ist sehr
+   wahrscheinlich die Live-Stimme über das Mithören des Overdubs — die Simulation zeigt den Loop
+   ab Sample 200 der Sektion stumm. Jetzt startet `Runner::comes_back` den Loop auf dem ersten
+   Sample der Ebene (das ist der Sektionsanfang, denn ein wiederkommender Loop wird dort neu
+   verankert; die Neuverankerung trägt dann `play: true`). Gilt für `overdub` und `stack`.
+2. **Ein Overdub ohne Durchlauf in seiner Sektion lief in die nächste.** Ein Overdub beginnt auf
+   dem eigenen Raster des Loops. Spielt der Loop über die Grenze weiter (kein `restart`), liegt der
+   nächste Rasterpunkt womöglich hinter dem Sektionsende — in `chorus_3_all` lag er auf dessen
+   Ende, und der Take wurde trotzdem geplant (Start nach dem Ende, `StopRecord` davor), ebenso
+   wurde ein ganzer Durchlauf, der nicht mehr hineinpasste, über das Ende hinaus geplant.
+
+Die Regel (`Runner::place_pass`):
+
+| Fall | Was geschieht |
+|---|---|
+| Loop wird an der Sektion neu verankert (kommt wieder, oder `restart: true`) | der Durchlauf beginnt am Sektionsanfang |
+| sonst | auf dem nächsten Rasterpunkt des Loops **in** der Sektion |
+| kein Rasterpunkt in der Sektion | **nichts** wird geplant, der Loop spielt einfach weiter; Meldung zur Laufzeit; `score --check` und Editor: **Fehler** mit Zeile, wenn alle Sektionen bis dahin `autorelease: true` haben (dann steht fest, wo jede beginnt), sonst ein **Hinweis** („with Release pressed as early as possible"). Vorschlag: `restart: true`, oder die Sektion so lang, dass der nächste Durchlauf hineinfällt |
+| Durchlauf passt ganz hinein | ein ganzer Durchlauf (wie bisher) |
+| passt nicht ganz, Sektion mit `autorelease` | die Ebene endet mit der Sektion — kürzer als der Loop, wie ein Overdub in einer Sektion, die kürzer als der Loop ist, es immer war. Nichts davon reicht in die nächste Sektion |
+| passt nicht ganz, Sektion wartet auf Release | ganzer Durchlauf; der Release wird wie immer hinter den laufenden Take geschoben |
+| `stack` | gleiche Regel für den ersten Durchlauf (kein Rasterpunkt: kein Stapel). Der letzte Durchlauf eines Stapels wird wie bisher zu Ende aufgenommen (siehe `stack`) |
+
+Die Prüfung vor dem Lauf rechnet nichts nach: `runner::dry_run` spielt die Partitur durch den
+Runner ohne Engine (jede Release-Sektion so früh wie möglich gelöst) und meldet, was
+`place_pass` nicht platzieren konnte. Der Golden-Wert „whole loops" in `runner/golden_tests.rs`
+ändert sich dadurch bewusst (dort überdubbt `back` einen Loop, der in `pause` schwieg); alles vor
+`back` ist bitgleich, geprüft mit einem eigenen Hash. Bewiesen in `runner/overdub_tests.rs` und
+`score/clip_tests.rs`.
+
 ### `stack`: eine neue Ebene in jedem Durchlauf, bis die Sektion endet
 
 ```yaml

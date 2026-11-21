@@ -21,6 +21,20 @@ describe("clip grid", () => {
 });
 
 describe("clip options", () => {
+  it("sets monitor on a play clip only, and a state change away from play drops it", () => {
+    const doc = henry();
+    const name = doc.tracks[0].name;
+    const find = (d: ReturnType<typeof henry>, s: number) => d.sections[s].tracks.find((t) => t.track === name);
+    const played = ops.setCellState(doc, [{ section: 5, track: 0 }], "play");
+    const heard = ops.setCellOptions(played, { section: 5, track: 0 }, { monitor: true });
+    expect(find(heard, 5)).toMatchObject({ state: "play", monitor: true });
+    expect(clipOptions(heard, 5, name).monitor).toBe(true);
+    expect(find(ops.setCellState(heard, [{ section: 5, track: 0 }], "record"), 5)?.monitor).toBeUndefined();
+    expect(find(ops.setCellOptions(heard, { section: 5, track: 0 }, { monitor: false }), 5)?.monitor).toBeUndefined();
+    // On record it is not written at all.
+    expect(find(ops.setCellOptions(doc, { section: 0, track: 0 }, { monitor: true }), 0)?.monitor).toBeUndefined();
+  });
+
   it("sets restart and a take length, keeps them through a state change that takes them and drops them otherwise", () => {
     const doc = henry();
     const name = doc.tracks[0].name;

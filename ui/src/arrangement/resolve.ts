@@ -81,6 +81,8 @@ export function inheritedState(doc: ScoreDoc, section: number, track: string): {
 /** What a clip says beyond its state (`restart`, `bars`). */
 export interface ClipOptions {
   restart: boolean;
+  /** `{state: play, monitor: true}`: the input is heard on top of the loop. */
+  monitor?: boolean;
   bars?: number;
 }
 
@@ -92,7 +94,7 @@ export interface ClipOptions {
 export function clipOptions(doc: ScoreDoc, section: number, track: string): ClipOptions {
   for (const at of repeatChain(doc, section)) {
     const own = doc.sections[at].tracks.find((t) => t.track === track);
-    if (own) return { restart: own.restart === true, bars: own.bars };
+    if (own) return { restart: own.restart === true, bars: own.bars, ...(own.monitor ? { monitor: true } : {}) };
   }
   return { restart: false };
 }
@@ -100,6 +102,8 @@ export function clipOptions(doc: ScoreDoc, section: number, track: string): Clip
 /** Which states a clip option goes with - the compiler refuses it with any other. */
 export const RESTART_STATES: ScoreState[] = ["play", "overdub", "stack"];
 export const TAKE_BARS_STATES: ScoreState[] = ["record"];
+/** `monitor: true` goes with play only: the takes and hear_through hear the input anyway. */
+export const MONITOR_STATES: ScoreState[] = ["play"];
 
 export type SectionField = "bars" | "autorelease" | "quantize";
 

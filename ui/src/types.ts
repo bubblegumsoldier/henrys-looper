@@ -888,6 +888,8 @@ export interface DocSectionTrack {
   grid?: string;
   /** `{state: play, restart: true}`: the loop starts from its top at this section's start. */
   restart?: boolean;
+  /** `{state: play, monitor: true}`: the loop plays and the live input is heard on top. */
+  monitor?: boolean;
   /** `{state: record, bars: 2}`: a take shorter than the section; the loop plays for the rest. */
   bars?: number;
   comments?: DocComments;
