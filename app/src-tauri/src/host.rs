@@ -90,6 +90,7 @@ use crate::proto::{
     StartConfig, StatusEvent, TrackConfig, bus_events, dbfs, output_events, score_event, track_event,
 };
 use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tracks};
+use crate::supervisor::{EngineStateView, MicPermission, NO_MIC_PERMISSION, Opened, Supervisor, Trigger, bring_up, then_act};
 
 /// Event the status snapshot is pushed on.
 pub const STATUS_EVENT: &str = "looper://status";
@@ -126,8 +127,14 @@ const IDLE_TICK: Duration = Duration::from_millis(200);
 const MIX_BATCH: usize = 48;
 /// How long the free-mode mix waits after the last change before it is written to `mixer.json`.
 const MIX_SAVE_DELAY: Duration = Duration::from_secs(1);
-/// The one sentence for "there is nothing to talk to yet", so every command says it the same way.
-const NO_ENGINE: &str = "The engine is not running. Start it first.";
+/// The sentence for a press that found no engine and could not start one either - only on the
+/// way out, or before the window has sent its setup. Everything else starts the engine itself.
+const NO_ENGINE: &str = "The engine is not running.";
+/// Event carrying the engine's situation (`crate::supervisor::EngineStateView`): running,
+/// starting, off, waiting for an interface, failed.
+pub const ENGINE_STATE_EVENT: &str = "looper://engine-state";
+/// How often a missing interface is looked for while the engine waits for it.
+const PLUG_POLL: Duration = Duration::from_secs(2);
 
 /// Keep the order in which layers appeared (one track index per layer, oldest first) in step with
 /// the layer counts of two snapshots: a new layer goes on top, a removed one comes off that track's
@@ -399,6 +406,21 @@ impl Action {
 }
 
 enum Request {
+    /// The window's setup and "start when the app opens", sent at startup and on every change;
+    /// `preview` is the score that will be loaded, whose tracks the stage shows until then.
+    Configure(Box<StartConfig>, bool, Option<String>, Sender<Result<EngineStateView, String>>),
+    EngineState(Sender<Result<EngineStateView, String>>),
+    /// Something is about to need the engine (a plugin's window opens): start it if it may.
+    Ensure(Sender<Result<(), String>>),
+    /// "Use ... now" while waiting for an interface.
+    UseFallback(Sender<Result<EngineInfo, String>>),
+    /// Rebuild with the window's setup (it changed in something only a start applies); a loaded
+    /// score is loaded again onto the new engine.
+    Restart(Sender<Result<EngineInfo, String>>),
+    /// "Unmute anyway": lift the feedback guard of built-in speakers.
+    Unmute(Sender<Result<(), String>>),
+    /// The app is going down: stop, and start nothing any more.
+    Quit(Sender<Result<(), String>>),
     ListDevices(Sender<Result<DeviceReport, String>>),
     Start(Box<StartConfig>, Sender<Result<EngineInfo, String>>),
     Stop(Sender<Result<(), String>>),
@@ -474,6 +496,39 @@ impl EngineHandle {
 
     pub fn stop(&self) -> Result<(), String> {
         self.call(Request::Stop)
+    }
+
+    pub fn configure(
+        &self,
+        config: StartConfig,
+        autostart: bool,
+        preview: Option<String>,
+    ) -> Result<EngineStateView, String> {
+        self.call(|reply| Request::Configure(Box::new(config), autostart, preview, reply))
+    }
+
+    pub fn engine_state(&self) -> Result<EngineStateView, String> {
+        self.call(Request::EngineState)
+    }
+
+    pub fn ensure(&self) -> Result<(), String> {
+        self.call(Request::Ensure)
+    }
+
+    pub fn use_fallback(&self) -> Result<EngineInfo, String> {
+        self.call(Request::UseFallback)
+    }
+
+    pub fn restart(&self) -> Result<EngineInfo, String> {
+        self.call(Request::Restart)
+    }
+
+    pub fn unmute(&self) -> Result<(), String> {
+        self.call(Request::Unmute)
+    }
+
+    pub fn quit(&self) -> Result<(), String> {
+        self.call(Request::Quit)
     }
 
     pub fn info(&self) -> Result<Option<EngineInfo>, String> {
@@ -567,6 +622,9 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
     // stays connected across a stop and a restart of the engine, and the learn mode has to work
     // before anything is started at all.
     let mut midi = MidiBridge::new();
+    // When the engine runs: by itself at startup, on demand, when an interface is plugged in.
+    let mut sup = Supervisor::with_store(crate::supervisor::store_path());
+    let mut last_plug_poll = Instant::now();
 
     loop {
         // An open MIDI port needs the short tick as much as a running engine does: the queue
@@ -578,7 +636,7 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
             IDLE_TICK
         };
         match rx.recv_timeout(tick) {
-            Ok(request) => handle(request, &mut session, &mut midi, &app),
+            Ok(request) => handle(request, &mut session, &mut midi, &mut sup, &app),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -587,28 +645,305 @@ fn host_thread(rx: Receiver<Request>, app: AppHandle) {
             active.service(&app);
             if active.finished() {
                 log!("The engine ended by itself.");
-                stop_session(&mut session, &app);
+                sup.lost();
+                stop_session(&mut session, &app, &sup);
+                emit_state(&app, &mut sup, false, false);
             }
         }
 
+        // Waiting for an interface: look for it every few seconds; plugged in, the engine starts.
+        if session.is_none() && sup.is_waiting() && last_plug_poll.elapsed() >= PLUG_POLL {
+            last_plug_poll = Instant::now();
+            let _ = ensure(&mut session, &mut midi, &mut sup, &app, Trigger::Plug, None);
+        }
+
         sync_instruments(&mut midi, session.as_mut());
-        pump_midi(&mut midi, &mut session, &app);
+        pump_midi(&mut midi, &mut session, &mut sup, &app);
         // Recordings whose writer has finished - also those of a session that is gone.
         crate::recording::poll(&app);
     }
 
     // The handle was dropped, so the app is going down. Give the device back properly anyway.
-    stop_session(&mut session, &app);
+    sup.quit();
+    stop_session(&mut session, &app, &sup);
     log!("Audio thread ended.");
+}
+
+/// Tell the window where the engine stands, when that changed.
+fn emit_state(app: &AppHandle, sup: &mut Supervisor, running: bool, starting: bool) {
+    let view = sup.view(running, starting);
+    if sup.shown.as_ref() != Some(&view) {
+        let _ = app.emit(ENGINE_STATE_EVENT, &view);
+        sup.shown = Some(view);
+    }
+}
+
+/// Make sure the engine runs, starting it if `trigger` may (see `crate::supervisor`). `score`: the
+/// score about to be loaded - the engine is then built with its tracks right away instead of with
+/// the setup's and rebuilt a moment later.
+fn ensure(
+    session: &mut Option<Session>,
+    midi: &mut MidiBridge,
+    sup: &mut Supervisor,
+    app: &AppHandle,
+    trigger: Trigger,
+    score: Option<&CompiledScore>,
+) -> Result<(), String> {
+    if session.is_some() {
+        return Ok(());
+    }
+    let host = sup.desired().map(|c| c.host.clone()).unwrap_or_default();
+    let result = bring_up(
+        session,
+        sup,
+        trigger,
+        || crate::supervisor::survey(&host),
+        |config, sup| {
+            let config = match score {
+                Some(score) => rebuilt_config(&config, score, None, config.quantize.into()),
+                None => config,
+            };
+            if crate::supervisor::has_audio_tracks(&config.tracks)
+                && crate::supervisor::mic_permission() == MicPermission::Denied
+            {
+                return Err(NO_MIC_PERMISSION.to_string());
+            }
+            let _ = app.emit(ENGINE_STATE_EVENT, sup.view(false, true));
+            log!("Starting the engine ({trigger:?}).");
+            let mut active = Session::start(config, sup.monitor_consent)?;
+            // Every parameter is back at its starting value, so every knob has to catch its
+            // parameter again. Without this, pickup would protect the first touch after startup
+            // and nothing afterwards.
+            midi.rearm();
+            log_started(&active.info);
+            let device = active.info.output_device.clone();
+            let interface = active.info.input_device == device
+                && !crate::supervisor::output_is_speakers(&device);
+            // The press that asked is carried out against the engine's real position.
+            active.settle(app);
+            Ok((active, Opened { device, interface }))
+        },
+    );
+    match &result {
+        Ok(()) => {
+            if let Some(active) = session.as_ref() {
+                let _ = app.emit(ENGINE_EVENT, &active.info);
+            }
+        }
+        Err(e) => {
+            if sup.view(false, false).phase == "failed" {
+                log!("Engine does not start: {e}");
+                let _ = app.emit(STATUS_EVENT, ready_event(sup));
+            }
+        }
+    }
+    emit_state(app, sup, session.is_some(), false);
+    result
+}
+
+fn log_started(info: &EngineInfo) {
+    let stereo = info.tracks.iter().filter(|t| t.channels() == 2).count();
+    log!(
+        "Engine started: {} / {} -> {} @ {} Hz, {} frames, {} tracks ({} of them stereo), \
+         default latency {} frames, {} tracks with their own value.",
+        info.host,
+        info.input_device,
+        info.output_device,
+        info.sample_rate,
+        info.buffer_frames,
+        info.tracks.len(),
+        stereo,
+        info.latency_frames,
+        info.tracks
+            .iter()
+            .filter(|t| t.latency_frames.is_some() || t.latency_trim != 0)
+            .count()
+    );
+}
+
+/// What the stage shows while no engine runs: the tracks and the clock of the setup it will start
+/// with - or of the score that will be loaded - every track empty, every meter at rest. `ready` is
+/// true so the window draws the whole stage; `running` stays false.
+fn ready_event(sup: &Supervisor) -> StatusEvent {
+    let mut event = StatusEvent::idle();
+    let Some(config) = sup.preview().or(sup.desired()) else {
+        return event;
+    };
+    event.ready = true;
+    event.bpm = config.bpm;
+    event.beats_per_bar = config.beats_per_bar;
+    event.beat_unit = config.beat_unit;
+    event.bars = config.bars;
+    event.quantize = config.quantize;
+    event.overdub_mode = config.overdub_mode;
+    event.count_in_bars = config.count_in_bars;
+    event.latency_frames = config.latency_frames;
+    event.click = config.click;
+    event.click_gain = config.click_gain;
+    event.monitor_gain = config.monitor_gain;
+    let rate = config.sample_rate.max(1);
+    event.sample_rate = rate;
+    if let Ok(timeline) = build_timeline(
+        rate,
+        config.bpm,
+        config.beats_per_bar,
+        config.beat_unit,
+        config.bars,
+        config.latency_frames,
+    ) {
+        event.samples_per_beat = timeline.samples_per_beat();
+        event.loop_samples = timeline.span_bars(0, config.bars);
+        event.loop_seconds = timeline.samples_to_secs(event.loop_samples);
+    }
+    // The device is not open, so its channel counts are not known: enough for every track, and
+    // the two output pairs a stereo interface has.
+    let inputs = config
+        .tracks
+        .iter()
+        .flat_map(|t| [t.input_channel, t.input_channel_right.unwrap_or(0)])
+        .max()
+        .unwrap_or(1)
+        .max(1) as usize;
+    let outputs = config.output_channels.map_or(2, usize::from).max(2);
+    event.output_channels = outputs as u32;
+    if let (Ok(routing), Ok(gains)) = (config.bus_routing(outputs), config.bus_gain_pair()) {
+        event.buses_collapsed = routing.collapsed();
+        event.buses = Bus::ALL
+            .into_iter()
+            .map(|bus| {
+                let out = routing.get(bus);
+                crate::proto::BusStatusEvent {
+                    id: bus.name().to_string(),
+                    label: bus.label().to_string(),
+                    channel: out.first as u32 + 1,
+                    width: out.width as u32,
+                    channel_label: out.label(),
+                    gain: gains[bus.index()],
+                    peak: 0.0,
+                    dbfs: None,
+                    peaks: vec![0.0, 0.0],
+                    has_click: bus == Bus::Monitor || (routing.collapsed() && bus == Bus::Main),
+                }
+            })
+            .collect();
+    }
+    let Ok(defs) = resolve_tracks(&config.tracks, inputs) else {
+        return event;
+    };
+    event.tracks = defs
+        .iter()
+        .zip(&config.tracks)
+        .enumerate()
+        .map(|(i, (d, t))| {
+            let (input_channels, channels) = match d.input {
+                TrackInput::Mono(c) => ([c as u8, c as u8], 1),
+                TrackInput::Stereo { left, right } => ([left as u8, right as u8], 2),
+                TrackInput::Instrument => ([0, 0], 2),
+            };
+            let status = TrackStatus {
+                input_channels,
+                channels,
+                pan: d.pan,
+                loop_send: d.loop_send,
+                monitor_send: d.monitor_send,
+                latency: d.latency,
+                latency_frames: d.latency.resolve(config.latency_frames) as u32,
+                monitor: t.instrument.as_ref().map_or(config.monitor, |x| x.monitor),
+                instrument: t.instrument.is_some(),
+                midi_loop: t.instrument.as_ref().is_some_and(InstrumentInput::midi_loop),
+                ..TrackStatus::default()
+            };
+            let mut track = track_event(i, &d.name, &status, &[], rate, Default::default());
+            if let Some(x) = &t.instrument {
+                track.grid = x.note_grid().as_str().to_string();
+                track.transpose = x.transpose.map_or(0, i32::from);
+            }
+            track
+        })
+        .collect();
+    event
 }
 
 fn handle(
     request: Request,
     session: &mut Option<Session>,
     midi: &mut MidiBridge,
+    sup: &mut Supervisor,
     app: &AppHandle,
 ) {
     match request {
+        Request::Configure(config, autostart, preview, reply) => {
+            let score_loaded = session.as_ref().map(|s| s.runner.is_some());
+            sup.configure(*config, autostart, score_loaded);
+            // The stage shows the score that is about to be loaded rather than the setup.
+            let shape = preview
+                .as_deref()
+                .and_then(|yaml| compile_score(yaml).ok())
+                .zip(sup.desired().cloned())
+                .map(|(score, desired)| {
+                    let quantize = desired.quantize.into();
+                    rebuilt_config(&desired, &score, None, quantize)
+                });
+            sup.set_preview(shape);
+            if session.is_none() {
+                let _ = app.emit(STATUS_EVENT, ready_event(sup));
+            }
+            emit_state(app, sup, session.is_some(), false);
+            let _ = reply.send(Ok(sup.view(session.is_some(), false)));
+            // The first setup of this run: the moment the app starts the engine by itself.
+            let _ = ensure(session, midi, sup, app, Trigger::Boot, None);
+        }
+        Request::EngineState(reply) => {
+            let _ = reply.send(Ok(sup.view(session.is_some(), false)));
+        }
+        Request::Ensure(reply) => {
+            let _ = reply.send(ensure(session, midi, sup, app, Trigger::Demand, None));
+        }
+        Request::UseFallback(reply) => {
+            sup.use_fallback();
+            let result = ensure(session, midi, sup, app, Trigger::Demand, None)
+                .and_then(|()| session.as_ref().map(|s| s.info.clone()).ok_or_else(|| NO_ENGINE.to_string()));
+            let _ = reply.send(result);
+        }
+        Request::Restart(reply) => {
+            // A loaded score goes onto the new engine again; its tracks are what the engine has.
+            let score = session
+                .as_ref()
+                .filter(|s| s.runner.is_some())
+                .and_then(|s| s.score_yaml.clone());
+            if session.is_some() {
+                log!("Restarting the engine with the changed setup.");
+                sup.lost();
+                stop_session(session, app, sup);
+            }
+            let compiled = score.as_deref().and_then(|y| compile_score(y).ok());
+            let mut result = ensure(session, midi, sup, app, Trigger::Demand, compiled.as_ref())
+                .and_then(|()| session.as_ref().map(|s| s.info.clone()).ok_or_else(|| NO_ENGINE.to_string()));
+            if let (Ok(_), Some(yaml)) = (&result, score) {
+                match load_score_onto(session, midi, app, &yaml, None, sup.monitor_consent) {
+                    Ok(loaded) => log!("Score loaded again: {}", loaded.message),
+                    Err(e) => {
+                        log!("Score not loaded again: {e}");
+                        result = Err(format!("The engine runs with the new setup, but the score was not loaded again: {e}"));
+                    }
+                }
+            }
+            let _ = reply.send(result);
+        }
+        Request::Unmute(reply) => {
+            sup.monitor_consent = true;
+            if let Some(active) = session.as_mut() {
+                active.set_monitor_guard(false);
+            }
+            log!("Monitoring unmuted on the speakers by the musician.");
+            let _ = reply.send(Ok(()));
+        }
+        Request::Quit(reply) => {
+            sup.quit();
+            stop_session(session, app, sup);
+            log!("Engine stopped on the way out.");
+            let _ = reply.send(Ok(()));
+        }
         Request::ListDevices(reply) => {
             let report = survey_devices();
             for host in &report.hosts {
@@ -625,68 +960,58 @@ fn handle(
             let _ = reply.send(Ok(report));
         }
         Request::Start(config, reply) => {
-            // Restart with a different configuration is a stop plus a start; doing it here rather
-            // than refusing keeps the frontend from having to sequence two commands.
+            // An explicit start (Setup, Retry): this setup, now. A running engine is stopped first,
+            // which keeps the frontend from having to sequence two commands.
+            let autostart = sup.view(false, false).autostart;
+            sup.configure(*config, autostart, None);
             if session.is_some() {
                 log!("Engine already running - stopping it for the restart.");
-                stop_session(session, app);
+                sup.lost();
+                stop_session(session, app, sup);
             }
-            match Session::start(*config) {
-                Ok(active) => {
-                    // Every parameter is back at its starting value, so every knob has to catch its
-                    // parameter again. Without this, pickup would protect the first touch after
-                    // startup and nothing afterwards.
-                    midi.rearm();
-                    let info = active.info.clone();
-                    let stereo = info.tracks.iter().filter(|t| t.channels() == 2).count();
-                    log!(
-                        "Engine started: {} / {} @ {} Hz, {} frames, {} tracks ({} of them stereo), \
-                         default latency {} frames, {} tracks with their own value.",
-                        info.host,
-                        info.output_device,
-                        info.sample_rate,
-                        info.buffer_frames,
-                        info.tracks.len(),
-                        stereo,
-                        info.latency_frames,
-                        info.tracks
-                            .iter()
-                            .filter(|t| t.latency_frames.is_some() || t.latency_trim != 0)
-                            .count()
-                    );
-                    *session = Some(active);
-                    let _ = reply.send(Ok(info));
-                }
-                Err(e) => {
-                    log!("Engine does not start: {e}");
-                    let _ = reply.send(Err(e));
-                }
-            }
+            let result = ensure(session, midi, sup, app, Trigger::Demand, None)
+                .and_then(|()| session.as_ref().map(|s| s.info.clone()).ok_or_else(|| NO_ENGINE.to_string()));
+            let _ = reply.send(result);
         }
         Request::Info(reply) => {
             let _ = reply.send(Ok(session.as_ref().map(|s| s.info.clone())));
         }
         Request::Stop(reply) => {
             if session.is_none() {
-                let _ = reply.send(Err("The engine is not running.".to_string()));
+                let _ = reply.send(Ok(()));
                 return;
             }
-            stop_session(session, app);
+            // Stopped by hand: nothing starts by itself now - the next press that needs the engine
+            // starts it again.
+            sup.stopped_by_user();
+            stop_session(session, app, sup);
+            emit_state(app, sup, false, false);
             log!("Engine stopped.");
             let _ = reply.send(Ok(()));
         }
         Request::Act(action, reply) => {
-            let result = match session.as_mut() {
-                Some(active) => active.apply(action),
-                None => Err(NO_ENGINE.to_string()),
-            };
+            let result = then_act(
+                session,
+                |session| ensure(session, midi, sup, app, Trigger::Demand, None),
+                |active| active.apply(action),
+            );
             if let Err(e) = &result {
                 log!("Command refused: {e}");
             }
             let _ = reply.send(result);
         }
         Request::ScoreLoad(yaml, count_in, reply) => {
-            let result = load_score_onto(session, midi, app, &yaml, count_in);
+            // No engine yet: it is started with the score's tracks right away. A score that does
+            // not compile starts nothing - the answer is the list of what is wrong with it.
+            let started = if session.is_none() {
+                compile_score(&yaml)
+                    .map_err(|error| render_issues(&error))
+                    .and_then(|score| ensure(session, midi, sup, app, Trigger::Demand, Some(&score)))
+            } else {
+                Ok(())
+            };
+            let result = started
+                .and_then(|()| load_score_onto(session, midi, app, &yaml, count_in, sup.monitor_consent));
             match &result {
                 Ok(loaded) => {
                     log!("Score loaded: {}", loaded.message);
@@ -714,12 +1039,21 @@ fn handle(
                 }
                 Err(e) => log!("Score not loaded: {e}"),
             }
+            if session.is_none() {
+                sup.lost();
+                emit_state(app, sup, false, false);
+            }
             let _ = reply.send(result);
         }
         Request::ScoreAct(action, reply) => {
-            let result = match session.as_mut() {
-                Some(active) => active.score_act(action),
-                None => Err(NO_ENGINE.to_string()),
+            let result = match (session.is_some(), action) {
+                // Nothing runs, so there is nothing to stop or to rewind.
+                (false, ScoreAction::StopAll | ScoreAction::Rewind) => Ok("Nothing is playing.".to_string()),
+                _ => then_act(
+                    session,
+                    |session| ensure(session, midi, sup, app, Trigger::Demand, None),
+                    |active| active.score_act(action),
+                ),
             };
             if let Ok(message) = &result {
                 log!("Score: {message}");
@@ -729,12 +1063,24 @@ fn handle(
         Request::RecordingStop(reply) => {
             let result = match session.as_mut() {
                 Some(active) => active.stop_recording(),
-                None => Err(NO_ENGINE.to_string()),
+                // Without an engine nothing is being recorded.
+                None => Ok(()),
             };
             let _ = reply.send(result);
         }
         Request::Calibrate(config, reply) => {
-            let _ = reply.send(run_calibration(*config, session.is_some()));
+            // The measurement needs the device to itself: the engine steps aside and comes back.
+            let was_running = session.is_some();
+            if was_running {
+                log!("Engine stopped for the calibration.");
+                sup.lost();
+                stop_session(session, app, sup);
+            }
+            let outcome = run_calibration(*config, false);
+            if was_running {
+                let _ = ensure(session, midi, sup, app, Trigger::Demand, None);
+            }
+            let _ = reply.send(outcome);
         }
         Request::MixerState(reply) => {
             let _ = reply.send(match session.as_ref() {
@@ -743,20 +1089,17 @@ fn handle(
             });
         }
         Request::MixerTake(reply) => {
-            let _ = reply.send(match session.as_mut() {
-                Some(active) => Ok(active.mixer_take()),
-                None => Err(NO_ENGINE.to_string()),
-            });
+            // Without an engine no fader has moved.
+            let _ = reply.send(Ok(session.as_mut().map(|a| a.mixer_take()).unwrap_or_default()));
         }
         Request::MixerApply(mixer, pan, reply) => {
-            let _ = reply.send(match session.as_mut() {
-                Some(active) => {
-                    active.queue_mix(&mixer);
-                    active.apply_pans(&pan);
-                    Ok(())
-                }
-                None => Err(NO_ENGINE.to_string()),
-            });
+            // Without an engine there is nothing to put the mix into: the score's `mixer:` section
+            // is applied when it is loaded.
+            if let Some(active) = session.as_mut() {
+                active.queue_mix(&mixer);
+                active.apply_pans(&pan);
+            }
+            let _ = reply.send(Ok(()));
         }
 
         // --- MIDI -------------------------------------------------------------------------
@@ -966,7 +1309,12 @@ fn sync_instruments(midi: &mut MidiBridge, session: Option<&mut Session>) {
 ///
 /// Called once per turn of the host loop, which is every four milliseconds while anything is open.
 /// Nothing here allocates unless an event actually arrived.
-fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHandle) {
+fn pump_midi(
+    midi: &mut MidiBridge,
+    session: &mut Option<Session>,
+    sup: &mut Supervisor,
+    app: &AppHandle,
+) {
     // Known controllers connect by themselves, unplugged ones are dropped, profiles edited by hand
     // are read again - see the module comment of `midi.rs`.
     for line in midi.tick() {
@@ -980,6 +1328,22 @@ fn pump_midi(midi: &mut MidiBridge, session: &mut Option<Session>, app: &AppHand
 
     let mut events = Vec::new();
     midi.drain(&mut events);
+
+    // A key or a pad while nothing runs: the musician wants to play. The engine starts, and the
+    // event is resolved against it as if it had come a moment later. Note-offs and pitch bend
+    // start nothing, and a failed start is not retried by the next note (`Trigger::Passive`).
+    if session.is_none()
+        && !midi.is_learning()
+        && events.iter().any(|(_, e)| {
+            matches!(
+                e,
+                looper_engine::midi::MidiEvent::NoteOn { .. }
+                    | looper_engine::midi::MidiEvent::ControlChange { .. }
+            )
+        })
+    {
+        let _ = ensure(session, midi, sup, app, Trigger::Passive, None);
+    }
 
     for (link, event) in events {
         // The learn mode swallows the stream: while it waits for a control, that control must not
@@ -1273,6 +1637,7 @@ fn load_score_onto(
     app: &AppHandle,
     yaml: &str,
     count_in: Option<u32>,
+    consent: bool,
 ) -> Result<ScoreLoaded, String> {
     let Some(active) = session.as_mut() else {
         return Err(NO_ENGINE.to_string());
@@ -1318,17 +1683,17 @@ fn load_score_onto(
         old.save_free_mix(true);
         old.shutdown();
     }
-    match Session::start(config) {
+    match Session::start(config, consent) {
         Ok(fresh) => {
             *session = Some(fresh);
             midi.rearm();
         }
         Err(e) => {
             log!("Rebuild failed: {e}");
-            let restored = Session::start(previous);
+            let restored = Session::start(previous, consent);
             let note = match &restored {
                 Ok(_) => "The previous setup is running again.",
-                Err(_) => "The engine is stopped; start it again from the setup screen.",
+                Err(_) => "The engine is stopped; the next press starts it again.",
             };
             *session = restored.ok();
             return Err(format!(
@@ -1449,12 +1814,13 @@ fn check_level(what: &str, gain: f32) -> Result<(), String> {
     }
 }
 
-/// Shut the engine down and tell the frontend, in that order.
-fn stop_session(session: &mut Option<Session>, app: &AppHandle) {
+/// Shut the engine down and tell the frontend, in that order. The stage stays: it shows the
+/// setup's tracks at rest until the engine runs again.
+fn stop_session(session: &mut Option<Session>, app: &AppHandle, sup: &Supervisor) {
     if let Some(mut active) = session.take() {
         active.save_free_mix(true);
         active.shutdown();
-        let _ = app.emit(STATUS_EVENT, StatusEvent::idle());
+        let _ = app.emit(STATUS_EVENT, ready_event(sup));
     }
 }
 
@@ -1826,10 +2192,16 @@ struct Session {
     grids: [NoteGrid; MAX_TRACKS],
     /// The transposition last sent, per track.
     transposes: Vec<i8>,
+    /// The monitored inputs are silenced in the engine (`Command::SetMonitorMute`) because the
+    /// output is a pair of speakers.
+    monitor_guard: bool,
 }
 
 impl Session {
-    fn start(config: StartConfig) -> Result<Session, String> {
+    /// Open the device and start the engine. `consent`: the musician has said "Unmute anyway" -
+    /// without it, built-in speakers start with the monitored inputs silenced
+    /// (`crate::supervisor`).
+    fn start(config: StartConfig, consent: bool) -> Result<Session, String> {
         let started_with = config.clone();
         let dev = DeviceOpts {
             host: config.host.clone(),
@@ -1854,6 +2226,11 @@ impl Session {
         // The tracks come first now: the loop length has to be checked against the *largest*
         // compensation in the session, and that is not known before they are resolved.
         let defs = resolve_tracks(&config.tracks, in_channels)?;
+        // Built-in speakers and a live microphone in one room feed back. The guard is set before a
+        // single block is played, and only where there is a live input to guard.
+        let monitor_guard = !consent
+            && defs.iter().any(|d| !d.input.is_instrument())
+            && crate::supervisor::output_is_speakers(&setup.out_name);
         let timeline = build_timeline(
             rate,
             config.bpm,
@@ -1951,6 +2328,13 @@ impl Session {
         // The app opens with the clock standing: nothing blinks or clicks until the musician
         // presses Start, records something, or loads a score.
         core.hold_transport();
+        if monitor_guard {
+            core.mute_monitoring(true);
+            log!(
+                "\"{}\" are speakers: monitoring starts muted so a microphone cannot feed back.",
+                setup.out_name
+            );
+        }
 
         // ---- input stream: whole frames into the FIFO, nothing else ------------------------
         let stats_in = Arc::clone(&stats);
@@ -2195,6 +2579,7 @@ impl Session {
             clips,
             grids,
             transposes: Vec::new(),
+            monitor_guard,
         };
         // The free mode's faders and chains, by track name - before anything is played, so the
         // first note already sounds the way the last session ended.
@@ -2206,6 +2591,34 @@ impl Session {
             });
         }
         Ok(session)
+    }
+
+    /// Lift (or set) the feedback guard of built-in speakers.
+    fn set_monitor_guard(&mut self, on: bool) {
+        if self.monitor_guard == on {
+            return;
+        }
+        match self.cmd.send(Command::SetMonitorMute { on }) {
+            Ok(()) => {
+                self.monitor_guard = on;
+                self.message = Some(if on {
+                    "Monitoring is muted: the output is the built-in speakers.".to_string()
+                } else {
+                    "Monitoring unmuted on the speakers - mind the feedback.".to_string()
+                });
+            }
+            Err(e) => self.message = Some(e),
+        }
+    }
+
+    /// Wait until the first status snapshot is in, so a press carried out right after an
+    /// on-demand start is scheduled against the engine's real position rather than against zero.
+    fn settle(&mut self, app: &AppHandle) {
+        let until = Instant::now() + Duration::from_millis(400);
+        while self.last.is_none() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            self.service(app);
+        }
     }
 
     /// Stop the streams and give every buffer back.
@@ -2544,8 +2957,16 @@ impl Session {
         } else {
             (1, 1, 0)
         };
+        // The warning is only news while something is actually being kept quiet: a monitored track
+        // with a live input.
+        let monitor_muted = self.monitor_guard
+            && self.defs.iter().enumerate().any(|(i, d)| {
+                !d.input.is_instrument() && status.tracks().get(i).is_some_and(|t| t.monitor)
+            });
         StatusEvent {
             running: true,
+            ready: true,
+            monitor_muted,
             transport,
             pos: status.pos,
             seconds: status.pos as f64 / rate as f64,
@@ -4132,7 +4553,7 @@ mod tests {
         )
         .expect("Konfiguration");
         // `Session` owns two cpal streams and has no `Debug`, so the error is unwrapped by hand.
-        let err = match Session::start(config) {
+        let err = match Session::start(config, false) {
             Err(e) => e,
             Ok(_) => panic!("den Host gibt es nicht, das haette scheitern muessen"),
         };

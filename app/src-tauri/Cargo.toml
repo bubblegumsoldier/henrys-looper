@@ -39,6 +39,7 @@ midir = "0.11.0"
 # through Tauri's WebView layer; named here to switch on the few classes it needs.
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"
+objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSError", "NSString"] }
 objc2-app-kit = { version = "0.3", features = ["NSImage", "NSImageRep", "NSBitmapImageRep"] }
 objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfiguration", "block2", "objc2-app-kit"] }

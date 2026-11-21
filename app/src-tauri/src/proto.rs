@@ -427,7 +427,7 @@ impl From<PendingKind> for PendingKindName {
 ///
 /// Every field except `tracks` has a default, so a frontend can send only what it wants to change
 /// from the values phase 0 measured on this machine.
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct StartConfig {
     /// `asio` or `wasapi` on Windows, `coreaudio` on macOS. On Windows only ASIO reaches a usable
@@ -836,6 +836,13 @@ pub struct TrackStatusEvent {
 #[serde(rename_all = "snake_case")]
 pub struct StatusEvent {
     pub running: bool,
+    /// The stage can be drawn: the engine runs, or it does not yet and this event shows the tracks
+    /// and clock of the setup it will start with (`crate::host::ready_event`) - meters empty,
+    /// every control usable, the first press starts the engine.
+    pub ready: bool,
+    /// The monitored live inputs are silenced because the output is a pair of built-in speakers
+    /// and a monitored microphone would feed back (`crate::supervisor`). "Unmute anyway" lifts it.
+    pub monitor_muted: bool,
     /// Whether the clock runs. `false` means: bar 1, beat 1, nothing counts, nothing blinks. In free
     /// looping it is the musician's Start/Stop; with a score loaded it is true from the count-in to
     /// the end of the run and false before the start and after "Stop all".
@@ -944,6 +951,8 @@ impl StatusEvent {
     pub fn idle() -> Self {
         Self {
             running: false,
+            ready: false,
+            monitor_muted: false,
             transport: false,
             pos: 0,
             seconds: 0.0,
@@ -2115,6 +2124,7 @@ mod tests {
                 "message",
                 "mixer_rev",
                 "monitor_gain",
+                "monitor_muted",
                 "other_errors",
                 "output_channels",
                 "output_dbfs",
@@ -2124,6 +2134,7 @@ mod tests {
                 "overdub_mode",
                 "pos",
                 "quantize",
+                "ready",
                 "running",
                 "sample_rate",
                 "samples_per_beat",

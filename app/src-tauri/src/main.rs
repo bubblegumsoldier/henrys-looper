@@ -28,6 +28,7 @@ mod plugins;
 mod proto;
 mod recording;
 mod schedule;
+mod supervisor;
 
 use tauri::{Emitter, Manager, State};
 
@@ -101,11 +102,79 @@ async fn engine_start(
     offload(move || handle.start(config)).await
 }
 
-/// Stop the engine and give the device back. Every buffer returns to the control thread.
+/// Stop the engine and give the device back. Every buffer returns to the control thread. Stopped
+/// by hand, it does not start by itself again; the next press that needs it starts it.
 #[tauri::command]
 async fn engine_stop(engine: State<'_, EngineHandle>) -> Result<(), String> {
     let handle = engine.inner().clone();
     offload(move || handle.stop()).await
+}
+
+/// The window's setup, sent at startup and on every change, with "start the engine when the app
+/// opens" and the score about to be loaded again (its tracks are what the resting stage shows).
+/// The first call of a run is when the engine starts by itself. Answers where the engine stands.
+#[tauri::command(rename_all = "snake_case")]
+async fn engine_configure(
+    config: StartConfig,
+    autostart: bool,
+    preview: Option<String>,
+    engine: State<'_, EngineHandle>,
+) -> Result<supervisor::EngineStateView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.configure(config, autostart, preview)).await
+}
+
+/// Where the engine stands: running, starting, off, waiting for an interface, failed.
+#[tauri::command]
+async fn engine_state(engine: State<'_, EngineHandle>) -> Result<supervisor::EngineStateView, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.engine_state()).await
+}
+
+/// Something is about to need the engine (a plugin's own window opens): start it if it is not
+/// running. Answers why not when it could not.
+#[tauri::command]
+async fn engine_ensure(engine: State<'_, EngineHandle>) -> Result<(), String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.ensure()).await
+}
+
+/// "Use ... now": start on the default device instead of waiting for the missing interface.
+#[tauri::command]
+async fn engine_use_fallback(engine: State<'_, EngineHandle>) -> Result<EngineInfo, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.use_fallback()).await
+}
+
+/// Rebuild the engine with the setup the window sent last; a loaded score is loaded again.
+#[tauri::command]
+async fn engine_restart(engine: State<'_, EngineHandle>) -> Result<EngineInfo, String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.restart()).await
+}
+
+/// "Unmute anyway": monitored inputs are heard on built-in speakers too, for the rest of this run.
+#[tauri::command]
+async fn engine_unmute(engine: State<'_, EngineHandle>) -> Result<(), String> {
+    let handle = engine.inner().clone();
+    offload(move || handle.unmute()).await
+}
+
+/// Open macOS's microphone privacy settings - the way out of a refused audio input.
+#[tauri::command]
+async fn open_mic_settings() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("System Settings did not open: {e}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Only on macOS.".to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1108,6 +1177,13 @@ fn main() {
             engine_info,
             engine_start,
             engine_stop,
+            engine_configure,
+            engine_state,
+            engine_ensure,
+            engine_use_fallback,
+            engine_restart,
+            engine_unmute,
+            open_mic_settings,
             track_record,
             track_overdub,
             track_stop,
@@ -1229,7 +1305,9 @@ fn shut_down(app: &tauri::AppHandle) {
         let engine = engine.inner().clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(engine.stop());
+            // Not `stop`: from here on nothing may start the engine again - not a MIDI note that
+            // arrives while the plugins are being unloaded.
+            let _ = tx.send(engine.quit());
         });
         // The audio thread may be waiting for this very thread; do not wait for it forever.
         if rx.recv_timeout(std::time::Duration::from_secs(3)).is_err() {
