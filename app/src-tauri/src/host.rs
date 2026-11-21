@@ -37,6 +37,7 @@ use tauri::{AppHandle, Emitter};
 
 use looper_engine::audio::{self, DeviceOpts};
 use looper_engine::capture::capture_channel;
+use looper_engine::load::{LoadClock, LoadShared};
 use looper_engine::capture::run::{Mode as RecordMode, SectionWatch};
 use looper_engine::engine::bus::{
     Bus, BusOutput, BusSend, MAX_BUS_GAIN, TrackSource, routing_note,
@@ -82,6 +83,7 @@ use looper_engine::score::{CompiledScore, CompiledTrack, OrderedMap, ScoreError,
 
 use crate::logfile::{self, log};
 use crate::layout::{self, LayoutTrack};
+use crate::loadwatch::{Counts, Incident, LoadWatch};
 use crate::mixstore;
 use crate::midi::{BindingOptions, MidiBridge, MidiOutcome, MidiPortView, MidiSaved, MidiView, ProfileAction};
 use crate::proto::{
@@ -2129,6 +2131,10 @@ struct Session {
     status_rx: StatusReceiver,
     pool: LayerPool,
     stats: Arc<HostStats>,
+    /// What the output callback's load clock publishes (`looper_engine::load`).
+    load: Arc<LoadShared>,
+    /// Overruns made out of it: counted, logged, marked in the recording (`crate::loadwatch`).
+    load_watch: LoadWatch,
     scheduler: Scheduler,
     tracks: Vec<TrackUi>,
     /// The engine's track layout as it was resolved at start. Kept because a score is checked
@@ -2390,6 +2396,8 @@ impl Session {
         let stats_out_err = Arc::clone(&stats);
         let mut in_scratch = vec![0.0f32; scratch_frames * in_channels];
         let mut out_scratch = vec![0.0f32; scratch_frames * BUS_SAMPLES];
+        // The load clock is owned by the callback; `load` is the control thread's window on it.
+        let (mut load_clock, load) = LoadClock::new(rate);
         let output = audio::build_output(
             &setup.output,
             &setup.out_plan,
@@ -2438,6 +2446,7 @@ impl Session {
                     done += n;
                 }
                 stats_out.record_callback(t0);
+                load_clock.finish(t0, frames, core.take_plugin_ns());
             },
             move |err| stats_out_err.count_error(err),
         )?;
@@ -2548,6 +2557,8 @@ impl Session {
             status_rx,
             pool,
             stats,
+            load,
+            load_watch: LoadWatch::default(),
             scheduler: Scheduler::new(
                 timeline,
                 config.bars,
@@ -2951,6 +2962,7 @@ impl Session {
         });
         let dropouts = self.dropouts();
         self.recorder.service(takes, dropouts, app);
+        self.watch_load();
 
         if self.last_emit.elapsed() >= EMIT_INTERVAL
             && let Some((status, _)) = self.last
@@ -3073,6 +3085,11 @@ impl Session {
             fifo_overruns: stats.overruns.load(Ordering::Relaxed),
             other_errors: stats.other_errors.load(Ordering::Relaxed),
             max_callback_ms: stats.cb_nanos_max.load(Ordering::Relaxed) as f64 / 1e6,
+            load: self.load_watch.event(
+                &self.load.read(),
+                stats.xruns.load(Ordering::Relaxed),
+                rate,
+            ),
             score: self.runner.as_ref().map(|runner| {
                 let names: Vec<String> = self.tracks.iter().map(|ui| ui.name.clone()).collect();
                 score_event(&runner.score().title, &runner.view(status.pos), &names)
@@ -3587,6 +3604,85 @@ impl Session {
         self.recorder.end(self.estimated_pos());
         self.message = Some("Recording to disk stopped.".to_string());
         Ok(())
+    }
+
+    /// The overrun watch's turn (`crate::loadwatch`): count what the callbacks counted, and once an
+    /// overrun is complete, mark it in the recording and write it to the log - rate-limited, and
+    /// here on the host thread, never in the callback.
+    fn watch_load(&mut self) {
+        let now = Instant::now();
+        let reading = self.load.read();
+        let counts = Counts {
+            late_blocks: reading.late_blocks,
+            late_wakeups: reading.late_wakeups,
+            overloads: self.stats.xruns.load(Ordering::Relaxed),
+        };
+        let pos = self.estimated_pos();
+        let done = self.load_watch.observe(now, counts, &reading, pos, || {
+            let (_, display) = crate::recording::local_stamp(Duration::ZERO);
+            display.rsplit(' ').next().unwrap_or_default().to_string()
+        });
+        if let Some(incident) = done {
+            self.recorder
+                .overrun(incident.frame, &incident.kind_text(), incident.percent);
+            if let Some((held, worst)) = self.load_watch.admit_log(now, &incident) {
+                if held > 0 {
+                    log!(
+                        "{held} further audio overrun(s) before this one (worst {worst:.0} %)."
+                    );
+                }
+                log!("{}", self.overrun_line(&incident, &reading));
+            }
+        }
+        if let Some((held, worst)) = self.load_watch.flush_log(now) {
+            log!(
+                "{held} further audio overrun(s) in the last seconds (worst {worst:.0} %, \
+                 {} in total).",
+                self.load_watch.incidents
+            );
+        }
+    }
+
+    /// One log line for an overrun: when, what, how bad, and where the music was.
+    fn overrun_line(&self, incident: &Incident, reading: &looper_engine::load::LoadReading) -> String {
+        let rate = f64::from(self.info.sample_rate.max(1));
+        let budget = f64::from(reading.block_frames) * 1000.0 / rate;
+        let load = if incident.percent > 0.0 {
+            format!(
+                "{:.0} % of the {budget:.2} ms budget ({:.2} ms)",
+                incident.percent,
+                f64::from(incident.percent) * budget / 100.0
+            )
+        } else {
+            format!("reported by the driver, budget {budget:.2} ms")
+        };
+        let mut line = format!(
+            "Audio overrun #{} at {} ({}): {load}; last second peak {:.0} %, average {:.0} %, \
+             plugins {:.0} %; engine frame {} ({:.3} s), {} frames at {} Hz.",
+            incident.number,
+            incident.wall,
+            incident.kind_text(),
+            reading.peak_percent,
+            reading.avg_percent,
+            reading.plugin_percent,
+            incident.frame,
+            incident.frame as f64 / rate,
+            reading.block_frames,
+            self.info.sample_rate,
+        );
+        if let (Some(runner), Some((status, _))) = (self.runner.as_ref(), self.last)
+            && self.score_is_playing()
+        {
+            let names: Vec<String> = self.tracks.iter().map(|ui| ui.name.clone()).collect();
+            let view = score_event(&runner.score().title, &runner.view(status.pos), &names);
+            if view.section.is_some() {
+                line += &format!(" Section \"{}\", bar {}.", view.section_id, view.bar);
+            }
+        }
+        if self.recorder.active() {
+            line += " Marked in the recording's session.json.";
+        }
+        line
     }
 
     /// Everything the audio callbacks counted as lost or late, added up.

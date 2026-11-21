@@ -824,6 +824,9 @@ pub struct SourceRack {
     /// for the recorder's MIDI file. Only collected while `tap` is set.
     pub(crate) sent: Vec<Vec<(u32, [u8; 3])>>,
     tap: bool,
+    /// Nanoseconds spent inside the instruments since [`SourceRack::take_busy_ns`] - the plugin
+    /// share of the audio load (`crate::load`).
+    busy_ns: u64,
 }
 
 impl SourceRack {
@@ -866,6 +869,7 @@ impl SourceRack {
                 .map(|_| Vec::with_capacity(PENDING_EVENTS))
                 .collect(),
             tap: false,
+            busy_ns: 0,
         }
     }
 
@@ -1135,6 +1139,12 @@ impl SourceRack {
         }
     }
 
+    /// Time spent inside the instruments since the last call, and reset.
+    #[inline]
+    pub fn take_busy_ns(&mut self) -> u64 {
+        std::mem::take(&mut self.busy_ns)
+    }
+
     /// Render every instrument for one process call of `frames` frames starting at `start`, into
     /// [`SourceRack::out`]. Long calls are cut into pieces of [`MAX_BLOCK`].
     pub fn render(&mut self, start: u64, frames: usize) {
@@ -1260,6 +1270,7 @@ impl SourceRack {
                     peak = peak.max(s.abs());
                 }
                 instrument.shared.note_block(peak, ns);
+                self.busy_ns += u64::from(ns);
                 done += n;
             }
         }

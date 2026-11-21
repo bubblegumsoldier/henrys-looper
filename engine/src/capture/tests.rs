@@ -349,6 +349,9 @@ fn section_markers_land_on_the_bar_lines_of_the_score() {
     run_info.count_in_bars = 1;
     run_info.score_yaml = Some(yaml.to_string());
     let mut rec = run::Recording::start(run_info, &mut port).unwrap();
+    // An overrun during the count-in is not in the files; one after frame 0 is, on their axis.
+    rec.overrun(first - 10, "late block", 140.0);
+    rec.overrun(first + RATE as u64, "late block + driver overload", 112.5);
     let mut watch = SectionWatch::default();
     let mut events = Vec::new();
     let end = tl.bar_start(first_bar + 6);
@@ -394,6 +397,12 @@ fn section_markers_land_on_the_bar_lines_of_the_score() {
     assert_eq!(markers[1]["frame"], tl.bar_start(first_bar + 2) - first);
     assert_eq!(markers[1]["bar"], 3);
     assert_eq!(markers[1]["section"], "verse");
+    let overruns = json["overruns"].as_array().unwrap();
+    assert_eq!(overruns.len(), 1);
+    assert_eq!(overruns[0]["frame"], RATE as u64);
+    assert_eq!(overruns[0]["seconds"], 1.0);
+    assert_eq!(overruns[0]["kind"], "late block + driver overload");
+    assert_eq!(overruns[0]["load_percent"], 112.5);
     assert_eq!(json["mode"], "score");
     assert_eq!(json["score_copy"], "score.yaml");
     assert_eq!(

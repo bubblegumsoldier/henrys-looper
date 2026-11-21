@@ -365,6 +365,9 @@ pub struct InsertRack {
     leaked: u64,
     /// The clock at the first frame of the block being processed; set by the engine per block.
     transport: PluginTransport,
+    /// Nanoseconds spent inside plugins since [`InsertRack::take_busy_ns`] - the plugin share of
+    /// the audio load (`crate::load`).
+    busy_ns: u64,
 }
 
 impl InsertRack {
@@ -378,7 +381,14 @@ impl InsertRack {
             installed: 0,
             leaked: 0,
             transport: PluginTransport::standing(48_000.0),
+            busy_ns: 0,
         }
+    }
+
+    /// Time spent inside the inserts since the last call, and reset.
+    #[inline]
+    pub fn take_busy_ns(&mut self) -> u64 {
+        std::mem::take(&mut self.busy_ns)
     }
 
     /// The clock for the block that is processed next. Every insert gets it before its call.
@@ -497,14 +507,14 @@ impl InsertRack {
             return;
         };
         let block = &mut blocks[bus];
-        run_slots(slots, &mut block.l[..n], &mut block.r[..n], &self.transport);
+        self.busy_ns += run_slots(slots, &mut block.l[..n], &mut block.r[..n], &self.transport);
     }
 
     /// Run a bus's inserts over its scratch block, the first `n` frames.
     #[inline]
     pub fn process_bus(&mut self, bus: usize, n: usize) {
         let block = &mut self.bus_scratch[bus];
-        run_slots(
+        self.busy_ns += run_slots(
             &mut self.buses[bus],
             &mut block.l[..n],
             &mut block.r[..n],
@@ -513,8 +523,10 @@ impl InsertRack {
     }
 }
 
+/// Returns the nanoseconds spent inside the plugins.
 #[inline]
-fn run_slots(slots: &mut Slots, l: &mut [f32], r: &mut [f32], transport: &PluginTransport) {
+fn run_slots(slots: &mut Slots, l: &mut [f32], r: &mut [f32], transport: &PluginTransport) -> u64 {
+    let mut busy = 0u64;
     for insert in slots.iter_mut().flatten() {
         if insert.shared.bypass() {
             continue;
@@ -533,7 +545,9 @@ fn run_slots(slots: &mut Slots, l: &mut [f32], r: &mut [f32], transport: &Plugin
             peak = peak.max(s.abs());
         }
         insert.shared.note_block(peak, ns);
+        busy += u64::from(ns);
     }
+    busy
 }
 
 #[cfg(test)]

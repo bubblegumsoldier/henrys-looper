@@ -2238,6 +2238,63 @@ des Blatts darunter (Klick springt zur Zeile, Klick in der Vorschau ebenso).
 | `ui/src/sheet/position.ts` | Status → Stelle auf dem Blatt, NOW/NEXT |
 | `ui/src/sheet/SheetSidebar.tsx`, `SheetView.tsx`, `SheetEditor.tsx` | Seitenleiste, Seite, Editor |
 
+## 18. Audiolast und Overruns: woher ein Knackser kommt
+
+Frage, die das beantworten soll: **Ist ein gelegentlicher Knackser eine Überlast?** Dafür misst
+der Output-Callback, wie viel vom Zeitbudget seines Blocks er braucht. Budget = Spielzeit des
+Blocks, `frames / Abtastrate` (128 Frames bei 48 kHz: 2,67 ms). Was länger braucht, ist zu spät.
+
+**Gemessen** (`engine/src/load.rs`, `LoadClock`, im Callback; `LoadShared`, Atomics für den
+Steuer-Thread):
+
+- **Last je Callback** = Rechenzeit / Budget. Veröffentlicht als **Spitze** (schlimmster einzelner
+  Callback) und **Mittel** (Summe Rechenzeit / Summe Budget) über die letzte Sekunde — vier
+  Viertelsekunden-Fenster, in Audio-Frames gezählt, nicht in Wanduhrzeit. Die Spitze ist die
+  Zahl, die über Aussetzer entscheidet: 30 % Mittel mit 105 % Spitze knackt.
+- **Plugin-Anteil**: Die Racks messen jeden Plugin-Aufruf ohnehin (Instrumente in `source.rs`,
+  Inserts in `insert.rs`); sie summieren jetzt die Nanosekunden, `EngineCore::take_plugin_ns`
+  holt sie einmal je Callback ab. Zwei Additionen, keine weitere Uhr.
+- **Späte Blöcke**: Rechenzeit > Budget.
+- **Späte Weckrufe**: Abstand zweier Callback-Starts > 2 × Blockdauer — der Callback war schnell,
+  das System hat ihn zu spät geweckt.
+- **Treiber-Overloads**: cpal 0.18 registriert auf macOS selbst einen Listener auf
+  `kAudioDeviceProcessorOverload` und meldet ihn als `ErrorKind::Xrun` — der vorhandene
+  `xruns`-Zähler des Hosts *ist* also CoreAudios Overload-Meldung; kein eigener Listener nötig.
+  Bei Ein- und Ausgang auf demselben Gerät meldet er eine Überlast einmal je Stream.
+
+**Kosten**: je Callback eine zusätzliche Uhrablesung (`Instant::now` liest auf macOS die
+Commpage, kein Syscall), ein paar Ganzzahl-Operationen und Atomics; viermal je Sekunde drei
+Stores. Gemessen ~40 ns je Callback samt beider Uhrablesungen — 0,0015 % von 2,67 ms.
+
+**Overruns** (`app/src-tauri/src/loadwatch.rs`): Was innerhalb von 60 ms zusammen steigt (später
+Block, Treibermeldung je Stream), ist **ein** Overrun. Abgeschlossen (60 ms ohne neuen Anstieg)
+wird er
+
+- ins Log geschrieben — höchstens eine Zeile je 2 s, was dazwischen kommt, wird gezählt und mit
+  der schlimmsten Last nachgereicht: Uhrzeit, Art, Last in % und ms, Spitze/Mittel/Plugins der
+  letzten Sekunde, Engine-Frame, Puffer, und bei laufender Partitur Sektion und Takt;
+- als Marker in `session.json` der laufenden Aufnahme eingetragen: `overruns: [{frame, seconds,
+  kind, load_percent}]` auf der Achse der Dateien (höchstens 1000 je Aufnahme). Ein Knackser im
+  WAV bei 83,2 s lässt sich so neben einen Overrun bei 83,2 s legen. Der Frame ist bei späten
+  Blöcken exakt (der Callback zählt seine Frames, wie `out_pos`), bei reinen Treibermeldungen die
+  Positionsschätzung des Hosts (einige ms später).
+
+**Status**: `load` im Status-Event (`proto::LoadStatusEvent`, `ui/src/types.ts` `LoadStatus`).
+Der Engine-`Status` (der durch den Callback wandert) wächst **nicht** — die Last läuft über
+eigene Atomics, die Größenbremse von 2400 Byte bleibt unberührt.
+
+**Was das UI zeigt**: In der Titelleiste neben der Status-Pille ein kurzer Balken mit der
+Spitzenlast (`ui/src/shell/LoadMeter.tsx`, Logik `loadModel.ts`), gedämpft wie die Pegelmeter
+(steigt sofort, fällt 25 %-Punkte je Sekunde, Zahl höchstens viermal je Sekunde). Ab 70 %
+Warnfarbe, ab 100 % und 4 s nach einem Overrun Alarmfarbe; ab dem ersten Overrun ein roter Zähler,
+den ein Klick zurücksetzt (der Klick öffnet auch das Engine-Panel). Im Engine-Panel: Spitze,
+Mittel, Plugins, Overruns mit Aufschlüsselung, letzter Overrun, Puffer/Budget und bei Overruns
+„Try a larger buffer in Setup › Audio“. Damit das bei 1024 px passt, zeigt die Status-Pille unter
+1500 px nur ihre Lampe (Format und Dropouts im Tooltip und im Panel).
+
+Nicht gemacht: Die CLI (`live`, `score`, `soak`) misst die Last nicht; dort bleibt es bei
+`Callback max` und den Xruns.
+
 ## 13. Arbeitsweise
 
 - Henry bedient Hardware selbst; Audio-Tests laufen nur mit seiner Zustimmung.

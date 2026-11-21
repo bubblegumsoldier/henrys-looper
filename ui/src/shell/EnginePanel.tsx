@@ -16,7 +16,8 @@ import { Icon } from "./Icon";
 import { run } from "./notes";
 import { engineWords, startEngine, stopEngine, useEngine } from "./engine";
 import { T, gainDb } from "./terms";
-import type { BusId, LooperStatus } from "../types";
+import { budgetText, loadAdvice, percentText } from "./loadModel";
+import { IDLE_LOAD, type BusId, type LooperStatus } from "../types";
 
 interface Counters {
   running: boolean;
@@ -133,6 +134,69 @@ function Reduction({ channel }: { channel: number }) {
   return <span className="num warn-text" ref={el} />;
 }
 
+/**
+ * The audio load in words and numbers - the details behind the title bar's load meter. Renders
+ * when a rounded number changes, i.e. a few times a second at most.
+ */
+function LoadSection() {
+  const sig = useStatusSlice((s) => {
+    const l = s.load ?? IDLE_LOAD;
+    return [
+      Math.round(l.peak_percent),
+      Math.round(l.avg_percent),
+      Math.round(l.plugin_percent),
+      l.overruns,
+      l.late_blocks,
+      l.late_wakeups,
+      l.driver_overloads,
+      l.last_overrun ?? "",
+      l.last_overrun_kind ?? "",
+      Math.round(l.last_overrun_percent),
+      l.block_frames,
+      l.budget_ms,
+      s.sample_rate,
+    ].join("|");
+  });
+  const [peak, avg, plugins, overruns, lateBlocks, lateWakeups, overloads, lastAt, lastKind, lastPct, frames, budget, rate] =
+    sig.split("|");
+  const load: typeof IDLE_LOAD = {
+    ...IDLE_LOAD,
+    overruns: Number(overruns),
+    budget_ms: Number(budget),
+  };
+  const advice = loadAdvice(load);
+  const bad = Number(overruns) > 0;
+  return (
+    <div className="pop-s">
+      <div className="caps" title="Share of each audio block's time budget (block length / sample rate) the engine needs. Above 100 % the block was late.">
+        Audio load
+      </div>
+      <div className="counters load-counters">
+        <span className={Number(peak) >= 100 ? "bad" : Number(peak) >= 70 ? "warn" : ""}>
+          peak <b>{percentText(Number(peak))}</b>
+        </span>
+        <span>
+          average <b>{percentText(Number(avg))}</b>
+        </span>
+        <span title="Instruments and insert plugins, as a share of the budget">
+          plugins <b>{percentText(Number(plugins))}</b>
+        </span>
+        <span className={bad ? "bad" : "ok"} title="Late blocks, late wake-ups and driver overloads; what comes together counts once">
+          overruns <b>{overruns}</b>
+        </span>
+        <span title="Blocks that took longer than their budget · callbacks the system woke too late · overloads CoreAudio reported">
+          late blocks <b>{lateBlocks}</b> · late wake-ups <b>{lateWakeups}</b> · driver <b>{overloads}</b>
+        </span>
+      </div>
+      <div className="mono dim load-facts">
+        {Number(frames) > 0 ? `${frames} frames at ${Number(rate) / 1000} kHz = ${budgetText(load)} per block` : "Measuring…"}
+        {lastAt && ` · last overrun ${lastAt} (${lastKind}${Number(lastPct) > 0 ? `, ${percentText(Number(lastPct))}` : ""})`}
+      </div>
+      {advice && <div className="warn-text load-advice">{advice}</div>}
+    </div>
+  );
+}
+
 export function EnginePanel({ onClose, onSetup }: { onClose: () => void; onSetup: () => void }) {
   const c = useStatusSlice(pick, same);
   const { info, busy, view } = useEngine();
@@ -142,7 +206,7 @@ export function EnginePanel({ onClose, onSetup }: { onClose: () => void; onSetup
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     const onDown = (e: PointerEvent) => {
       const t = e.target as HTMLElement;
-      if (box.current && !box.current.contains(t) && !t.closest(".status-pill")) onClose();
+      if (box.current && !box.current.contains(t) && !t.closest(".status-pill, .load-meter")) onClose();
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("pointerdown", onDown);
@@ -215,6 +279,8 @@ export function EnginePanel({ onClose, onSetup }: { onClose: () => void; onSetup
               callback max <b>{c.maxMs.toFixed(1)} ms</b>
             </span>
           </div>
+
+          <LoadSection />
 
           <div className="pop-s">
             <div className="caps">Buses</div>

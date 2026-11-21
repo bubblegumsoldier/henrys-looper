@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use super::session::{
-    self, Dropouts, Marker, SCORE_FILE, SESSION_FILE, SessionFile, TrackEntry, file_specs,
+    self, Dropouts, Marker, OverrunMarker, SCORE_FILE, SESSION_FILE, SessionFile, TrackEntry, file_specs,
 };
 use super::writer::{self, Written};
 use super::{CapturePort, CaptureSpec, Layout, Shared, capture_pair};
@@ -69,10 +69,15 @@ pub struct RunInfo {
     pub queue_seconds: f64,
 }
 
+/// Overrun markers kept per run. A machine that overruns all the time does not need ten thousand
+/// entries to say so; the count in `dropouts` keeps going.
+pub const MAX_OVERRUN_MARKERS: usize = 1000;
+
 /// What the control thread adds while the run goes on.
 #[derive(Debug, Default)]
 struct RunMeta {
     markers: Vec<Marker>,
+    overruns: Vec<OverrunMarker>,
     /// Whether any take was recorded during the run.
     takes: bool,
     engine_dropouts: u64,
@@ -232,6 +237,24 @@ impl Recording {
             && meta.markers.last() != Some(&marker)
         {
             meta.markers.push(marker);
+        }
+    }
+
+    /// An audio overrun at engine position `at`. Ignored before the run's frame 0.
+    pub fn overrun(&self, at: u64, kind: &str, load_percent: f32) {
+        if at < self.start {
+            return;
+        }
+        let frame = at - self.start;
+        if let Ok(mut meta) = self.meta.lock()
+            && meta.overruns.len() < MAX_OVERRUN_MARKERS
+        {
+            meta.overruns.push(OverrunMarker {
+                frame,
+                seconds: frame as f64 / self.sample_rate.max(1) as f64,
+                kind: kind.to_string(),
+                load_percent,
+            });
         }
     }
 
@@ -416,6 +439,7 @@ fn finalize(
             })
             .collect(),
         markers: meta.markers.clone(),
+        overruns: meta.overruns.clone(),
         dropouts: dropouts.clone(),
         score_copy,
         score_path: info.score_path.clone(),
@@ -453,6 +477,7 @@ fn finalize(
 #[derive(Debug, Default)]
 struct RunMetaView {
     markers: Vec<Marker>,
+    overruns: Vec<OverrunMarker>,
     takes: bool,
     engine_dropouts: u64,
     notes: Vec<String>,
@@ -462,6 +487,7 @@ impl From<&RunMeta> for RunMetaView {
     fn from(m: &RunMeta) -> Self {
         Self {
             markers: m.markers.clone(),
+            overruns: m.overruns.clone(),
             takes: m.takes,
             engine_dropouts: m.engine_dropouts,
             notes: m.notes.clone(),

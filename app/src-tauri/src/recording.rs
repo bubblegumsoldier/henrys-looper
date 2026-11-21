@@ -195,7 +195,7 @@ pub fn free_bytes(_path: &Path) -> Option<u64> {
 }
 
 /// Local wall-clock time `offset` from now, as `(folder stamp, display stamp)`.
-fn local_stamp(offset: Duration) -> (String, String) {
+pub(crate) fn local_stamp(offset: Duration) -> (String, String) {
     let when = std::time::SystemTime::now() + offset;
     let secs = when
         .duration_since(std::time::UNIX_EPOCH)
@@ -491,6 +491,14 @@ impl Recorder {
                     self.end(*at);
                 }
             }
+        }
+    }
+
+    /// An audio overrun at engine position `at` (`crate::loadwatch`): a marker in the running
+    /// recording's `session.json`, so a click in a file can be matched to it.
+    pub fn overrun(&self, at: u64, kind: &str, load_percent: f32) {
+        if let Some(rec) = &self.active {
+            rec.overrun(at, kind, load_percent);
         }
     }
 

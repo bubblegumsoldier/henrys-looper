@@ -102,6 +102,20 @@ pub struct Marker {
     pub index: usize,
 }
 
+/// One audio overrun during the run, on the files' own axis - so a click heard in a WAV can be
+/// matched to what the engine measured (`crate::load`).
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct OverrunMarker {
+    /// Sample frame in every file: the start of the block that was late, or - for an overload only
+    /// the driver reported - the engine's position when the host noticed it (a few ms later).
+    pub frame: u64,
+    pub seconds: f64,
+    /// What was seen, in words: "late block", "late wake-up", "driver overload", joined by " + ".
+    pub kind: String,
+    /// Processing time of the late callback in percent of its time budget; 0 when unknown.
+    pub load_percent: f32,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct TrackEntry {
     /// One-based, as in the file names.
@@ -159,6 +173,8 @@ pub struct SessionFile {
     pub mix: String,
     pub tracks: Vec<TrackEntry>,
     pub markers: Vec<Marker>,
+    /// Audio overruns during the run, oldest first (at most [`super::run::MAX_OVERRUN_MARKERS`]).
+    pub overruns: Vec<OverrunMarker>,
     pub dropouts: Dropouts,
     /// `score.yaml` when a copy of the score is in the folder.
     pub score_copy: Option<String>,

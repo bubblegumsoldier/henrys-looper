@@ -2,7 +2,7 @@
 //! that has to be reachable from every view.
 //!
 //! ```text
-//!  ● ● ●  Title       [▶][■][▶| Release]  [SECTION|BAR|BEAT|TEMPO|TIME SIG]   [♪ Click ▾] Arrangement|Live   MIDI Learn  (status)  ⚙
+//!  ● ● ●  Title       [▶][■][▶| Release]  [SECTION|BAR|BEAT|TEMPO|TIME SIG]   [♪ Click ▾] Arrangement|Live   MIDI Learn  (Load ▬ 34 %) (status)  ⚙
 //!         file state   ^ Arrangement only (Live has the same controls full size)   ^ every view
 //! ```
 //!
@@ -20,6 +20,7 @@ import { engineWords, useEngine } from "./engine";
 import { Ticker } from "./Toasts";
 import { ClickSwitch } from "./ClickSwitch";
 import { OutputClip } from "./OutputClip";
+import { LoadMeter } from "./LoadMeter";
 import { RecordingBadge } from "../recording/RecordingBadge";
 import { isDirty, useScoreFile } from "../scoreFile";
 import {
@@ -180,6 +181,7 @@ export function TitleBar({ mode, setupOpen, onMode, onSetup, enginePanelOpen, on
         </button>
       )}
       <OutputClip onOpen={() => !enginePanelOpen && onEnginePanel()} />
+      <LoadMeter onToggle={onEnginePanel} />
       <StatusPill facts={facts} open={enginePanelOpen} onClick={onEnginePanel} />
       <button
         className={`btn sq ghost${setupOpen ? " on" : ""}`}
@@ -359,13 +361,26 @@ function StatusPill({ facts, open, onClick }: { facts: Facts; open: boolean; onC
     body = (
       <>
         <i className="led" />
-        {num(facts.rate / 1000)} kHz{frames !== null ? ` · ${frames}` : ""} · {facts.xruns} {T.dropouts}
-        {facts.overruns > 0 ? ` · ${facts.overruns} lost` : ""}
+        {/* Below 1500 px the load meter beside this pill carries the dropouts (its overrun
+            counter includes the driver's) and the panel the format, so the words make room for
+            it - all but lost input, which needs a restart. The tooltip still says it. */}
+        <span className="sp-text">
+          {num(facts.rate / 1000)} kHz{frames !== null ? ` · ${frames}` : ""} · {facts.xruns} {T.dropouts}
+        </span>
+        {facts.overruns > 0 ? <span className="sp-lost">{facts.overruns} lost</span> : null}
       </>
     );
   }
   return (
-    <button className={`${cls}${open ? " open" : ""}`} onClick={onClick} title="Engine, buses and counters">
+    <button
+      className={`${cls}${open ? " open" : ""}`}
+      onClick={onClick}
+      title={
+        facts.running
+          ? `${num(facts.rate / 1000)} kHz${frames !== null ? ` · ${frames} frames` : ""} · ${facts.xruns} ${T.dropouts} - engine, buses and counters`
+          : "Engine, buses and counters"
+      }
+    >
       {body}
     </button>
   );

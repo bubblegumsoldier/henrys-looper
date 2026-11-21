@@ -48,6 +48,13 @@ Ausgänge über eingebaute Lautsprecher, startet die Engine mit stummem Mithöre
 rückkoppeln) und sagt es im Band unter der Titelleiste (*Unmute anyway*). Wer die Engine im
 Engine-Panel stoppt, bekommt keinen Neustart von selbst.
 
+Knackser? Die Lastanzeige in der Titelleiste (Balken und Prozent, neben der Status-Pille) zeigt
+die Spitzenlast der letzten Sekunde: wie viel vom Zeitbudget eines Audio-Blocks die Engine
+braucht. Ab 70 % gelb, ab 100 % rot; ein roter Zähler zählt Overruns (Klick setzt zurück, öffnet
+die Details). Jeder Overrun steht mit Uhrzeit und Sektion im Log und, wenn mitgeschnitten wird,
+als Marker in `session.json` – so lässt sich ein Knackser im WAV zuordnen. Abhilfe: größerer
+Puffer in *Setup › Audio*. Details: `docs/architektur.md`, Abschnitt 18.
+
 Ohne Partitur (freies Loopen) steht die Uhr nach dem Engine-Start auf Takt 1: kein Klick, nichts
 zählt. *Start* (Leertaste) lässt sie laufen, *Stop* hält sie an; die Loops bleiben erhalten und
 spielen beim nächsten Start von vorn. `R` bei stehender Uhr startet sie und nimmt ab Takt 1 auf.
