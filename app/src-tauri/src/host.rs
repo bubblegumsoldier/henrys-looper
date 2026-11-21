@@ -441,6 +441,8 @@ enum Request {
     /// Put the engine into a mix (an undo in the arrangement), and the pans it names. Tracks by
     /// name.
     MixerApply(Box<MixerSource>, OrderedMap<f64>, Sender<Result<(), String>>),
+    /// The built-in chain of track `from` onto track `to` (0-based), as a human change.
+    ChainCopy(usize, usize, Sender<Result<(), String>>),
 
     // --- MIDI. Handled on this thread because that is where the session is, and because a MIDI
     // connection belongs to the thread that opened it.
@@ -573,6 +575,11 @@ impl EngineHandle {
 
     pub fn mixer_apply(&self, mixer: MixerSource, pan: OrderedMap<f64>) -> Result<(), String> {
         self.call(|reply| Request::MixerApply(Box::new(mixer), pan, reply))
+    }
+
+    /// Track `from`'s built-in chain - every effect and setting - onto track `to`.
+    pub fn chain_copy(&self, from: usize, to: usize) -> Result<(), String> {
+        self.call(|reply| Request::ChainCopy(from, to, reply))
     }
 
     // ---- MIDI ------------------------------------------------------------------------------
@@ -1108,6 +1115,12 @@ fn handle(
                 active.apply_pans(&pan);
             }
             let _ = reply.send(Ok(()));
+        }
+        Request::ChainCopy(from, to, reply) => {
+            let _ = reply.send(match session.as_mut() {
+                Some(active) => active.copy_chain(from, to),
+                None => Err(NO_ENGINE.to_string()),
+            });
         }
 
         // --- MIDI -------------------------------------------------------------------------
@@ -4282,6 +4295,40 @@ impl Session {
                 .collect();
             crate::pluginmix::apply(mixer, &names, &instruments);
         }
+    }
+
+    /// The built-in chain of track `from` onto track `to`: preset, bypass and every effect line,
+    /// through the same commands a score's `mixer:` uses. The target keeps its fader and mute, and
+    /// the plugins are the plugin manager's business (`crate::plugins::copy_all`). A human change,
+    /// so the open score writes the target's entry back.
+    fn copy_chain(&mut self, from: usize, to: usize) -> Result<(), String> {
+        let name = |t: usize| {
+            self.tracks
+                .get(t)
+                .map(|ui| ui.name.clone())
+                .ok_or_else(|| format!("There is no track {}.", t + 1))
+        };
+        let (from_name, to_name) = (name(from)?, name(to)?);
+        if from == to {
+            return Ok(());
+        }
+        let state = self.mixer_state(Some(&[from_name.clone(), to_name.clone()]));
+        let (Some(source), Some(target)) = (state.tracks.get(&from_name), state.tracks.get(&to_name))
+        else {
+            return Err("The engine has not reported its tracks yet. Try again in a moment.".to_string());
+        };
+        let mut entry = source.clone().without_plugins();
+        entry.gain = target.gain;
+        entry.mute = target.mute;
+        let mut tracks = OrderedMap::new();
+        tracks.insert(to_name.clone(), entry);
+        self.queue_mix(&MixerSource {
+            buses: None,
+            tracks,
+        });
+        self.mix_touched(Some(to));
+        self.message = Some(format!("Device chain of \"{from_name}\" copied to \"{to_name}\"."));
+        Ok(())
     }
 
     /// Pans by track name, from the score (an undo, typing in `tracks:`). Not a human change.

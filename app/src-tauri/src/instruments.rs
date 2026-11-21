@@ -639,6 +639,26 @@ impl Manager {
         self.put(track, plugin_id, None)
     }
 
+    /// `from`'s instrument with its state onto `to`.
+    fn copy(&mut self, from: &str, to: &str) -> Result<InstrumentRack, String> {
+        if from == to {
+            return Ok(self.view());
+        }
+        if self.index_of(to).is_none() {
+            return Err(format!("\"{to}\" is not an instrument track."));
+        }
+        let p = self
+            .position(from)
+            .ok_or_else(|| format!("Track \"{from}\" has no instrument to copy."))?;
+        let slot = &self.slots[p];
+        let state = slot.plugin.save_state().map_err(|e| {
+            format!("\"{}\" did not hand over its settings: {e}", slot.info.info.name)
+        })?;
+        let id = slot.info.info.id.clone();
+        self.restoring.retain(|e| e.track != to);
+        self.put(to, &id, Some(&state))
+    }
+
     /// Load `plugin_id` for `track`, give it `state` while it is not running yet, and start it.
     fn put(
         &mut self,
@@ -966,6 +986,20 @@ pub async fn instrument_set(track: String, plugin_id: Option<String>) -> Result<
             let view = m.set(&track, plugin_id.as_deref())?;
             // A human choice: the open score writes it into its `mixer:` section.
             crate::pluginmix::touch_instrument(&track);
+            Ok(view)
+        })
+    })
+    .await
+}
+
+/// Put a copy of `from`'s instrument - the same plugin with its full state - on track `to` (both
+/// by name), replacing what `to` had. A second, independent instance, loaded like any choice.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn instrument_copy(from: String, to: String) -> Result<InstrumentRack, String> {
+    blocking(move || {
+        on_main(move |m| {
+            let view = m.copy(&from, &to)?;
+            crate::pluginmix::touch_instrument(&to);
             Ok(view)
         })
     })

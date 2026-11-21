@@ -181,6 +181,8 @@ export const T = {
   builtIn: "Built-in",
   plugIns: "Plug-ins",
   addPlugin: "Add plugin",
+  copyTo: "Copy to…",
+  copyChain: "Copy chain to…",
   chainOn: "Chain on",
   chainBypassedShort: "Bypassed",
   openEditor: "Open editor",

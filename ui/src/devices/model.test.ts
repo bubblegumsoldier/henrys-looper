@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { builtinSummary, defaultDevice, deviceOrder, pluginSlotOf, pluginSummary } from "./model";
+import { builtinSummary, defaultDevice, deviceOrder, movedIndex, placeDrop, pluginSlotOf, pluginSummary } from "./model";
 import type { FxStatus } from "../types";
 
 const fx = (over: Partial<FxStatus> = {}): FxStatus =>
@@ -75,5 +75,55 @@ describe("device column", () => {
     expect(pluginSummary({ ...s, latency: 64 })).toBe("Valhalla DSP · 64 smp");
     expect(pluginSummary({ ...s, active: false })).toBe("VST3 · starts with the engine");
     expect(pluginSummary({ ...s, error: "boom" })).toBe("failed to start");
+  });
+});
+
+describe("plug-ins anywhere in the chain", () => {
+  // An IR loader in front of everything (slot 0), a de-esser before the compressor (slot 1), a
+  // delay after the chain (slot 2).
+  const plugins = [
+    { slot: 2, before: null },
+    { slot: 0, before: "octaver" as const },
+    { slot: 1, before: "comp" as const },
+  ];
+  const order = deviceOrder({ instrument: false, builtin: true, plugins });
+
+  it("puts every plug-in in front of the built-in device it is placed before", () => {
+    expect(order).toEqual(["plugin.0", "octaver", "high_pass", "eq", "plugin.1", "comp", "delay", "reverb", "plugin.2"]);
+    // A bus has no built-in devices: its plug-ins in slot order, whatever they say.
+    expect(deviceOrder({ instrument: false, builtin: false, plugins })).toEqual(["plugin.0", "plugin.1", "plugin.2"]);
+    expect(deviceOrder({ instrument: true, builtin: true, plugins: [{ slot: 4, before: "eq" }] }).slice(0, 4)).toEqual([
+      "instrument",
+      "octaver",
+      "high_pass",
+      "plugin.4",
+    ]);
+  });
+
+  it("drops a plug-in in front of a built-in device without changing its slot", () => {
+    // The delay (slot 2) dragged above the reverb: only its place changes - its MIDI addresses
+    // (`insert.3.…`) stay, and every built-in address is by name anyway.
+    expect(placeDrop(order, 2, order.indexOf("reverb"), 8)).toEqual({ to: 2, before: "reverb" });
+    // The IR loader dragged from the front to just above the EQ.
+    expect(placeDrop(order, 0, order.indexOf("eq"), 8)).toEqual({ to: 0, before: "eq" });
+    // The de-esser to the very end, after the delay: it has to follow it in slot order too.
+    expect(placeDrop(order, 1, order.length, 8)).toEqual({ to: 2, before: null });
+    // The delay to the very front, ahead of the IR loader: slot 0, the others shift.
+    expect(placeDrop(order, 2, 0, 8)).toEqual({ to: 0, before: "octaver" });
+  });
+
+  it("does nothing when a plug-in is dropped where it already is", () => {
+    const at = order.indexOf("plugin.1");
+    expect(placeDrop(order, 1, at, 8)).toBeNull();
+    expect(placeDrop(order, 1, at + 1, 8)).toBeNull();
+    expect(placeDrop(order, 9, 0, 8)).toBeNull();
+  });
+
+  it("keeps slot order and signal order the same, gaps in the slots included", () => {
+    // Slots 0 and 3 taken (1, 2 empty): the plug-in in slot 3 dragged in front of the one in slot 0.
+    const gappy = deviceOrder({ instrument: false, builtin: true, plugins: [{ slot: 0, before: "eq" }, { slot: 3, before: null }] });
+    const move = placeDrop(gappy, 3, gappy.indexOf("high_pass"), 8);
+    expect(move).toEqual({ to: 0, before: "high_pass" });
+    expect(movedIndex(0, 3, 0)).toBe(1);
   });
 });

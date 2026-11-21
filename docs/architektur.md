@@ -567,7 +567,9 @@ was neben den Ebenen-Puffern nicht ins Gewicht fällt.
 ### Reihenfolge und Presets
 
 Oktaver, Hochpass, drei Bänder parametrischer EQ, Kompressor, Delay, Hall - die Reihenfolge aus
-dem Plan, mit dem Oktaver davor (Begründung unten). Das oberste EQ-Band ist als Kuhschwanz
+dem Plan, mit dem Oktaver davor (Begründung unten). Die Reihenfolge der eingebauten Geräte ist
+fest; Plugins lassen sich seit 2026-11 vor jedes von ihnen setzen (Abschnitt 14, „Plugins in der
+Kette“). Das oberste EQ-Band ist als Kuhschwanz
 ausgelegt: "Luft" ist das ganze obere Ende, nicht eine Frequenz. Der Kompressor hat ein weiches
 Knie (6 bis 8 dB), weil eine Stimme *an* der Schwelle lebt und ein hartes Knie mehrmals pro Sekunde
 umschalten würde.
@@ -1866,9 +1868,10 @@ und Apples mitgelieferte Effekte sind auf jedem Mac echte Testobjekte. CLAP (`cl
 möglich, aber nicht gebaut: hier ist kein CLAP-Plugin installiert, und die großen Bibliotheken
 liefern es nicht (Abschnitt 8).
 
-**Lage im Signalweg.** Acht Insert-Slots je Track **nach der eingebauten Kette und vor Fader und
-Panorama**, acht je Bus über der Summe der Tracks, **vor** dem Klick (der bleibt außerhalb jedes
-Plugins). Aufgenommen wird weiter trocken. Eine Instanz je Slot; hören Main und Monitor
+**Lage im Signalweg.** Acht Insert-Slots je Track **an beliebiger Stelle der eingebauten Kette,
+vor Fader und Panorama** (seit 2026-11, siehe „Plugins in der Kette“ unten; ohne Angabe nach der
+eingebauten Kette, wie zuvor), acht je Bus über der Summe der Tracks, **vor** dem Klick (der bleibt
+außerhalb jedes Plugins). Aufgenommen wird weiter trocken. Eine Instanz je Slot; hören Main und Monitor
 verschiedene Quellen (4+ Ausgänge, Loop und Mithören getrennt), rechnen die Inserts auf Main —
 Monitor bekommt dann die eingebaute Kette ohne Plugins. Bekannte Grenze.
 
@@ -1925,6 +1928,69 @@ Ziffern, Punkt, Leerzeichen), wird als Position geschrieben. Schon gelernte Bele
 `track.<n>.insert…` bleiben positionsbezogen wie alle `track.<n>.*`-Adressen: nach einem
 Umordnen greifen sie auf den Slot der Spur, die jetzt an Position `n` steht (oder ins Leere).
 Wer das nicht will, lernt sie einmal neu.
+
+**Plugins in der Kette** (gebaut 2026-11). Ein Impulsantwort-Lader (Gitarrenbox) gehört vor EQ,
+Kompressor und Hall, auf das trockene Signal — bis dahin konnte ein Plugin nur hinter dem Hall
+sitzen. Jetzt ist die Spalte eines Tracks **eine geordnete Liste**:
+
+```
+[IR-Lader] ─► Oktaver ─► Hochpass ─► [De-Esser] ─► EQ ─► Kompressor ─► Delay ─► Hall ─► [Delay-Plugin] ─► Fader/Panorama
+```
+
+* *Entscheidung: die eingebauten Geräte behalten ihre feste Reihenfolge*, jedes Plugin bekommt
+  einen Platz **vor** einem von ihnen oder **hinter** allen (`InsertPosition`, 0 = vor dem Oktaver
+  … 6 = Ende). Frei umsortierbare eingebaute Geräte fielen nicht von selbst mit ab: die Presets
+  und die Begründungen der Reihenfolge (Oktaver vorn, Delay vor dem Hall, Abschnitt 9) würden
+  bedeutungslos, die Kette hat *einen* Bypass mit *einer* Überblendung und einen Leerlauf-Detektor
+  am Eingang, und die Parameter-Kommandos adressieren die Geräte über ihren festen Index. Für den
+  Wunsch („IR vor alles“) reichen Plätze zwischen den Geräten vollständig.
+* *Slot-Reihenfolge ist Signal-Reihenfolge.* Der Host hält die Slots eines Tracks nach Platz
+  sortiert (`in_signal_order`, eine Verschiebung, die das bräche, wird abgelehnt). Der Audio-Thread
+  rechnet nach (Platz, Slot), braucht die Sortierung also nicht.
+* *Echtzeit.* Liegt ein Plugin innerhalb der Kette, rechnet der Blockpfad die eingebaute Kette in
+  **Segmenten** (`Chain::process_segment`: die aufeinanderfolgenden Geräte zwischen zwei
+  Plugin-Plätzen, je über den ganzen Block, dazwischen die Plugins dieses Platzes) — nichts wird
+  alloziert, die Blöcke gibt es schon. Ohne ein solches Plugin bleibt der Pfad exakt der alte
+  (Test `an_identity_plugin_anywhere_changes_nothing`: ein Identitäts-Plugin an jedem der sieben
+  Plätze ergibt bitgleich dasselbe wie am Ende, mit Voice-Preset, Mithören und getrennten Bussen).
+  Der Ketten-Bypass blendet je Segment über, mit demselben Faktor je Frame — eingeschwungen ist
+  das exakt die ganze Kette, während der 25-ms-Überblendung eine andere, ebenso klickfreie
+  Überblendung. Der Leerlauf-Detektor schaut auf den Eingang jedes Segments (ein Hall hinter einem
+  ausklingenden IR-Plugin darf nicht abgeschnitten werden); die Zähler beginnen neu, sobald sich
+  die Aufteilung ändert. Die Ein/Aus-Überblendungen der eingebauten Geräte sind unverändert, ein
+  Plugin-Bypass schaltet wie bisher hart.
+* *Latenz* ist die Summe von allem, was gehört wird, egal wo es sitzt (Oktaver + Plugins; Test
+  `latencies_add_up_wherever_the_plugins_sit`); der Loop wird um genau so viel vorgelesen.
+* *Umordnen während der Musik.* Ein Platzwechsel ändert das Signal hinter dem Einfügepunkt von
+  einem Sample aufs nächste — ein Knack. Darum geht jedes `Move`/`Place` eines hörbaren Track-Racks
+  durch einen **Dip**: der Track blendet in 256 Frames (5 ms) aus, die Slots wechseln in der Stille,
+  er blendet wieder ein (`REORDER_FADE`; Test `moving_a_plugin_while_it_plays_dips_instead_of_clicking`:
+  kein Sprung größer als eine Rampenstufe). Ein zweites Umordnen wartet in der Queue, bis das erste
+  durch ist. Laden, Entfernen und Bus-Umordnen bleiben sofort, wie bisher.
+* *Nur ein Signal.* Bei getrennten Bussen (Abschnitt 12) bekommt Monitor weiter die eingebaute
+  Kette ohne Plugins, jetzt in ganzer Länge.
+* *MIDI.* Eingebaute Geräte heißen in Adressen nach Namen (`fx.reverb.mix`), Plugins nach Slot
+  (`insert.<n>`). Ein Plugin nur über eingebaute Geräte hinweg zu ziehen ändert seinen Slot nicht
+  (`placeDrop` im UI behält den Slot, wann immer das reicht) — gelernte Belegungen bleiben gültig,
+  eine Belegung auf den Hall erst recht. Wer die Plugins **untereinander** umordnet, verschiebt ihre
+  Slots, wie schon vorher.
+* *Datei.* `plugin-rack.json` bekommt je Slot `before` (fehlt = Ende); eine alte Datei liest sich
+  mit allen Plugins am Ende — genau wie vorher —, Version bleibt 2 (ein älteres Programm ignoriert
+  das Feld). In der Partitur: `inserts: [{plugin: …, before: eq}]`, Abschnitt 15.
+* *UI.* Eine Liste ohne „Built-in“/„Plug-ins“-Trenner; eine Plugin-Zeile lässt sich über und unter
+  jede eingebaute Zeile ziehen (obere Hälfte einer Zeile = davor, „+ Add plugin“ = ans Ende). Ein
+  neues Plugin kommt ans Ende.
+
+**Kopieren.** „Copy to…“ in einer aufgeklappten Plugin-Zeile legt eine Kopie — dasselbe Plugin,
+sein vollständiger Zustand (derselbe Chunk wie im Rack), Bypass und Platz — auf eine andere Spur
+oder einen Bus (dort am Ende); eine zweite, unabhängige Instanz, geladen auf dem Hauptthread wie
+jedes Laden, mit dem Zustand **vor** dem Start, hinter den Plugins, die schon an diesem Platz sitzen
+(`plugin_copy`). Dasselbe für Instrumente (`instrument_copy`, nur auf Instrument-Spuren, ersetzt
+das dortige). „Copy chain to…“ im Kopf einer Spur kopiert die **ganze Kette**: die eingebauten
+Geräte mit allen Werten über dieselben Kommandos wie ein `mixer:`-Eintrag (Fader, Mute und
+Instrument des Ziels bleiben), dann ersetzt es die Plugins des Ziels durch Kopien (`chain_copy`).
+Alles zählt als menschliche Änderung: die offene Partitur schreibt den Eintrag des Ziels zurück.
+Eine Tastenkonvention für Kopieren/Einfügen hat die App nicht; es gibt nur die Knöpfe.
 
 **Nicht gebaut.** Instrumente (werden gelistet, nicht geladen), Sidechain, MIDI an Plugins,
 Latenzausgleich über Busse hinweg, Windows-Host (kompiliert, sagt „nur macOS“).
@@ -2052,8 +2118,18 @@ mixer:
     keys:
       gain: -3
       instrument: "au:aumu:dls :appl"                          # Plugin-Id
-      inserts: [{plugin: "au:aufx:dely:appl", bypass: false}]  # Slot-Reihenfolge
+      inserts: [{plugin: "au:aufx:dely:appl", bypass: false}]  # Signal-Reihenfolge
+    guitar:
+      inserts: [{plugin: "vst3:…IRDX…", before: octaver}, {plugin: "au:aufx:dely:appl"}]
 ```
+
+* `before:` (seit 2026-11) nennt das eingebaute Gerät, **vor** dem das Plugin sitzt (`octaver`,
+  `high_pass`, `eq`, `comp`, `delay`, `reverb`); **fehlt es, sitzt das Plugin hinter der ganzen
+  eingebauten Kette** — dort, wo jedes Plugin einer älteren Partitur saß, die sich also unverändert
+  liest und klingt. Die Liste ist in Signal-Reihenfolge: ein Plugin darf nicht weiter vorn sitzen
+  als das davor genannte, sonst Fehler mit Zeile; ein unbekannter Name ebenso (mit Vorschlag). Der
+  Rückweg schreibt `before` nur, wenn es etwas sagt. Gleiche Plugins in gleicher Reihenfolge an
+  anderen Plätzen werden beim Anwenden nur verschoben, nicht neu geladen.
 
 * `input: instrument` macht die Spur zur Instrument-Spur (immer stereo, `monitor_bus` ohne
   Angabe `main+monitor`, kein gemessenes `latency` — die Kompensation ist automatisch, nur

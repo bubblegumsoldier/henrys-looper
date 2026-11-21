@@ -66,8 +66,8 @@ use tauri::{AppHandle, Emitter};
 use looper_engine::engine::bus::Bus;
 use looper_engine::engine::command::MAX_TRACKS;
 use looper_engine::engine::insert::{
-    Insert, InsertEndpoint, InsertMsg, InsertSender, InsertShared, InsertTarget, MAX_BLOCK,
-    MAX_INSERTS, insert_channel,
+    Insert, InsertEndpoint, InsertMsg, InsertPosition, InsertSender, InsertShared, InsertTarget,
+    MAX_BLOCK, MAX_INSERTS, insert_channel,
 };
 use looper_engine::midi::MidiAction;
 use looper_engine::score::mixer::InsertLine;
@@ -335,6 +335,9 @@ pub struct SlotView {
     pub bypass_address: String,
     /// Name of the track the slot belongs to; `None` on a bus.
     pub track: Option<String>,
+    /// The built-in effect the plugin sits in front of (`octaver` … `reverb`); `None` = after the
+    /// built-in chain (always on a bus).
+    pub before: Option<String>,
 }
 
 /// A slot whose track is not in the running engine: kept, and back when the track is.
@@ -487,6 +490,9 @@ impl Owner {
 struct Slot {
     owner: Owner,
     index: usize,
+    /// Where in the track's chain it runs (`InsertPosition::END` on a bus). The slots of an owner
+    /// are kept sorted by it, so slot order is signal order.
+    position: InsertPosition,
     info: Scanned,
     plugin: Box<dyn PluginInstance>,
     shared: Arc<InsertShared>,
@@ -496,6 +502,14 @@ struct Slot {
     editor_was_open: bool,
     /// Whether the first audio through this slot has been logged for the current activation.
     heard: bool,
+}
+
+/// How [`Manager::load_as`] starts a plugin: where in the chain, with which state, bypassed or not.
+#[derive(Default, Clone, Copy)]
+struct LoadAs<'a> {
+    position: InsertPosition,
+    state: Option<&'a [u8]>,
+    bypass: bool,
 }
 
 #[derive(Default)]
@@ -535,6 +549,16 @@ struct SavedSlot {
     bypass: bool,
     /// The plugin's state chunk, base64.
     state: Option<String>,
+    /// The built-in effect the plugin sits in front of (`eq`, ...); absent = after the built-in
+    /// chain, which is what every file written before positions existed means.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    before: Option<String>,
+}
+
+impl SavedSlot {
+    fn position(&self) -> InsertPosition {
+        InsertPosition::parse(self.before.as_deref()).unwrap_or_default()
+    }
 }
 
 /// The file of the version before: one list, keyed by `track.<n>` / `bus.<name>`.
@@ -576,6 +600,7 @@ fn read_rack(text: &str, layout: &[String]) -> Option<SavedRack> {
             name: o.name,
             bypass: o.bypass,
             state: o.state,
+            before: None,
         };
         let list = match parse_target(&o.target) {
             Ok(InsertTarget::Track(t)) => match layout.get(t) {
@@ -644,6 +669,80 @@ fn rehome(owners: &[Owner], new: &[String], renamed: &[(String, String)]) -> Vec
             Owner::Bus(_) => owner.clone(),
         })
         .collect()
+}
+
+// ---- the order of a chain, as plain data ------------------------------------------------------
+//
+// An owner's slots as `(slot index, position)`. Slot indices may have gaps (a removed plugin
+// leaves its slot empty); the order is the order of the indices, and it is the signal order only
+// while the positions never fall along it - which `in_signal_order` checks and every change keeps.
+
+/// Where slot `index` ends up when the plugin in `from` is moved to `to` - the rotation the
+/// audio thread does (`InsertRack`), which shifts the ones in between.
+fn moved_index(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < to && index > from && index <= to {
+        index - 1
+    } else if to < from && index >= to && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
+
+/// The layout after moving `from` to `to` with the moved plugin at `position`, sorted by index.
+fn after_place(
+    layout: &[(usize, InsertPosition)],
+    from: usize,
+    to: usize,
+    position: InsertPosition,
+) -> Vec<(usize, InsertPosition)> {
+    let mut out: Vec<(usize, InsertPosition)> = layout
+        .iter()
+        .map(|&(i, p)| (moved_index(i, from, to), if i == from { position } else { p }))
+        .collect();
+    out.sort_by_key(|(i, _)| *i);
+    out
+}
+
+/// Whether slot order is signal order: the positions never fall along the indices.
+fn in_signal_order(layout: &[(usize, InsertPosition)]) -> bool {
+    let mut sorted = layout.to_vec();
+    sorted.sort_by_key(|(i, _)| *i);
+    sorted.windows(2).all(|w| w[0].1 <= w[1].1)
+}
+
+/// The place a plugin moved among the plugins (no place given) takes: its own, if that still fits
+/// between its new neighbours, otherwise the place of the neighbour it now follows (or precedes,
+/// at the front).
+fn adopted_position(
+    layout: &[(usize, InsertPosition)],
+    from: usize,
+    to: usize,
+    current: InsertPosition,
+) -> InsertPosition {
+    let moved = after_place(layout, from, to, current);
+    let prev = moved.iter().rev().find(|(i, _)| *i < to).map(|(_, p)| *p);
+    let next = moved.iter().find(|(i, _)| *i > to).map(|(_, p)| *p);
+    match (prev, next) {
+        (Some(p), _) if current < p => p,
+        (_, Some(n)) if current > n => n,
+        _ => current,
+    }
+}
+
+/// The slot a plugin just loaded into the free slot `free` has to move to so that it sits after
+/// every plugin at its position or further forward, and before every one further back. `layout`
+/// is the owner's other plugins.
+fn placement_index(layout: &[(usize, InsertPosition)], free: usize, position: InsertPosition) -> usize {
+    let last_before = layout.iter().filter(|(_, p)| *p <= position).map(|(i, _)| *i).max();
+    let first_after = layout.iter().filter(|(_, p)| *p > position).map(|(i, _)| *i).min();
+    match (last_before, first_after) {
+        (Some(b), _) if free < b => b,
+        (_, Some(a)) if free > a => a,
+        _ => free,
+    }
 }
 
 fn rack_path() -> PathBuf {
@@ -770,6 +869,7 @@ impl Manager {
                     Owner::Track(name) => Some(name.clone()),
                     _ => None,
                 },
+                before: s.position.name().map(str::to_string),
             });
         }
         slots.sort_by(|a, b| (a.target.clone(), a.slot).cmp(&(b.target.clone(), b.slot)));
@@ -801,6 +901,7 @@ impl Manager {
                     InsertLine {
                         plugin: s.info.info.id.clone(),
                         bypass: s.shared.bypass().then_some(true),
+                        before: s.position.name().map(str::to_string),
                     },
                 ));
             }
@@ -893,7 +994,7 @@ impl Manager {
                 let msg = InsertMsg::Install {
                     target,
                     slot: slot.index,
-                    insert: Insert::new(processor, slot.shared.clone()),
+                    insert: Insert::new(processor, slot.shared.clone()).at(slot.position),
                 };
                 let mut link_guard = LINK.lock().unwrap();
                 match link_guard.as_mut() {
@@ -954,6 +1055,18 @@ impl Manager {
         index: Option<usize>,
         plugin_id: &str,
     ) -> Result<RackView, String> {
+        self.load_as(owner, index, plugin_id, LoadAs::default())
+    }
+
+    /// [`Self::load`] with a place in the chain, a state and a bypass - all given to the plugin
+    /// before it is started, so it never plays a block in its default sound.
+    fn load_as(
+        &mut self,
+        owner: &Owner,
+        index: Option<usize>,
+        plugin_id: &str,
+        how: LoadAs<'_>,
+    ) -> Result<RackView, String> {
         if !plugin::SUPPORTED {
             return Err(plugin::UNSUPPORTED.to_string());
         }
@@ -978,7 +1091,7 @@ impl Manager {
         if self.position(owner, index).is_some() {
             self.remove_slot(owner, index)?;
         }
-        let instance = plugin::load(&entry.info)?;
+        let mut instance = plugin::load(&entry.info)?;
         log!(
             "Plugin loaded: {} ({}) in {} slot {}",
             entry.info.name,
@@ -986,12 +1099,23 @@ impl Manager {
             owner.label(),
             index + 1
         );
+        if let Some(state) = how.state
+            && let Err(e) = instance.load_state(state)
+        {
+            log!("State of {} not loaded: {e}", entry.info.name);
+        }
+        let shared = InsertShared::new(0);
+        shared.set_bypass(how.bypass);
         self.slots.push(Slot {
             owner: owner.clone(),
             index,
+            position: match owner {
+                Owner::Bus(_) => InsertPosition::END,
+                _ => how.position,
+            },
             info: entry,
             plugin: instance,
-            shared: InsertShared::new(0),
+            shared,
             active_gen: None,
             error: None,
             editor_was_open: false,
@@ -1060,31 +1184,133 @@ impl Manager {
     }
 
     fn move_slot(&mut self, owner: &Owner, from: usize, to: usize) -> Result<RackView, String> {
+        self.place_slot(owner, from, to, None)
+    }
+
+    /// Move the plugin in slot `from` to slot `to` and, with `position`, to that place in the
+    /// built-in chain. The slots stay in signal order: a place that would put a plugin in front of
+    /// one it follows in slot order is refused. Without `position` (a plain reorder among the
+    /// plugins) the moved plugin takes the place of its new neighbour, so the order holds.
+    fn place_slot(
+        &mut self,
+        owner: &Owner,
+        from: usize,
+        to: usize,
+        position: Option<InsertPosition>,
+    ) -> Result<RackView, String> {
         if from >= MAX_INSERTS || to >= MAX_INSERTS {
             return Err(format!("There are slots 1 to {MAX_INSERTS}."));
         }
-        if from == to {
+        let current = self.slot(owner, from)?.position;
+        let position = match owner {
+            Owner::Bus(_) => Some(InsertPosition::END),
+            _ => position,
+        };
+        let layout: Vec<(usize, InsertPosition)> = self
+            .slots
+            .iter()
+            .filter(|s| s.owner == *owner)
+            .map(|s| (s.index, s.position))
+            .collect();
+        let position = position.unwrap_or_else(|| adopted_position(&layout, from, to, current));
+        if from == to && position == current {
             return Ok(self.view());
         }
-        self.slot(owner, from)?;
+        if !in_signal_order(&after_place(&layout, from, to, position)) {
+            return Err(
+                "A plugin cannot sit in front of a built-in effect that a plugin before it comes \
+                 after. Move the plugins in the order the signal passes them."
+                    .to_string(),
+            );
+        }
         if let Some(target) = self.target_of(owner)
             && let Some(link) = LINK.lock().unwrap().as_mut()
         {
-            link.sender.send(InsertMsg::Move { target, from, to })?;
+            link.sender.send(InsertMsg::Place {
+                target,
+                from,
+                to,
+                position,
+            })?;
         }
         // The same rotation the rack does.
         for s in self.slots.iter_mut().filter(|s| s.owner == *owner) {
-            s.index = if s.index == from {
-                to
-            } else if from < to && s.index > from && s.index <= to {
-                s.index - 1
-            } else if to < from && s.index >= to && s.index < from {
-                s.index + 1
-            } else {
-                s.index
-            };
+            if s.index == from {
+                s.position = position;
+            }
+            s.index = moved_index(s.index, from, to);
         }
         self.changed();
+        Ok(self.view())
+    }
+
+    /// Put a copy of the plugin in `from`'s slot `index` - same plugin, its full state, bypass and
+    /// place in the chain - onto `to`, after the plugins already at that place. A second,
+    /// independent instance, loaded here on the main thread like any other.
+    fn copy_slot(&mut self, from: &Owner, index: usize, to: &Owner) -> Result<RackView, String> {
+        let (plugin_id, state, bypass, position) = {
+            let s = self.slot(from, index)?;
+            let state = s.plugin.save_state().map_err(|e| {
+                format!("\"{}\" did not hand over its settings: {e}", s.info.info.name)
+            })?;
+            (s.info.info.id.clone(), state, s.shared.bypass(), s.position)
+        };
+        let position = match to {
+            Owner::Bus(_) => InsertPosition::END,
+            _ => position,
+        };
+        let free = (0..MAX_INSERTS)
+            .find(|i| self.position(to, *i).is_none())
+            .ok_or_else(|| format!("All {MAX_INSERTS} plugin slots of {} are taken.", to.label()))?;
+        self.load_as(
+            to,
+            Some(free),
+            &plugin_id,
+            LoadAs {
+                position,
+                state: Some(&state),
+                bypass,
+            },
+        )?;
+        let layout: Vec<(usize, InsertPosition)> = self
+            .slots
+            .iter()
+            .filter(|s| s.owner == *to && s.index != free)
+            .map(|s| (s.index, s.position))
+            .collect();
+        let target = placement_index(&layout, free, position);
+        if target != free {
+            self.place_slot(to, free, target, Some(position))?;
+        }
+        Ok(self.view())
+    }
+
+    /// Replace the plugins of `to` with copies of those of `from`, in the same places. What `to`
+    /// had is removed first.
+    fn copy_all(&mut self, from: &Owner, to: &Owner) -> Result<RackView, String> {
+        if from == to {
+            return Ok(self.view());
+        }
+        let mut sources: Vec<usize> = self
+            .slots
+            .iter()
+            .filter(|s| s.owner == *from)
+            .map(|s| s.index)
+            .collect();
+        sources.sort_unstable();
+        let mut old: Vec<usize> = self
+            .slots
+            .iter()
+            .filter(|s| s.owner == *to)
+            .map(|s| s.index)
+            .collect();
+        old.sort_unstable();
+        for index in old {
+            self.remove_slot(to, index)?;
+        }
+        for index in sources {
+            self.copy_slot(from, index, to)?;
+        }
         Ok(self.view())
     }
 
@@ -1126,6 +1352,37 @@ impl Manager {
                     changed = true;
                 }
             }
+            // Same plugins in the same order, perhaps at other places in the chain: moved in
+            // place, not reloaded, so they keep their sound. (The audio thread runs by place and
+            // slot, so the steps in between need no particular order.) A list out of signal order
+            // is refused by the score reader and left alone here.
+            let places: Vec<(usize, InsertPosition)> = have
+                .iter()
+                .zip(wanted)
+                .map(|(p, w)| (self.slots[*p].index, w.position()))
+                .collect();
+            if in_signal_order(&places) {
+                for (index, position) in places {
+                    let p = self.position(&owner, index);
+                    if let Some(p) = p
+                        && self.slots[p].position != position
+                    {
+                        self.slots[p].position = position;
+                        if let Some(target) = self.target_of(&owner)
+                            && let Some(link) = LINK.lock().unwrap().as_mut()
+                            && let Err(e) = link.sender.send(InsertMsg::Place {
+                                target,
+                                from: index,
+                                to: index,
+                                position,
+                            })
+                        {
+                            log!("Plugin slot {} of track \"{track}\" not moved: {e}", index + 1);
+                        }
+                        changed = true;
+                    }
+                }
+            }
             if changed {
                 self.changed();
             }
@@ -1156,19 +1413,17 @@ impl Manager {
         let mut missing = Vec::new();
         let mut index = 0;
         for w in wanted {
-            match self.load(&owner, Some(index), &w.plugin) {
-                Ok(_) => {
-                    if let Some(p) = self.position(&owner, index) {
-                        if let Some(at) = states.iter().position(|(id, _)| *id == w.plugin)
-                            && let (_, Some(state)) = states.remove(at)
-                            && let Err(e) = self.slots[p].plugin.load_state(&state)
-                        {
-                            log!("State of {} not loaded: {e}", w.plugin);
-                        }
-                        self.slots[p].shared.set_bypass(w.bypass.unwrap_or(false));
-                    }
-                    index += 1;
-                }
+            let state = states
+                .iter()
+                .position(|(id, _)| *id == w.plugin)
+                .and_then(|at| states.remove(at).1);
+            let how = LoadAs {
+                position: w.position(),
+                state: state.as_deref(),
+                bypass: w.bypass.unwrap_or(false),
+            };
+            match self.load_as(&owner, Some(index), &w.plugin, how) {
+                Ok(_) => index += 1,
                 Err(e) => missing.push(format!("\"{}\" ({e})", w.plugin)),
             }
         }
@@ -1407,6 +1662,7 @@ impl Manager {
                     name: s.info.info.name.clone(),
                     bypass: s.shared.bypass(),
                     state: s.plugin.save_state().ok().map(|b| base64_encode(&b)),
+                    before: s.position.name().map(str::to_string),
                 },
             );
         }
@@ -1465,20 +1721,14 @@ impl Manager {
         // (uninstalled, not scanned yet) is not forgotten by the next save.
         let mut lost = Vec::new();
         for (owner, saved) in entries {
-            match self.load(&owner, Some(saved.slot), &saved.plugin_id) {
-                Ok(_) => {
-                    if let Some(state) = saved.state.as_deref().and_then(base64_decode)
-                        && let Ok(slot) = self.slot_mut(&owner, saved.slot)
-                        && let Err(e) = slot.plugin.load_state(&state)
-                    {
-                        log!("State of {} not loaded: {e}", saved.name);
-                    }
-                    if saved.bypass
-                        && let Ok(slot) = self.slot(&owner, saved.slot)
-                    {
-                        slot.shared.set_bypass(true);
-                    }
-                }
+            let state = saved.state.as_deref().and_then(base64_decode);
+            let how = LoadAs {
+                position: saved.position(),
+                state: state.as_deref(),
+                bypass: saved.bypass,
+            };
+            match self.load_as(&owner, Some(saved.slot), &saved.plugin_id, how) {
+                Ok(_) => {}
                 Err(e) => {
                     log!("Plugin {} not restored: {e}", saved.name);
                     emit(PluginEvent::Notice {
@@ -1682,6 +1932,67 @@ pub async fn plugin_move(target: String, from: usize, to: usize) -> Result<RackV
     .await
 }
 
+/// Move a plugin to slot `to` and to a place in the track's built-in chain: in front of `before`
+/// (`octaver`, `high_pass`, `eq`, `comp`, `delay`, `reverb`) or, without it, after the chain.
+/// Refused when it would put the plugins out of signal order.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn plugin_place(
+    target: String,
+    from: usize,
+    to: usize,
+    before: Option<String>,
+) -> Result<RackView, String> {
+    let target = parse_target(&target)?;
+    let position = parse_before(before.as_deref())?;
+    blocking(move || {
+        on_main(move |m| {
+            let owner = m.owner(target)?;
+            let view = m.place_slot(&owner, from, to, Some(position))?;
+            m.touched(&owner);
+            Ok(view)
+        })
+    })
+    .await
+}
+
+/// `before:` as the UI sends it.
+fn parse_before(before: Option<&str>) -> Result<InsertPosition, String> {
+    InsertPosition::parse(before).ok_or_else(|| {
+        format!(
+            "'{}' is not a built-in effect. Use octaver, high_pass, eq, comp, delay or reverb.",
+            before.unwrap_or_default()
+        )
+    })
+}
+
+/// Copy the plugin in `target`'s slot - with its full state, bypass and place in the chain - onto
+/// `to` (`track.<n>` or `bus.<name>`), as a second, independent instance.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn plugin_copy(target: String, slot: usize, to: String) -> Result<RackView, String> {
+    let from = parse_target(&target)?;
+    let to = parse_target(&to)?;
+    blocking(move || {
+        on_main(move |m| {
+            let (from, to) = (m.owner(from)?, m.owner(to)?);
+            let view = m.copy_slot(&from, slot, &to)?;
+            m.touched(&to);
+            Ok(view)
+        })
+    })
+    .await
+}
+
+/// Replace every plugin of `to` with copies of `from`'s, in the same places - the plugin half of
+/// "copy the whole chain" (`crate::host`, `chain_copy`).
+pub fn copy_all(from: InsertTarget, to: InsertTarget) -> Result<RackView, String> {
+    on_main(move |m| {
+        let (from, to) = (m.owner(from)?, m.owner(to)?);
+        let view = m.copy_all(&from, &to)?;
+        m.touched(&to);
+        Ok(view)
+    })
+}
+
 /// The host's bypass of a slot: the plugin is not called, the signal passes unchanged.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn plugin_bypass(target: String, slot: usize, on: bool) -> Result<RackView, String> {
@@ -1785,7 +2096,100 @@ mod tests {
             name: id.to_uppercase(),
             bypass: slot == 1,
             state: Some("AAEC".into()),
+            before: None,
         }
+    }
+
+    use looper_engine::engine::fx::FxSlot;
+
+    fn at(slot: FxSlot) -> InsertPosition {
+        InsertPosition::before(slot)
+    }
+    const END: InsertPosition = InsertPosition::END;
+
+    /// A rack file from before positions reads with every plugin at the end - exactly as before -
+    /// and a placed one round-trips; `before` is only written when it says something.
+    #[test]
+    fn positions_round_trip_through_the_rack_file_and_old_files_mean_the_end() {
+        let rack = read_rack(r#"{"version": 2, "tracks": {"voice": [
+            {"slot": 0, "plugin_id": "vst3:IRDX", "name": "IRDX", "bypass": false, "state": "AAEC"}
+        ]}}"#, &[])
+        .expect("liest sich");
+        assert_eq!(rack.tracks["voice"][0].position(), END);
+
+        let mut rack = SavedRack {
+            version: RACK_VERSION,
+            ..SavedRack::default()
+        };
+        let mut ir = saved(0, "vst3:irdx");
+        ir.before = Some("octaver".into());
+        rack.add(&Owner::Track("voice".into()), ir);
+        rack.add(&Owner::Track("voice".into()), saved(1, "au:delay"));
+        let text = serde_json::to_string_pretty(&rack).unwrap();
+        assert_eq!(text.matches("\"before\"").count(), 1, "{text}");
+        let back = read_rack(&text, &[]).unwrap();
+        assert_eq!(back, rack);
+        assert_eq!(back.tracks["voice"][0].position(), at(FxSlot::Octaver));
+        assert_eq!(back.tracks["voice"][1].position(), END);
+    }
+
+    #[test]
+    fn slot_order_must_be_signal_order() {
+        assert!(in_signal_order(&[(0, at(FxSlot::Octaver)), (1, at(FxSlot::Eq)), (4, END)]));
+        assert!(in_signal_order(&[(3, END), (0, at(FxSlot::Eq))]), "by index, not by list");
+        assert!(!in_signal_order(&[(0, END), (1, at(FxSlot::Eq))]));
+        assert!(in_signal_order(&[]));
+    }
+
+    /// Moving a plugin across built-in effects only - the IR loader from the end to the front,
+    /// with nothing else passed - keeps its slot, and with it every MIDI address of the slot.
+    #[test]
+    fn a_move_across_built_ins_only_keeps_the_slot_and_its_midi_address() {
+        let layout = [(0, at(FxSlot::Comp)), (1, END)];
+        // Plugin 2 (the IR loader) to the front of the octaver: it must now be slot 1.
+        let moved = after_place(&layout, 1, 0, at(FxSlot::Octaver));
+        assert_eq!(moved, vec![(0, at(FxSlot::Octaver)), (1, at(FxSlot::Comp))]);
+        assert!(in_signal_order(&moved));
+        // Plugin 1 from before the compressor to before the EQ: same slot.
+        let moved = after_place(&layout, 0, 0, at(FxSlot::Eq));
+        assert_eq!(moved, vec![(0, at(FxSlot::Eq)), (1, END)]);
+        // Plugin 1 to the end but kept in slot 1, in front of plugin 2: still in order (both end).
+        assert!(in_signal_order(&after_place(&layout, 0, 0, END)));
+        // Plugin 2 in front of the EQ but left in slot 2, behind plugin 1 at the compressor: refused.
+        assert!(!in_signal_order(&after_place(&layout, 1, 1, at(FxSlot::Eq))));
+        assert_eq!(moved_index(5, 1, 3), 5);
+        assert_eq!(moved_index(2, 1, 3), 1);
+        assert_eq!(moved_index(1, 1, 3), 3);
+    }
+
+    /// A plain reorder among the plugins (the old drag, or MIDI-free `plugin_move`) keeps the
+    /// order valid by taking the neighbour's place where its own no longer fits.
+    #[test]
+    fn a_plain_reorder_adopts_the_place_of_its_new_neighbour() {
+        let layout = [(0, at(FxSlot::Octaver)), (1, END), (2, END)];
+        assert_eq!(adopted_position(&layout, 2, 1, END), END, "among equals: unchanged");
+        assert_eq!(
+            adopted_position(&layout, 2, 0, END),
+            at(FxSlot::Octaver),
+            "to the very front: the place of the one it now precedes"
+        );
+        assert_eq!(adopted_position(&layout, 0, 2, at(FxSlot::Octaver)), END, "to the back");
+    }
+
+    /// A copied plugin lands after every plugin at its place or further forward.
+    #[test]
+    fn a_copy_lands_behind_the_plugins_at_its_place() {
+        let layout = [(0, at(FxSlot::Octaver)), (1, at(FxSlot::Eq)), (2, END)];
+        assert_eq!(placement_index(&layout, 3, at(FxSlot::Eq)), 2, "between EQ and end");
+        assert_eq!(placement_index(&layout, 3, END), 3, "at the end: stays");
+        assert_eq!(placement_index(&layout, 3, at(FxSlot::Octaver)), 1);
+        // A gap in front (slot 0 empty): the new one moves behind the octaver plugin in slot 2.
+        let gappy = [(2, at(FxSlot::Octaver)), (3, END)];
+        assert_eq!(placement_index(&gappy, 0, at(FxSlot::Eq)), 2);
+        let mut result = after_place(&[(0, at(FxSlot::Eq)), (2, at(FxSlot::Octaver)), (3, END)], 0, 2, at(FxSlot::Eq));
+        result.sort();
+        assert!(in_signal_order(&result), "{result:?}");
+        assert_eq!(placement_index(&[], 0, at(FxSlot::Eq)), 0);
     }
 
     const OLD_FILE: &str = r#"{"slots": [

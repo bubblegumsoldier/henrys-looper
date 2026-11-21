@@ -29,7 +29,12 @@
 .dvc.held { box-shadow: inset 3px 0 0 var(--fx-on-line); }
 .dvc.err { border-color: rgba(255, 92, 108, .5); }
 .dvc.open { border-color: var(--line-3); background: var(--bg-1); }
-.dvc.dropover { box-shadow: 0 -2px 0 var(--accent); }
+.dvc.drop-above { box-shadow: 0 -2px 0 var(--accent); }
+.dvc.drop-below { box-shadow: 0 2px 0 var(--accent); }
+.dev-add.drop-above { box-shadow: 0 -2px 0 var(--accent); }
+/* A plug-in among the built-in devices: the same row, marked by its plug icon */
+.dvc.plug .dev-n::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--tx-4); vertical-align: middle; }
+.dev-copy { display: flex; flex-direction: column; }
 .dev-h { display: flex; align-items: center; height: var(--row-h); min-width: 0; }
 .dvc .pwr { width: var(--row-h); height: var(--row-h); flex: none; display: grid; place-items: center; color: var(--tx-4); border-right: 1px solid var(--line-1); border-radius: 6px 0 0 6px; }
 .dvc .pwr .ic { --ic: 14px; }

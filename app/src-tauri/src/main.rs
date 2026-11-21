@@ -877,6 +877,27 @@ async fn mixer_apply(
     offload(move || handle.mixer_apply(mixer, pan.unwrap_or_default())).await
 }
 
+/// Copy a track's whole device chain onto another track: the built-in effects with every setting
+/// (fader, mute and the instrument of the target stay), then its plugins as independent copies
+/// with their full state and places - what the target had is replaced. `from`/`to` are 0-based
+/// track positions. A human change: the open score's `mixer:` follows, like after a fader move.
+#[tauri::command(rename_all = "snake_case")]
+async fn chain_copy(
+    from: usize,
+    to: usize,
+    engine: State<'_, EngineHandle>,
+) -> Result<plugins::RackView, String> {
+    let handle = engine.inner().clone();
+    offload(move || {
+        handle.chain_copy(from, to)?;
+        plugins::copy_all(
+            looper_engine::engine::insert::InsertTarget::Track(from),
+            looper_engine::engine::insert::InsertTarget::Track(to),
+        )
+    })
+    .await
+}
+
 #[tauri::command(rename_all = "snake_case")]
 async fn score_load(
     yaml: String,
@@ -1259,6 +1280,9 @@ fn main() {
             plugins::plugin_load,
             plugins::plugin_remove,
             plugins::plugin_move,
+            plugins::plugin_place,
+            plugins::plugin_copy,
+            chain_copy,
             plugins::plugin_bypass,
             plugins::plugin_params,
             plugins::plugin_set_param,
@@ -1267,6 +1291,7 @@ fn main() {
             plugins::plugin_state_set,
             instruments::instrument_rack,
             instruments::instrument_set,
+            instruments::instrument_copy,
             instruments::instrument_editor,
             instruments::instrument_panic,
             recording_settings,

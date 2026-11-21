@@ -193,6 +193,7 @@ mod tests {
         InsertLine {
             plugin: id.to_string(),
             bypass: None,
+            before: None,
         }
     }
 
