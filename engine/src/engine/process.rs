@@ -362,6 +362,15 @@ impl EngineCore {
         self.instrument_delay
     }
 
+    /// Nanoseconds spent inside plugins - instruments and inserts - since the last call, and reset.
+    /// The audio callback calls it once per callback for the plugin share of the load
+    /// (`crate::load`); the racks measure every plugin call anyway, so this costs two additions.
+    #[inline]
+    pub fn take_plugin_ns(&mut self) -> u64 {
+        self.sources.as_mut().map_or(0, |r| r.take_busy_ns())
+            + self.inserts.as_mut().map_or(0, |r| r.take_busy_ns())
+    }
+
     /// Events that sounded later than their fixed position because they arrived too late.
     pub fn late_events(&self) -> u64 {
         self.sources.as_ref().map_or(0, |s| s.late())

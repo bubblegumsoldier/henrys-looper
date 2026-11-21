@@ -17,6 +17,7 @@ pub mod click;
 pub mod duplex;
 pub mod engine;
 pub mod latency;
+pub mod load;
 pub mod meter;
 pub mod midi;
 pub mod plugin;

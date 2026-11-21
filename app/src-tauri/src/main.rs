@@ -20,6 +20,7 @@ mod devshot;
 mod host;
 mod logfile;
 mod layout;
+mod loadwatch;
 mod midi;
 mod mixstore;
 mod instruments;

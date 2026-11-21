@@ -932,6 +932,8 @@ pub struct StatusEvent {
     pub other_errors: u64,
     /// Longest audio callback so far. At 128 frames / 48 kHz the budget is 2.67 ms.
     pub max_callback_ms: f64,
+    /// The audio load of the output callback and the overruns (`crate::loadwatch`).
+    pub load: LoadStatusEvent,
     /// Commands the engine refused, in total.
     pub ignored_commands: u64,
     /// Prepared layer buffers the engine is currently holding ready.
@@ -943,6 +945,39 @@ pub struct StatusEvent {
     /// MIDI). The arrangement asks `mixer_take` for what changed when it moves, and writes it into
     /// the open score's `mixer:` section.
     pub mixer_rev: u64,
+}
+
+/// How much of its time budget the output callback uses, and when it did not make it
+/// (`looper_engine::load`, `crate::loadwatch`). The budget of a callback is its block's playing
+/// time, `block_frames / sample_rate`.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct LoadStatusEvent {
+    /// Over the last second: processing time / budget, summed - the average load, in percent.
+    pub avg_percent: f32,
+    /// Over the last second: the worst single callback, in percent. Above 100 it was late.
+    pub peak_percent: f32,
+    /// Over the last second: time inside plugins (instruments and inserts) / budget, in percent.
+    pub plugin_percent: f32,
+    /// Overruns since the engine started: late blocks, late wake-ups and driver overloads, with
+    /// what came together within a few milliseconds counted once.
+    pub overruns: u64,
+    /// Callbacks that took longer than their budget.
+    pub late_blocks: u64,
+    /// Callbacks that started more than two blocks after the previous one.
+    pub late_wakeups: u64,
+    /// What the driver reported - on macOS CoreAudio's processor overload. The same number as
+    /// `xruns`.
+    pub driver_overloads: u64,
+    /// Local time of the newest overrun, `HH:MM:SS`; `null` while there was none.
+    pub last_overrun: Option<String>,
+    /// What it was, e.g. "late block + driver overload".
+    pub last_overrun_kind: Option<String>,
+    /// Load of its late callback in percent; 0 when only the driver reported it.
+    pub last_overrun_percent: f32,
+    /// Frames per callback the driver really delivers.
+    pub block_frames: u32,
+    /// The time budget of one callback in milliseconds.
+    pub budget_ms: f64,
 }
 
 impl StatusEvent {
@@ -991,6 +1026,7 @@ impl StatusEvent {
             fifo_overruns: 0,
             other_errors: 0,
             max_callback_ms: 0.0,
+            load: LoadStatusEvent::default(),
             ignored_commands: 0,
             spares: 0,
             message: None,
@@ -2147,6 +2183,7 @@ mod tests {
                 "fifo_underruns",
                 "ignored_commands",
                 "latency_frames",
+                "load",
                 "loop_samples",
                 "loop_seconds",
                 "max_callback_ms",
@@ -2183,6 +2220,52 @@ mod tests {
             Value::Null,
             "ohne geladene Partitur ist das Feld leer, nicht ein leeres Objekt"
         );
+    }
+
+    /// The load part as `ui/src/types.ts` reads it: these keys, numbers as numbers, and the time of
+    /// the last overrun `null` until there was one.
+    #[test]
+    fn the_load_part_has_exactly_the_documented_keys() {
+        let idle = serde_json::to_value(StatusEvent::idle()).unwrap();
+        assert_eq!(idle["load"]["last_overrun"], Value::Null);
+        assert_eq!(idle["load"]["overruns"], json!(0));
+        let load = LoadStatusEvent {
+            avg_percent: 23.5,
+            peak_percent: 104.5,
+            plugin_percent: 12.0,
+            overruns: 2,
+            late_blocks: 2,
+            late_wakeups: 1,
+            driver_overloads: 3,
+            last_overrun: Some("21:14:05".to_string()),
+            last_overrun_kind: Some("late block + driver overload".to_string()),
+            last_overrun_percent: 104.5,
+            block_frames: 128,
+            budget_ms: 2.5,
+        };
+        let value = serde_json::to_value(&load).unwrap();
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "avg_percent",
+                "block_frames",
+                "budget_ms",
+                "driver_overloads",
+                "last_overrun",
+                "last_overrun_kind",
+                "last_overrun_percent",
+                "late_blocks",
+                "late_wakeups",
+                "overruns",
+                "peak_percent",
+                "plugin_percent",
+            ]
+        );
+        assert_eq!(value["peak_percent"], json!(104.5));
+        assert_eq!(value["last_overrun"], json!("21:14:05"));
+        assert_eq!(value["budget_ms"], json!(2.5));
     }
 
     #[test]
