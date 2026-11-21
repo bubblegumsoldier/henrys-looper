@@ -1984,8 +1984,19 @@ sitzen. Jetzt ist die Spalte eines Tracks **eine geordnete Liste**:
   mit allen Plugins am Ende — genau wie vorher —, Version bleibt 2 (ein älteres Programm ignoriert
   das Feld). In der Partitur: `inserts: [{plugin: …, before: eq}]`, Abschnitt 15.
 * *UI.* Eine Liste ohne „Built-in“/„Plug-ins“-Trenner; eine Plugin-Zeile lässt sich über und unter
-  jede eingebaute Zeile ziehen (obere Hälfte einer Zeile = davor, „+ Add plugin“ = ans Ende). Ein
-  neues Plugin kommt ans Ende.
+  jede eingebaute Zeile ziehen (über die Kopfzeile oder den Griff; maßgeblich ist die Mitte der
+  Kopfzeilen, die Regler einer aufgeklappten Zeile zählen also als „dahinter“; „+ Add plugin“ =
+  ans Ende; eine Linie zeigt die Einfügestelle, Esc bricht ab). Ein neues Plugin kommt ans Ende.
+  **Zeiger-Ereignisse, kein HTML5-Drag-and-Drop** (Fehler vom 2026-11-21): im App-Fenster
+  (WKWebView) übernimmt Tauris eigene Datei-Ablage (`dragDropEnabled`, standardmäßig an) die native
+  Drag-Sitzung, die Seite bekommt kein `dragover`/`drop` — das Plugin ließ sich anfassen, aber
+  nirgends ablegen (in Chrome ging es, darum fiel es in keinem Test auf). Jedes andere Ziehen der
+  App (Raster, Mixer-Kante, Blatt) benutzt ohnehin Zeiger-Ereignisse. Rückfallweg, der nicht
+  scheitern kann: „↑ Up“/„↓ Down“ in der aufgeklappten Plugin-Zeile und Alt+↑/↓ auf der
+  fokussierten Zeile, Schritt für Schritt durch die sieben Plätze und an anderen Plugins am selben
+  Platz vorbei (`stepPlace`). Prüfen im Browser mit echten Eingabe-Ereignissen:
+  `node ui/scripts/drag-check.mjs` (eigener Vite-Server auf 5199, Chrome headless mit Wegwerf-Profil
+  über das DevTools-Protokoll, Vorschau `ui/dev/devchain.html` mit Stellvertreter-Host).
 
 **Kopieren.** „Copy to…“ in einer aufgeklappten Plugin-Zeile legt eine Kopie — dasselbe Plugin,
 sein vollständiger Zustand (derselbe Chunk wie im Rack), Bypass und Platz — auf eine andere Spur

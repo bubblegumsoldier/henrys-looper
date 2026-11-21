@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { builtinSummary, defaultDevice, deviceOrder, movedIndex, placeDrop, pluginSlotOf, pluginSummary } from "./model";
-import type { FxStatus } from "../types";
+import { builtinSummary, defaultDevice, deviceOrder, dropIndex, movedIndex, placeDrop, pluginSlotOf, pluginSummary, stepPlace } from "./model";
+import type { FxSlotName, FxStatus } from "../types";
 
 const fx = (over: Partial<FxStatus> = {}): FxStatus =>
   ({
@@ -125,5 +125,40 @@ describe("plug-ins anywhere in the chain", () => {
     const move = placeDrop(gappy, 3, gappy.indexOf("high_pass"), 8);
     expect(move).toEqual({ to: 0, before: "high_pass" });
     expect(movedIndex(0, 3, 0)).toBe(1);
+  });
+});
+
+describe("moving a plug-in without HTML5 drag and drop", () => {
+  it("hit-tests a drag by the middles of the row headers", () => {
+    // Three rows with headers centred at 10, 40 (an unfolded row from 25 to 120) and 130.
+    const mids = [10, 40, 130];
+    expect(dropIndex(5, mids)).toBe(0);
+    expect(dropIndex(30, mids)).toBe(1);
+    expect(dropIndex(90, mids)).toBe(2); // on the unfolded row's controls: behind it
+    expect(dropIndex(200, mids)).toBe(3); // below everything: the end
+  });
+
+  it("steps a plug-in through all seven places and past others at the same place", () => {
+    // The owner's case: everything built in, IRDX Studio after the reverb.
+    let place: { slot: number; before: FxSlotName | null } = { slot: 0, before: null };
+    const seen: (FxSlotName | null)[] = [];
+    for (;;) {
+      const order = deviceOrder({ instrument: false, builtin: true, plugins: [place] });
+      const step = stepPlace(order, place.slot, -1, 8);
+      if (!step) break;
+      seen.push(step.before);
+      place = { slot: step.to, before: step.before };
+    }
+    expect(seen).toEqual(["reverb", "delay", "comp", "eq", "high_pass", "octaver"]);
+    const front = deviceOrder({ instrument: false, builtin: true, plugins: [{ slot: 0, before: "octaver" }] });
+    expect(stepPlace(front, 0, 1, 8)).toEqual({ to: 0, before: "high_pass" });
+    const end = deviceOrder({ instrument: false, builtin: true, plugins: [0] });
+    expect(stepPlace(end, 0, 1, 8)).toBeNull();
+    // Two plug-ins after the chain: one step up passes the other one, the place stays.
+    const two = deviceOrder({ instrument: false, builtin: true, plugins: [0, 1] });
+    expect(stepPlace(two, 1, -1, 8)).toEqual({ to: 0, before: null });
+    // Never above an instrument.
+    const inst = deviceOrder({ instrument: true, builtin: true, plugins: [{ slot: 0, before: "octaver" }] });
+    expect(stepPlace(inst, 0, -1, 8)).toBeNull();
   });
 });

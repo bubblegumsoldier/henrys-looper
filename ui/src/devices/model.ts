@@ -74,6 +74,33 @@ export function movedIndex(index: number, from: number, to: number): number {
 }
 
 /**
+ * Where a drag at height `y` would drop: in front of the first row whose header middle lies below
+ * `y`, or at the end. `mids` are the vertical middles of the rows' headers, in column order - the
+ * header, not the whole row, so an unfolded device's controls count as "behind it".
+ */
+export function dropIndex(y: number, mids: number[]): number {
+  const i = mids.findIndex((m) => y < m);
+  return i < 0 ? mids.length : i;
+}
+
+/**
+ * One step up (-1) or down (+1) for plug-in `slot`: past the next row - a built-in device (a new
+ * place) or another plug-in at the same place (a new slot). Null at either end.
+ */
+export function stepPlace(
+  order: DeviceId[],
+  slot: number,
+  dir: -1 | 1,
+  maxSlots: number,
+): { to: number; before: FxSlotName | null } | null {
+  const own = order.indexOf(pluginId(slot));
+  if (own < 0) return null;
+  const at = dir < 0 ? own - 1 : own + 2;
+  if (at < 0 || at > order.length || (dir < 0 && order[at] === "instrument")) return null;
+  return placeDrop(order, slot, at, maxSlots);
+}
+
+/**
  * Dropping plug-in `from` into the column `order` so that it lands in front of row `at` (an index
  * into `order`; `order.length` = the very end). Answers the slot and the place the host is asked
  * for (`pluginApi.place`), or null when nothing would change.

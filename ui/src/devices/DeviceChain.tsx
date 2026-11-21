@@ -23,9 +23,10 @@
 //!   slot stays whenever it only crosses built-in devices, so its MIDI addresses stay too.
 //! * "Copy to…" in an open plug-in or instrument row, "Copy chain to…" in the header: copies with
 //!   the full plugin state, independent afterwards.
-//! * Keyboard: ↑/↓ move between rows, Enter or Space opens and closes one.
+//! * Keyboard: ↑/↓ move between rows, Enter or Space opens and closes one, Alt+↑/↓ moves a plug-in
+//!   one step (as do "↑ Up"/"↓ Down" in its open row) - the fallback for the drag.
 
-import { useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from "react";
+import { useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { fxAddress, fxSlotAddress, trackAddress } from "../midi/addresses";
 import { pluginApi } from "../plugins/api";
 import { instrumentApi, instrumentOf, setInstruments, useInstruments } from "../plugins/instruments";
@@ -51,6 +52,8 @@ import {
   pluginSlotOf,
   pluginSummary,
   placeDrop,
+  dropIndex,
+  stepPlace,
   trackOwner,
   type DeviceId,
   type Owner,
@@ -91,6 +94,21 @@ export function DeviceChain({ owner, track, size, title }: Props) {
 
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    if (e.altKey) {
+      // Alt+↑/↓ on a plug-in row moves the plug-in one step - the keyboard twin of the drag.
+      const id = (document.activeElement?.closest("[data-dev]") as HTMLElement | null)?.dataset.dev as DeviceId | undefined;
+      const slot = pluginSlotOf(id ?? null);
+      if (slot === null || !track) return;
+      e.preventDefault();
+      const where = stepPlace(order, slot, e.key === "ArrowUp" ? -1 : 1, rack.max_slots);
+      if (!where) return;
+      void attempt(async () => {
+        const to = await placePlugin(owner, slot, where, open);
+        // The row is drawn at its new place; the focus goes with it.
+        setTimeout(() => list.current?.querySelector<HTMLElement>(`[data-dev="${pluginId(to)}"] .dev-main`)?.focus(), 0);
+      });
+      return;
+    }
     const rows = [...(list.current?.querySelectorAll<HTMLElement>(".dev-main") ?? [])];
     const at = rows.indexOf(document.activeElement as HTMLElement);
     if (at < 0) return;
@@ -167,13 +185,12 @@ interface RowProps {
 }
 
 interface RowDrag {
-  draggable: boolean;
-  onDragStart?: (e: DragEvent) => void;
-  onDragOver: (e: DragEvent) => void;
-  onDrop: (e: DragEvent) => void;
-  onDragEnd: () => void;
-  /** Where the dragged plug-in would land: in front of this row or behind it. */
-  over: "above" | "below" | null;
+  /** Plug-in rows only: pressing the header starts a drag (see `ChainRows`). */
+  onPointerDown?: (e: ReactPointerEvent) => void;
+  /** Swallows the click that follows the release of a drag. */
+  onClickCapture: (e: MouseEvent) => void;
+  /** The dragged plug-in would land in front of this row: the insertion line shows above it. */
+  over: "above" | null;
 }
 
 function DeviceRow(p: RowProps) {
@@ -181,13 +198,10 @@ function DeviceRow(p: RowProps) {
     <div
       className={`dvc ${p.state}${p.open ? " open" : ""}${p.plug ? " plug" : ""}${p.drag?.over ? ` drop-${p.drag.over}` : ""}`}
       role="listitem"
-      draggable={!!p.drag?.draggable}
-      onDragStart={p.drag?.onDragStart}
-      onDragOver={p.drag?.onDragOver}
-      onDrop={p.drag?.onDrop}
-      onDragEnd={p.drag?.onDragEnd}
+      data-dev={p.id}
+      onClickCapture={p.drag?.onClickCapture}
     >
-      <div className="dev-h">
+      <div className={`dev-h${p.drag?.onPointerDown ? " grab" : ""}`} onPointerDown={p.drag?.onPointerDown}>
         {p.power ? (
           <button
             className={`pwr${p.power.on ? " on" : ""}`}
@@ -358,9 +372,27 @@ interface ChainRowsProps {
 }
 
 /**
+ * Move plug-in `from` of `owner` to `move` (from `placeDrop`/`stepPlace`). An unfolded plug-in
+ * stays unfolded under its new slot. Answers the new slot.
+ */
+async function placePlugin(owner: Owner, from: number, move: { to: number; before: FxSlotName | null }, open: DeviceId | null): Promise<number> {
+  setRack(await pluginApi.place(owner, from, move.to, move.before));
+  if (open === pluginId(from) && move.to !== from) openDevice(owner, pluginId(move.to));
+  return move.to;
+}
+
+/**
  * Every device of a column in signal order. A plug-in row can be dragged above or below any other
  * row - in front of a built-in device, between two of them, or after the chain; the built-in
  * devices keep their order. Dropping asks the host for the slot and the place `placeDrop` works out.
+ *
+ * **Pointer events, not HTML5 drag and drop.** In the app window (WKWebView) Tauri's own file-drop
+ * handling (`dragDropEnabled`, on by default) takes the native drag session, and the page never
+ * sees `dragover`/`drop` - the plug-in could be picked up but not dropped anywhere. Pointer events
+ * are delivered the same in every web view, which is why every other drag in the app (grid, mixer
+ * edge, sheet) uses them too. The rows are hit-tested by their header middles (`dropIndex`), so an
+ * unfolded device's controls count as "behind it", and on/off or unfolded rows take a drop like
+ * any other.
  */
 function ChainRows({ owner, track, fx, plugins, order, open, toggle }: ChainRowsProps) {
   const { rack } = usePlugins();
@@ -368,51 +400,84 @@ function ChainRows({ owner, track, fx, plugins, order, open, toggle }: ChainRows
   const [drag, setDrag] = useState<number | null>(null);
   /** Index into `order` the dragged plug-in would land in front of (`order.length`: the end). */
   const [at, setAt] = useState<number | null>(null);
+  /** A drag just ended: the click that follows the release must not fold the row. */
+  const dragged = useRef(false);
 
   const free = (() => {
     for (let n = 0; n < rack.max_slots; n += 1) if (!plugins.some((s) => s.slot === n)) return n;
     return -1;
   })();
 
-  const stop = () => {
-    setDrag(null);
-    setAt(null);
-  };
-  const drop = () => {
-    const from = drag;
-    const target = at;
-    stop();
-    if (from === null || target === null) return;
-    const move = placeDrop(order, from, target, rack.max_slots);
-    if (move) void attempt(async () => setRack(await pluginApi.place(owner, from, move.to, move.before)));
-  };
-  /** Drop handlers of the row at `index`: its upper half is "in front of it", the lower "behind". */
-  const rowDrag = (index: number, slot: number | null): RowDrag | undefined => {
-    if (!rack.supported) return undefined;
-    return {
-      draggable: slot !== null,
-      onDragStart:
-        slot === null
-          ? undefined
-          : (e) => {
-              e.dataTransfer.effectAllowed = "move";
-              e.dataTransfer.setData("text/plain", String(slot));
-              setDrag(slot);
-            },
-      onDragOver: (e) => {
-        if (drag === null) return;
-        e.preventDefault();
-        const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        const next = e.clientY > box.top + box.height / 2 ? index + 1 : index;
-        if (next !== at) setAt(next);
-      },
-      onDrop: (e) => {
-        e.preventDefault();
-        drop();
-      },
-      onDragEnd: stop,
-      over: drag !== null && at === index ? "above" : null,
+  /** Pressing a plug-in row's header (not its power switch) and moving 4 px starts a drag. */
+  const startDrag = (e: ReactPointerEvent, slot: number) => {
+    if (e.button !== 0 || (e.target as HTMLElement).closest(".pwr")) return;
+    const list = (e.currentTarget as HTMLElement).closest(".devlist");
+    if (!list) return;
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const columnOrder = order;
+    let active = false;
+    let target: number | null = null;
+    const mids = () =>
+      columnOrder.map((id) => {
+        const head = list.querySelector(`[data-dev="${id}"] > .dev-h`);
+        if (!head) return Number.POSITIVE_INFINITY;
+        const box = head.getBoundingClientRect();
+        return box.top + box.height / 2;
+      });
+    const move = (ev: PointerEvent) => {
+      if (!active) {
+        if (Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
+        active = true;
+        dragged.current = true;
+        setDrag(slot);
+        document.body.classList.add("dev-dragging");
+      }
+      ev.preventDefault();
+      target = dropIndex(ev.clientY, mids());
+      setAt(target);
     };
+    const end = (drop: boolean) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", escape, true);
+      document.body.classList.remove("dev-dragging");
+      setDrag(null);
+      setAt(null);
+      // The click that follows a release lands after this; let it pass by first.
+      setTimeout(() => (dragged.current = false), 0);
+      if (!active || !drop || target === null) return;
+      const where = placeDrop(columnOrder, slot, target, rack.max_slots);
+      if (where) void attempt(() => placePlugin(owner, slot, where, open));
+    };
+    const up = () => end(true);
+    const cancel = () => end(false);
+    const escape = (ev: globalThis.KeyboardEvent) => {
+      if (ev.key !== "Escape") return;
+      ev.stopPropagation();
+      end(false);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", escape, true);
+  };
+
+  const rowDrag = (index: number, slot: number | null): RowDrag => ({
+    onPointerDown: slot === null || !rack.supported ? undefined : (e) => startDrag(e, slot),
+    onClickCapture: (e) => {
+      if (!dragged.current) return;
+      e.stopPropagation();
+      e.preventDefault();
+    },
+    over: drag !== null && at === index ? "above" : null,
+  });
+
+  /** One step up or down, for the buttons of an unfolded plug-in row; null at either end. */
+  const step = (slot: number, dir: -1 | 1): (() => void) | null => {
+    const where = stepPlace(order, slot, dir, rack.max_slots);
+    return where ? () => void attempt(() => placePlugin(owner, slot, where, open)) : null;
   };
 
   return (
@@ -429,7 +494,16 @@ function ChainRows({ owner, track, fx, plugins, order, open, toggle }: ChainRows
         }
         const s = plugins.find((p) => p.slot === slot);
         if (!s) return null;
-        return <PluginRow key={`${s.slot}-${s.plugin_id}`} s={s} open={open === id} onToggle={() => toggle(id)} drag={rowDrag(index, s.slot)} />;
+        return (
+          <PluginRow
+            key={`${s.slot}-${s.plugin_id}`}
+            s={s}
+            open={open === id}
+            onToggle={() => toggle(id)}
+            drag={rowDrag(index, s.slot)}
+            moves={track ? { up: step(s.slot, -1), down: step(s.slot, 1) } : undefined}
+          />
+        );
       })}
       {!rack.supported ? (
         <div className="dev-hint">{T.plugUnsupported}</div>
@@ -438,15 +512,6 @@ function ChainRows({ owner, track, fx, plugins, order, open, toggle }: ChainRows
           className={`dev-add${drag !== null && at === order.length ? " drop-above" : ""}`}
           disabled={free < 0}
           onClick={(e) => setPicker(e.currentTarget)}
-          onDragOver={(e) => {
-            if (drag === null) return;
-            e.preventDefault();
-            if (at !== order.length) setAt(order.length);
-          }}
-          onDrop={(e) => {
-            e.preventDefault();
-            drop();
-          }}
           title={
             free < 0
               ? `All ${rack.max_slots} slots are taken`
@@ -528,7 +593,13 @@ function CopyChain({ track }: { track: TrackChain }) {
   );
 }
 
-function PluginRow({ s, open, onToggle, drag }: { s: SlotView; open: boolean; onToggle: () => void; drag: RowProps["drag"] }) {
+/** One step up / down through the places and the other plug-ins; null where it cannot go. */
+interface Moves {
+  up: (() => void) | null;
+  down: (() => void) | null;
+}
+
+function PluginRow({ s, open, onToggle, drag, moves }: { s: SlotView; open: boolean; onToggle: () => void; drag: RowProps["drag"]; moves?: Moves }) {
   const on = !s.bypass;
   return (
     <DeviceRow
@@ -546,19 +617,19 @@ function PluginRow({ s, open, onToggle, drag }: { s: SlotView; open: boolean; on
       onToggle={onToggle}
       drag={drag}
       plug
-      title={`${s.name} · ${s.vendor} · ${FORMAT[s.format] ?? s.format}${s.latency ? ` · ${s.latency} frames latency` : ""}\nClick to ${open ? "fold" : "show its parameters"} · drag to move it anywhere in the chain`}
+      title={`${s.name} · ${s.vendor} · ${FORMAT[s.format] ?? s.format}${s.latency ? ` · ${s.latency} frames latency` : ""}\nClick to ${open ? "fold" : "show its parameters"} · drag to move it anywhere in the chain (Alt+↑/↓ moves it too)`}
       trail={
         <span className="dev-grip" title="Drag to move this plug-in - in front of a built-in device, between two, or after them" aria-hidden="true">
           <Icon name="grip" />
         </span>
       }
     >
-      <PluginEditor s={s} />
+      <PluginEditor s={s} moves={moves} />
     </DeviceRow>
   );
 }
 
-function PluginEditor({ s }: { s: SlotView }) {
+function PluginEditor({ s, moves }: { s: SlotView; moves?: Moves }) {
   const run = async (work: () => Promise<unknown>) => attempt(work);
   const targets = useCopyTargets().filter((t) => t.owner !== s.target);
   return (
@@ -576,6 +647,16 @@ function PluginEditor({ s }: { s: SlotView }) {
           {s.active ? ` · ${s.cpu_us.toFixed(0)} µs` : ""}
         </span>
         <div className="grow" />
+        {moves && (
+          <span className="seg dev-move">
+            <button className="btn s" data-move="up" disabled={!moves.up} onClick={() => moves.up?.()} title={T.moveUpHint}>
+              {T.moveUp}
+            </button>
+            <button className="btn s" data-move="down" disabled={!moves.down} onClick={() => moves.down?.()} title={T.moveDownHint}>
+              {T.moveDown}
+            </button>
+          </span>
+        )}
         <CopyTo
           label={T.copyTo}
           title={`Put a copy of ${s.name} - with all its settings, on/off and place in the chain - on another track or bus. The copy is independent.`}

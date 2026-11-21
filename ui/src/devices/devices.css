@@ -29,9 +29,14 @@
 .dvc.held { box-shadow: inset 3px 0 0 var(--fx-on-line); }
 .dvc.err { border-color: rgba(255, 92, 108, .5); }
 .dvc.open { border-color: var(--line-3); background: var(--bg-1); }
-.dvc.drop-above { box-shadow: 0 -2px 0 var(--accent); }
-.dvc.drop-below { box-shadow: 0 2px 0 var(--accent); }
-.dev-add.drop-above { box-shadow: 0 -2px 0 var(--accent); }
+/* While a plug-in is dragged: the insertion line sits in the gap above the row it would land in
+   front of (or above "+ Add plugin" for the end). A shadow, so the rows do not move under the
+   pointer. */
+.dvc.drop-above, .dev-add.drop-above { box-shadow: 0 -3px 0 var(--accent); }
+.dev-h.grab { touch-action: none; }
+.dev-h.grab .dev-grip { cursor: grab; }
+body.dev-dragging, body.dev-dragging * { cursor: grabbing !important; user-select: none; -webkit-user-select: none; }
+.dev-move { display: inline-flex; gap: 2px; }
 /* A plug-in among the built-in devices: the same row, marked by its plug icon */
 .dvc.plug .dev-n::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--tx-4); vertical-align: middle; }
 .dev-copy { display: flex; flex-direction: column; }

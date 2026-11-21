@@ -2609,5 +2609,85 @@ mod tests {
         scorestate::restore(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// The owner's case: a score whose `inserts:` say `before: octaver` (written by hand) with a
+    /// settings file beside it, loaded again while the plugin already sits at the end of one
+    /// track and is missing on another. "Stays with its sound" must not mean "stays where it is":
+    /// the loaded plugin is moved (same instance, not reloaded) and gets the file's state; the
+    /// missing one is loaded at the named place with the file's state. The rack view and what the
+    /// next save would write say the new place.
+    #[test]
+    fn a_reload_moves_a_loaded_plugin_to_the_scores_place() {
+        let _turn = scorestate::TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("looper-plugins-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let score = dir.join("The Hardest Part.yaml");
+        let side = |state: &[u8]| scorestate::SidePlugin {
+            plugin_id: "fake:ir".into(),
+            name: "IRDX Studio".into(),
+            slot: Some(0),
+            before: Some("octaver".into()),
+            state: Some(base64_encode(state)),
+            ..Default::default()
+        };
+        let mut file = scorestate::Sidecar {
+            version: 1,
+            ..Default::default()
+        };
+        for (track, state) in [("theme", &b"THEME"[..]), ("guitar", &b"GUITAR"[..])] {
+            file.tracks.insert(
+                track.into(),
+                scorestate::TrackPlugins {
+                    instrument: None,
+                    inserts: vec![side(state)],
+                },
+            );
+        }
+        scorestate::write(&score, &file).unwrap();
+        let theme = Owner::Track("theme".into());
+
+        let mut m = manager(&["theme", "guitar"]);
+        put(&mut m, &theme, 0, "fake:ir", b"LOCAL", END, false);
+        let instance = m.slot(&theme, 0).unwrap().shared.clone();
+
+        scorestate::restore(None);
+        scorestate::switch(Some(score.clone()));
+        let wanted = vec![InsertLine {
+            plugin: "fake:ir".into(),
+            bypass: None,
+            before: Some("octaver".into()),
+        }];
+        m.apply_score("theme", &wanted);
+        m.apply_score("guitar", &wanted);
+        scorestate::finish_load();
+
+        assert_eq!(held(&m, &theme, 0), ("fake:ir".into(), "THEME".into(), at(FxSlot::Octaver), false));
+        assert!(Arc::ptr_eq(&instance, &m.slot(&theme, 0).unwrap().shared), "moved, not reloaded");
+        assert_eq!(held(&m, &guitar(), 0), ("fake:ir".into(), "GUITAR".into(), at(FxSlot::Octaver), false));
+        // What the UI draws the column from.
+        let view = m.view();
+        assert_eq!(view.slots.len(), 2);
+        assert!(view.slots.iter().all(|s| s.before.as_deref() == Some("octaver")), "{view:?}");
+        let (_, captured) = m.capture();
+        assert_eq!(captured["theme"][0].before.as_deref(), Some("octaver"));
+        assert_eq!(captured["guitar"][0].before.as_deref(), Some("octaver"));
+
+        // Applied again (an undo, the write-back coming round): nothing moves back.
+        m.apply_score("theme", &wanted);
+        assert_eq!(held(&m, &theme, 0).2, at(FxSlot::Octaver));
+        // And a score without `before` puts it back at the end - also without reloading.
+        let old = vec![InsertLine {
+            plugin: "fake:ir".into(),
+            bypass: None,
+            before: None,
+        }];
+        m.apply_score("theme", &old);
+        assert_eq!(held(&m, &theme, 0).2, END);
+        assert!(Arc::ptr_eq(&instance, &m.slot(&theme, 0).unwrap().shared));
+
+        scorestate::restore(None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
