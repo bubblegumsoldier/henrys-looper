@@ -36,6 +36,7 @@ use super::super::frame::Frame;
 use super::biquad::{Biquad, Coeffs};
 use super::delay::{Delay, DelayNote};
 use super::dynamics::{CompSettings, Compressor};
+use super::octaver::Octaver;
 use super::reverb::Reverb;
 use super::{Chain, FxPreset};
 
@@ -118,8 +119,17 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
     let signal = test_signal(samples, sample_rate);
     let mut rows = Vec::new();
 
+    // The octaver as the bass preset sets it: drive on, so the saturation is in the number too.
+    // The splice search runs every 15 to 30 ms and is included, averaged over the run.
+    let mut octaver = Octaver::new(sample_rate);
+    octaver.set_settings(FxPreset::BassFromGuitar.settings().octaver);
+    rows.push(Row {
+        name: "Octaver",
+        ns_per_sample: time(&signal, |x| octaver.process(x)),
+    });
+
     // One filter instance per channel, exactly as the chain holds them.
-    let mut hp = [Biquad::new(Coeffs::high_pass(
+    let mut hp =[Biquad::new(Coeffs::high_pass(
         sample_rate,
         80.0,
         std::f32::consts::FRAC_1_SQRT_2,
@@ -177,10 +187,19 @@ pub fn measure(sample_rate: u32, seconds: f64) -> Report {
         ns_per_sample: time(&signal, |x| chain.process(x)),
     });
 
-    // Everything on, including the delay: the most expensive state a track can be in.
+    let mut bass = Chain::new(sample_rate);
+    bass.load_preset(FxPreset::BassFromGuitar);
+    rows.push(Row {
+        name: "Chain \"bass\"",
+        ns_per_sample: time(&signal, |x| bass.process(x)),
+    });
+
+    // Everything on, including the delay and the octaver: the most expensive state a track can
+    // be in.
     let mut full = Chain::new(sample_rate);
     full.load_preset(FxPreset::Voice);
     full.set_enabled(super::FxSlot::Delay, true);
+    full.set_enabled(super::FxSlot::Octaver, true);
     full.set_quarter_samples(sample_rate as f64 * 60.0 / 100.0);
     rows.push(Row {
         name: "Chain full",
@@ -249,7 +268,7 @@ pub fn print(report: &Report) {
         );
     }
     println!(
-        "\nThe row \"Chain full\" is the worst case: all five effects on, signal\n\
+        "\nThe row \"Chain full\" is the worst case: all six effects on, signal\n\
          constantly above the compressor threshold. A silent track costs the row\n\
          \"Chain silent\", because the chain stops computing once its tail has died away."
     );

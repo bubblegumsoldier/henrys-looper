@@ -565,14 +565,92 @@ was neben den Ebenen-Puffern nicht ins Gewicht fällt.
 
 ### Reihenfolge und Presets
 
-Hochpass, drei Bänder parametrischer EQ, Kompressor, Delay, Hall - die Reihenfolge aus dem Plan.
-Das oberste EQ-Band ist als Kuhschwanz ausgelegt: "Luft" ist das ganze obere Ende, nicht eine
-Frequenz. Der Kompressor hat ein weiches Knie (6 bis 8 dB), weil eine Stimme *an* der Schwelle
-lebt und ein hartes Knie mehrmals pro Sekunde umschalten würde.
+Oktaver, Hochpass, drei Bänder parametrischer EQ, Kompressor, Delay, Hall - die Reihenfolge aus
+dem Plan, mit dem Oktaver davor (Begründung unten). Das oberste EQ-Band ist als Kuhschwanz
+ausgelegt: "Luft" ist das ganze obere Ende, nicht eine Frequenz. Der Kompressor hat ein weiches
+Knie (6 bis 8 dB), weil eine Stimme *an* der Schwelle lebt und ein hartes Knie mehrmals pro Sekunde
+umschalten würde.
 
-Drei Presets, jeder Wert im Code begründet: `stimme` (80 Hz Hochpass, Präsenz +2,5 dB bei 3 kHz,
+Vier Presets, jeder Wert im Code begründet: `stimme` (80 Hz Hochpass, Präsenz +2,5 dB bei 3 kHz,
 3:1 ab -18 dBFS mit +6 dB Makeup, 18 % Hall), `gitarre` (100 Hz Hochpass, -4 dB Quäkband bei
-3 kHz, 2,5:1 mit langsamem Attack, 10 % Hall), `trocken` (alles aus, Kette umgangen).
+3 kHz, 2,5:1 mit langsamem Attack, 10 % Hall), `bass` (Oktaver ohne Original, Drive 0,4, Tone
+2,5 kHz; Hochpass 30 Hz; +2 dB bei 70 Hz und 800 Hz, -4 dB Kuhschwanz ab 3 kHz; 4:1 ab -20 dBFS,
+10 ms Attack, +6 dB Makeup; kein Delay, kein Hall), `trocken` (alles aus, Kette umgangen). In der
+Partitur heißen sie `voice`, `piezo_guitar`, `bass_from_guitar`, `dry`.
+
+### Oktaver (`engine/src/engine/fx/octaver.rs`)
+
+Eine Oktave tiefer, gebaut für einstimmig gespielte (Piezo-)Gitarre, die nach Bass klingen soll.
+
+**Verfahren: halbe Geschwindigkeit, auf die Periode geschnitten.** Eine Oktave tiefer ist das
+Eingangssignal mit halber Geschwindigkeit gelesen - jede Frequenz exakt halbiert, ohne einen
+Tonhöhendetektor im Signalweg, der sich verschätzen könnte. Der Lesezeiger fällt dabei um einen
+halben Sample je Sample zurück und muss immer wieder nach vorn springen. Springt er um eine
+beliebige Strecke, landen die beiden übergeblendeten Abgriffe an verschiedenen Stellen der
+Schwingung (das „Leiern" einfacher Pitch-Shifter); springt er um ganze Perioden, tragen beide
+dieselbe Schwingung und die Überblendung ist unhörbar. Die Sprungweite wird deshalb im Moment des
+Sprungs per normierter Korrelation gesucht - grob auf einer 12-kHz-Kopie, fein auf voller Rate -
+zwischen einer halben und einer ganzen längsten Periode (70 Hz); unter den annähernd besten
+*Spitzen* gewinnt die längste. In diesem Intervall liegt für jeden Ton bis 70 Hz ein Vielfaches
+seiner Periode; welches gefunden wird, ist egal, Oktavfehler gibt es also nicht. Anders als PSOLA
+verschiebt das die Formanten mit - der Korpus klingt eine Oktave tiefer, wie eine dickere Saite
+in einem größeren Instrument, statt wie eine Gitarre mit Sub-Oszillator. Gewählt, weil es für
+Einzeltöne am stabilsten ist (kein Tracker, der auf langen Tönen schwankt) und für Akkorde
+gutmütig bleibt (verschmiert, aber nie lauter oder instabil).
+
+**Anschläge.** Ein Detektor (schnelle gegen langsame Hüllkurve auf einem 300-Hz-hochpassgefilterten
+Abbild, Schwelle +6 dB und -46 dBFS, 60 ms Sperrzeit) setzt bei jedem Anschlag den Lesezeiger
+direkt vor den Anschlag und blendet den alten Ton in 3 ms aus. Jeder Ton beginnt daher gleich
+spät nach dem Anschlag - das ist die Latenz -, und das Ende des alten Tons wird nicht in den
+neuen hineingeblendet (kein „Gurgeln"). Hinter dem Anschlag wandert die Verzögerung des
+Tonhaltes zwischen etwa 3 und 15 ms, was auf einem klingenden Ton nicht zu hören ist.
+
+**Regler:** an/aus, `dry` (Original, 0..1), `sub` (Oktave, 0..1), `tone` (Tiefpass 12 dB/Okt. auf
+der Oktave, 100 Hz bis 8 kHz), `drive` (0..1). Drive ist eine Sättigung **auf die eigene Hüllkurve
+normiert**: das Signal wird durch seine Hüllkurve geteilt, hinter bis zu +24 dB weich begrenzt
+und wieder mit ihr multipliziert. Dieselbe Einstellung macht so bei -30 dBFS dieselben Obertöne
+wie bei -6 dBFS. Gebaut, weil die Messung es verlangt hat: eine Oktave tiefer hat die Piezo-Gitarre
+über ein paar hundert Hertz kaum noch etwas (bei 1 kHz rund 30 dB unter dem 100-Hz-Band), und ein
+EQ kann nicht anheben, was nicht da ist; ein gewöhnlicher Clipper vor einem festen Gain hat bei
+realistischen Pegeln nichts bewirkt. Drive 0,4 hebt 300 Hz bis 1 kHz gegenüber dem Grundton um 6
+bis 10 dB.
+
+**Latenz und Ausgleich.** 144 Frames bei 48 kHz (3,0 ms; allgemein zweimal 1,5 ms Vorlauf, weil
+der Vorlauf mit halber Geschwindigkeit gelesen wird). Auch der `dry`-Anteil wird um genau diese
+Zeit verzögert, damit Original und Oktave zusammenbleiben; der ganze Oktaver ist also eine Stufe
+mit fester Latenz. `Chain::latency()` meldet sie, solange der Oktaver an und die Kette nicht
+umgangen ist, und `process::collect_inserts` zählt sie zur Plugin-Latenz des Tracks: **der Loop
+wird um genau so viel früher gelesen und landet auf dem Raster** (Test
+`the_octavers_latency_is_made_up_for_on_the_loop`: mit Oktaver als reiner Verzögerung ist die
+Wiedergabe ab dem zweiten Durchgang sample-gleich mit der ohne). **Nicht ausgeglichen**: das live
+Mitgehörte kommt 3 ms später (es lässt sich nicht vorauslesen - wie hinter einem Plugin mit
+Latenz); beim Ein- und Ausschalten springt die Lesestelle des Loops um 144 Frames, was in der
+20-ms-Überblendung des Schalters liegt; und die wandernde Verzögerung des Tonhaltes (bis etwa 12
+ms nach dem Anschlag) ist bewusst nicht ausgeglichen, weil das Raster an den Anschlägen hängt. Die
+Aufnahme bleibt trocken wie immer.
+
+**Gemessen** am Bass-Stem der Skizze 124 (eine auf der Gitarre gespielte Basslinie, 40 s,
+YIN-Tonhöhe alle 10 ms): in 99,2 % der stimmhaften Frames liegt der Ausgang innerhalb ±3 % bei der
+halben Eingangsfrequenz (Median-Verhältnis 0,4999); die Tonhöhe schwankt von Frame zu Frame im
+Median um 1,0 Cent (Eingang 0,4), im 95. Perzentil um 11 Cent; Ausreißer über 50 Cent gibt es nur
+an Tonwechseln (16 von 2373 Frames). Mit dem Bass-Preset schrumpft der Pegelabstand zwischen
+leisen und lauten Tönen (10./90. Perzentil des 0,5-s-RMS) von 6,6 dB auf etwa 3,5 dB. Auf einer
+Melodiestimme mit nachklingenden Saiten sind es noch 96,6 % Oktave, aber das 95. Perzentil der
+Schwankung steigt auf 15 bis 28 Cent - dort ist es hörbar unruhiger. Nachmessen:
+`looper-engine fxrender <stem> <out> --mix "{preset: bass_from_guitar}"` rendert offline durch
+genau die Kette, die eine Partitur einstellt.
+
+**Grenzen.** Akkorde und zwei gleichzeitig klingende Saiten kommen verschmiert heraus. Bendings und
+Vibrato werden mitgenommen (die Oktave ist exakt die halbe Frequenz), aber die Splice-Suche
+findet dann schlechtere Übereinstimmungen. Gebundene Töne (Hammer-on, Slide) lösen keinen
+Anschlag aus; der neue Ton erscheint dann erst, wenn der Lesezeiger ihn erreicht - im ungünstigsten Fall rund 30 ms später, und eine Überblendung kann kurz beide Töne mischen. Unter 70 Hz
+Eingang (tiefer als Drop-D) gibt es keine periodensynchronen Sprünge mehr.
+
+**Warum vorn in der Kette.** Alles danach formt einen Klang, und zu formen ist der eine Oktave
+tiefer: ein Hochpass davor nähme der Gitarre ihr tiefes E (82 Hz), bevor es zu den 41 Hz des
+Basses werden kann; ein EQ davor säße eine Oktave zu hoch; ein Kompressor davor glättete die
+Gitarre statt des Basses. Und als einziges Glied mit Latenz verzögert er vorn einfach alles
+dahinter gleich - genau das setzt der Ausgleich voraus.
 
 **Ein frischer Track ist umgangen und damit bitgleich durchgereicht** - deshalb hat sich für die
 123 Tests aus Phase 2 nichts geändert, und deshalb hat der Stereo-Umbau sie ebenfalls nicht
@@ -625,6 +703,19 @@ Detektor, eine Hall-Anregung), nur die Filter und die Verzögerungsleitungen lie
 Ein globaler Hall-Bus würde davon 1,7 Prozentpunkte sparen und bleibt damit **nicht nötig** - er
 wurde weiterhin bewusst nicht gebaut. Die beiden billigen Zustände sind billig geblieben: sieben
 von acht Tracks sind meistens still und kosten zusammen 0,12 %.
+
+**Oktaver** (`looper-engine fxbench`, Release, 48 kHz, 2026-11-21 - ein anderer
+Lauf als die Tabelle oben, daher eigene Zeilen; die Hochpass-Zeile desselben Laufs zum Vergleich):
+
+| | ns/Frame | % je Track | % bei 8 Tracks |
+|---|---:|---:|---:|
+| Oktaver (Drive an, Splice-Suche gemittelt) | 16,8 | 0,08 | 0,64 |
+| Hochpass (derselbe Lauf) | 6,7 | 0,03 | 0,26 |
+| Kette „bass" | 40,1 | 0,19 | 1,54 |
+| Kette komplett, alle sechs | 78,1 | 0,37 | 3,00 |
+
+Die Suche nach der Sprungweite kostet rund 20 000 Multiplikationen auf einmal, höchstens einmal je
+14 ms je Track - im ungünstigsten Callback ein paar Mikrosekunden zusätzlich.
 
 ## 10. Der Runner (Phase 3)
 
@@ -931,8 +1022,9 @@ track.<ref>.record | overdub | play | stop | clear | monitor | pan | latency_tri
 track.<ref>.bus.<main|monitor>          · monitor_bus.<main|monitor>
 track.<ref>.layer.<n>.mute | remove | gain
 track.<ref>.fx.bypass
-track.<ref>.fx.<high_pass|eq|comp|delay|reverb>.on
-track.<ref>.fx.preset.<trocken|stimme|gitarre>
+track.<ref>.fx.<octaver|high_pass|eq|comp|delay|reverb>.on
+track.<ref>.fx.preset.<trocken|stimme|gitarre|bass>
+track.<ref>.fx.octaver.<dry|sub|tone|drive>
 track.<ref>.fx.high_pass.hz · eq.<1-3>.<hz|q|gain|peak|low_shelf|high_shelf>
 track.<ref>.fx.comp.<threshold|ratio|attack|release|knee|makeup>
 track.<ref>.fx.delay.<note.<wert>|feedback|mix> · reverb.<size|damping|mix>
@@ -1543,12 +1635,16 @@ mixer:
       preset: piezo_guitar
       comp: {threshold: -12}   # nur was vom Preset abweicht
       reverb: {on: false}
+    bass:
+      preset: bass_from_guitar
+      octaver: {tone: 1800, drive: 0.5}   # on, dry, sub (0..1), tone (Hz), drive (0..1)
 ```
 
 * Pegel in dB, auf 0,1 dB gerundet; `-100` und weniger ist Stille, Obergrenze +12 dB.
-* Eine Kette ist ein Preset (`dry`, `voice`, `piezo_guitar`; fehlt = `dry`) plus Effektzeilen
-  (`high_pass`, `eq`, `band1`…`band3`, `comp`, `delay`, `reverb`), die nur die genannten Felder
-  überschreiben. `bypass` fehlt = Kette aus genau dann, wenn kein Effekt an ist — wie die Presets.
+* Eine Kette ist ein Preset (`dry`, `voice`, `piezo_guitar`, `bass_from_guitar`; fehlt = `dry`)
+  plus Effektzeilen (`octaver`, `high_pass`, `eq`, `band1`…`band3`, `comp`, `delay`, `reverb`), die
+  nur die genannten Felder überschreiben. `octaver: {on: true, dry: 0, sub: 1}` schaltet den
+  Oktaver auf jedem Preset dazu. `bypass` fehlt = Kette aus genau dann, wenn kein Effekt an ist — wie die Presets.
 * In einem Eintrag heißt ein fehlendes Feld Standardwert; eine Spur ohne Eintrag behält, was sie
   hat. Fehlt der Abschnitt ganz, ändert sich nichts — alte Partituren lesen und rendern sich
   unverändert.

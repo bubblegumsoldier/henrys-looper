@@ -62,7 +62,7 @@ Stoppstelle.
 | Live | `R` `O` `P` `S` `M` | Record · Overdub · Play · Stop · Monitor der gewählten Spur |
 | Live | `I` | Spur-Detail auf/zu |
 | Live | `F` | Effekte der Spur umgehen (Bypass) |
-| Live | `X` / `V` / `D` + Ziffer | Effekt an/aus · Preset laden · Delay-Notenwert |
+| Live | `X` / `V` / `D` + Ziffer | Effekt an/aus (1 Oktaver … 6 Hall) · Preset laden (4 = Bass) · Delay-Notenwert |
 | überall (außer im Textfeld) | `K` | Klick an/aus (auch der große *Click*-Schalter in der Kopfleiste; Rechtsklick: Lautstärke) |
 | Live/Arrangement | Leertaste oder `N` | Partitur starten bzw. *Release* |
 | Live/Arrangement, ohne Partitur | Leertaste | Uhr starten/stoppen (*Start*/*Stop*, MIDI `transport.toggle`) |
