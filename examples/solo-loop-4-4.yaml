@@ -54,3 +54,39 @@ sections:
   - id: end
     bars: 1
     autorelease: true
+
+# Text, Akkorde und Regieanweisungen fuer die Live-Ansicht (Taste L, Arrangement > Sheet).
+# "# Teil @id" haengt einen Teil an den Anfang der Sektion id, "> ..." ist eine Anweisung
+# (mit REC vorn rot), "|2" am Zeilenende = dauert 2 Takte. Der Text ist ein Platzhalter.
+sheet: |
+  beats per chord: 2
+
+  # Guitar @guitar
+  > REC guitar · 4 bars · this is the loop for the whole song
+  Am      F       C       G
+  Am      F       C       G
+
+  # More layers @layers
+  > Overdub one layer per pass · Release when it is full
+  Am      F       C       G
+  Am      F       C       G
+
+  # Voice @voice
+  > REC voice · 8 bars · the guitar plays
+  Am                  F
+  Paper boats are drifting down the gutter |2
+  C                   G
+  every one a letter I forgot to send |2
+  [Am]Count the lamps along the [F]river |2
+  [C]one for every time I [G]said I'd call |2
+
+  # Jam @jam
+  > Everything plays · sing or play over it · Release ends it
+  Am      F       C       G
+  Am      F       C       G
+  Am      F       C       G
+  Am      F       C       G
+
+  # End @end
+  > Let it ring
+  (silence) |1

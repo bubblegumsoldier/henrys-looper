@@ -41,6 +41,7 @@ pub mod map;
 pub mod mixer;
 pub mod model;
 pub mod read;
+pub mod sheet;
 pub mod yaml;
 
 #[cfg(test)]

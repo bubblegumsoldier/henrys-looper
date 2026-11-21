@@ -21,6 +21,7 @@ use super::model::{
     ClipOptions, CompiledMidiBinding, CompiledScore, CompiledSection, CompiledTrack, ScoreSource,
     SectionSource, TrackState,
 };
+use super::sheet::{SectionInfo, compile_sheet};
 use crate::engine::schedule::Quantize;
 
 /// Defaults for a section that inherits nothing. `autorelease: false` means "wait for the release
@@ -97,7 +98,7 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
         .map(|section| (section.id.as_str(), section))
         .collect();
     let mut resolved: HashMap<&str, Resolved> = HashMap::new();
-    let sections = source
+    let sections: Vec<CompiledSection> = source
         .sections
         .iter()
         .enumerate()
@@ -146,8 +147,15 @@ pub fn compile(source: &ScoreSource) -> CompiledScore {
         count_in: source.count_in,
         tracks,
         midi,
-        sections,
         mixer: source.mixer.clone(),
+        sheet: source.sheet.as_deref().map(|text| {
+            let infos: Vec<SectionInfo<'_>> = sections
+                .iter()
+                .map(|s| SectionInfo { id: &s.id, bars: s.bars, autorelease: s.autorelease })
+                .collect();
+            compile_sheet(text, beats_per_bar, &infos)
+        }),
+        sections,
     }
 }
 

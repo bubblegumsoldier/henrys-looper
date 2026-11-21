@@ -332,6 +332,10 @@ pub struct ScoreDoc {
     /// The `mixer:` section; `None` when the score has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mixer: Option<DocMixer>,
+    /// `sheet: |` - lyrics, chords and stage directions (`score::sheet`), byte for byte as written.
+    /// Rendered as a block scalar after everything else; `None` when the score has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
     /// Comment lines at the top of the file, before the first key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub header: Vec<String>,
@@ -339,7 +343,7 @@ pub struct ScoreDoc {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub footer: Vec<String>,
     /// Comments of the top-level keys (`title`, `bpm`, `time_signature`, `beats_per_bar`,
-    /// `count_in`, `tracks`, `midi`, `sections`, `mixer`).
+    /// `count_in`, `tracks`, `midi`, `sections`, `mixer`, `sheet`).
     #[serde(default, skip_serializing_if = "OrderedMap::is_empty")]
     pub field_comments: OrderedMap<Comments>,
 }
@@ -541,6 +545,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
         midi: Vec::new(),
         sections: Vec::new(),
         mixer: None,
+        sheet: None,
         header: Vec::new(),
         footer: Vec::new(),
         field_comments: OrderedMap::new(),
@@ -713,6 +718,7 @@ fn build(tree: &Node<'_>, anchors: &mut Vec<(u32, Anchor)>) -> ScoreDoc {
                 }
             }
             "mixer" => doc.mixer = Some(build_mixer(value, anchors)),
+            "sheet" => doc.sheet = text_of(value),
             _ => {}
         }
     }
@@ -946,9 +952,38 @@ fn comment_start(line: &str) -> Option<usize> {
     None
 }
 
+/// The indentation of a line whose value is a block scalar (`key: |`, `key: >-`, `- |2`), i.e.
+/// whose following, further indented lines are text rather than YAML.
+fn block_scalar_header(line: &str) -> Option<usize> {
+    let code = match comment_start(line) {
+        Some(start) => &line[..start],
+        None => line,
+    }
+    .trim_end();
+    let (before, token) = code.rsplit_once(' ')?;
+    let mut chars = token.chars();
+    if !matches!(chars.next(), Some('|' | '>')) || !chars.all(|c| c.is_ascii_digit() || c == '+' || c == '-') {
+        return None;
+    }
+    let before = before.trim_end();
+    if !(before.ends_with(':') || before.ends_with('-')) {
+        return None;
+    }
+    Some(line.len() - line.trim_start().len())
+}
+
 fn find_comments(text: &str) -> Vec<FoundComment> {
     let mut found = Vec::new();
+    // Inside a block scalar (the sheet): the indentation of its header line.
+    let mut block: Option<usize> = None;
     for (n, line) in text.lines().enumerate() {
+        if let Some(indent) = block {
+            let own = line.len() - line.trim_start_matches(' ').len();
+            if line.trim().is_empty() || own > indent {
+                continue;
+            }
+        }
+        block = block_scalar_header(line);
         let Some(start) = comment_start(line) else { continue };
         let raw = &line[start + 1..];
         let body = raw.strip_prefix(' ').unwrap_or(raw).trim_end().to_string();
@@ -1354,10 +1389,14 @@ fn resolve_section(doc: &ScoreDoc, index: usize) -> ResolvedSection {
 ///   relative to their element - so they move with it when sections are reordered, and they go
 ///   when their element is deleted.
 /// * The layout is fixed: two spaces of indentation, keys in a fixed order (`title`, `bpm`,
-///   `time_signature`, `beats_per_bar`, `count_in`, `tracks`, `midi`, `sections`; inside a section `id`,
-///   `repeat`, `bars`, `autorelease`, `quantize`, `tracks`), tracks and MIDI bindings as one
-///   `{...}` line each, sections as blocks, one blank line between top-level blocks and between
-///   sections, strings quoted only where YAML needs it, numbers in shortest form.
+///   `time_signature`, `beats_per_bar`, `count_in`, `tracks`, `midi`, `sections`, `mixer`,
+///   `sheet`; inside a section `id`, `repeat`, `bars`, `autorelease`, `quantize`, `tracks`), tracks
+///   and MIDI bindings as one `{...}` line each, sections as blocks, one blank line between
+///   top-level blocks and between sections, strings quoted only where YAML needs it, numbers in
+///   shortest form.
+/// * The sheet is the exception to "layout is canonical": it is a block scalar (`sheet: |`) whose
+///   text comes back byte for byte - columns, blank lines, `#` part headers and all. Those `#`
+///   lines are text, not comments (`find_comments` skips the inside of every block scalar).
 /// * What is written stays written: an explicit default (`monitor: true`) is kept, an omitted
 ///   field stays omitted, `beats_per_bar` stays when the file used it.
 ///
@@ -1471,8 +1510,21 @@ pub fn render_doc(doc: &ScoreDoc) -> String {
         render_mixer(&mut w, mixer, &root("mixer"));
     }
 
-    if !doc.footer.is_empty() {
+    // Last, because it is the longest and the one written by hand.
+    let mut keeps_blank_lines = false;
+    if let Some(sheet) = &doc.sheet {
         w.blank();
+        let (header, body) = sheet_scalar(sheet);
+        w.line(0, &format!("sheet: {header}"), &root("sheet"));
+        w.out.push_str(&body);
+        keeps_blank_lines = header.contains('+');
+    }
+
+    if !doc.footer.is_empty() {
+        // A `|+` block would take a blank line below it as part of its text.
+        if !keeps_blank_lines {
+            w.blank();
+        }
         for line in &doc.footer {
             w.comment(0, line);
         }
@@ -1863,11 +1915,59 @@ fn quoted(text: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() || c == '\u{feff}' => out.push_str(&format!("\\u{:04x}", c as u32)),
             c => out.push(c),
         }
     }
     out.push('"');
     out
+}
+
+/// The sheet as a YAML scalar: `(what follows "sheet: ", the lines below it)`.
+///
+/// A literal block (`|`) whenever that reads back as exactly the same text, which is the form a
+/// musician writes and pastes into. Chomping follows the trailing line breaks (`|-` none, `|` one,
+/// `|+` more), and an explicit indentation (`|2`) is added when the text itself starts with a space
+/// - a chord line usually does. Whatever a block cannot carry (a carriage return, a control
+/// character) falls back to one double-quoted line; the round trip is checked, not assumed.
+fn sheet_scalar(text: &str) -> (String, String) {
+    let fallback = || (quoted(text), String::new());
+    if text.is_empty() {
+        return fallback();
+    }
+    let trailing = text.len() - text.trim_end_matches('\n').len();
+    let chomp = match trailing {
+        0 => "-",
+        1 => "",
+        _ => "+",
+    };
+    let first = text.split('\n').find(|l| !l.is_empty());
+    let indent = match first {
+        Some(line) if !line.starts_with([' ', '\t']) && !line.trim().is_empty() => "",
+        _ => "2",
+    };
+    let header = format!("|{indent}{chomp}");
+    let mut body = String::with_capacity(text.len() + 64);
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    // The piece after the last line break is empty exactly when the text ends with one.
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    for line in lines {
+        if !line.is_empty() {
+            body.push_str("  ");
+            body.push_str(line);
+        }
+        body.push('\n');
+    }
+    let probe = format!("sheet: {header}\n{body}");
+    let same = matches!(
+        super::yaml::parse_document(&probe),
+        Ok(Node { kind: NodeKind::Map(ref entries), .. })
+            if entries.len() == 1 && entries[0].value.as_str() == Some(text)
+    );
+    if same { (header, body) } else { fallback() }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1961,6 +2061,7 @@ pub fn template_with(tracks: Vec<DocTrack>, instruments: Vec<(String, String)>) 
         midi: Vec::new(),
         sections: vec![intro, layer, outro],
         mixer,
+        sheet: None,
         header: vec![
             "Henrys Looper score. Each section states what every track does;".to_string(),
             "a track a section does not name is stopped.".to_string(),

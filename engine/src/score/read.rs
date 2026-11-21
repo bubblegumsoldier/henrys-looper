@@ -17,6 +17,7 @@ use super::model::{
     ClipOptions, GRID_NAMES, InstrumentSource, LoopKind, MidiBindingSource, MidiKind, ScoreSource,
     SectionSource, TrackSource, TrackState,
 };
+use super::sheet::{SectionInfo, SheetIssue, check_sheet, compile_sheet};
 use super::yaml::{Entry, Node, NodeKind, Pos, parse_document};
 use crate::engine::bus::BusSend;
 use crate::engine::command::MAX_TRACKS;
@@ -25,7 +26,7 @@ use crate::midi::{Binding, ButtonMode, Control, Takeover, Target, TrackRef};
 
 mod mixer;
 
-const ROOT_FIELDS: [&str; 9] = [
+const ROOT_FIELDS: [&str; 10] = [
     "title",
     "bpm",
     "time_signature",
@@ -35,6 +36,7 @@ const ROOT_FIELDS: [&str; 9] = [
     "midi",
     "sections",
     "mixer",
+    "sheet",
 ];
 const TRACK_FIELDS: [&str; 10] = [
     "input",
@@ -119,6 +121,11 @@ pub fn read_score_noted(yaml_text: &str) -> (Result<ScoreSource, ScoreError>, Ve
         // Needs `repeat:` resolved, so it runs on a score that is otherwise clean.
         let issues = take_length_issues(score, &reader.clip_bars_pos);
         reader.issues.extend(issues);
+        // Needs the resolved sections too: anchors name them, and their bars are what the text
+        // between two anchors is measured against.
+        let (errors, sheet_notes) = sheet_issues(score, &document, yaml_text);
+        reader.issues.extend(errors);
+        notes.extend(sheet_notes);
     }
     if reader.issues.is_empty() {
         // Only a clean read produces a score; anything else would hand the compiler half a file.
@@ -184,6 +191,45 @@ fn take_length_issues(
         }
     }
     issues
+}
+
+/// The sheet's anchors and timing, checked against the sections (`score::sheet`). Positions are
+/// lines of the file: line `n` of a `sheet: |` block is `n` lines below its header. A sheet written
+/// as a quoted string has no such lines, so everything about it points at the `sheet:` key.
+fn sheet_issues(score: &ScoreSource, document: &Node<'_>, yaml_text: &str) -> (Vec<ScoreIssue>, Vec<ScoreIssue>) {
+    let Some(text) = score.sheet.as_deref() else {
+        return (Vec::new(), Vec::new());
+    };
+    let compiled = super::compile::compile(score);
+    let infos: Vec<SectionInfo<'_>> = compiled
+        .sections
+        .iter()
+        .map(|s| SectionInfo { id: &s.id, bars: s.bars, autorelease: s.autorelease })
+        .collect();
+    let sheet = compile_sheet(text, compiled.beats_per_bar, &infos);
+    let (errors, notes) = check_sheet(&sheet, &infos);
+    let place = sheet_place(document, yaml_text);
+    let issue = |i: SheetIssue| {
+        let pos = match place {
+            Some((key, Some(first))) => Pos { line: first + i.line - 1, column: key.column + 2 },
+            Some((key, None)) => key,
+            None => Pos { line: 1, column: 1 },
+        };
+        ScoreIssue::new(Some(pos), i.message).maybe_suggestion(i.suggestion)
+    };
+    (errors.into_iter().map(issue).collect(), notes.into_iter().map(issue).collect())
+}
+
+/// Where the `sheet:` key stands, and the file line of the sheet's first line when it is a block
+/// scalar (`sheet: |`), whose content starts on the line below its header.
+fn sheet_place(document: &Node<'_>, yaml_text: &str) -> Option<(Pos, Option<u32>)> {
+    let NodeKind::Map(entries) = &document.kind else { return None };
+    let entry = entries.iter().find(|e| e.key.as_str() == Some("sheet"))?;
+    let key = entry.key.pos;
+    let header = yaml_text.lines().nth(key.line.saturating_sub(1) as usize)?;
+    let after = header.split_once(':').map_or("", |(_, rest)| rest.trim_start());
+    let block = after.starts_with(['|', '>']);
+    Some((key, block.then_some(key.line + 1)))
 }
 
 /// `stack` with `autorelease: true` on a track that nothing has recorded on yet: the section's
@@ -492,6 +538,11 @@ impl Reader {
         let mixer = fields
             .get("mixer")
             .and_then(|node| self.read_mixer(node, &track_names, &instrument_tracks));
+        // Optional. The text is kept as written; its anchors are checked once the sections are
+        // resolved (`sheet_issues`).
+        let sheet = fields
+            .get("sheet")
+            .and_then(|node| self.as_str(node, "'sheet'").map(str::to_string));
 
         Some(ScoreSource {
             title,
@@ -503,6 +554,7 @@ impl Reader {
             midi,
             sections,
             mixer,
+            sheet,
         })
     }
 

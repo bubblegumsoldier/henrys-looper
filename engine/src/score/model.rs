@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 use super::map::OrderedMap;
 use super::mixer::MixerSource;
+use super::sheet::CompiledSheet;
 use crate::engine::bus::BusSend;
 use crate::engine::frame::TrackInput;
 use crate::engine::schedule::Quantize;
@@ -404,6 +405,10 @@ pub struct ScoreSource {
     /// The `mixer:` section, as written; `None` when the score has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mixer: Option<MixerSource>,
+    /// `sheet: |` - lyrics, chords and stage directions for the Live view, exactly as written
+    /// (`score::sheet`). `None` when the score has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -565,6 +570,10 @@ pub struct CompiledScore {
     /// the score is loaded (`score::mixer`). `None` when the score has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mixer: Option<MixerSource>,
+    /// The `sheet:`, parsed and laid over the sections - for the Live view only; the runner never
+    /// reads it. `None` when the score has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<CompiledSheet>,
 }
 
 impl CompiledScore {

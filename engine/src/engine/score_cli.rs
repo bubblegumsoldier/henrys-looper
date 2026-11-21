@@ -325,6 +325,30 @@ fn print_score(score: &CompiledScore, defs: &[TrackDef], default_latency: u64, r
             states.join("  ")
         );
     }
+    if let Some(sheet) = &score.sheet {
+        use crate::score::sheet::SheetItem;
+        let count = |f: fn(&SheetItem) -> bool| sheet.items.iter().filter(|i| f(i)).count();
+        let anchors: Vec<String> = sheet
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                SheetItem::Part { section: Some(id), at, .. } => Some(format!("{id} at bar {}", at + 1.0)),
+                _ => None,
+            })
+            .collect();
+        println!(
+            "Sheet:    {} parts, {} lines, {} directions, {:.2} bars; {}",
+            count(|i| matches!(i, SheetItem::Part { .. })),
+            count(|i| matches!(i, SheetItem::Line { .. })),
+            count(|i| matches!(i, SheetItem::Direction { .. })),
+            sheet.total,
+            if anchors.is_empty() {
+                "no anchors - it runs through the sections in order".to_string()
+            } else {
+                format!("anchors: {}", anchors.join(", "))
+            }
+        );
+    }
 }
 
 pub fn cmd_score(dev: &DeviceOpts, opts: &ScoreOpts) -> Result<(), String> {
