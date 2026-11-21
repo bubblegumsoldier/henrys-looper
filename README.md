@@ -200,6 +200,12 @@ schreibgeschützt.
   `P` Play · `S` Stop · `M` Monitor; Pfeiltasten wandern, `⌫` setzt auf die Vorlage zurück.
   **Stack** (`stack` im YAML) legt in jedem Durchlauf eine neue Ebene an, bis die Sektion endet —
   mit `autorelease: false` also bis Release; leere Durchläufe bleiben nicht liegen.
+- Ein Loop, der mit einer Sektion einsetzt (vorher still), beginnt dort vorn — auch nach einer
+  Sektion, die kein Vielfaches seiner Länge ist. Spielt er durch, behält er seine Phase; der
+  Clip-Inspektor schaltet mit *Restart the loop here* den Neuanfang trotzdem ein
+  (`{state: play, restart: true}`). *Take length* bei Record nimmt nur die ersten Takte der Sektion
+  auf und spielt sie danach als Loop (`{state: record, bars: 2}`). Details:
+  `docs/architektur.md`, Abschnitt 10.
 - Sektionsmarker: ziehen = verschieben, rechte Kante ziehen = Takte, Doppelklick = umbenennen
   (`repeat:` zieht mit, `transport.goto.<n>` wird beim Verschieben umnummeriert); ⌘D dupliziert.
 - Spurkopf: ziehen = umsortieren, Doppelklick = umbenennen (Zustände und `track.<name>.*`

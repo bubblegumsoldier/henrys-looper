@@ -128,7 +128,8 @@ Modus ist umschaltbar (`--quantize bar|loop`, `StartConfig.quantize`, Kommando `
 **Stopp und Wiedergabe bleiben auf der Taktgrenze.** Das sind Korrekturen, keine Takes — ein Stopp,
 der acht Takte wartet, wirkt kaputt. Die Wiedergabe verliert dabei nichts, weil ein Loop als
 `(Position − origin) mod loop_len` gelesen wird und deshalb phasenrichtig weiterläuft, egal wann man
-sie einschaltet.
+sie einschaltet. (In einer Partitur beginnt ein Loop, der mit einer Sektion einsetzt, dagegen vorn —
+Abschnitt 10, „Ein Loop, der einsetzt, beginnt vorn".)
 
 **Welches Raster gilt:**
 
@@ -757,8 +758,8 @@ merkt sich, was er zuletzt von einem Track verlangt hat, und schickt nur die Dif
 | `stack` | `stack` | **keins** — der Stapel läuft einfach weiter |
 | `stack` | `play` | nur `LatchOverdub aus` mitten im letzten Durchlauf |
 | `stack` | `record` / `overdub` | `LatchOverdub aus` + `StopRecord` am Ende des letzten Durchlaufs, dann wie oben |
-| klingt schon | `play` | **keins** |
-| still, mit Inhalt | `play` | `StartPlay` |
+| klingt schon | `play` | **keins** (mit `restart: true`: `RestartLoop`, wenn die Sektion nicht auf seinem Raster beginnt) |
+| still, mit Inhalt | `play` | `StartPlay`, davor `RestartLoop`, wenn die Sektion nicht auf seinem Raster beginnt (unten) |
 | klingt | `stop` / `hear_through` | `StopPlay` |
 | still | `stop` | **keins** |
 
@@ -770,6 +771,115 @@ Stelle — die Sorte Fehler, die man erst nach zwanzig Minuten Spielen als Knack
 **Mithören** folgt demselben Prinzip: an bei `record`, `overdub`, `stack` und `hear_through`, aus bei `play`
 und `stop`, und nur, wenn die Partitur es dem Track überhaupt erlaubt (`monitor:`). Ein Wechsel
 wird nur geschickt, wenn er den Zustand wirklich ändert.
+
+### Ein Loop, der einsetzt, beginnt vorn (`RestartLoop`, `restart: true`)
+
+Ein Loop wird als `(Position − origin) mod loop_len` gelesen und bleibt deshalb vom ersten Take an
+phasenstarr zum Song. Das ist im freien Modus richtig (Abschnitt 3: Stopp und Wiedergabe verlieren
+nichts) — in einer Partitur aber falsch, sobald eine Sektion kein Vielfaches der Looplänge ist. Der
+Fall des Besitzers („The Hardest Part", 92 BPM): `theme` und `bass` sind Zwei-Takt-Loops, die
+Sektion `verse_1_b` ist **einen** Takt lang und lässt beide schweigen, und im folgenden Refrain
+setzten sie mit ihrem **zweiten** Takt ein und blieben bis zur nächsten Ein-Takt-Sektion versetzt.
+Belegt vor der Änderung mit dem Test `a_loop_that_comes_back_after_a_one_bar_section_starts_from_its_top`
+(`runner/restart_tests.rs`): genau ein Takt daneben. Ein Musiker erwartet: Setzt ein Loop mit einer
+Sektion ein, beginnt er vorn.
+
+**Die Regel (Runner, `Runner::restarts`).** Ein Track wird am Anfang einer Sektion neu verankert —
+`origin` = erste Sample der Sektion —, wenn
+
+1. er in der Sektion seinen Loop spielt: `play`, oder `overdub`/`stack` auf einen schon
+   vorhandenen Loop (nicht ein `stack`, der aus der Vorsektion einfach weiterläuft),
+2. er **einsetzt** — in der Sektion davor klang er nicht (`stop`, `hear_through`, noch nie
+   bespielt) — oder der Clip es ausdrücklich verlangt: `theme: {state: play, restart: true}`,
+3. und die Sektion **nicht ohnehin** auf seinem Raster beginnt. Gefragt in Takten
+   (`(Sektionstakt − Ursprungstakt) mod Looptakte`): Ein Loop ist immer ganze Takte, sein Ursprung
+   immer ein Sektionsanfang.
+
+Bedingung 3 ist die Bestandsgarantie: Eine Partitur, deren Sektionen Vielfache ihrer Loops sind,
+erzeugt **kein einziges** neues Kommando und klingt bitgleich wie vorher. Das beweist
+`runner/golden_tests.rs`: Henrys 3/4-Partitur, der Walzer, die Solo-Partitur und eine Partitur mit
+Pause, Wiederkehr auf dem Raster, Overdub und Release laufen durch die Engine, und ein Hash über
+jedes Sample beider Busse muss gleich dem Wert sein, den derselbe Test auf `origin/octaver`
+(2a135a0, vor der Änderung) ergab.
+
+**Entscheidungen zu den Randfällen:**
+
+| Fall | Verhalten |
+|---|---|
+| Track spielt über die Grenze weiter | **kein** Neuanfang (unverändert), außer `restart: true` |
+| Wechsel per Release, `quantize: bar` oder `loop`, per `goto` | verankert auf der Sample, auf der die Sektion **wirklich** beginnt — wo auch immer der Release sie hingelegt hat |
+| Sektion ohne `autorelease` loopt | nur beim Betreten der Sektion, nicht in jedem Durchlauf |
+| mehrere Tracks setzen an derselben Grenze ein (theme + bass) | alle auf dieselbe Sample verankert, also untereinander phasengleich. Ein Track, der *weiterspielt*, behält seine Phase — er kann danach gegen die eingesetzten versetzt sein; wer das nicht will, schreibt bei ihm `restart: true` |
+| `overdub` auf einen einsetzenden Track | erst neu verankert, dann die Ebene auf dem neuen Raster: sie beginnt am Sektionsanfang |
+| Take, der genau an der Grenze endet (`overdub` in einer Sektion kürzer als der Loop, dann `restart: true`) | seine letzten Frames kommen erst `R` später herein und landen noch auf dem **alten** Raster: der Ursprung gilt je Position, nicht ab einem Zeitpunkt (unten) |
+| Take, der über die Grenze läuft | kann es nicht geben (ein Wechsel landet nie in einem laufenden Take); die Engine lehnt den Neuanfang unter einem offenen Loop-Take als `Busy` ab |
+| `restart` auf `record` | **Fehler** — der neue Take legt den Ursprung ohnehin an den Sektionsanfang |
+| `restart` auf `stop` / `hear_through` | **Fehler** — es spielt kein Loop |
+| `restart: false` | erlaubt, sagt nichts; der Text schreibt es nicht zurück |
+| Live-Ansicht ohne Partitur | unverändert — nur der Runner schickt `RestartLoop` |
+
+**Wie es gebaut ist (Engine).** `Command::RestartLoop { track, at, play }` legt den neuen Ursprung
+**neben** den alten (`LoopGrid::restart`) statt ihn zu überschreiben: Wiedergabe und Aufnahme
+erreichen `at` zu verschiedenen Zeiten — die Wiedergabe wird für Plugin- und Kettenlatenz (der
+Oktaver von `bass_from_guitar`!) um `playback_advance` vorausgelesen, die Aufnahme läuft um `R`
+hinterher. Deshalb geht jede Position durch `LoopGrid::origin_at(pos)`: vor `at` der alte, ab `at`
+der neue Ursprung — beim Lesen (`Track::read`), beim Schreiben (`write_index`) und beim Abspielen
+der MIDI-Ebenen. Das Kommando wirkt **früh**, sobald der Vorauslesezeiger `at` erreicht
+(`EngineCore::next_due` zieht die Vorauslese des Tracks ab); `play: true` lässt den Track ab `at`
+auf der Leseachse klingen (`Track::sounds_at`), das `StartPlay` für dieselbe Sample folgt wie
+immer. So beginnt ein vorausgelesener Loop mit seinem ersten Frame, statt die ersten
+`playback_advance` Frames — den Anschlag auf der Eins — zu verlieren. Der nächste Neuanfang faltet
+den vorigen in `origin`; Leeren, ein neuer Loop und ein Transport-Start verwerfen ihn. Gebundene
+Arbeit: ein paar Speicherungen, nichts alloziert.
+
+**MIDI-Loops.** `play_midi` teilt sein Fenster an `at`: davor das alte Raster (nur wenn der Track
+spielt), ab da das neue. Alles, was die alte Phase klingen ließ, bekommt genau auf `at` sein
+Note-off — vor den ersten Noten der neuen Phase; das Note-off aus dem übersprungenen Teil des Loops
+käme sonst nie, und die Note hinge. Bewiesen in `midi_tests.rs` mit und ohne Instrumentlatenz
+(`a_midi_loop_re_anchored_mid_note_leaves_nothing_hanging`, `a_midi_loop_that_comes_back_plays_its_first_note`).
+
+### Ein Take kürzer als die Sektion (`{state: record, bars: 2}`)
+
+Der zweite Wunsch des Besitzers: im sechstaktigen Refrain nimmt `chorus_guitar` die Takte 1–2
+auf und spielt sie als Zwei-Takt-Loop für 3–6, während `mic` alle sechs Takte in einem Take
+aufnimmt. Ein Take kann keine Sektionsgrenze überqueren, also musste beides in eine Sektion:
+
+```yaml
+  - id: chorus_1
+    bars: 6
+    tracks:
+      chorus_guitar: {state: record, bars: 2}   # zwei Takte, dann der Loop
+      mic: record                               # alle sechs Takte
+```
+
+Der Runner plant den Take über `bars` Takte ab Sektionsanfang (`StartRecord`, `StopRecord` und
+`StartPlay` am Takeende), die Looplänge sind diese `bars`, der Ursprung der Sektionsanfang. Ohne
+`bars` ändert sich nichts.
+
+| Frage | Entscheidung |
+|---|---|
+| Gültige Werte | `1 … bars der Sektion`; gleich der Sektionslänge ist erlaubt (wie ohne). Mehr: **Fehler** „records 8 bars in Section 'x', but the section has only 6" — auch, wenn die Sektion ihre Länge über `repeat:` bekommt (geprüft auf den aufgelösten Sektionen) |
+| Teilt die Sektion nicht (3 in 4) | erlaubt; der Loop läuft einfach weiter. Spielt der Track in der Folgesektion weiter, behält er seine Phase (kein Neuanfang); setzt er nach einer Pause wieder ein, beginnt er vorn (Regel oben) |
+| `autorelease: false` | der Take endet nach seinen Takten, der Loop spielt bis zum Release. Ein Release während des Takes wird wie immer an sein Ende geschoben |
+| `overdub` | **Fehler** — ein Overdub dauert immer genau einen Durchlauf des Loops |
+| `stack` | **Fehler** — `stack` nimmt Durchlauf um Durchlauf bis zum Sektionsende auf |
+| `play` / `stop` / `hear_through` | **Fehler** — `bars` ist die Länge eines Takes |
+| MIDI-Loop, Clip-`grid` | wie Audio: derselbe `record_at` des Schedulers, das Notenraster ist davon unabhängig |
+| Einzähler | keine Wechselwirkung — Sektionen beginnen nach ihm |
+| Mitschnitt (Stems, Marker) | unverändert: der Take ist ein Take, die Marker hängen an Sektionen |
+| `repeat:` | erbt der Clip den Zustand, erbt er seine Optionen mit; nennt die Sektion den Track selbst, gelten nur ihre eigenen |
+
+Bewiesen in `runner/restart_tests.rs`: `a_short_take_and_a_whole_section_take_share_one_section`
+(Zwei-Takt- und Sechs-Takt-Take in einer Sektion, mit und ohne `autorelease`, sample-genau und
+phasenrichtig in der Folgesektion) und `a_short_take_that_does_not_divide_its_section_runs_on`.
+
+**Format.** Beide Optionen stehen in der Clip-Form neben `grid`, in fester Reihenfolge
+(`{state: play, grid: 1/16, restart: true}`, `{state: record, bars: 2}`), im kompilierten Score als
+`CompiledSection.clips` (nur Clips, die etwas sagen), im Dokument als `DocSectionTrack.restart` /
+`.bars`. `score --check` zeigt sie hinter dem Zustand: `theme=play(restart)`,
+`chorus_guitar=record(2 bars)`. Im Arrangement zeigt der Clip „2 of 6 bars" bzw. „from top", und
+der Clip-Inspektor hat *Take length* (bei Record) und *Restart the loop here* (bei Play, Overdub,
+Stack). Wechselt ein Clip den Zustand, fallen Optionen weg, die der neue nicht nimmt.
 
 ### `stack`: eine neue Ebene in jedem Durchlauf, bis die Sektion endet
 
