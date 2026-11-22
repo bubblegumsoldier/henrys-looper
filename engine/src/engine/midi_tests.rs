@@ -1747,3 +1747,223 @@ fn a_cut_midi_take_ends_held_notes_on_the_cut_and_takes_nothing_after_it() {
         );
     }
 }
+
+
+// ---------------------------------------------------------------------------------------------
+// A chord held over the end of the take (the owner's pad, 22.11.): it sounds the whole loop
+// ---------------------------------------------------------------------------------------------
+
+/// Frames of `from..to` in which the instrument had key `note` sounding, judged from everything it
+/// was sent (one voice per key, as a synth without stacking hears it).
+fn coverage(rig: &Rig, note: u8, from: u64, to: u64) -> u64 {
+    let mut on_since: Option<u64> = None;
+    let mut total = 0;
+    for &(at, m) in rig.seen.lock().unwrap().iter() {
+        if m[1] != note || !matches!(m[0] & 0xF0, 0x80 | 0x90) {
+            continue;
+        }
+        let on = m[0] & 0xF0 == 0x90 && m[2] > 0;
+        match (on, on_since) {
+            (true, None) => on_since = Some(at),
+            (false, Some(s)) => {
+                total += at.min(to).saturating_sub(s.max(from));
+                on_since = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = on_since {
+        total += to.saturating_sub(s.max(from));
+    }
+    total
+}
+
+/// When the musician lets go of the chord, relative to the start of the take.
+#[derive(Clone, Copy, Debug)]
+enum Release {
+    /// Shortly after the loop end - after the wrap, while the loop plays its first pass.
+    AfterEnd,
+    /// Exactly on the loop end.
+    AtEnd,
+    /// Just before the loop end.
+    BeforeEnd,
+    /// Not before the next pass is over.
+    Late,
+}
+
+/// A two-note chord, pressed `on` frames from the start of a take that begins from nothing
+/// (negative: a touch early, in the pre-roll), released as `release` says. Returns the rig, the
+/// take's start, and the frame the keys went up (relative to the start).
+fn held_chord(grid: NoteGrid, on: i64, release: Release) -> (Rig, u64, i64) {
+    let mut rig = grid_rig(grid);
+    rig.sim.run_to(20_000);
+    let start = 40_000u64;
+    rig.sim.send(Command::StartRecord { track: 0, at: start });
+    rig.sim.send(Command::StopRecord {
+        track: 0,
+        at: start + L,
+    });
+    rig.sim.send(Command::StartPlay {
+        track: 0,
+        at: start + L,
+    });
+    let at = |f: i64| (start as i64 + f) as u64;
+    play(&mut rig, at(on), [0x99, 62, 127]);
+    play(&mut rig, at(on), [0x99, 55, 127]);
+    // Channel pressure while holding, as the owner's pads send it.
+    for k in 1..8 {
+        play(&mut rig, at(on + k * 25_000), [0xD9, 120, 0]);
+    }
+    let up = match release {
+        Release::AfterEnd => L as i64 + 20_000,
+        Release::AtEnd => L as i64,
+        Release::BeforeEnd => L as i64 - 300,
+        Release::Late => 2 * L as i64 + 30_000,
+    };
+    play(&mut rig, at(up), [0x89, 62, 0]);
+    play(&mut rig, at(up + 40), [0x89, 55, 0]);
+    (rig, start, up)
+}
+
+/// The owner's report: a chord held over the end of a MIDI loop sounded while he recorded it, and
+/// when the loop came round nothing was heard. Its note off came after the wrap and was stored
+/// there (or, pressed a touch early, the note was "longer than the loop" and was ended right after
+/// its own start) - a note of a few milliseconds - and his release, after the loop had struck the
+/// chord again, ended the loop's notes as well.
+///
+/// Whatever the timing, on a grid or not: every stored note is shorter than the loop and not
+/// empty, and every pass after the take has the chord sounding all the way through.
+#[test]
+fn a_chord_held_over_the_end_sounds_for_the_whole_loop_in_every_pass() {
+    for grid in [NoteGrid::None, NoteGrid::Eighth] {
+        for on in [-1_000i64, 0, 500] {
+            for release in [Release::AfterEnd, Release::AtEnd, Release::BeforeEnd, Release::Late] {
+                let name = format!("{grid:?}, an bei {on}, {release:?}");
+                // Released before the end, a chord pressed after the start is just shorter than
+                // the loop: nothing to test here.
+                if matches!(release, Release::BeforeEnd) && on >= 0 {
+                    continue;
+                }
+                let (mut rig, start, _) = held_chord(grid, on, release);
+                rig.sim.run_to(start + 4 * L + 3 * C);
+
+                // What was stored: each key one note, longer than nothing, shorter than the loop.
+                let r = raw(&rig, 0);
+                for key in [62u8, 55] {
+                    let ev: Vec<&RawEvent> = r
+                        .iter()
+                        .filter(|e| e.ev.d1 == key && matches!(e.ev.kind, NoteKind::On | NoteKind::Off))
+                        .collect();
+                    assert_eq!(ev.len(), 2, "{name}: {ev:?}");
+                    let len = ev[1].frame - ev[0].frame;
+                    assert!(len > 0 && len < L as i64, "{name}: Laenge {len}");
+                }
+                // What was played: the chord through the whole of every pass - the first one too,
+                // except where a chord pressed early without a grid struck before the loop played
+                // (see the next test).
+                let first = if grid == NoteGrid::None && on < 0 && matches!(release, Release::BeforeEnd) {
+                    2
+                } else {
+                    1
+                };
+                for pass in first..4 {
+                    let from = start + pass * L;
+                    for key in [62u8, 55] {
+                        let heard = coverage(&rig, key, from, from + L);
+                        // A grid line moves the start by up to 500 frames here; a pre-roll note
+                        // ends one frame before its own next start.
+                        assert!(heard + 1_100 >= L, "{name}: Durchlauf {pass}, Taste {key}: {heard} von {L}");
+                    }
+                }
+                // Stopped: nothing is left on.
+                let at = rig.sim.pos() + 64;
+                rig.sim.send(Command::StopPlay { track: 0, at });
+                rig.sim.run_to(at + L);
+                assert!(sounding(&rig).is_empty(), "{name}: {:?}", sounding(&rig));
+            }
+        }
+    }
+}
+
+/// The one gap left: without a grid, a chord pressed a touch early for the one belongs to the end
+/// of the loop, and its note on in the loop lies in the take itself, before the loop plays. Let go
+/// before the end, the first pass after the take has nothing of it; from the second on it sounds
+/// all the way. (Held over the end, the loop takes the held keys over - previous test.)
+#[test]
+fn a_chord_pressed_early_and_let_go_before_the_end_sounds_from_the_second_pass_without_a_grid() {
+    let (mut rig, start, _) = held_chord(NoteGrid::None, -1_000, Release::BeforeEnd);
+    rig.sim.run_to(start + 3 * L + C);
+    let play = play_list(&rig, 0);
+    let on = play.iter().find(|e| e.msg == [0x99, 62, 127]).unwrap();
+    let off = play.iter().find(|e| e.msg == [0x89, 62, 0]).unwrap();
+    assert_eq!(on.offset, (L - 1_000) as u32, "wo gespielt, vor der Eins");
+    assert_eq!(off.offset, (L - 1_001) as u32, "ein Bild vor dem eigenen Wiederanschlag");
+    assert!(coverage(&rig, 62, start + 2 * L, start + 3 * L) + 2 >= L);
+}
+
+/// The live key and the loop share one voice: the loop striking a key the musician still holds
+/// strikes it afresh (off, on), his release then leaves the loop's note sounding, and the loop's
+/// own off ends it. Stopping the loop while he still holds the key leaves his note alone.
+#[test]
+fn a_key_held_live_and_struck_by_the_loop_is_one_voice() {
+    let mut rig = grid_rig(NoteGrid::Eighth);
+    record_first_pass(&mut rig);
+    play(&mut rig, 0, [0x90, 60, 100]);
+    play(&mut rig, 50_000, [0x80, 60, 0]);
+    // Pass 2: the musician presses the same key before the loop's note comes and holds it past.
+    play(&mut rig, L - 2_000 + L, [0x90, 60, 90]);
+    play(&mut rig, 2 * L + 10_000, [0x80, 60, 0]);
+    rig.sim.run_to(2 * L + 60_000);
+    let got: Vec<(u64, [u8; 3])> = sent(&rig, 2 * L - 3_000, 2 * L + 60_000)
+        .into_iter()
+        .filter(|(_, m)| m[1] == 60)
+        .collect();
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert_eq!(got[0].1, [0x90, 60, 90], "live");
+    assert_eq!((got[1].0, got[1].1), (2 * L, [0x80, 60, 0]), "neu angeschlagen: aus ...");
+    assert_eq!((got[2].0, got[2].1), (2 * L, [0x90, 60, 100]), "... und an");
+    assert_eq!((got[3].0, got[3].1), (2 * L + 50_000, [0x80, 60, 0]), "das Aus der Schleife");
+
+    // Held live while the loop is stopped: the loop's off does not end his note.
+    let mut rig = grid_rig(NoteGrid::Eighth);
+    record_first_pass(&mut rig);
+    play(&mut rig, 0, [0x90, 60, 100]);
+    play(&mut rig, 50_000, [0x80, 60, 0]);
+    play(&mut rig, 2 * L - 2_000, [0x90, 60, 90]);
+    rig.sim.run_to(2 * L + 10_000);
+    let at = rig.sim.pos() + 64;
+    rig.sim.send(Command::StopPlay { track: 0, at });
+    rig.sim.run_to(2 * L + 30_000);
+    assert_eq!(sounding(&rig), vec![(0, 60)], "die Live-Taste klingt weiter");
+    play(&mut rig, 2 * L + 40_000, [0x80, 60, 0]);
+    rig.sim.run_to(2 * L + 60_000);
+    assert!(sounding(&rig).is_empty());
+}
+
+/// The same chord in an overdub on a playing loop: held over the end of the overdub pass, it
+/// sounds through every pass after it, and nothing hangs once the loop stops.
+#[test]
+fn a_chord_held_over_the_end_of_an_overdub_sounds_for_the_whole_loop() {
+    for grid in [NoteGrid::None, NoteGrid::Eighth] {
+        let mut rig = grid_rig(grid);
+        record_first_pass(&mut rig);
+        hit(&mut rig, 10_000, 36);
+        rig.sim.send(Command::StartOverdub { track: 0, at: L });
+        rig.sim.send(Command::StopRecord {
+            track: 0,
+            at: 2 * L,
+        });
+        play(&mut rig, L + 300, [0x90, 62, 100]);
+        play(&mut rig, 2 * L + 20_000, [0x80, 62, 0]);
+        rig.sim.run_to(5 * L);
+        assert_eq!(rig.sim.core.track(0).layer_count(), 2, "{grid:?}");
+        for pass in 2..5 {
+            let heard = coverage(&rig, 62, pass * L, (pass + 1) * L);
+            assert!(heard + 400 >= L, "{grid:?}: Durchlauf {pass}: {heard} von {L}");
+        }
+        let at = rig.sim.pos() + 64;
+        rig.sim.send(Command::StopPlay { track: 0, at });
+        rig.sim.run_to(at + L);
+        assert!(sounding(&rig).is_empty(), "{grid:?}: {:?}", sounding(&rig));
+    }
+}

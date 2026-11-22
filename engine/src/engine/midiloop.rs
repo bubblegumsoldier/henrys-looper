@@ -44,7 +44,9 @@
 //! * A note whose off comes after the take's end keeps being listened to (the "tail"): the off is
 //!   stored where it was played, past the loop length, and the play list wraps it to the start.
 //! * A note that never gets its off - the transport stopped, the pass was left for good - or that
-//!   would sound longer than the loop, is ended one frame before the end of its pass.
+//!   would sound longer than the loop, is ended one frame before the end of the pass it was played
+//!   for - a pre-roll note's is the pass that begins after it - and never later than one frame
+//!   before its own next start ([`note_end`]). Held over the end, it sounds the whole loop.
 //! * A take that begins from nothing also takes what was played up to a 32nd note before its start
 //!   (the "pre-roll"): stored at a negative frame, it plays at the end of the loop, right before
 //!   the one, exactly as early as it was played - and a grid puts it on the one.
@@ -355,6 +357,26 @@ impl MidiClip {
         }
     }
 
+    /// Whether the play list has key `note` on `channel` sounding at loop offset `at`, pass after
+    /// pass: the last note event of that key at or before `at` - counted round the loop - is an on.
+    /// An off exactly at `at` counts as before it. Bounded by the clip size.
+    pub fn sounds_at(&self, channel: u8, note: u8, at: u32) -> bool {
+        let mut before: Option<bool> = None;
+        let mut last: Option<bool> = None;
+        for e in &self.play {
+            let kind = e.msg[0] & 0xF0;
+            if (kind != 0x80 && kind != 0x90) || e.msg[0] & 0x0F != channel || e.msg[1] != note {
+                continue;
+            }
+            let on = kind == 0x90 && e.msg[2] > 0;
+            if e.offset <= at {
+                before = Some(on);
+            }
+            last = Some(on);
+        }
+        before.or(last).unwrap_or(false)
+    }
+
     /// Indices of the play-list events with an offset in `from..to` (both inside the loop).
     #[inline]
     pub fn window(&self, from: u64, to: u64) -> (usize, usize) {
@@ -604,6 +626,23 @@ impl Default for OpenNotes {
 pub fn pass_end(on_frame: i64, loop_len: u64) -> i64 {
     let l = loop_len.max(1) as i64;
     (on_frame.div_euclid(l) + 1) * l - 1
+}
+
+/// Where a note that started at `on_frame` ends when it was held longer than a loop can play it
+/// (or never let go): one frame before the end of the pass it belongs to, and never later than
+/// one frame short of a whole loop after its start.
+///
+/// The pass a note belongs to is the one whose one it was played for: a key pressed up to
+/// `preroll` frames before a pass begins (the pre-roll, a hit a little early) belongs to that
+/// pass, not to the one it was physically pressed in - otherwise a chord played a touch early on
+/// the one and held over the end would be ended right after it started, a blip before the
+/// downbeat. The cap keeps the note shorter than the loop, so its off never lands behind its own
+/// next on: such a note sounds for the whole loop, re-struck at its start in every pass.
+#[inline]
+pub fn note_end(on_frame: i64, loop_len: u64, preroll: u64) -> i64 {
+    let l = loop_len.max(1) as i64;
+    let p = (preroll as i64).min(l - 1).max(0);
+    pass_end(on_frame + p, loop_len).min(on_frame + l - 1).max(on_frame + 1)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -952,5 +991,17 @@ mod tests {
         assert_eq!(pass_end(100, 1_000), 999);
         assert_eq!(pass_end(1_100, 1_000), 1_999);
         assert_eq!(pass_end(-50, 1_000), -1);
+    }
+
+    #[test]
+    fn a_held_note_ends_before_the_end_of_the_pass_it_was_played_for() {
+        // Pressed in the pass: the end of that pass.
+        assert_eq!(note_end(100, 1_000, 30), 999);
+        assert_eq!(note_end(0, 1_000, 30), 999);
+        // A touch early for the one: that pass, one frame short of a whole loop.
+        assert_eq!(note_end(-20, 1_000, 30), 979);
+        assert_eq!(note_end(980, 1_000, 30), 1_979);
+        // Never zero length, also for a degenerate loop.
+        assert_eq!(note_end(5, 1, 30), 6);
     }
 }

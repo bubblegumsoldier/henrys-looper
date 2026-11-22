@@ -845,6 +845,36 @@ Note-off — vor den ersten Noten der neuen Phase; das Note-off aus dem überspr
 käme sonst nie, und die Note hinge. Bewiesen in `midi_tests.rs` mit und ohne Instrumentlatenz
 (`a_midi_loop_re_anchored_mid_note_leaves_nothing_hanging`, `a_midi_loop_that_comes_back_plays_its_first_note`).
 
+**MIDI-Loops: ein Akkord, über das Loop-Ende gehalten** (Fix 2026-11-22, Bericht des Besitzers:
+Pad-Akkord über vier Takte gehalten, beim Wiederholen nichts zu hören). Drei Ursachen, alle drei
+behoben:
+
+* *Länge.* Eine Note, die länger als der Loop gehalten wird, endet ein Frame vor dem Ende des
+  Durchlaufs, **für den sie gespielt wurde** — ein Anschlag im Vorlauf-Fenster (eine
+  Zweiunddreißigstel vor der Eins) gehört zu dem Durchlauf, der dort beginnt — und nie später als
+  ein Frame vor ihrem eigenen nächsten Anschlag (`midiloop::note_end`). Vorher rechnete der Vorlauf
+  zum Durchlauf davor: der leicht früh gedrückte Akkord endete eine Millisekunde nach seinem Anfang,
+  und ein im Take selbst kurz vor dem Ende gelöster wurde gar nicht gekürzt (Off hinter dem
+  eigenen On). Gilt im Take, im Nachlauf und beim Schließen des Nachlaufs.
+* *Eine Taste, eine Stimme.* Live-Taste und MIDI-Ebenen spielen dasselbe Instrument, und MIDI kennt
+  keine Noten-Ids: schlägt der Loop eine Taste an, die der Musiker noch hält, und lässt er sie
+  danach los, beendete sein Off die Note des Loops. Die Event-Stufe (`source::shared_key`) schlägt
+  eine Taste, die eine andere Quelle hält, sauber neu an (Off, On) und lässt ein Off durch, erst
+  wenn keine Quelle die Taste mehr hält. Ohne Raster liegt der Anschlag eines früh gedrückten
+  Akkords vor dem Beginn der Wiedergabe; dann übernimmt der Loop die gehaltene Taste
+  (`adopt_held`, `SourceRack::adopt`), und sein eigenes Off beendet sie.
+* *Neue Abspielliste.* Mit Raster baut der Steuer-Thread die Liste neu, sobald das späte Off
+  ankommt; der Tausch beendete alles, was die alte Liste klingen ließ — mitten im Akkord. Jetzt
+  bleibt, was die neue Liste an dieser Stelle selbst klingen lässt (`NoteTracker::release_except`).
+
+Offen, bewusst: ohne Raster und im Take gelöst hat der erste Durchlauf nach der Aufnahme nichts
+vom früh gedrückten Akkord (sein Anschlag lag vor dem Beginn der Wiedergabe), ab dem zweiten
+klingt er durch. Kanaldruck und Controller werden wie gespielt wiederholt, auch ein Druck 0 beim
+Loslassen vor dem Ende; im Nachlauf wird nur Note-Off und Pedal-Hoch aufgenommen. Bewiesen in
+`midi_tests.rs` (`a_chord_held_over_the_end_sounds_for_the_whole_loop_in_every_pass`: drei
+Anschlagzeiten mal vier Loslass-Zeiten, mit und ohne Raster, danach Stopp ohne hängende Note;
+Overdub; eine Stimme je Taste).
+
 ### Ein Take kürzer als die Sektion (`{state: record, bars: 2}`)
 
 Der zweite Wunsch des Besitzers: im sechstaktigen Refrain nimmt `chorus_guitar` die Takte 1–2

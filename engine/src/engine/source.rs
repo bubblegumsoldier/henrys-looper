@@ -721,6 +721,36 @@ impl NoteTracker {
         *self = Self::default();
     }
 
+    /// Like [`NoteTracker::release_own`], but the notes `keep` answers true for stay sounding and
+    /// tracked.
+    pub fn release_except(
+        &mut self,
+        mut keep: impl FnMut(u8, u8) -> bool,
+        mut emit: impl FnMut([u8; 3]),
+    ) {
+        let mut kept = Self::default();
+        for c in 0..16u8 {
+            let words = self.on[c as usize];
+            for (w, word) in words.iter().enumerate() {
+                let mut bits = *word;
+                while bits != 0 {
+                    let b = bits.trailing_zeros() as u8;
+                    bits &= bits - 1;
+                    let n = w as u8 * 64 + b;
+                    if keep(c, n) {
+                        kept.note([0x90 | c, n, 1]);
+                    } else {
+                        emit([0x80 | c, n, 0]);
+                    }
+                }
+            }
+            if self.sustain & (1 << c) != 0 {
+                emit([0xB0 | c, 64, 0]);
+            }
+        }
+        *self = kept;
+    }
+
     /// Emit what ends everything this source started: a note off per held note, the sustain pedal
     /// up where it was down, and "all notes off" (CC 123) on every channel that was used - the
     /// last for instruments that keep voices of their own the tracker cannot see. Then forget.
@@ -928,6 +958,24 @@ impl SourceRack {
             source: SourceId::LOOP,
             now: true,
         });
+    }
+
+    /// The track's MIDI layers take over key `note` on `channel` that the musician holds: the loop
+    /// has it sounding at this point of its pass but could not strike it itself (its note on lay
+    /// before the loop started playing). The live off that is on its way then leaves the note
+    /// sounding, and the loop's own off ends it. Returns false - nothing taken over - when the live
+    /// input does not hold the key or the loop has it already.
+    pub fn adopt(&mut self, track: usize, channel: u8, note: u8) -> bool {
+        let Some(trackers) = self.trackers.get_mut(track) else {
+            return false;
+        };
+        if !trackers[SourceId::LIVE.0 as usize].is_on(channel, note)
+            || trackers[SourceId::LOOP.0 as usize].is_on(channel, note)
+        {
+            return false;
+        }
+        trackers[SourceId::LOOP.0 as usize].note([0x90 | (channel & 0x0F), note & 0x7F, 1]);
+        true
     }
 
     /// One event of a track's MIDI layers at output position `at`.
@@ -1228,7 +1276,24 @@ impl SourceRack {
                     } else {
                         (e.at - chunk_start) as u32
                     };
-                    self.trackers[t][e.source.0 as usize].note(e.msg);
+                    let trackers = &mut self.trackers[t];
+                    let shared = shared_key(trackers, e.source, e.msg);
+                    trackers[e.source.0 as usize].note(e.msg);
+                    match shared {
+                        // The key sounds already, from another source: struck again cleanly,
+                        // so the instrument never stacks a second voice the first off leaves.
+                        Shared::Restrike => {
+                            if self.scratch.len() + 1 < self.scratch.capacity() {
+                                self.scratch.push(BlockEvent {
+                                    offset,
+                                    msg: [0x80 | (e.msg[0] & 0x0F), e.msg[1], 0],
+                                });
+                            }
+                        }
+                        // Another source still holds the key: its off is the one that ends it.
+                        Shared::StillHeld => continue,
+                        Shared::No => {}
+                    }
                     self.scratch.push(BlockEvent {
                         offset,
                         msg: e.msg,
@@ -1299,6 +1364,40 @@ impl SourceRack {
             Some(out) if i < self.capacity => (out.l[i], out.r[i]),
             _ => (0.0, 0.0),
         }
+    }
+}
+
+/// What a note event means for a key another source of the same track may hold too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shared {
+    No,
+    /// A note on for a key another source has sounding.
+    Restrike,
+    /// A note off for a key another source still holds.
+    StillHeld,
+}
+
+/// One instrument, several sources (the live keys, the MIDI layers): a key is one voice, and it
+/// sounds while any source holds it. The musician holding a chord over the end of the loop he
+/// records and letting go after the loop has struck it again must not end the loop's note - MIDI
+/// has no note ids, and the instrument would take his off for the loop's.
+#[inline]
+fn shared_key(trackers: &[NoteTracker; SOURCES], source: SourceId, msg: [u8; 3]) -> Shared {
+    let kind = msg[0] & 0xF0;
+    if !is_channel_message(msg) || (kind != 0x80 && kind != 0x90) {
+        return Shared::No;
+    }
+    let (c, n) = (msg[0] & 0x0F, msg[1]);
+    let elsewhere = trackers
+        .iter()
+        .enumerate()
+        .any(|(i, tr)| i != source.0 as usize && tr.is_on(c, n));
+    if !elsewhere {
+        Shared::No
+    } else if kind == 0x90 && msg[2] > 0 {
+        Shared::Restrike
+    } else {
+        Shared::StillHeld
     }
 }
 
