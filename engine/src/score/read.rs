@@ -215,7 +215,8 @@ fn take_length_issues(
 /// `{state: play, monitor: true}` asks for the track's live input on top of its loop. Two tracks
 /// cannot give that, and saying so beats silently not doing it: a track the score set to
 /// `monitor: false` (the input is never heard - that is what the option is for), and an instrument
-/// track (its keys are heard whenever it plays anyway; to silence them it is `monitor: false`).
+/// track (the sections never switch its monitoring: its keys are heard as the track's `monitor`
+/// starts it, and from then on as the musician's Monitor switch says).
 fn clip_monitor_issues(
     score: &ScoreSource,
     monitor_pos: &HashMap<(String, String), Pos>,
@@ -234,7 +235,8 @@ fn clip_monitor_issues(
                 (
                     format!(
                         "'monitor' does nothing on the instrument track '{name}' (Section '{}'): \
-                         what is played on it is heard whenever it plays.",
+                         the sections never switch its monitoring - its keys are heard unless the \
+                         track says 'monitor: false', and the Monitor switch changes that live.",
                         section.id
                     ),
                     "Remove 'monitor'.".to_string(),
@@ -916,7 +918,7 @@ impl Reader {
                     self.error_with(
                         Some(node.pos),
                         format!("'monitor: always' does nothing on the instrument track '{name}'."),
-                        "An instrument track is heard whenever it is played; 'monitor: false' silences it.",
+                        "An instrument track's keys are heard whenever it is played; 'monitor: false' starts it with them cut off (a MIDI loop keeps playing), and the Monitor switch turns them on and off live.",
                     );
                 }
                 Some(true)

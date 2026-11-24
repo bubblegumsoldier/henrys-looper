@@ -700,8 +700,8 @@ function TrackHead(p: HeadProps) {
             title={
               t.instrument
                 ? monitor
-                  ? "Heard whenever it is played, in every section"
-                  : "This instrument is never heard live (monitor: false)"
+                  ? "Your playing is heard in every section; the Monitor button on the stage can switch it off"
+                  : "Starts with your playing not heard (monitor: false) - still recorded; the Monitor button on the stage switches it on"
                 : monitor
                   ? t.monitor_always
                     ? "Monitoring always: heard from the load on, giving way to a monitored track on the same input"

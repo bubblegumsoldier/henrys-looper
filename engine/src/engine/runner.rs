@@ -306,8 +306,9 @@ struct TrackRun {
     name: String,
     /// Whether the score allows this track to be monitored at all.
     can_monitor: bool,
-    /// An instrument track: heard whenever it is played (unless the score says monitor: false,
-    /// which the engine was started with), so the sections never switch its monitoring.
+    /// An instrument track: the sections never switch its monitoring. It starts as the score's
+    /// `monitor` says ([`setup_commands`]) and is then the musician's switch alone - a section that
+    /// only monitors a track while it records would silence the piano between two takes.
     instrument: bool,
     /// The track's default `skip_end` in thousandths of a quarter note; 0 for none.
     skip_end: u32,
@@ -1680,7 +1681,8 @@ fn lead_text(bars: u32, beats: u32) -> String {
 /// What a score says about how its tracks are set up, as the untimed commands that put an engine
 /// into that state: pan, the two bus assignments, the latency compensation - and monitoring off,
 /// which is the state the runner's picture starts from (`hear_through` and the takes switch it on
-/// at the section boundary).
+/// at the section boundary). An instrument track's monitoring is set to the score's `monitor`
+/// instead: the sections never switch it.
 ///
 /// Untimed on purpose: these are setup, not musical events, and they are only sent while every
 /// track is empty and no score is playing - on load, and again after "Clear all" has put the
@@ -1708,15 +1710,13 @@ pub fn setup_commands(score: &CompiledScore) -> Vec<Command> {
             track,
             latency: spec.track_latency(),
         });
-        // An instrument track keeps the monitoring it was started with: heard, unless the score
-        // says monitor: false (the host starts the engine that way). The engine would ignore
-        // the command anyway.
-        if !spec.is_instrument() {
-            out.push(Command::SetMonitor {
-                track,
-                on: idle[track],
-            });
-        }
+        // An instrument track starts as the score's `monitor` says - its live keys heard unless
+        // `monitor: false` - and the sections leave it alone from then on; the musician's Monitor
+        // switch may still change it. Every other track starts as the idle plan says.
+        out.push(Command::SetMonitor {
+            track,
+            on: if spec.is_instrument() { spec.monitor } else { idle[track] },
+        });
     }
     out
 }
@@ -1729,8 +1729,8 @@ pub fn setup_commands(score: &CompiledScore) -> Vec<Command> {
 /// that a `monitor: always` track is heard whenever none of those takes its input: tracks that
 /// share an input channel (five guitar tracks on input 2) never monitor it twice. So during the bass
 /// take the bass track's chain is heard, otherwise the `always` track's; of two `always` tracks on
-/// one input the first one wins. Instrument tracks keep the monitoring they were started with and
-/// are left out (`Runner::set_monitor`).
+/// one input the first one wins. Instrument tracks are left out (`Runner::set_monitor`): they keep
+/// the monitoring [`setup_commands`] started them with, or what the musician switched by hand.
 pub fn monitor_plan(score: &CompiledScore, section: Option<usize>) -> Vec<bool> {
     let n = score.tracks.len();
     let mut on = vec![false; n];

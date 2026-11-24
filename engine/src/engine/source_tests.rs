@@ -283,24 +283,42 @@ fn an_empty_slot_is_silent_and_audio_tracks_are_untouched() {
     assert_eq!(status.tracks()[1].latency_frames, 827, "Audiospur unveraendert");
 }
 
-/// A score that switches monitoring off between takes must not silence the piano.
+/// The Monitor switch of an instrument track with an audio loop works like an audio track's: off,
+/// the instrument is not heard, and a take still records it; on again, it is.
 #[test]
-fn monitoring_commands_do_not_silence_an_instrument_track() {
+fn the_monitor_switch_silences_an_audio_loop_instrument_track_and_it_still_records() {
     let mut rig = rig(vec![TrackSpec::instrument()], false);
     install(&mut rig, 0, Box::new(Impulse::new(0)), 0);
     rig.sim.send(Command::SetMonitor {
         track: 0,
         on: false,
     });
-    rig.sim.run_blocks(2);
-    rig.keys
-        .push(LiveEvent {
-            host_ns: 0,
-            msg: [0x90, 60, 127],
-        })
-        .unwrap();
-    rig.sim.run_blocks(1);
-    assert_eq!(nonzero(&rig.sim.out_l).len(), 1);
+    rig.sim.send(Command::StartRecord { track: 0, at: 0 });
+    // Past the 10 ms fade of the switch.
+    rig.sim.run_blocks(8);
+    let key = |rig: &mut Rig| {
+        rig.keys
+            .push(LiveEvent {
+                host_ns: 0,
+                msg: [0x90, 60, 127],
+            })
+            .unwrap();
+        rig.sim.run_blocks(1);
+    };
+    key(&mut rig);
+    assert!(nonzero(&rig.sim.out_l).is_empty(), "off: not heard");
+    let status = rig.sim.latest_status().unwrap();
+    assert!(!status.tracks()[0].monitor);
+    let recorded = rig.sim.core.track(0).layer(0).unwrap().channel(0, 9 * BLOCK as u64);
+    assert_eq!(nonzero(&recorded).len(), 1, "the take has the note all the same");
+
+    rig.sim.send(Command::SetMonitor {
+        track: 0,
+        on: true,
+    });
+    rig.sim.run_blocks(8);
+    key(&mut rig);
+    assert_eq!(nonzero(&rig.sim.out_l).len(), 1, "on again: heard");
 }
 
 /// Swapping the instrument hands the old one back to the thread that sent it.
@@ -320,10 +338,19 @@ fn a_replaced_instrument_goes_back_to_its_sender() {
 }
 
 /// An engine built from a score's tracks (as the app's rebuild and the CLI build it) plays the
-/// score's instrument track - heard, whatever the score's setup and sections switch - unless the
-/// score says monitor: false.
+/// score's instrument track - heard, unless the score says monitor: false. That is where it
+/// starts, whatever the engine was started with; the musician's switch can still turn it on.
 #[test]
 fn an_engine_built_from_a_score_plays_its_instrument_track() {
+    let key = |rig: &mut Rig| {
+        rig.keys
+            .push(LiveEvent {
+                host_ns: 0,
+                msg: [0x90, 60, 127],
+            })
+            .unwrap();
+        rig.sim.run_blocks(1);
+    };
     for (monitor, heard) in [("", true), (", monitor: false", false)] {
         let text = format!(
             "bpm: 120\ntracks:\n  keys: {{input: instrument{monitor}}}\n  voice: {{input: 1}}\n\
@@ -335,8 +362,9 @@ fn an_engine_built_from_a_score_plays_its_instrument_track() {
             .zip(&score.tracks)
             .map(|(def, track)| TrackSpec {
                 input: def.input,
-                // What the app starts an instrument track with: the score's monitor.
-                monitor: track.is_instrument() && track.monitor,
+                // Started heard either way (a setup that differs from the score): the score's
+                // setup commands put it where the score says.
+                monitor: track.is_instrument(),
                 pan: def.pan,
                 latency: def.latency,
                 loop_send: def.loop_send,
@@ -349,16 +377,14 @@ fn an_engine_built_from_a_score_plays_its_instrument_track() {
         for command in super::runner::setup_commands(&score) {
             rig.sim.send(command);
         }
-        // What a section's monitoring would send; an instrument track ignores it.
-        rig.sim.send(Command::SetMonitor { track: 0, on: false });
-        rig.sim.run_blocks(2);
-        rig.keys
-            .push(LiveEvent {
-                host_ns: 0,
-                msg: [0x90, 60, 127],
-            })
-            .unwrap();
-        rig.sim.run_blocks(1);
+        // Past the 10 ms fade of a switch.
+        rig.sim.run_blocks(8);
+        key(&mut rig);
         assert_eq!(!nonzero(&rig.sim.out_l).is_empty(), heard, "monitor{monitor}");
+        // The musician's switch overrides the score's start.
+        rig.sim.send(Command::SetMonitor { track: 0, on: true });
+        rig.sim.run_blocks(8);
+        key(&mut rig);
+        assert!(!nonzero(&rig.sim.out_l).is_empty(), "switched on by hand: monitor{monitor}");
     }
 }

@@ -169,8 +169,11 @@ pub struct InstrumentInput {
     pub note_low: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_high: Option<u8>,
-    /// Whether the instrument is heard. Default `true`: an instrument track is heard whenever it
-    /// is played, whatever the takes and sections do.
+    /// Whether the live keys are heard when the engine starts. Default `true`: an instrument track
+    /// is heard whenever it is played, whatever the takes and sections do. `false` starts it with
+    /// the Monitor switch off - on a MIDI loop the live MIDI is cut before the instrument and the
+    /// loop plays on; on an audio loop the instrument's output is not heard but still recorded.
+    /// The switch can turn it on at any time, as on an audio track.
     #[serde(default = "instrument_heard")]
     pub monitor: bool,
     /// What a take of this track stores: `audio` (the default - the instrument's sound) or `midi`

@@ -541,7 +541,7 @@ function ClipNote({ doc, index, track, layers, editable, edit }: { doc: ScoreDoc
       break;
     case "hear_through":
       what = t.instrument ? (
-        <>{name} is an instrument track: it is heard whenever it is played, so Monitor changes nothing here.</>
+        <>{name} is an instrument track: sections never switch its monitoring, so Monitor changes nothing here. Its Monitor button on the stage decides whether you hear what you play.</>
       ) : (
         <>You hear {name}’s input live; nothing is recorded.</>
       );
@@ -765,13 +765,13 @@ function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, stale
           </>
         )}
         <div className="frow">
-          <label>{t.instrument ? "Heard" : "Monitoring"}</label>
+          <label>{t.instrument ? "Monitor at start" : "Monitoring"}</label>
           <div>
             {t.instrument ? (
               <Toggle
                 on={monitor}
                 disabled={!editable}
-                label={monitor ? "Always" : "Never"}
+                label={monitor ? "On" : "Off"}
                 onChange={(on) => patch({ monitor: on ? undefined : false })}
               />
             ) : (
@@ -800,8 +800,8 @@ function TrackPanel({ doc, errors, notes, editable, setSel, edit, onIssue, stale
         <div className="hint">
           {t.instrument
             ? monitor
-              ? "An instrument track is heard whenever it is played — in every section, whatever its clips say."
-              : "This instrument is never heard live; its takes are still recorded and play back."
+              ? "You hear what you play on this instrument track in every section, whatever its clips say. The Monitor button on the stage can switch your playing off and on at any time."
+              : "The score starts with your playing on this instrument not heard - it is still recorded, and a MIDI loop keeps playing. The Monitor button on the stage switches it on."
             : t.monitor_always
               ? "You hear this input from the moment the score is loaded, count-in included. While another track on the same input is monitored (a take, Monitor), that one is heard instead - never both."
               : monitor

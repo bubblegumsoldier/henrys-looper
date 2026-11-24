@@ -1607,9 +1607,16 @@ impl Track {
     }
 
     /// Monitoring as heard at input index `k`: 1 while on, 0 while off, a fade over `edge` input
-    /// frames after a switch.
+    /// frames after a switch. (An instrument track counts on the output axis.)
+    ///
+    /// Always 1 on a MIDI loop: its instrument plays the loop and the live keys alike, so its
+    /// output is always heard, and the Monitor switch cuts the live MIDI before the instrument
+    /// instead (`super::source::SourceRack::set_live_cut`).
     #[inline(always)]
     pub fn monitor_level(&self, k: u64) -> f32 {
+        if self.midi_loop {
+            return 1.0;
+        }
         if self.monitor_from == self.monitor_to || k >= self.monitor_k0 + self.edge {
             return self.monitor_to;
         }
@@ -1619,13 +1626,24 @@ impl Track {
         self.monitor_from + (self.monitor_to - self.monitor_from) * fade_in(k - self.monitor_k0, self.edge)
     }
 
-    /// Whether monitoring contributes anything right now: on, or still fading out.
+    /// Whether monitoring contributes anything right now: on, or still fading out - and always on
+    /// a MIDI loop, whose instrument output carries the loop (see [`Track::monitor_level`]).
     #[inline(always)]
     pub fn monitor_active(&self) -> bool {
-        self.monitor || self.monitor_from != self.monitor_to
+        self.midi_loop || self.monitor || self.monitor_from != self.monitor_to
     }
 
-    /// Switch monitoring with a fade that begins at input index `k`.
+    /// Whether the live MIDI of this track is cut off before its instrument: a MIDI loop with its
+    /// Monitor switch off. The loop keeps sounding; what the musician plays is recorded but not
+    /// heard. An instrument track with an audio loop is switched like an audio track instead (its
+    /// instrument's output is faded out and still recorded), so this is false there.
+    #[inline]
+    pub fn live_midi_cut(&self) -> bool {
+        self.midi_loop && !self.monitor
+    }
+
+    /// Switch monitoring with a fade that begins at input index `k` (on an instrument track: at
+    /// output position `k`).
     pub fn fade_monitor(&mut self, on: bool, k: u64) {
         self.fade_monitor_from(on, k, 1.0);
     }
@@ -1634,7 +1652,7 @@ impl Track {
     /// longer configured fade (`Command::MonitorFade`) that this switch ends: the ramp starts where
     /// that fade had got to.
     pub fn fade_monitor_from(&mut self, on: bool, k: u64, reached: f32) {
-        if self.is_instrument() || (on == self.monitor && reached >= 1.0) {
+        if on == self.monitor && reached >= 1.0 {
             return;
         }
         let from = self.monitor_level(k) * reached;
@@ -1723,17 +1741,18 @@ impl Track {
         self.monitor
     }
 
-    /// Switch monitoring. An instrument track ignores it: it is heard whenever it plays, unless it
-    /// was set up with monitoring off - a score that only monitors a track while it records would
-    /// otherwise silence the piano between two takes.
+    /// Switch monitoring, at once. On an instrument track it is the musician's switch for his live
+    /// keys: off cuts them (a MIDI loop: before the instrument, so the loop keeps sounding; an
+    /// audio loop: the instrument's output, as on an audio track) - recording goes on either way.
+    /// The score runner never sends it for an instrument track: a score that only monitors a track
+    /// while it records would otherwise silence the piano between two takes. Its setup's (or the
+    /// score's) `monitor` is only where it starts.
     #[inline]
     pub fn set_monitor(&mut self, on: bool) {
-        if !self.is_instrument() {
-            self.monitor = on;
-            let level = if on { 1.0 } else { 0.0 };
-            self.monitor_from = level;
-            self.monitor_to = level;
-        }
+        self.monitor = on;
+        let level = if on { 1.0 } else { 0.0 };
+        self.monitor_from = level;
+        self.monitor_to = level;
     }
 
     #[inline]

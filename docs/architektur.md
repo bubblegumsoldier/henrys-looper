@@ -936,7 +936,7 @@ Mithören). „Stop all" schaltet es mit allem anderen aus.
 | `hear_through` | **Fehler** — das ist der Eingang allein |
 | `stop` | **Fehler** — dazu gehört ein Loop, der spielt; der Hinweis nennt `hear_through` |
 | Track mit `monitor: false` | **Fehler** an der Clip-Option: beides zugleich kann nicht gelten, eins muss weg |
-| Instrument-Track | **Fehler** — dessen Spiel ist immer zu hören, solange er spielt |
+| Instrument-Track | **Fehler** — die Sektionen schalten sein Mithören nie; das tut sein Monitor-Schalter (Startwert `monitor`) |
 | `monitor: false` am Clip | sagt nichts, überall erlaubt |
 | mit `restart: true` | geht zusammen |
 
@@ -2204,9 +2204,8 @@ Standardzustand. **Fehlt es auf dem Rechner**, läuft die Spur stumm (Instrument
 Effekt weiter, eine englische Notice sagt es, und `pluginmix` meldet für die Spur weiter, was die
 Partitur verlangt hat — so schreibt der nächste Fader-Zug den Eintrag nicht weg. Erst wenn ein
 Mensch auf dieser Spur ein Plugin wählt, gilt seine Wahl. Instrument-Routing (Gerät, Kanal,
-Tasten) folgt beim Laden ohne Neuaufbau; ein anderes `monitor` einer Instrument-Spur erzwingt den
-Neuaufbau (das Hören ist beim Engine-Start festgelegt), den das Laden auf leere Spuren ohnehin
-darf.
+Tasten) folgt beim Laden ohne Neuaufbau, ebenso ein anderes `monitor` einer Instrument-Spur (die
+`setup_commands` der Partitur schalten es in der laufenden Engine).
 
 *Rückweg* wie bei den Fadern: Plugin wählen, laden, verschieben, entfernen, Bypass (Maus oder
 MIDI) zählt `mixer_rev` hoch (`pluginmix::touch_*`), `mixer_take` nennt die Spur, ihr Eintrag
@@ -2215,13 +2214,44 @@ zurück. Das Wiederherstellen beim Start und das Anwenden einer Partitur sind ke
 freien Modus landen die Plugin-Felder nicht in `mixer.json` (die Plugins haben ihre eigenen
 Dateien).
 
-*Monitor bei Instrument-Spuren — Entscheidung.* Eine Instrument-Spur ist **immer hörbar, wenn
-sie gespielt wird**, außer mit `monitor: false`. Das Mithören der Sektionen (`hear_through`, die
-Takes) gilt für Mikrofone: der Runner schaltet es für Instrument-Spuren nie (`setup_commands`
-schickt kein `SetMonitor`), die Engine ignoriert es ohnehin, und der Monitor-Schalter (Live,
-MIDI) antwortet mit einer Erklärung statt still nichts zu tun. `monitor: false` der Partitur geht
-beim Neuaufbau als `InstrumentInput::monitor` in die Startkonfiguration. Ein `hear_through`-Clip
-einer Instrument-Spur ist erlaubt und ändert nichts; der Inspektor sagt das.
+*Monitor bei Instrument-Spuren — Entscheidung (überarbeitet 2026-11).* Der Monitor-Schalter
+einer Instrument-Spur tut aus Sicht des Spielers dasselbe wie bei einer Audiospur: **an = ich
+höre, was ich spiele; aus = mein Live-Spiel ist nicht zu hören, wird aber weiter aufgenommen.**
+Schalten lässt er sich überall, wo eine Audiospur ihn hat: Knopf und Taste M auf der Bühne, die
+MIDI-Bindung `track.N.monitor`, das Host-Kommando — im freien Modus und während eine Partitur
+läuft.
+
+* **MIDI-Loop** (`loop: midi`): Live-Tasten und Loop spielen *ein* Instrument. „Aus“ schneidet
+  deshalb das Live-MIDI **vor** dem Instrument ab (`SourceRack::set_live_cut`, gesetzt aus
+  `Track::live_midi_cut` vor jedem Stück eines Blocks), nicht dessen Ton: der Loop klingt weiter,
+  der Instrumentenausgang einer MIDI-Loop-Spur hat immer Pegel 1 (`Track::monitor_level`).
+  Abgeschnitten wird jedes Live-Ereignis (Noten, CCs samt Pedal, Pitch Bend, Aftertouch), das ab
+  dem Umschalten fällig wird — auch eines, das vorher gespielt wurde und noch auf seine feste
+  Verzögerung wartete. Beim Ausschalten endet, was der Spieler hält (Note-off je Taste, Pedal
+  hoch), **außer** einer Taste oder einem Pedal, das der Loop ebenfalls hält (eine Stimme je
+  Taste: dessen eigenes Off beendet sie); kein „all notes off“, das träfe den Loop. Was der
+  Spieler im Aus drückt oder beim Ausschalten hielt, merkt sich der Rack (`unheard`): dessen Offs
+  und Pedal-Hochs werden auch nach dem Wiedereinschalten verschluckt — kein streunendes Note-off,
+  und eine über das Einschalten gehaltene Taste bleibt stumm, bis sie neu angeschlagen wird.
+  **Aufnahme läuft weiter**: aufgenommen wird aus den Zeitstempeln (`heard`), nicht aus dem, was
+  das Instrument bekam; die Noten eines im Aus gespielten Takes klingen ab der ersten
+  Wiederholung. Ein im Aus gedrücktes Pedal zählt für den Take-Beginn als gedrückt
+  (`live_sustain`).
+* **Audio-Loop** (`loop: audio`): hier teilt sich kein Loop das Instrument, und ein abgeschnittenes
+  MIDI hätte nichts zum Aufnehmen. Der Schalter wirkt deshalb wie bei einer Audiospur auf den
+  Instrumentenausgang (10-ms-Blende auf der Ausgangsachse, `instrument_frame`), und der Take nimmt
+  das Instrument weiter auf (`record_sources` liest es unabhängig vom Schalter). Unterschied zum
+  MIDI-Loop: eine über das Einschalten gehaltene Taste wird mit dem Einblenden hörbar.
+
+Die Sektionen schalten das Mithören einer Instrument-Spur weiterhin **nie** (`monitor_plan`,
+`Runner::set_monitor`): eine Partitur, die eine Spur nur während ihrer Takes mithört, würde sonst
+das Klavier zwischen zwei Takes stummschalten. `monitor` der Spur (Setup `instrument.monitor`,
+Partitur `monitor: false`) ist nur der **Startzustand**: die Engine startet so, und
+`setup_commands` schickt beim Laden und nach „Back to start“ ein `SetMonitor` mit dem Wert der
+Partitur; danach gehört der Schalter dem Spieler, auch während die Partitur läuft. Ein
+`hear_through`-Clip einer Instrument-Spur ist erlaubt und ändert nichts; der Inspektor sagt das.
+Gespeichert wird der Schalter wie bei Audiospuren nicht: er lebt in der laufenden Engine, ein
+Neustart, Neuaufbau oder „Clear all“ setzt ihn auf den Startwert zurück.
 
 *Reserviert: `loop` und `grid`.* Damit das Format nicht zweimal bricht, liest, prüft und
 rendert der Compiler schon jetzt `loop: audio|midi` je Spur (`midi` nur an einer Instrument-Spur)

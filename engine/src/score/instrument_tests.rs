@@ -304,19 +304,24 @@ fn a_new_score_takes_the_instrument_tracks_of_the_setup() {
     assert!(text.contains("keys: {input: instrument, midi: {device: Testkeys, channel: 2}}"), "{text}");
 }
 
-/// Monitoring of an instrument track is not the sections' business: it is heard whenever it is
-/// played, and `monitor: false` (which the engine is started with) keeps it silent.
+/// Monitoring of an instrument track is not the sections' business: the score's setup starts it
+/// as `monitor` says - the keys heard, the pads with `monitor: false` not - and from then on only
+/// the musician's switch changes it.
 #[test]
-fn the_score_setup_never_switches_an_instrument_tracks_monitoring() {
+fn the_score_setup_starts_an_instrument_tracks_monitoring_as_the_score_says() {
     let score = compile_score(KEYS).unwrap();
-    let monitors: Vec<usize> = setup_commands(&score)
+    let monitors: Vec<(usize, bool)> = setup_commands(&score)
         .into_iter()
         .filter_map(|c| match c {
-            Command::SetMonitor { track, .. } => Some(track),
+            Command::SetMonitor { track, on } => Some((track, on)),
             _ => None,
         })
         .collect();
-    assert_eq!(monitors, vec![2], "only the voice");
+    assert_eq!(monitors, vec![(0, true), (1, false), (2, false)]);
+    for section in 0..score.sections.len() {
+        let plan = crate::engine::runner::monitor_plan(&score, Some(section));
+        assert!(!plan[0] && !plan[1], "the sections never switch an instrument track");
+    }
 }
 
 /// The command line cannot play an instrument; it says so before opening a device.

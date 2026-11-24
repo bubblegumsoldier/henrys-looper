@@ -15,6 +15,9 @@ use super::source::{
 };
 use super::track::TrackState;
 
+/// The Monitor switch of a MIDI loop: it cuts the live keys before the instrument.
+mod monitor_tests;
+
 const BLOCK: usize = 128;
 /// Output latency of the simulated device, in frames.
 const OUT: u64 = 300;
