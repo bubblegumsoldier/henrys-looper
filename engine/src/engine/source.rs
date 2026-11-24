@@ -721,6 +721,36 @@ impl NoteTracker {
         *self = Self::default();
     }
 
+    /// Like [`NoteTracker::release_own`], but the notes `keep` answers true for stay sounding and
+    /// tracked.
+    pub fn release_except(
+        &mut self,
+        mut keep: impl FnMut(u8, u8) -> bool,
+        mut emit: impl FnMut([u8; 3]),
+    ) {
+        let mut kept = Self::default();
+        for c in 0..16u8 {
+            let words = self.on[c as usize];
+            for (w, word) in words.iter().enumerate() {
+                let mut bits = *word;
+                while bits != 0 {
+                    let b = bits.trailing_zeros() as u8;
+                    bits &= bits - 1;
+                    let n = w as u8 * 64 + b;
+                    if keep(c, n) {
+                        kept.note([0x90 | c, n, 1]);
+                    } else {
+                        emit([0x80 | c, n, 0]);
+                    }
+                }
+            }
+            if self.sustain & (1 << c) != 0 {
+                emit([0xB0 | c, 64, 0]);
+            }
+        }
+        *self = kept;
+    }
+
     /// Emit what ends everything this source started: a note off per held note, the sustain pedal
     /// up where it was down, and "all notes off" (CC 123) on every channel that was used - the
     /// last for instruments that keep voices of their own the tracker cannot see. Then forget.
@@ -807,6 +837,17 @@ pub struct SourceRack {
     trackers: Vec<[NoteTracker; SOURCES]>,
     /// Set when the live notes of a track have to be ended before its next block.
     flush_live: [bool; MAX_TRACKS],
+    /// Per track: the live MIDI is cut off before the instrument - the track's Monitor switch is
+    /// off on a MIDI loop ([`SourceRack::set_live_cut`]). The loop's own events still go through.
+    cut: [bool; MAX_TRACKS],
+    /// Set when the cut has just begun: what the live input has sounding is ended before the next
+    /// rendered piece, except what the loop holds as well.
+    cut_begun: [bool; MAX_TRACKS],
+    /// Per track, what the musician holds down that the instrument never got (or no longer has):
+    /// keys and pedal pressed while the live input was cut, and the ones the cut ended. Their
+    /// later offs and pedal-ups are swallowed, so a key let go after the cut is lifted is not a
+    /// stray note off - and a key still held then stays silent until it is struck again.
+    unheard: Vec<NoteTracker>,
     panic_all: bool,
     /// Events for one chunk, sorted - what the instrument gets.
     scratch: Vec<BlockEvent>,
@@ -854,6 +895,9 @@ impl SourceRack {
             pending: (0..MAX_TRACKS).map(|_| resident_events()).collect(),
             trackers: vec![[NoteTracker::default(); SOURCES]; MAX_TRACKS],
             flush_live: [false; MAX_TRACKS],
+            cut: [false; MAX_TRACKS],
+            cut_begun: [false; MAX_TRACKS],
+            unheard: vec![NoteTracker::default(); MAX_TRACKS],
             panic_all: false,
             scratch: {
                 let mut v = Vec::with_capacity(PENDING_EVENTS + 64 * SOURCES);
@@ -903,11 +947,31 @@ impl SourceRack {
         self.tap = on;
     }
 
-    /// Channels on which the musician holds the sustain pedal of a track down.
+    /// Channels on which the musician holds the sustain pedal of a track down - whether the
+    /// instrument hears it or the live input is cut.
     pub fn live_sustain(&self, track: usize) -> u16 {
-        self.trackers
+        let heard = self
+            .trackers
             .get(track)
-            .map_or(0, |t| t[SourceId::LIVE.0 as usize].sustain())
+            .map_or(0, |t| t[SourceId::LIVE.0 as usize].sustain());
+        heard | self.unheard.get(track).map_or(0, NoteTracker::sustain)
+    }
+
+    /// Cut the live MIDI of `track` off before its instrument (`true`), or let it through again.
+    /// Acts from the next rendered piece on, for every live event that is due from there - also
+    /// one that was played before and waits for its fixed delay. Cutting ends what the live input
+    /// has sounding, except a key or pedal the track's MIDI loop holds too (one voice per key:
+    /// the loop's own off ends it). Lifting the cut sends nothing: a key still held stays silent
+    /// until it is struck again. Called by the engine before every piece; a few stores.
+    #[inline]
+    pub fn set_live_cut(&mut self, track: usize, on: bool) {
+        let Some(cut) = self.cut.get_mut(track) else {
+            return;
+        };
+        if *cut != on {
+            *cut = on;
+            self.cut_begun[track] = on;
+        }
     }
 
     /// An ending for a track's instrument that has to go out before anything else at the start of
@@ -928,6 +992,24 @@ impl SourceRack {
             source: SourceId::LOOP,
             now: true,
         });
+    }
+
+    /// The track's MIDI layers take over key `note` on `channel` that the musician holds: the loop
+    /// has it sounding at this point of its pass but could not strike it itself (its note on lay
+    /// before the loop started playing). The live off that is on its way then leaves the note
+    /// sounding, and the loop's own off ends it. Returns false - nothing taken over - when the live
+    /// input does not hold the key or the loop has it already.
+    pub fn adopt(&mut self, track: usize, channel: u8, note: u8) -> bool {
+        let Some(trackers) = self.trackers.get_mut(track) else {
+            return false;
+        };
+        if !trackers[SourceId::LIVE.0 as usize].is_on(channel, note)
+            || trackers[SourceId::LOOP.0 as usize].is_on(channel, note)
+        {
+            return false;
+        }
+        trackers[SourceId::LOOP.0 as usize].note([0x90 | (channel & 0x0F), note & 0x7F, 1]);
+        true
     }
 
     /// One event of a track's MIDI layers at output position `at`.
@@ -1079,6 +1161,8 @@ impl SourceRack {
 
     fn reset_track(&mut self, track: usize) {
         self.trackers[track] = [NoteTracker::default(); SOURCES];
+        self.unheard[track] = NoteTracker::default();
+        self.cut_begun[track] = false;
         self.flush_live[track] = false;
         self.pending[track].clear();
     }
@@ -1217,9 +1301,22 @@ impl SourceRack {
                         trackers[SourceId::LIVE.0 as usize].release(&mut push);
                     }
                 }
+                // The live input was cut since the last piece: its notes end at the top of this
+                // one, the loop's stay.
+                if done == from && std::mem::take(&mut self.cut_begun[t]) {
+                    let scratch = &mut self.scratch;
+                    cut_live(&mut self.trackers[t], &mut self.unheard[t], |msg| {
+                        scratch.push(BlockEvent { offset: 0, msg });
+                    });
+                }
                 let list = &mut self.pending[t];
                 let due = list.partition_point(|e| e.now || e.at < chunk_end);
                 for e in &list[..due] {
+                    if e.source == SourceId::LIVE
+                        && unheard_live(self.cut[t], &mut self.unheard[t], e.msg)
+                    {
+                        continue;
+                    }
                     let offset = if e.now {
                         0
                     } else if e.at < chunk_start {
@@ -1228,7 +1325,24 @@ impl SourceRack {
                     } else {
                         (e.at - chunk_start) as u32
                     };
-                    self.trackers[t][e.source.0 as usize].note(e.msg);
+                    let trackers = &mut self.trackers[t];
+                    let shared = shared_key(trackers, e.source, e.msg);
+                    trackers[e.source.0 as usize].note(e.msg);
+                    match shared {
+                        // The key sounds already, from another source: struck again cleanly,
+                        // so the instrument never stacks a second voice the first off leaves.
+                        Shared::Restrike => {
+                            if self.scratch.len() + 1 < self.scratch.capacity() {
+                                self.scratch.push(BlockEvent {
+                                    offset,
+                                    msg: [0x80 | (e.msg[0] & 0x0F), e.msg[1], 0],
+                                });
+                            }
+                        }
+                        // Another source still holds the key: its off is the one that ends it.
+                        Shared::StillHeld => continue,
+                        Shared::No => {}
+                    }
                     self.scratch.push(BlockEvent {
                         offset,
                         msg: e.msg,
@@ -1299,6 +1413,115 @@ impl SourceRack {
             Some(out) if i < self.capacity => (out.l[i], out.r[i]),
             _ => (0.0, 0.0),
         }
+    }
+}
+
+/// The live input of a track is cut off: end what it has sounding - a note off per key and the
+/// pedal up - except what another source (the MIDI loop) holds as well, which keeps sounding and
+/// is ended by that source's own off. No "all notes off": the instrument is shared with the loop.
+/// Everything the live input held is moved to `unheard`, so its later offs are swallowed.
+fn cut_live(
+    trackers: &mut [NoteTracker; SOURCES],
+    unheard: &mut NoteTracker,
+    mut emit: impl FnMut([u8; 3]),
+) {
+    let live = SourceId::LIVE.0 as usize;
+    let held = trackers[live];
+    let elsewhere = |c: u8, n: u8| {
+        trackers
+            .iter()
+            .enumerate()
+            .any(|(i, tr)| i != live && tr.is_on(c, n))
+    };
+    let pedal_elsewhere = |c: u8| {
+        trackers
+            .iter()
+            .enumerate()
+            .any(|(i, tr)| i != live && tr.sustain() & (1 << c) != 0)
+    };
+    for c in 0..16u8 {
+        for (w, word) in held.on[c as usize].iter().enumerate() {
+            let mut bits = *word;
+            while bits != 0 {
+                let b = bits.trailing_zeros() as u8;
+                bits &= bits - 1;
+                let n = w as u8 * 64 + b;
+                if !elsewhere(c, n) {
+                    emit([0x80 | c, n, 0]);
+                }
+                unheard.note([0x90 | c, n, 1]);
+            }
+        }
+        if held.sustain & (1 << c) != 0 {
+            if !pedal_elsewhere(c) {
+                emit([0xB0 | c, 64, 0]);
+            }
+            unheard.note([0xB0 | c, 64, 127]);
+        }
+    }
+    trackers[live] = NoteTracker::default();
+}
+
+/// Whether a live event stays away from the instrument. While the input is `cut`, every one does,
+/// and the keys and pedal it presses or lets go are kept in `unheard`. Afterwards the offs and
+/// pedal-ups of what is still in `unheard` are swallowed (the instrument never sounded those); a
+/// pedal that was down through the cut stays unheard until it is let go. A new note on for such a
+/// key is a new note and goes through.
+#[inline]
+fn unheard_live(cut: bool, unheard: &mut NoteTracker, msg: [u8; 3]) -> bool {
+    if cut {
+        unheard.note(msg);
+        return true;
+    }
+    if unheard.used == 0 || !is_channel_message(msg) {
+        return false;
+    }
+    let (kind, c, n) = (msg[0] & 0xF0, msg[0] & 0x0F, msg[1] & 0x7F);
+    match kind {
+        0x80 | 0x90 if unheard.is_on(c, n) => {
+            unheard.note([0x80 | c, n, 0]);
+            // An off is swallowed; an on is a fresh stroke of a key that was let go unheard.
+            !(kind == 0x90 && msg[2] > 0)
+        }
+        0xB0 if msg[1] == 64 && unheard.sustain & (1 << c) != 0 => {
+            unheard.note(msg);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// What a note event means for a key another source of the same track may hold too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shared {
+    No,
+    /// A note on for a key another source has sounding.
+    Restrike,
+    /// A note off for a key another source still holds.
+    StillHeld,
+}
+
+/// One instrument, several sources (the live keys, the MIDI layers): a key is one voice, and it
+/// sounds while any source holds it. The musician holding a chord over the end of the loop he
+/// records and letting go after the loop has struck it again must not end the loop's note - MIDI
+/// has no note ids, and the instrument would take his off for the loop's.
+#[inline]
+fn shared_key(trackers: &[NoteTracker; SOURCES], source: SourceId, msg: [u8; 3]) -> Shared {
+    let kind = msg[0] & 0xF0;
+    if !is_channel_message(msg) || (kind != 0x80 && kind != 0x90) {
+        return Shared::No;
+    }
+    let (c, n) = (msg[0] & 0x0F, msg[1]);
+    let elsewhere = trackers
+        .iter()
+        .enumerate()
+        .any(|(i, tr)| i != source.0 as usize && tr.is_on(c, n));
+    if !elsewhere {
+        Shared::No
+    } else if kind == 0x90 && msg[2] > 0 {
+        Shared::Restrike
+    } else {
+        Shared::StillHeld
     }
 }
 

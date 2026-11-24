@@ -352,7 +352,7 @@ function Notes({ doc }: { doc: ScoreDoc }) {
     if (t.instrument)
       notes.push({
         line: t.line,
-        text: `${t.name} is an instrument track: played over MIDI, always stereo, heard whenever it is played${t.monitor === false ? " (here: never, monitor: false)" : ""}.`,
+        text: `${t.name} is an instrument track: played over MIDI, always stereo, heard whenever it is played${t.monitor === false ? " - here it starts with monitoring off (monitor: false), until the Monitor button switches it on" : ""}. Sections never switch its monitoring.`,
       });
     else if (t.input_right) notes.push({ line: t.line, text: `${t.name} is stereo (inputs ${t.input} and ${t.input_right}).` });
   });

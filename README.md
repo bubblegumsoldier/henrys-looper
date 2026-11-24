@@ -290,8 +290,10 @@ mixer:
 
 `device` fehlt = alle Geräte, `channel: 1..16|all`, `notes` fehlt = alle Tasten. Im Arrangement
 wählt der Inspektor der Spur *Source: Instrument*, das Plugin, Gerät, Kanal und Tasten. Eine
-Instrument-Spur ist immer zu hören, wenn sie gespielt wird (`monitor: false` macht sie stumm);
-der Monitor-Schalter wirkt auf sie nicht. Fehlt ein genanntes Plugin auf dem Rechner, läuft die
+Instrument-Spur ist zu hören, wenn sie gespielt wird; die Sektionen schalten das nie. Ihr
+Monitor-Schalter wirkt wie bei einer Audiospur: aus = das Live-Spiel ist nicht zu hören, wird
+aber aufgenommen; ein MIDI-Loop auf derselben Spur spielt weiter (das Live-MIDI wird vor dem
+Instrument abgeschnitten). `monitor: false` startet die Spur mit ausgeschaltetem Schalter. Fehlt ein genanntes Plugin auf dem Rechner, läuft die
 Spur stumm bzw. ohne diesen Effekt weiter, eine Meldung sagt es, und der Eintrag bleibt in der
 Datei. `loop: audio|midi` und `grid: none|1/4|1/8|1/16|1/8t|1/16t` (je Spur, je Clip als
 `keys: {state: play, grid: 1/16}`) sind für MIDI-Loops und ihre Quantisierung reserviert: sie

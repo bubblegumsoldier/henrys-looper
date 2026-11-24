@@ -797,6 +797,11 @@ impl EngineCore {
         let start = self.out_pos;
         self.play_midi(start + from as u64, start + to as u64);
         if let Some(rack) = self.sources.as_deref_mut() {
+            // A Monitor switch applied between two pieces cuts (or lets through) the live MIDI
+            // from the second one on.
+            for (t, track) in self.tracks.iter().enumerate() {
+                rack.set_live_cut(t, track.live_midi_cut());
+            }
             rack.render_range(start, from, to);
         }
     }
@@ -1148,7 +1153,7 @@ impl EngineCore {
                 // The live input of this track, already stereo: one channel fanned out on a mono
                 // track, the recorded pair on a stereo one, the instrument on an instrument track.
                 let monitor = if track.is_instrument() {
-                    instrument_frame(track, sources, t, frame)
+                    instrument_frame(track, sources, t, frame, pos)
                 } else {
                     let gain = monitor_gain * MonitorRamp::gain_of(fades.get(t).copied().flatten(), pos);
                     monitor_frame(track, input, frame, in_frames, channels, gain, in_index)
@@ -1246,7 +1251,7 @@ impl EngineCore {
                 let scratch = &mut rack.track_scratch[t];
                 for i in 0..n {
                     let monitor = if track.is_instrument() {
-                        instrument_frame(track, sources, t, in_base + i)
+                        instrument_frame(track, sources, t, in_base + i, start + i as u64)
                     } else {
                         monitor_frame(
                             track,
@@ -1745,7 +1750,12 @@ impl EngineCore {
             Command::SetMonitor { track, on } => {
                 // A configured fade that is still running ends here; the anti-click ramp takes
                 // over from the level that fade had reached, so nothing jumps.
-                let k = self.in_index + (self.now.saturating_sub(self.out_pos));
+                // An instrument track is monitored on the output axis (`instrument_frame`).
+                let k = if self.tracks[track].is_instrument() {
+                    self.now
+                } else {
+                    self.in_index + (self.now.saturating_sub(self.out_pos))
+                };
                 let reached = MonitorRamp::gain_of(self.monitor_fades[track], self.now);
                 self.monitor_fades[track] = None;
                 self.tracks[track].fade_monitor_from(on, k, reached);
@@ -2462,14 +2472,20 @@ fn monitor_frame(
     }
 }
 
-/// One instrument track's source output at one frame of the block, or silence when it was set up
-/// without monitoring or no rack is attached.
+/// One instrument track's source output at one frame of the block (output position `pos`), as far
+/// as it is monitored; silence without a rack.
+///
+/// A MIDI loop is always heard in full - its instrument plays the loop too, and its Monitor switch
+/// cuts the live MIDI before the instrument instead (`SourceRack::set_live_cut`). On an audio loop
+/// the switch fades the instrument's output like an audio track's input; the recording takes it
+/// either way (`record_sources`).
 #[inline(always)]
-fn instrument_frame(track: &Track, rack: Option<&SourceRack>, t: usize, frame: usize) -> Frame {
+fn instrument_frame(track: &Track, rack: Option<&SourceRack>, t: usize, frame: usize, pos: u64) -> Frame {
     match rack {
-        Some(rack) if track.monitor() => {
+        Some(rack) if track.monitor_active() => {
             let (l, r) = rack.frame(t, frame);
-            Frame::new(l, r)
+            let g = track.monitor_level(pos);
+            Frame::new(l * g, r * g)
         }
         _ => Frame::SILENT,
     }

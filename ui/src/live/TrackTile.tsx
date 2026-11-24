@@ -262,9 +262,8 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         <button
           className={`tb hear${track.monitor ? " on" : ""}`}
           data-midi={trackAddress(i, "monitor")}
-          // An instrument track is heard whenever it is played; only its setup or the score's
-          // `monitor: false` silences it.
-          disabled={track.instrument}
+          // On an instrument track the switch is for the live keys: off, they are not heard
+          // (still recorded); a MIDI loop on the same instrument plays on.
           onClick={(e) => {
             e.stopPropagation();
             onSelect(i);
@@ -273,8 +272,8 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
           title={
             track.instrument
               ? track.monitor
-                ? "Instrument track: heard whenever it is played. Mute it to silence it."
-                : "Instrument track set up as never heard (monitor: false)"
+                ? `${T.monitor}: you hear what you play. Off: your playing is not heard, but still recorded${track.midi_loop ? "; the MIDI loop keeps playing" : ""} · key M`
+                : `${T.monitor} off: what you play is not heard, but still recorded${track.midi_loop ? "; the MIDI loop keeps playing" : ""} · key M`
               : `${T.monitor} · key M`
           }
         >

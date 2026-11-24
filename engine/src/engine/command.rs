@@ -119,7 +119,8 @@ pub enum Command {
     /// it (the stop itself) stays. Timed, so whatever was due before `at` still happens in order.
     DropWaiting { at: u64 },
     /// Input monitoring (hearing yourself through the engine) for one track, independent of whether
-    /// that track is playing.
+    /// that track is playing. On an instrument track: the live keys (a MIDI loop cuts the live
+    /// MIDI before the instrument and plays on; see `Track::set_monitor`).
     SetMonitor { track: usize, on: bool },
     /// Where this track sits in the stereo field: -1.0 hard left, 0.0 centre, +1.0 hard right.
     /// Untimed - a pan is a mix decision, not a musical event, and it is set before a take rather

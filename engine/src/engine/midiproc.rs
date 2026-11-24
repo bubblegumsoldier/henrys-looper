@@ -19,8 +19,9 @@
 //!   still recorded into that layer, at the position they were played, past the end - the play
 //!   list wraps them to the start. The tail ends when every note is up, at the latest one loop
 //!   length after the take's end; what is still down then (and an off that would make a note
-//!   longer than the loop) is ended one frame before the end of the note's pass. A second tail
-//!   ends the first one the same way.
+//!   longer than the loop, in the tail or in the take) is ended one frame before the end of the
+//!   note's pass (`super::super::midiloop::note_end`). A second tail ends the first one the same
+//!   way.
 //! * Offs and pedal-ups of notes a take never saw start are not recorded - they belong to
 //!   something else. A pedal held down when a take begins is recorded as pressed at its start.
 //! * A take that begins from nothing accepts events from a 32nd note before its start on (the
@@ -33,10 +34,13 @@
 //! track's plugin latency, so they sound on time. They enter the track's event stage with the live
 //! events and go to the same instrument. Each layer tracks what it has sounding; stopping, holding,
 //! muting, undoing or clearing a layer ends exactly those notes and leaves the live keys alone.
+//! A key the loop and the musician both hold is one voice: it ends when the last of them lets go
+//! (`super::super::source`), so releasing a chord held over the end of the take does not silence
+//! the loop that has struck it again.
 
 use super::super::command::MAX_TRACKS;
 use super::super::midiloop::{
-    CLIP_STOCK, ClipEndpoint, ClipNews, MidiClip, OpenNotes, RawEvent, pass_end,
+    CLIP_STOCK, ClipEndpoint, ClipNews, MidiClip, OpenNotes, RawEvent, note_end,
 };
 use super::super::source::{NoteEvent, SourceRack, ticks_of_frames};
 use super::super::track::{LayerStore, Track};
@@ -118,21 +122,39 @@ impl EngineCore {
                 break;
             };
             let mut rack = self.sources.as_deref_mut();
+            let out_pos = self.out_pos;
             'tracks: for (t, track) in self.tracks.iter_mut().enumerate() {
                 if !track.midi_loop() {
                     continue;
                 }
                 let len = track.loop_len();
+                // The read position the loop has played up to (`play_midi`), as a loop offset -
+                // `None` while it does not play.
+                let advance = rack.as_deref().map_or(0, |r| r.latency(t)) + track.playback_advance();
+                let origin = track.grid().origin;
+                let read = out_pos + advance;
+                let at = (len > 0 && track.playing() && !track.held() && read >= origin)
+                    .then(|| ((read - origin) % len) as u32);
                 for layer in track.layers_mut() {
                     if let Some(clip) = layer.clip_mut()
                         && clip.id() == list.clip
                     {
+                        clip.install_list(&mut list.list, len);
                         // What the old list started ends now: a note it played early would
                         // otherwise sound twice when the new list plays it later in the pass.
+                        // A note the new list has sounding right here stays: its off is in the
+                        // new list. (A chord held over the end of the take is quantised the
+                        // moment its late off arrives; ending it then would silence the loop
+                        // for the rest of the pass.)
                         if let Some(rack) = rack.as_deref_mut() {
-                            clip.tracker.release_own(|msg| rack.push_now(t, msg));
+                            let mut tracker = clip.tracker;
+                            let play = &*clip;
+                            tracker.release_except(
+                                |c, n| at.is_some_and(|at| play.sounds_at(c, n, at)),
+                                |msg| rack.push_now(t, msg),
+                            );
+                            clip.tracker = tracker;
                         }
-                        clip.install_list(&mut list.list, len);
                         break 'tracks;
                     }
                 }
@@ -312,6 +334,7 @@ impl EngineCore {
     /// End every note of the tail of `t` one frame before the end of its pass.
     fn close_tail(&mut self, t: usize) {
         let len = self.tracks[t].loop_len();
+        let preroll = self.midi_preroll();
         let Some(midi) = self.midi.as_deref_mut() else {
             return;
         };
@@ -329,7 +352,7 @@ impl EngineCore {
             else {
                 break;
             };
-            let frame = pass_end(on, len);
+            let frame = note_end(on, len, preroll);
             let frame = self
                 .midi
                 .as_deref()
@@ -466,6 +489,7 @@ impl EngineCore {
     /// tail's alone.
     fn tail_event(&mut self, t: usize, pos: u64, msg: [u8; 3]) -> bool {
         let len = self.tracks[t].loop_len();
+        let preroll = self.midi_preroll();
         let Some(midi) = self.midi.as_deref_mut() else {
             return false;
         };
@@ -499,9 +523,11 @@ impl EngineCore {
         let settled = tail.settled();
         // A take with a cut: what is still held ends on the cut.
         let frame = tail.cut.map_or(frame, |cut| frame.min(cut));
-        // Longer than the loop cannot be played back: it ends before its pass is over.
+        // Longer than the loop cannot be played back: it ends before its pass is over. Its off
+        // must not be stored where it was played - wrapped, that is right after the note's own
+        // start, and the note held over the end would be cut to the fragment after the wrap.
         let frame = if frame - start >= len as i64 {
-            pass_end(start, len)
+            note_end(start, len, preroll)
         } else {
             frame
         };
@@ -509,7 +535,51 @@ impl EngineCore {
         if settled && let Some(midi) = self.midi.as_deref_mut() {
             midi.tails[t].reset();
         }
+        if is_off(msg) {
+            self.adopt_held(t, clip, pos, c, msg[1]);
+        }
         only_tail
+    }
+
+    /// The musician lets go of a key he has held since the take of `clip` - over its end, into the
+    /// loop's playback. If the loop has that note sounding here and has not struck it itself
+    /// (its on lay before the loop started playing: a chord played a touch early for the one, on
+    /// a track without a grid), the loop takes the held key over and its own off ends it; his
+    /// release would otherwise silence the loop until the note comes round again.
+    ///
+    /// A grid's play list comes from the control thread and does not know this off yet; such a
+    /// note is struck on its grid line by the loop itself, and the event stage keeps it sounding
+    /// past the live release (`super::super::source`, one voice per key).
+    fn adopt_held(&mut self, t: usize, clip: u32, pos: u64, channel: u8, note: u8) {
+        let track = &self.tracks[t];
+        let len = track.loop_len();
+        let origin = track.grid().origin;
+        if len == 0 || track.held() || pos < origin || !track.sounds_at(pos) {
+            return;
+        }
+        let at = ((pos - origin) % len) as u32;
+        let Some(rack) = self.sources.as_deref_mut() else {
+            return;
+        };
+        for layer in self.tracks[t].layers_mut() {
+            if layer.muted() {
+                continue;
+            }
+            let Some(c) = layer.clip_mut() else {
+                continue;
+            };
+            if c.id() != clip {
+                continue;
+            }
+            if !c.external()
+                && !c.tracker.is_on(channel, note)
+                && c.sounds_at(channel, note, at)
+                && rack.adopt(t, channel, note)
+            {
+                c.tracker.note([0x90 | channel, note, 1]);
+            }
+            break;
+        }
     }
 
     /// An event at musical position `pos` for the running take of `t`, if it takes it.
@@ -517,6 +587,8 @@ impl EngineCore {
         let Some(take) = self.tracks[t].take() else {
             return;
         };
+        let len = self.tracks[t].loop_len();
+        let preroll = self.midi_preroll();
         let Some(midi) = self.midi.as_deref_mut() else {
             return;
         };
@@ -543,28 +615,39 @@ impl EngineCore {
                 frame = cut;
             }
         }
+        // Where the note or pedal this event ends was started, if the take saw it start.
+        let mut started: Option<i64> = None;
         let keep = if is_on(msg) {
             notes.open_note(c, msg[1], frame);
             true
         } else if is_off(msg) {
-            let open = notes.is_open(c, msg[1]);
+            started = notes.on_frame(c, msg[1]);
             notes.close_note(c, msg[1]);
-            open
+            started.is_some()
         } else if is_pedal(msg) {
             if msg[2] >= 64 {
                 let fresh = notes.pedal_open(c).is_none();
                 notes.press_pedal(c, frame);
                 fresh
             } else {
-                let open = notes.pedal_open(c).is_some();
+                started = notes.pedal_open(c);
                 notes.release_pedal(c);
-                open
+                started.is_some()
             }
         } else {
             true
         };
         if !keep {
             return;
+        }
+        // A key pressed a touch early for the one (the pre-roll) and let go just before the end:
+        // longer than the loop, it cannot be played back as it was - stored as played, its off
+        // would come right after its own on. It ends as a note held over the end does.
+        if let Some(on) = started
+            && len > 0
+            && frame - on >= len as i64
+        {
+            frame = note_end(on, len, preroll);
         }
         let clip = notes.clip;
         if is_on(msg) {

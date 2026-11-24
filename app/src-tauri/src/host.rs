@@ -1685,12 +1685,9 @@ fn load_score_onto(
     if reset {
         active.reset_for_reload();
     }
-    let fits = check_tracks(&score, &active.defs).and_then(|()| {
-        match instrument_mismatch(&score, &active.instrument_inputs) {
-            Some(why) => Err(why),
-            None => Ok(()),
-        }
-    });
+    // Whether an instrument track's keys are heard is no reason to rebuild: the score's setup
+    // switches it (`setup_commands`).
+    let fits = check_tracks(&score, &active.defs);
     let Err(mismatch) = fits else {
         return active.load_score(yaml, count_in).map(|loaded| ScoreLoaded {
             engine: None,
@@ -1812,8 +1809,8 @@ fn rebuilt_config(
 }
 
 /// What plays an instrument track of a score, in the form the setup has it. The score's `monitor`
-/// is the instrument's "heard" switch: an instrument track is heard whenever it is played, unless
-/// the score says `monitor: false`.
+/// is where the track's Monitor switch starts: its keys are heard unless the score says
+/// `monitor: false`; the sections never switch it, the musician may.
 fn instrument_input(track: &CompiledTrack) -> Option<InstrumentInput> {
     let midi = track.instrument.as_ref()?;
     Some(InstrumentInput {
@@ -1826,23 +1823,6 @@ fn instrument_input(track: &CompiledTrack) -> Option<InstrumentInput> {
             .then(|| "midi".to_string()),
         grid: track.grid.clone(),
         transpose: midi.transpose,
-    })
-}
-
-/// Why the running engine cannot take a score's instrument tracks as they are, beyond what
-/// [`check_tracks`] compares: whether an instrument is heard is fixed when the engine starts.
-fn instrument_mismatch(score: &CompiledScore, running: &[Option<InstrumentInput>]) -> Option<String> {
-    score.tracks.iter().zip(running).find_map(|(t, have)| {
-        let want = instrument_input(t)?;
-        let have = have.as_ref()?;
-        (want.monitor != have.monitor).then(|| {
-            format!(
-                "Instrument track \"{}\" is {} in the score but {} in the running engine.",
-                t.name,
-                if want.monitor { "heard" } else { "silent (monitor: false)" },
-                if have.monitor { "heard" } else { "silent" },
-            )
-        })
     })
 }
 
@@ -3248,10 +3228,11 @@ impl Session {
         // takes switch it, `monitor:` in the score says which tracks may have it at all), and its
         // picture starts at "everything off"; a track started with monitoring on would otherwise
         // stay on for the whole score, because the runner would never see a difference to send.
+        // An instrument track is set to the score's `monitor` instead and left to the musician.
         self.apply_score_setup(&score)?;
         // What plays each instrument track - device, channel, keys - is the score's now;
-        // `sync_instruments` routes the ports anew on its next turn. Whether it is heard was
-        // compared before (`instrument_mismatch`): that one needs a rebuild.
+        // `sync_instruments` routes the ports anew on its next turn. Whether its keys are heard
+        // was just switched by the setup commands.
         for (i, spec) in score.tracks.iter().enumerate() {
             if let Some(input) = instrument_input(spec) {
                 if let Some(slot) = self.instrument_inputs.get_mut(i) {
@@ -4149,20 +4130,18 @@ impl Session {
                 Ok(())
             }
             Action::SetMonitor { track, on } => {
-                // An instrument track is heard whenever it is played; switching that per take
-                // would silence the piano between two of them. Only its setup (or the score's
-                // `monitor: false`) can.
-                if self.defs.get(track).is_some_and(|d| d.input.is_instrument()) {
-                    return Err(format!(
-                        "\"{}\" is an instrument track: it is always heard while it is played. \
-                         To silence it, mute it - or set 'monitor: false' for it in the score or \
-                         the setup.",
-                        self.tracks[track].name
-                    ));
-                }
+                // On an instrument track the switch is for the live keys: off, what is played is
+                // not heard (but still recorded); a MIDI loop on the same instrument plays on. The
+                // score's sections never switch it - this is the musician's switch alone.
                 self.cmd.send(Command::SetMonitor { track, on })?;
+                let what = match self.defs.get(track) {
+                    Some(d) if d.input.is_instrument() && !on => {
+                        " - the live keys are not heard (a take still records them)"
+                    }
+                    _ => "",
+                };
                 self.message = Some(format!(
-                    "\"{}\": Monitor {}.",
+                    "\"{}\": Monitor {}{what}.",
                     self.tracks[track].name,
                     if on { "on" } else { "off" }
                 ));
@@ -5371,8 +5350,8 @@ mod tests {
     }
 
     /// A score's instrument track becomes an instrument track of the rebuilt engine, with the
-    /// score's routing; whether it is heard is the score's `monitor`, and a difference there alone
-    /// is a reason to rebuild (the engine fixes it at start).
+    /// score's routing; its Monitor switch starts as the score's `monitor` says. A difference
+    /// there is no reason to rebuild: the score's setup commands switch it in the running engine.
     #[test]
     fn a_rebuild_builds_instrument_tracks_from_the_score() {
         let score = compile_score(
@@ -5396,19 +5375,14 @@ mod tests {
         let defs = resolve_tracks(&config.tracks, 2).expect("no input channel needed");
         assert!(defs[0].input.is_instrument() && defs[1].input.is_instrument());
         assert_eq!(check_tracks(&score, &defs), Ok(()));
-        let running: Vec<Option<InstrumentInput>> =
-            config.tracks.iter().map(|t| t.instrument.clone()).collect();
-        assert_eq!(instrument_mismatch(&score, &running), None);
-
-        // The same layout, but the setup has the pads heard: the score wins by a rebuild.
-        let mut heard = running.clone();
-        heard[1].as_mut().unwrap().monitor = true;
-        let why = instrument_mismatch(&score, &heard).expect("mismatch");
-        assert!(why.contains("\"pads\" is silent (monitor: false) in the score"), "{why}");
-        // A different keyboard alone is no reason: the routing follows without a rebuild.
-        let mut other = running;
-        other[0].as_mut().unwrap().device = Some("KeyLab".into());
-        assert_eq!(instrument_mismatch(&score, &other), None);
+        let monitors: Vec<(usize, bool)> = setup_commands(&score)
+            .into_iter()
+            .filter_map(|c| match c {
+                Command::SetMonitor { track, on } => Some((track, on)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(monitors, vec![(0, true), (1, false), (2, false)], "the score's start");
     }
 
     /// What was changed at runtime survives a rebuild: bus volumes and outputs, and the click.

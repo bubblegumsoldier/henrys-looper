@@ -223,7 +223,9 @@ pub struct TrackSource {
     /// Whether this track may be monitored (hearing the live input through the engine) at all.
     /// `hear_through` and the takes switch monitoring on for a track; `monitor: false` keeps it off
     /// throughout, which is what a track fed from a line source that is already audible wants.
-    /// Default `true`.
+    /// Default `true`. On an instrument track it is where its monitoring starts instead: the
+    /// sections never switch it, the musician's Monitor switch does (`false` cuts the live keys
+    /// off; a MIDI loop plays on).
     #[serde(default = "default_true")]
     pub monitor: bool,
     /// `monitor: always` - the input is heard whenever a score is loaded (ready, count-in, every
