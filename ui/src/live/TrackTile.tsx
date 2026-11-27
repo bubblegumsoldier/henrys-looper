@@ -80,9 +80,88 @@ interface Props {
   loopBars: number;
   /** O keeps overdubbing until pressed again (free looping, `overdub_mode: latch`). */
   latchMode: boolean;
+  /** The clock runs (and is not counting in): there is a bar line for a stop to wait for. */
+  clockRuns: boolean;
 }
 
-function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, barInLoop, loopBars, latchMode }: Props) {
+/**
+ * The stop button, split in two: the big part stops at the end of the bar (key S) and, while that
+ * stop waits, takes it back; the small red square on its right stops now, mid-bar (Shift+S). No
+ * dialog - the colour and the tooltip are the warning. One control, the width the single button
+ * had.
+ */
+export function StopSplit({
+  track,
+  clockRuns,
+  onStop,
+  onStopNow,
+}: {
+  track: LooperTrackStatus;
+  clockRuns: boolean;
+  onStop: () => void;
+  onStopNow: () => void;
+}) {
+  const i = track.index;
+  const writing = track.state === "recording" || track.state === "overdub";
+  const waits = track.pending_kind === "stop";
+  let sub: string;
+  let title: string;
+  if (track.state === "armed") {
+    sub = "cancels the take";
+    title = `${T.stop} · key S: the recording that waits for its start is cancelled`;
+  } else if (waits) {
+    sub = "cancel";
+    title = writing
+      ? `The take ends at the end of the bar - press again to let it run on · key S`
+      : `Stops at the end of the bar - press again to cancel · key S`;
+  } else if (writing) {
+    sub = "at bar end";
+    title = `${T.stop} · key S: the take ends at the end of the bar, then the loop plays`;
+  } else if (!clockRuns) {
+    sub = "at once";
+    title = `${T.stop} · key S: the clock stands, so it stops at once`;
+  } else {
+    sub = "at bar end";
+    title = `${T.stopBarEnd} · key S: the loop plays to the end of the bar, then stops`;
+  }
+  const nowTitle = writing
+    ? `${T.stopNow} · Shift+S: a take is never cut mid-bar - it ends at the end of the bar`
+    : `${T.stopNow} (cuts the loop mid-bar) · Shift+S`;
+  return (
+    <div className={`tsplit${waits ? " waits" : ""}`} role="group" aria-label={T.stop}>
+      <button
+        className={`tb stop sp-main${waits ? " pend" : ""}`}
+        data-midi={trackAddress(i, "stop")}
+        aria-label={waits ? `${T.stop}: armed, press to cancel` : `${T.stop} ${sub}`}
+        onClick={(e) => {
+          e.stopPropagation();
+          onStop();
+        }}
+        title={title}
+      >
+        <Icon name={waits ? "armed" : "stop"} />
+        <span className="sp-l">
+          <b>{T.stop}</b>
+          <small>{sub}</small>
+        </span>
+      </button>
+      <button
+        className="tb sp-now"
+        data-midi={trackAddress(i, "stop_now")}
+        aria-label={T.stopNow}
+        onClick={(e) => {
+          e.stopPropagation();
+          onStopNow();
+        }}
+        title={nowTitle}
+      >
+        <Icon name="stop" />
+      </button>
+    </div>
+  );
+}
+
+function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, barInLoop, loopBars, latchMode, clockRuns }: Props) {
   const i = track.index;
   const kind = trackKind(track);
   const pending = track.pending_kind ? PENDING[track.pending_kind] : null;
@@ -246,19 +325,18 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
           <Icon name="play" />
           <span>{T.play}</span>
         </button>
-        <button
-          className={`tb stop${pending === "stop" ? " pend" : ""}`}
-          data-midi={trackAddress(i, "stop")}
-          onClick={(e) => {
-            e.stopPropagation();
+        <StopSplit
+          track={track}
+          clockRuns={clockRuns}
+          onStop={() => {
             onSelect(i);
             actions.stop(i);
           }}
-          title={`${T.stop} · key S`}
-        >
-          <Icon name="stop" />
-          <span>{T.stop}</span>
-        </button>
+          onStopNow={() => {
+            onSelect(i);
+            actions.stopNow(i);
+          }}
+        />
         <button
           className={`tb hear${track.monitor ? " on" : ""}`}
           data-midi={trackAddress(i, "monitor")}
@@ -283,6 +361,7 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
         <button
           className="tb hear undo"
           data-midi={trackAddress(i, "undo")}
+          aria-label={T.undo}
           disabled={empty && !writing}
           onClick={(e) => {
             e.stopPropagation();
@@ -298,6 +377,7 @@ function TrackTileInner({ track, selected, onSelect, onDetail, actions, next, ba
           className={`tb hear mute${track.muted ? " on" : ""}`}
           data-midi={trackAddress(i, "mute")}
           aria-pressed={track.muted}
+          aria-label={T.mute}
           onClick={(e) => {
             e.stopPropagation();
             onSelect(i);

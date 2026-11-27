@@ -104,7 +104,10 @@ export const api = {
   // --- per track (zero-based index into the status event's `tracks`) --------
   trackRecord: (track: number) => call<void>("track_record", { track }),
   trackOverdub: (track: number) => call<void>("track_overdub", { track }),
+  /** Stop at the end of the bar (a running take ends there); pressed again while it waits, taken back. */
   trackStop: (track: number) => call<void>("track_stop", { track }),
+  /** Stop now, mid-bar. A running take still ends at the next bar line. */
+  trackStopNow: (track: number) => call<void>("track_stop_now", { track }),
   trackPlay: (track: number) => call<void>("track_play", { track }),
   trackClear: (track: number) => call<void>("track_clear", { track }),
   /** Undo on one track: its running take, or else its newest layer. */

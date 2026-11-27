@@ -510,7 +510,11 @@ pub enum Target {
     Record(TrackRef),
     Overdub(TrackRef),
     Play(TrackRef),
+    /// Stop at the end of the bar (a running take ends there; pressed again before it, taken
+    /// back). The stop button's big half and the `S` key.
     StopTrack(TrackRef),
+    /// Stop now, mid-bar (`track.<t>.stop_now`): the stop button's small red half, `Shift+S`.
+    StopTrackNow(TrackRef),
     ClearTrack(TrackRef),
     /// Undo on this track: the running take, or else its newest layer (`track.<t>.undo`).
     Undo(TrackRef),
@@ -569,6 +573,7 @@ impl Target {
             | Target::Overdub(_)
             | Target::Play(_)
             | Target::StopTrack(_)
+            | Target::StopTrackNow(_)
             | Target::ClearTrack(_)
             | Target::Undo(_)
             | Target::UndoLast
@@ -619,6 +624,7 @@ impl Target {
             | Target::Overdub(t)
             | Target::Play(t)
             | Target::StopTrack(t)
+            | Target::StopTrackNow(t)
             | Target::ClearTrack(t)
             | Target::Undo(t)
             | Target::Monitor(t)
@@ -672,6 +678,7 @@ impl Target {
             Target::Overdub(_) => Target::Overdub(t),
             Target::Play(_) => Target::Play(t),
             Target::StopTrack(_) => Target::StopTrack(t),
+            Target::StopTrackNow(_) => Target::StopTrackNow(t),
             Target::ClearTrack(_) => Target::ClearTrack(t),
             Target::Undo(_) => Target::Undo(t),
             Target::Monitor(_) => Target::Monitor(t),
@@ -729,6 +736,7 @@ impl Target {
                 | Target::Overdub(_)
                 | Target::Play(_)
                 | Target::StopTrack(_)
+                | Target::StopTrackNow(_)
                 | Target::ClearTrack(_)
                 | Target::Undo(_)
                 | Target::UndoLast
@@ -761,7 +769,8 @@ impl Target {
             Target::Record(t) => format!("{}: Record", track(t)),
             Target::Overdub(t) => format!("{}: Overdub", track(t)),
             Target::Play(t) => format!("{}: Play", track(t)),
-            Target::StopTrack(t) => format!("{}: Stop", track(t)),
+            Target::StopTrack(t) => format!("{}: Stop at bar end", track(t)),
+            Target::StopTrackNow(t) => format!("{}: Stop now", track(t)),
             Target::ClearTrack(t) => format!("{}: Clear", track(t)),
             Target::Undo(t) => format!("{}: Undo", track(t)),
             Target::UndoLast => "Undo last take".to_string(),
@@ -862,6 +871,7 @@ fn parse_track(track: TrackRef, rest: &[&str], address: &str) -> Result<Target, 
         ["overdub"] => Ok(Target::Overdub(track)),
         ["play"] => Ok(Target::Play(track)),
         ["stop"] => Ok(Target::StopTrack(track)),
+        ["stop_now"] => Ok(Target::StopTrackNow(track)),
         ["clear"] => Ok(Target::ClearTrack(track)),
         ["undo"] => Ok(Target::Undo(track)),
         ["monitor"] => Ok(Target::Monitor(track)),
@@ -1042,6 +1052,7 @@ impl fmt::Display for Target {
             Target::Overdub(t) => write!(f, "track.{t}.overdub"),
             Target::Play(t) => write!(f, "track.{t}.play"),
             Target::StopTrack(t) => write!(f, "track.{t}.stop"),
+            Target::StopTrackNow(t) => write!(f, "track.{t}.stop_now"),
             Target::ClearTrack(t) => write!(f, "track.{t}.clear"),
             Target::Undo(t) => write!(f, "track.{t}.undo"),
             Target::UndoLast => f.write_str("global.undo"),
@@ -1157,6 +1168,7 @@ pub fn catalogue(tracks: usize, layers: usize, sections: usize) -> Vec<Target> {
             Target::Overdub(t()),
             Target::Play(t()),
             Target::StopTrack(t()),
+            Target::StopTrackNow(t()),
             Target::ClearTrack(t()),
             Target::Undo(t()),
             Target::Monitor(t()),

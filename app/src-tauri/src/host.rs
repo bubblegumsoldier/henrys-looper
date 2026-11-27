@@ -93,7 +93,7 @@ use crate::proto::{
     DeviceReport, EngineInfo, HostInfo, InstrumentInput, OverdubMode, QuantizeName, ScoreLoaded,
     StartConfig, StatusEvent, TrackConfig, bus_events, dbfs, output_events, score_event, track_event,
 };
-use crate::schedule::{Quantize, Scheduled, Scheduler, build_timeline, resolve_tracks};
+use crate::schedule::{Quantize, Scheduled, Scheduler, StopAt, build_timeline, resolve_tracks};
 use crate::supervisor::{EngineStateView, MicPermission, NO_MIC_PERMISSION, Opened, Supervisor, Trigger, bring_up, then_act};
 
 /// Event the status snapshot is pushed on.
@@ -216,7 +216,11 @@ impl TapTempo {
 pub enum Action {
     Record { track: usize },
     Overdub { track: usize },
+    /// Stop at the end of the bar - the stop button, `S`, `track.<n>.stop`. Pressed again while it
+    /// waits, taken back. See `looper_engine::engine::schedule::Scheduler::stop`.
     StopTrack { track: usize },
+    /// Stop now, mid-bar - the small red half of the stop button, `Shift+S`, `track.<n>.stop_now`.
+    StopTrackNow { track: usize },
     Play { track: usize },
     ClearTrack { track: usize },
     /// The looper's undo on one track: its running take, or else its newest layer.
@@ -349,6 +353,7 @@ impl Action {
             Action::Record { .. }
                 | Action::Overdub { .. }
                 | Action::StopTrack { .. }
+                | Action::StopTrackNow { .. }
                 | Action::Play { .. }
                 | Action::ClearTrack { .. }
                 | Action::Undo { .. }
@@ -367,6 +372,7 @@ impl Action {
             Action::Record { track }
             | Action::Overdub { track }
             | Action::StopTrack { track }
+            | Action::StopTrackNow { track }
             | Action::Play { track }
             | Action::ClearTrack { track }
             | Action::Undo { track }
@@ -1241,6 +1247,7 @@ fn intent_of(action: MidiAction, signature: TimeSignature, measured: Option<u32>
         MidiAction::Overdub { track } => MidiIntent::Session(Action::Overdub { track }),
         MidiAction::Play { track } => MidiIntent::Session(Action::Play { track }),
         MidiAction::StopTrack { track } => MidiIntent::Session(Action::StopTrack { track }),
+        MidiAction::StopTrackNow { track } => MidiIntent::Session(Action::StopTrackNow { track }),
         MidiAction::ClearTrack { track } => MidiIntent::Session(Action::ClearTrack { track }),
         MidiAction::Undo { track } => MidiIntent::Session(Action::Undo { track }),
         MidiAction::UndoLast => MidiIntent::Session(Action::UndoLast),
@@ -3980,6 +3987,22 @@ impl Session {
             return Err(TRANSPORT_BELONGS_TO_SCORE.to_string());
         }
         let est = self.estimated_pos();
+        // A newer transport press on a track takes back a stop that waits there for its bar line:
+        // what the musician presses now is what he wants (the same rule as pressing Stop again).
+        let superseded = match action {
+            Action::Record { track }
+            | Action::Overdub { track }
+            | Action::Play { track }
+            | Action::ClearTrack { track } => {
+                let cancel = self.scheduler.supersede_stop(track, est);
+                let any = !cancel.is_empty();
+                for command in cancel {
+                    self.cmd.send(command)?;
+                }
+                any
+            }
+            _ => false,
+        };
 
         match action {
             Action::Transport { run } => self.set_transport(run),
@@ -4051,18 +4074,33 @@ impl Session {
                 let plan = self.overdub_plan(track, est)?;
                 self.send_all(plan)
             }
-            Action::StopTrack { track } => {
+            Action::StopTrack { track } | Action::StopTrackNow { track } => {
+                let when = match action {
+                    Action::StopTrackNow { .. } => StopAt::Now,
+                    _ => StopAt::BarEnd,
+                };
                 let ts = self.status_of(track);
                 if ts.latched {
                     self.cmd.send(Command::LatchOverdub { track, on: false, at: 0 })?;
                 }
                 let name = self.tracks[track].name.clone();
-                let plan = self.scheduler.stop(track, &name, est, ts.state);
+                // With the clock standing (or counting in) there is no bar line to wait for, and
+                // every loop is silent anyway: the stop acts at once.
+                let clock_runs = self.transport && !self.counting_in();
+                let plan = self
+                    .scheduler
+                    .stop(track, &name, est, ts.state, when, clock_runs);
                 self.send_all(plan)
             }
             Action::Play { track } => {
                 let name = self.tracks[track].name.clone();
                 let ts = self.status_of(track);
+                // Play while a stop waited: the stop is taken back above, and the loop that is
+                // playing simply plays on - there is nothing to start.
+                if superseded && ts.state == TrackState::Playing {
+                    self.message = Some(format!("\"{name}\": stop cancelled - keeps playing."));
+                    return Ok(());
+                }
                 if ts.latched {
                     self.cmd.send(Command::LatchOverdub { track, on: false, at: 0 })?;
                 }
@@ -4072,7 +4110,11 @@ impl Session {
                     && self.config.overdub_mode == OverdubMode::Latch
                     && self.runner.is_none()
                 {
-                    let plan = self.scheduler.stop(track, &name, est, ts.state);
+                    // `Now` rather than `BarEnd`: during a take both end it on the next bar line,
+                    // but only `BarEnd` would take back an end the Stop button already armed.
+                    let plan = self
+                        .scheduler
+                        .stop(track, &name, est, ts.state, StopAt::Now, true);
                     return self.send_all(Scheduled {
                         message: format!("\"{name}\": overdub ends at the next bar line, then plays."),
                         ..plan
@@ -4905,6 +4947,7 @@ mod tests {
             Action::Record { track: 0 },
             Action::Overdub { track: 0 },
             Action::StopTrack { track: 0 },
+            Action::StopTrackNow { track: 0 },
             Action::Play { track: 0 },
             Action::ClearTrack { track: 0 },
             Action::ClearAll,
@@ -4975,6 +5018,7 @@ mod tests {
             (Target::Overdub(track()), Action::Overdub { track: 0 }),
             (Target::Play(track()), Action::Play { track: 0 }),
             (Target::StopTrack(track()), Action::StopTrack { track: 0 }),
+            (Target::StopTrackNow(track()), Action::StopTrackNow { track: 0 }),
             (Target::ClearTrack(track()), Action::ClearTrack { track: 0 }),
             (Target::Undo(track()), Action::Undo { track: 0 }),
             (Target::UndoLast, Action::UndoLast),
@@ -5161,6 +5205,7 @@ mod tests {
             MidiAction::Overdub { track: 0 },
             MidiAction::Play { track: 0 },
             MidiAction::StopTrack { track: 0 },
+            MidiAction::StopTrackNow { track: 0 },
             MidiAction::ClearTrack { track: 0 },
             MidiAction::ClearAll,
             MidiAction::Transport,

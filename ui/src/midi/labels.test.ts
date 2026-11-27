@@ -10,6 +10,11 @@ describe("how an address reads in the binding list", () => {
     expect(targetLabel("track.9.play", tracks)).toBe("Track 9 · Play");
   });
 
+  it("tells the two stops apart: at the bar end, and now", () => {
+    expect(targetLabel("track.1.stop", tracks)).toBe("gitarre · Stop at bar end");
+    expect(targetLabel("track.2.stop_now", tracks)).toBe("voice · Stop now");
+  });
+
   it("uses the words of the buttons for transport and global targets", () => {
     expect(targetLabel("transport.next", tracks)).toBe("Release");
     expect(targetLabel("transport.goto.3", tracks)).toBe("Go to section 3");

@@ -58,6 +58,16 @@
 //! `(position - origin) mod loop_len`, so switching it on mid-loop resumes at the phase the loop is
 //! in rather than at a random offset. Only a take, which has to *fill* a loop from its top, needs
 //! the loop grid.
+//!
+//! # Stop at the end of the bar, and stop now
+//!
+//! A stop pressed by hand waits for the end of the bar that is playing ([`StopAt::BarEnd`]): a
+//! loop cut mid-phrase sounds like a mistake, one that ends on the bar line sounds like an ending.
+//! The cut mid-bar is still there, as an explicit second way ([`StopAt::Now`]). A stop that waits
+//! is a [`PendingKind::Stop`] like a take's countdown, so the display counts down to it; pressing
+//! it again, or pressing play, record, overdub or clear on that track, takes it back with
+//! [`Command::CancelStop`] (see [`Scheduler::stop`] and [`Scheduler::supersede_stop`]). The score
+//! never goes through here - its stops are its own and stay where the runner puts them.
 
 use super::command::{Command, MAX_TRACKS};
 use super::timeline::Timeline;
@@ -123,6 +133,22 @@ struct Pending {
     kind: PendingKind,
     /// Absolute sample position the action takes effect at.
     at: u64,
+    /// A stop pressed by hand, which a second press (or a newer action) can take back: `Some(false)`
+    /// for a playback stop (`StopPlay`), `Some(true)` for the early end of a running take
+    /// (`StopRecord` + `StartPlay`). `None` for everything else - in particular for the score's own
+    /// stops, which nothing in free looping may take back.
+    stop: Option<bool>,
+}
+
+/// When a stop pressed by hand takes effect. See [`Scheduler::stop`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopAt {
+    /// At the end of the bar that is playing - the default of the stop button, the `S` key and
+    /// the `track.<n>.stop` MIDI target.
+    BarEnd,
+    /// Now (one head start from now), cutting the loop mid-bar: the small red half of the button,
+    /// `Shift+S`, `track.<n>.stop_now`.
+    Now,
 }
 
 /// How far a track still is from its scheduled action.
@@ -254,7 +280,11 @@ impl Scheduler {
     /// Remember what a track is waiting for, so [`Scheduler::lead`] can count down to it.
     fn arm(&mut self, track: usize, kind: PendingKind, at: u64) {
         if let Some(slot) = self.pending.get_mut(track) {
-            *slot = Some(Pending { kind, at });
+            *slot = Some(Pending {
+                kind,
+                at,
+                stop: None,
+            });
         }
     }
 
@@ -411,11 +441,35 @@ impl Scheduler {
         self.overdub_at(track, name, start, end, layers)
     }
 
-    /// One button for three situations, exactly as on the keyboard: a scheduled recording is
-    /// cancelled, a running one is closed on the next bar, and otherwise playback stops.
+    /// The stop button of free looping, read against what the track is doing and against `when`
+    /// ([`StopAt`]). `clock_runs` is whether there is a bar to wait for at all: with the transport
+    /// standing (or a count-in running) every loop is silent anyway, and a stop that waited for a
+    /// bar line nobody hears would only look broken - it acts at once.
     ///
-    /// Bar grid on purpose, in both modes - see the module comment.
-    pub fn stop(&mut self, track: usize, name: &str, est: u64, state: TrackState) -> Scheduled {
+    /// * **Armed** (a take waits for its start): the take is cancelled, as it always was.
+    /// * **Recording / overdubbing**: the take ends on the next bar line and the loop plays on -
+    ///   unchanged, and the same for both halves of the button: a take that ended mid-bar would
+    ///   define a loop that is not a whole number of bars. Pressed again while that early end
+    ///   waits, `BarEnd` takes it back (the take runs on to its own end).
+    /// * **Anything else**, `Now`: silent from one head start on, as the button always did. A stop
+    ///   or play still waiting for its bar line is taken back with it, so nothing wakes the track
+    ///   up again a bar later.
+    /// * **Anything else**, `BarEnd`: a playing loop stops on the next bar line (the fade sits
+    ///   before it, as with every timed stop). Pressed again while that waits, it is taken back. A
+    ///   track that is not playing has nothing to wait for: a play armed for a bar line is
+    ///   cancelled there, otherwise it is silent at once.
+    ///
+    /// Bar grid, not loop grid, in both quantise modes - see the module comment.
+    pub fn stop(
+        &mut self,
+        track: usize,
+        name: &str,
+        est: u64,
+        state: TrackState,
+        when: StopAt,
+        clock_runs: bool,
+    ) -> Scheduled {
+        let waiting = self.waiting_stop(track, est);
         match state {
             TrackState::Armed => {
                 self.disarm(track);
@@ -427,27 +481,170 @@ impl Scheduler {
                     message: "Scheduled recording cancelled.".to_string(),
                 }
             }
-            TrackState::Recording | TrackState::Overdub => {
-                let end = self.next_bar(est);
-                self.arm(track, PendingKind::Stop, end);
-                Scheduled {
-                    commands: vec![
-                        Command::StopRecord { track, at: end },
-                        Command::StartPlay { track, at: end },
-                    ],
-                    message: "Recording ends at the next bar line.".to_string(),
+            TrackState::Recording | TrackState::Overdub => match (waiting, when) {
+                (Some((at, true)), StopAt::BarEnd) => self.take_back(track, est, at, true, name),
+                (Some((_, true)), StopAt::Now) => Scheduled {
+                    commands: Vec::new(),
+                    message: "Recording already ends at the next bar line - a take is never cut \
+                              mid-bar."
+                        .to_string(),
+                },
+                _ => {
+                    let end = self.next_bar(est);
+                    self.arm_stop(track, end, true);
+                    Scheduled {
+                        commands: vec![
+                            Command::StopRecord { track, at: end },
+                            Command::StartPlay { track, at: end },
+                        ],
+                        message: "Recording ends at the next bar line.".to_string(),
+                    }
                 }
-            }
-            _ => {
+            },
+            _ if when == StopAt::Now || !clock_runs => {
+                let mut commands = self.cancel_commands(track, est);
+                commands.push(Command::StopPlay {
+                    track,
+                    at: self.soon(est),
+                });
                 self.disarm(track);
                 Scheduled {
-                    commands: vec![Command::StopPlay {
-                        track,
-                        at: self.soon(est),
-                    }],
-                    message: format!("\"{name}\": stopped."),
+                    commands,
+                    message: if clock_runs || when == StopAt::Now {
+                        format!("\"{name}\": stopped.")
+                    } else {
+                        format!("\"{name}\": stopped - the clock stands, so at once.")
+                    },
                 }
             }
+            TrackState::Playing => match waiting {
+                Some((at, false)) => self.take_back(track, est, at, false, name),
+                _ => {
+                    let at = self.next_bar(est);
+                    self.arm_stop(track, at, false);
+                    Scheduled {
+                        commands: vec![Command::StopPlay { track, at }],
+                        message: format!("\"{name}\": stops at the end of the bar."),
+                    }
+                }
+            },
+            _ => {
+                let commands = self.cancel_commands(track, est);
+                self.disarm(track);
+                let cancelled = !commands.is_empty();
+                Scheduled {
+                    commands: if cancelled {
+                        commands
+                    } else {
+                        vec![Command::StopPlay {
+                            track,
+                            at: self.soon(est),
+                        }]
+                    },
+                    message: if cancelled {
+                        format!("\"{name}\": play cancelled.")
+                    } else {
+                        format!("\"{name}\": stopped.")
+                    },
+                }
+            }
+        }
+    }
+
+    /// What a newer transport action on this track (play, record, overdub, clear) sends first: a
+    /// playback stop the musician armed by hand is taken back, because the newer press is what he
+    /// wants now - the same rule as a second press on Stop. Empty when nothing of that kind waits.
+    ///
+    /// The early end of a running take is left alone: what a newer action does to a running take
+    /// was decided long before this button and is not changed by it.
+    pub fn supersede_stop(&mut self, track: usize, est: u64) -> Vec<Command> {
+        match self.waiting_stop(track, est) {
+            Some((at, false)) => {
+                self.disarm(track);
+                if self.in_time(est, at) {
+                    vec![Command::CancelStop {
+                        track,
+                        at,
+                        take: false,
+                    }]
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The stop by hand this track is waiting for, as `(at, take)`, if one is still ahead of `est`.
+    pub fn waiting_stop(&self, track: usize, est: u64) -> Option<(u64, bool)> {
+        match self.pending.get(track).copied().flatten() {
+            Some(Pending {
+                kind: PendingKind::Stop,
+                at,
+                stop: Some(take),
+            }) if at > est => Some((at, take)),
+            _ => None,
+        }
+    }
+
+    /// Whether a cancel sent now still reaches a command due at `at` before it acts. The cancel is
+    /// untimed and arrives within one head start; the stop acts up to one fade (10 ms) before its
+    /// position. A second head start covers the fade with room to spare.
+    fn in_time(&self, est: u64, at: u64) -> bool {
+        at > est + 2 * self.guard
+    }
+
+    /// The second press on a waiting stop: take it back if there is still time, otherwise say that
+    /// it happens anyway.
+    fn take_back(&mut self, track: usize, est: u64, at: u64, take: bool, name: &str) -> Scheduled {
+        if !self.in_time(est, at) {
+            return Scheduled {
+                commands: Vec::new(),
+                message: format!("\"{name}\": too late to cancel - it stops on this bar line."),
+            };
+        }
+        self.disarm(track);
+        Scheduled {
+            commands: vec![Command::CancelStop { track, at, take }],
+            message: if take {
+                format!("\"{name}\": stop cancelled - the take runs on to its end.")
+            } else {
+                format!("\"{name}\": stop cancelled - keeps playing.")
+            },
+        }
+    }
+
+    /// For a stop that acts at once: take back whatever this track still waits for on a bar line
+    /// that would make it sound again - a stop by hand (a `StopPlay` that would then be left over
+    /// for a later play to run into) or a play. A play is cancelled with a `StopPlay` on its own
+    /// sample: sent later, it wins over the `StartPlay` there.
+    fn cancel_commands(&self, track: usize, est: u64) -> Vec<Command> {
+        match self.pending.get(track).copied().flatten() {
+            Some(Pending {
+                kind: PendingKind::Stop,
+                at,
+                stop: Some(false),
+            }) if self.in_time(est, at) => vec![Command::CancelStop {
+                track,
+                at,
+                take: false,
+            }],
+            Some(Pending {
+                kind: PendingKind::Play,
+                at,
+                ..
+            }) if at > self.soon(est) => vec![Command::StopPlay { track, at }],
+            _ => Vec::new(),
+        }
+    }
+
+    fn arm_stop(&mut self, track: usize, at: u64, take: bool) {
+        if let Some(slot) = self.pending.get_mut(track) {
+            *slot = Some(Pending {
+                kind: PendingKind::Stop,
+                at,
+                stop: Some(take),
+            });
         }
     }
 
@@ -653,11 +850,11 @@ mod tests {
     #[test]
     fn stopping_means_three_different_things_depending_on_the_state() {
         let mut s = scheduler(120.0, 8, Quantize::Loop);
-        let armed = s.stop(0, "gitarre", 100_000, TrackState::Armed);
+        let armed = s.stop(0, "gitarre", 100_000, TrackState::Armed, StopAt::BarEnd, true);
         assert!(matches!(armed.commands[0], Command::ClearTrack { .. }));
         assert!(armed.message.contains("cancelled"), "{}", armed.message);
 
-        let recording = s.stop(0, "gitarre", 100_000, TrackState::Recording);
+        let recording = s.stop(0, "gitarre", 100_000, TrackState::Recording, StopAt::BarEnd, true);
         assert_eq!(
             recording.commands,
             vec![
@@ -666,10 +863,128 @@ mod tests {
             ]
         );
 
-        let playing = s.stop(0, "gitarre", 100_000, TrackState::Playing);
-        assert!(matches!(playing.commands[0], Command::StopPlay { .. }));
-        // Untimed-feeling actions still carry a timestamp, just not a quantised one.
-        assert_eq!(playing.commands[0].at(), Some(100_000 + s.guard));
+        // Playback stops on the next bar line by default ...
+        let playing = s.stop(1, "gitarre", 100_000, TrackState::Playing, StopAt::BarEnd, true);
+        assert_eq!(playing.commands, vec![Command::StopPlay { track: 1, at: 2 * BAR }]);
+        assert!(playing.message.contains("end of the bar"), "{}", playing.message);
+        // ... and now, one head start from the press, on the explicit second way.
+        let now = s.stop(2, "gitarre", 100_000, TrackState::Playing, StopAt::Now, true);
+        assert_eq!(now.commands, vec![Command::StopPlay { track: 2, at: 100_000 + s.guard }]);
+    }
+
+    /// A second press on a waiting stop takes it back; so does play, record, overdub or clear.
+    #[test]
+    fn a_waiting_stop_is_cancelled_by_a_second_press_and_by_a_newer_action() {
+        let mut s = scheduler(120.0, 8, Quantize::Loop);
+        let est = 100_000;
+        s.stop(0, "t", est, TrackState::Playing, StopAt::BarEnd, true);
+        assert_eq!(s.lead(0, est).kind, Some(PendingKind::Stop));
+        assert_eq!(s.waiting_stop(0, est), Some((2 * BAR, false)));
+
+        let again = s.stop(0, "t", est + 1_000, TrackState::Playing, StopAt::BarEnd, true);
+        assert_eq!(
+            again.commands,
+            vec![Command::CancelStop { track: 0, at: 2 * BAR, take: false }]
+        );
+        assert!(again.message.contains("cancelled"), "{}", again.message);
+        assert_eq!(s.lead(0, est), Lead::default(), "the countdown is gone");
+
+        // A third press arms it again.
+        let third = s.stop(0, "t", est + 2_000, TrackState::Playing, StopAt::BarEnd, true);
+        assert_eq!(third.commands, vec![Command::StopPlay { track: 0, at: 2 * BAR }]);
+
+        // Play (or record, overdub, clear) supersedes it.
+        assert_eq!(
+            s.supersede_stop(0, est + 3_000),
+            vec![Command::CancelStop { track: 0, at: 2 * BAR, take: false }]
+        );
+        assert_eq!(s.lead(0, est + 3_000), Lead::default());
+        assert!(s.supersede_stop(0, est + 3_000).is_empty(), "nothing left to take back");
+    }
+
+    /// Stop now while a stop waits: silent at once, and the waiting one is taken back so a play
+    /// pressed before that bar line is not stopped by it.
+    #[test]
+    fn stop_now_while_a_stop_waits_acts_at_once_and_takes_the_waiting_one_back() {
+        let mut s = scheduler(120.0, 8, Quantize::Loop);
+        s.stop(0, "t", 100_000, TrackState::Playing, StopAt::BarEnd, true);
+        let now = s.stop(0, "t", 110_000, TrackState::Playing, StopAt::Now, true);
+        assert_eq!(
+            now.commands,
+            vec![
+                Command::CancelStop { track: 0, at: 2 * BAR, take: false },
+                Command::StopPlay { track: 0, at: 110_000 + s.guard },
+            ]
+        );
+        assert_eq!(s.lead(0, 110_000), Lead::default());
+    }
+
+    /// Too close to the bar line the cancel could arrive after the stop began its fade: the press
+    /// changes nothing and says so, rather than promising what the engine cannot keep.
+    #[test]
+    fn a_cancel_too_close_to_the_bar_line_is_refused() {
+        let mut s = scheduler(120.0, 8, Quantize::Loop);
+        s.stop(0, "t", 100_000, TrackState::Playing, StopAt::BarEnd, true);
+        let late = 2 * BAR - s.guard;
+        let plan = s.stop(0, "t", late, TrackState::Playing, StopAt::BarEnd, true);
+        assert!(plan.commands.is_empty());
+        assert!(plan.message.contains("too late"), "{}", plan.message);
+        assert_eq!(s.lead(0, late).kind, Some(PendingKind::Stop), "still counting down");
+        assert!(s.supersede_stop(0, late).is_empty());
+    }
+
+    /// A stop during a take ends it on the bar line, as before; pressed again it is taken back with
+    /// both of its commands. The small half does not cut a take mid-bar.
+    #[test]
+    fn the_early_end_of_a_take_can_be_taken_back_but_not_cut_shorter() {
+        let mut s = scheduler(120.0, 8, Quantize::Loop);
+        let first = s.stop(0, "t", 100_000, TrackState::Overdub, StopAt::BarEnd, true);
+        assert_eq!(start_of(&first), 2 * BAR);
+        let now = s.stop(0, "t", 101_000, TrackState::Overdub, StopAt::Now, true);
+        assert!(now.commands.is_empty(), "{:?}", now.commands);
+        assert!(now.message.contains("never cut"), "{}", now.message);
+        let again = s.stop(0, "t", 102_000, TrackState::Overdub, StopAt::BarEnd, true);
+        assert_eq!(
+            again.commands,
+            vec![Command::CancelStop { track: 0, at: 2 * BAR, take: true }]
+        );
+        // A newer action does not touch the early end of a take.
+        s.stop(0, "t", 103_000, TrackState::Overdub, StopAt::BarEnd, true);
+        assert!(s.supersede_stop(0, 104_000).is_empty());
+    }
+
+    /// No bar to wait for: with the clock standing every loop is silent, and a stop acts at once.
+    #[test]
+    fn with_the_clock_standing_a_stop_acts_at_once() {
+        let mut s = scheduler(120.0, 8, Quantize::Loop);
+        let plan = s.stop(0, "t", 100_000, TrackState::Playing, StopAt::BarEnd, false);
+        assert_eq!(plan.commands, vec![Command::StopPlay { track: 0, at: 100_000 + s.guard }]);
+        assert!(plan.message.contains("at once"), "{}", plan.message);
+        assert_eq!(s.lead(0, 100_000), Lead::default());
+    }
+
+    /// A track that is not playing has nothing to wait for: a play armed for a bar line is
+    /// cancelled on that bar line, otherwise it is silent at once.
+    #[test]
+    fn stop_on_a_track_that_waits_for_play_cancels_the_play() {
+        let mut s = scheduler(120.0, 8, Quantize::Loop);
+        s.play(0, "t", 100_000);
+        let plan = s.stop(0, "t", 100_000, TrackState::Ready, StopAt::BarEnd, true);
+        assert_eq!(plan.commands, vec![Command::StopPlay { track: 0, at: 2 * BAR }]);
+        assert!(plan.message.contains("play cancelled"), "{}", plan.message);
+        assert_eq!(s.lead(0, 100_000), Lead::default());
+
+        let idle = s.stop(1, "t", 100_000, TrackState::Ready, StopAt::BarEnd, true);
+        assert_eq!(idle.commands, vec![Command::StopPlay { track: 1, at: 100_000 + s.guard }]);
+    }
+
+    /// The score's own stops are not stops by hand: nothing in free looping takes them back.
+    #[test]
+    fn the_scores_stops_are_never_taken_back() {
+        let mut s = scheduler(120.0, 8, Quantize::Loop);
+        s.stop_play_at(0, "t", 4 * BAR);
+        assert_eq!(s.waiting_stop(0, 100_000), None);
+        assert!(s.supersede_stop(0, 100_000).is_empty());
     }
 
     /// Stop and playback stay on the bar grid even in loop mode - a correction that waits eight
@@ -679,8 +994,10 @@ mod tests {
         let mut s = scheduler(120.0, 8, Quantize::Loop);
         let plan = s.play(0, "gitarre", 100_000);
         assert_eq!(start_of(&plan), 2 * BAR);
-        let plan = s.stop(0, "gitarre", 100_000, TrackState::Recording);
+        let plan = s.stop(0, "gitarre", 100_000, TrackState::Recording, StopAt::BarEnd, true);
         assert_eq!(start_of(&plan), 2 * BAR);
+        let plan = s.stop(1, "gitarre", 100_000, TrackState::Playing, StopAt::BarEnd, true);
+        assert_eq!(start_of(&plan), 2 * BAR, "in loop mode too: the bar, not the loop");
     }
 
     #[test]
@@ -789,11 +1106,11 @@ mod tests {
         s.play(1, "t", 1_000);
         assert_eq!(s.lead(1, 1_000).kind, Some(PendingKind::Play));
 
-        s.stop(1, "t", 1_000, TrackState::Recording);
+        s.stop(1, "t", 1_000, TrackState::Recording, StopAt::BarEnd, true);
         assert_eq!(s.lead(1, 1_000).kind, Some(PendingKind::Stop));
 
         // Cancelling an armed take, clearing a track and clearing everything all take it back.
-        s.stop(0, "t", 1_000, TrackState::Armed);
+        s.stop(0, "t", 1_000, TrackState::Armed, StopAt::BarEnd, true);
         assert_eq!(s.lead(0, 1_000), Lead::default());
         s.record(0, "t", 1_000);
         s.clear_track(0, "t", 1_000);

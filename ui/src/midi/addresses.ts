@@ -121,6 +121,7 @@ export type TrackPart =
   | "overdub"
   | "play"
   | "stop"
+  | "stop_now"
   | "clear"
   | "undo"
   | "monitor"

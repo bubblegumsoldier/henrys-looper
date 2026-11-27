@@ -571,7 +571,7 @@ export function WaitCard({ view }: { view: MidiView }) {
 // Bindings
 // =============================================================================================
 
-const PART_ORDER = ["record", "overdub", "play", "stop", "clear", "monitor", "pan", "bus", "monitor_bus", "latency_trim", "layer", "fx"];
+const PART_ORDER = ["record", "overdub", "play", "stop", "stop_now", "clear", "monitor", "pan", "bus", "monitor_bus", "latency_trim", "layer", "fx"];
 
 function sortKey(address: string): string {
   const m = /^track\.(\d+)\.([a-z_]+)/.exec(address);

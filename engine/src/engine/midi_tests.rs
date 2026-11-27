@@ -1970,3 +1970,121 @@ fn a_chord_held_over_the_end_of_an_overdub_sounds_for_the_whole_loop() {
         assert!(sounding(&rig).is_empty(), "{grid:?}: {:?}", sounding(&rig));
     }
 }
+
+/// Free looping's stop at the end of the bar (`schedule::Scheduler::stop`) on a MIDI loop, pressed
+/// at `est` - and with `twice` once more 5000 frames later, which takes it back.
+fn stop_at_bar_end(rig: &mut Rig, est: u64, twice: bool) -> Vec<Command> {
+    use super::schedule::{Quantize, Scheduler, StopAt};
+    use super::timeline::{TimeSignature, Timeline};
+    rig.sim.run_to(est);
+    let timeline = Timeline::new(48_000, 100.0, TimeSignature::new(4, 4));
+    let mut sched = Scheduler::new(timeline, 2, BLOCK as u32, Quantize::Loop);
+    let mut sent = sched
+        .stop(0, "t", est, TrackState::Playing, StopAt::BarEnd, true)
+        .commands;
+    for c in &sent {
+        rig.sim.send(*c);
+    }
+    if twice {
+        rig.sim.run_to(est + 5_000);
+        let again = sched
+            .stop(0, "t", est + 5_000, TrackState::Playing, StopAt::BarEnd, true)
+            .commands;
+        for c in &again {
+            rig.sim.send(*c);
+        }
+        sent.extend(again);
+    }
+    sent
+}
+
+/// A first pass with a note held across its middle bar line (60) and one struck on it (64).
+fn held_and_struck(rig: &mut Rig) {
+    let bar = L / 2;
+    record_first_pass(rig);
+    play(rig, 50_000, [0x90, 60, 100]);
+    play(rig, bar, [0x90, 64, 100]);
+    play(rig, bar + 10_000, [0x80, 64, 0]);
+    play(rig, 150_000, [0x80, 60, 0]);
+    rig.sim.run_to(L);
+}
+
+/// Note ons and offs the instrument got in `from..to`.
+fn sent_notes(rig: &Rig, from: u64, to: u64) -> Vec<(u64, [u8; 3])> {
+    sent(rig, from, to)
+        .into_iter()
+        .filter(|(_, m)| matches!(m[0] & 0xF0, 0x80 | 0x90))
+        .collect()
+}
+
+/// The loop's own note held across the bar line ends exactly on it, the note it would strike on
+/// that bar line is not struck, and nothing hangs.
+#[test]
+fn a_stop_at_the_bar_end_releases_the_loops_notes_exactly_on_the_bar_line() {
+    let mut rig = rig();
+    held_and_struck(&mut rig);
+    assert!(sounding(&rig).is_empty(), "nach dem ersten Durchlauf klingt nichts");
+
+    // Pressed in the first bar of pass 2: the stop waits for the second bar line of the pass.
+    let line = L + L / 2;
+    let sent = stop_at_bar_end(&mut rig, L + 60_000, false);
+    assert_eq!(sent, vec![Command::StopPlay { track: 0, at: line }]);
+    rig.sim.run_to(line + L);
+
+    assert_eq!(
+        sent_notes(&rig, L, line + L),
+        vec![(L + 50_000, [0x90, 60, 100]), (line, [0x80, 60, 0])],
+        "an bis zur Taktgrenze, aus genau auf ihr, die Note auf ihr kommt nicht"
+    );
+    assert!(sounding(&rig).is_empty(), "{:?}", sounding(&rig));
+    assert!(!rig.sim.core.track(0).playing());
+}
+
+/// Taken back before the bar line, the MIDI loop plays on as if nothing had been pressed: the held
+/// note sounds to its own off and the note on the bar line is struck.
+#[test]
+fn a_stop_at_the_bar_end_taken_back_leaves_the_midi_loop_alone() {
+    let mut rig = rig();
+    held_and_struck(&mut rig);
+    let line = L + L / 2;
+    let sent = stop_at_bar_end(&mut rig, L + 60_000, true);
+    assert_eq!(
+        sent,
+        vec![
+            Command::StopPlay { track: 0, at: line },
+            Command::CancelStop {
+                track: 0,
+                at: line,
+                take: false
+            },
+        ]
+    );
+    rig.sim.run_to(2 * L);
+    assert_eq!(
+        sent_notes(&rig, L, 2 * L),
+        vec![
+            (L + 50_000, [0x90, 60, 100]),
+            (line, [0x90, 64, 100]),
+            (line + 10_000, [0x80, 64, 0]),
+            (L + 150_000, [0x80, 60, 0]),
+        ]
+    );
+    assert!(rig.sim.core.track(0).playing());
+}
+
+/// With an instrument that reports latency the loop is read that far ahead (so its notes are
+/// *heard* on their beat), and a stop on the bar line still leaves nothing hanging. (As with every
+/// timed `StopPlay` on a MIDI loop, the score's too, the switch is on the output axis: the note on
+/// the bar line has already gone out `latency` frames early and is ended on the bar line.)
+#[test]
+fn a_stop_at_the_bar_end_leaves_nothing_hanging_on_a_late_instrument() {
+    let mut rig = rig_with(100, 0);
+    held_and_struck(&mut rig);
+    stop_at_bar_end(&mut rig, L + 60_000, false);
+    rig.sim.run_to(3 * L);
+    assert!(sounding(&rig).is_empty(), "{:?}", sounding(&rig));
+    assert!(
+        sent_notes(&rig, L + L / 2 + 1, 3 * L).is_empty(),
+        "nach der Taktgrenze kommt nichts mehr"
+    );
+}
