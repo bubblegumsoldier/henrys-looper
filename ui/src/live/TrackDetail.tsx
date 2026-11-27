@@ -27,7 +27,10 @@ import "../mixer/mixer.css";
 export interface TrackActions extends ChannelActions {
   record: (track: number) => void;
   overdub: (track: number) => void;
+  /** Stop at the end of the bar - the stop button's big half, key S. */
   stop: (track: number) => void;
+  /** Stop now, mid-bar - the small red half, Shift+S. */
+  stopNow: (track: number) => void;
   play: (track: number) => void;
 }
 

@@ -75,7 +75,7 @@ use super::process::{
     EngineConfig, EngineCore, check_loop, limits_line, loop_capacity, max_latency, spare_channels,
     spare_slots_for, total_channels,
 };
-use super::schedule::{Lead, Quantize, Scheduled, Scheduler};
+use super::schedule::{Lead, Quantize, Scheduled, Scheduler, StopAt};
 use super::timeline::{TimeSignature, Timeline};
 use super::track::{MAX_LAYERS, Track, TrackLatency, TrackState};
 
@@ -733,6 +733,13 @@ impl Control {
         self.message = plan.message;
     }
 
+    /// A newer transport key on a track takes back a stop that waits for its bar line there.
+    fn supersede_stop(&mut self, track: usize, est: u64) {
+        for cmd in self.sched.supersede_stop(track, est) {
+            self.send(cmd);
+        }
+    }
+
     fn status_of(&self, last: Option<(Status, Instant)>, track: usize) -> TrackStatus {
         last.and_then(|(s, _)| s.tracks().get(track).copied())
             .unwrap_or_default()
@@ -762,29 +769,39 @@ impl Control {
             }
             "r" => {
                 let name = self.tracks[track].name.clone();
+                self.supersede_stop(track, est);
                 let plan = self.sched.record(track, &name, est);
                 self.tracks[track].gains.clear();
                 self.send_all(plan);
             }
             "o" => {
                 let name = self.tracks[track].name.clone();
+                self.supersede_stop(track, est);
                 let plan =
                     self.sched
                         .overdub(track, &name, est, ts.origin, ts.loop_len, ts.layers);
                 self.send_all(plan);
             }
-            "s" => {
+            "s" | "s!" => {
                 let name = self.tracks[track].name.clone();
-                let plan = self.sched.stop(track, &name, est, ts.state);
+                let when = if key == "s!" {
+                    StopAt::Now
+                } else {
+                    StopAt::BarEnd
+                };
+                // The terminal's clock runs from the engine start; there is always a bar line.
+                let plan = self.sched.stop(track, &name, est, ts.state, when, true);
                 self.send_all(plan);
             }
             "p" => {
                 let name = self.tracks[track].name.clone();
+                self.supersede_stop(track, est);
                 let plan = self.sched.play(track, &name, est);
                 self.send_all(plan);
             }
             "c" => {
                 let name = self.tracks[track].name.clone();
+                self.supersede_stop(track, est);
                 let plan = self.sched.clear_track(track, &name, est);
                 self.tracks[track].gains.clear();
                 self.send_all(plan);
@@ -1802,7 +1819,9 @@ pub fn cmd_live(dev: &DeviceOpts, opts: &LiveOpts) -> Result<(), String> {
          \x20 1-{}  select track\n\
          \x20 r   Record a new loop from {grid}, {} bars (replaces existing layers)\n\
          \x20 o   Overdub: another layer from {grid}, one loop long\n\
-         \x20 s   Stop: end a running recording at the next bar line, otherwise stop playback\n\
+         \x20 s   Stop at the end of the bar: a running recording ends there, otherwise playback\n\
+         \x20     stops there. Pressed again before that bar line: the stop is cancelled\n\
+         \x20 s!  Stop now, mid-bar (a recording still ends at the next bar line)\n\
          \x20 p   Play from the next bar line\n\
          \x20 c   Clear this track\n\
          \x20 a   Clear all (all tracks, back to a fresh start)\n\

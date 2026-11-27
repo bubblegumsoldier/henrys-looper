@@ -13,7 +13,7 @@ use looper_engine::engine::live::{MAX_LATENCY_FRAMES, TrackDef};
 use looper_engine::engine::process::check_loop;
 use looper_engine::engine::timeline::{TimeSignature, Timeline};
 
-pub use looper_engine::engine::schedule::{Quantize, Scheduled, Scheduler};
+pub use looper_engine::engine::schedule::{Quantize, Scheduled, Scheduler, StopAt};
 
 use crate::proto::TrackConfig;
 

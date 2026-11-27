@@ -83,3 +83,5 @@ mod clean_tests;
 mod rt_tests;
 #[cfg(test)]
 mod fifo_tests;
+#[cfg(test)]
+mod stop_tests;

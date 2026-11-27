@@ -126,7 +126,8 @@ dann hetzen. Loop-Quantisierung heißt: einmal früh drücken, dann in Ruhe zum 
 Modus ist umschaltbar (`--quantize bar|loop`, `StartConfig.quantize`, Kommando `set_quantize`).
 
 **Stopp und Wiedergabe bleiben auf der Taktgrenze.** Das sind Korrekturen, keine Takes — ein Stopp,
-der acht Takte wartet, wirkt kaputt. Die Wiedergabe verliert dabei nichts, weil ein Loop als
+der acht Takte wartet, wirkt kaputt. (Bis zum Stopp am Taktende, unten, galt das für den Stopp nur
+während einer Aufnahme; eine spielende Spur verstummte sofort.) Die Wiedergabe verliert dabei nichts, weil ein Loop als
 `(Position − origin) mod loop_len` gelesen wird und deshalb phasenrichtig weiterläuft, egal wann man
 sie einschaltet. (In einer Partitur beginnt ein Loop, der mit einer Sektion einsetzt, dagegen vorn —
 Abschnitt 10, „Ein Loop, der einsetzt, beginnt vorn".)
@@ -144,6 +145,61 @@ alte Geometrie weg und definiert ein neues `origin`.
 Die ganze Rechnung steht in `engine/src/engine/schedule.rs`, mit Modulkommentar und Tests.
 **Dieses Modul ist die einzige Stelle, an der aus einer Bedienhandlung getimte Kommandos werden** —
 CLI und Tauri-App teilen es sich. Vorher stand es zweimal da, einmal je Frontend.
+
+### Stopp am Taktende, Stopp sofort (freies Loopen)
+
+Der Stopp-Knopf einer Spur ist geteilt. **Die große Fläche (Taste `S`, MIDI `track.<n>.stop`) stoppt
+am Ende des laufenden Takts**: der Loop spielt bis zum Taktstrich und ist ab genau diesem Sample
+still, die 10-ms-Blende liegt davor wie bei jedem getimten Stopp (Abschnitt 19). Ein Loop, der
+mitten in der Phrase abbricht, klingt nach Fehler; einer, der auf dem Taktstrich endet, nach Schluss.
+**Das kleine rote Quadrat rechts daneben (`⇧S`, `track.<n>.stop_now`) stoppt sofort**, wie der
+Knopf es vorher immer tat (ein `StopPlay` einen Vorlauf nach dem Druck). Keine Rückfrage — die Farbe
+(`--err`) und der Tooltip sind die Warnung.
+
+* **Wartet** ein Stopp, zeigt die Kachel ihn wie jeden Vorlauf („Next → Stop in 2 beats", der
+  Knopf schraffiert und gestrichelt). **Noch einmal drücken nimmt ihn zurück**; ebenso Play,
+  Record, Overdub und Clear auf derselben Spur — der neuere Druck ist, was der Musiker jetzt will.
+  Play auf der noch spielenden Spur heißt dann nur „weiterspielen". Sofort-Stopp während ein Stopp
+  wartet: sofort still, und der wartende wird mit zurückgenommen, damit er nicht ein Play trifft,
+  das vor seinem Taktstrich gedrückt wird.
+* **Zurücknehmen** ist das Engine-Kommando `CancelStop { track, at, take }`: es nimmt den
+  *neuesten* noch wartenden `StopPlay { track, at }` aus dem Warteraum (mit `take` das neueste
+  Paar `StopRecord` + `StartPlay` auf `at`, siehe unten). Ungetimt, kein Allokieren (Suche und
+  `Vec::remove` im Warteraum). Ist der Stopp schon ausgeführt — bei einem Audio-Loop heißt das: seine
+  Blende hat begonnen —, tut es nichts; ein Stopp wird nie halb zurückgenommen. Die Steuerseite
+  schickt es deshalb nur, solange bis zum Taktstrich mehr als zwei Vorläufe bleiben, sonst sagt sie
+  „too late to cancel".
+* **Während einer Aufnahme** bleibt es bei dem, was Stopp schon immer tat: der Take endet auf dem
+  nächsten Taktstrich (`StopRecord` + `StartPlay`, derselbe Weg wie jedes Take-Ende), danach spielt
+  der Loop. Für beide Hälften des Knopfs — ein Take, der mitten im Takt endet, ergäbe einen Loop,
+  der keine ganze Zahl Takte lang ist. Noch einmal `S` vor dem Taktstrich: der Take läuft bis zu
+  seinem eigenen Ende. Fällt der vorgezogene Endpunkt auf das eigene Ende des Takes (Druck im
+  letzten Takt), liegen zwei gleiche Paare im Warteraum; `CancelStop` nimmt das neuere, das Take-Ende
+  bleibt. Play, Record, Overdub, Clear lassen ein vorgezogenes Take-Ende in Ruhe.
+* **Kein Taktraster**: steht die Uhr (oder zählt sie ein), sind alle Loops ohnehin still — der Stopp
+  wirkt sofort, und Knopf und Tooltip sagen „at once" statt „at bar end". Einen Loop außerhalb des
+  Taktrasters gibt es im freien Modus nicht: Takes beginnen auf Takt- oder Loopgrenzen, sind ganze
+  Takte lang, und der Transportstart verankert alle Loops auf Takt 1. Ein Rückfall „Ende des
+  Loop-Durchlaufs" ist deshalb nicht nötig und nicht gebaut.
+* **MIDI-Loops**: der Stopp ist derselbe getimte `StopPlay`, den auch die Partitur schickt; er gibt
+  die klingenden Noten des Loops genau auf dem Taktstrich frei, eine Note *auf* dem Taktstrich wird
+  nicht mehr angeschlagen (`midi_tests.rs`, `a_stop_at_the_bar_end_*`). Mit einem Instrument, das
+  Latenz meldet, wird der Loop um diese Latenz vorausgelesen; der Schalter liegt aber wie bei jedem
+  `StopPlay` auf der Ausgangsachse — eine Note genau auf dem Taktstrich geht dann `latency` Frames
+  früher hinaus und wird auf dem Taktstrich beendet. Nichts bleibt hängen.
+* **Partitur**: unberührt. Ihre Stopps (Sektionswechsel, „Stop all", Ende, Back to start) plant der
+  Runner selbst und gehen nicht durch `Scheduler::stop`; die Stopps aus der Partitur tragen keine
+  Rücknahme-Markierung, nichts im freien Modus nimmt sie zurück. Der Stopp-Knopf einer Kachel wird
+  wie jede Transporthandlung abgewiesen, solange eine Partitur läuft; `⇧S` ist dann „Stop all".
+* Der **Transport-Stopp** des freien Loopens (Leertaste, *Stop* der Uhr, `transport.toggle`) bleibt
+  sofort: er hält die Uhr an und verwirft den Warteraum (`TransportStop`), er ist keine Spuraktion.
+
+Code: `engine/src/engine/schedule.rs` (`Scheduler::stop`, `supersede_stop`, `StopAt`),
+`Command::CancelStop` in `command.rs`/`process.rs`, `Action::StopTrack`/`StopTrackNow` im Host,
+`StopSplit` in `ui/src/live/TrackTile.tsx`. Bewiesen in `engine/src/engine/stop_tests.rs`
+(sample-genau auf dem Taktstrich, Zurücknehmen, sofort während des Wartens, Play/Overdub nehmen
+zurück, Take-Ende und dessen Rücknahme, Uhr steht, zu späte Rücknahme, keine Allokation),
+`schedule.rs` und `midi_tests.rs`.
 
 ### Sichtbarer Vorlauf
 
@@ -1373,7 +1429,7 @@ transport.start | transport.next | transport.stop_all | transport.goto.<n>
 transport.toggle                         (Uhr des freien Loopens; mit Partitur abgewiesen)
 global.click | global.clear_all | global.tempo | global.quantize.bar|loop
 global.bus.<main|monitor>.gain
-track.<ref>.record | overdub | play | stop | clear | monitor | pan | latency_trim
+track.<ref>.record | overdub | play | stop | stop_now | clear | monitor | pan | latency_trim
 track.<ref>.bus.<main|monitor>          · monitor_bus.<main|monitor>
 track.<ref>.layer.<n>.mute | remove | gain
 track.<ref>.fx.bypass

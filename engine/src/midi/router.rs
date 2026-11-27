@@ -72,7 +72,10 @@ pub enum MidiAction {
     Record { track: usize },
     Overdub { track: usize },
     Play { track: usize },
+    /// Stop at the end of the bar (`schedule::StopAt::BarEnd`).
     StopTrack { track: usize },
+    /// Stop now, mid-bar (`schedule::StopAt::Now`).
+    StopTrackNow { track: usize },
     ClearTrack { track: usize },
     /// Undo on one track.
     Undo { track: usize },
@@ -141,6 +144,7 @@ impl MidiAction {
                 | MidiAction::Overdub { .. }
                 | MidiAction::Play { .. }
                 | MidiAction::StopTrack { .. }
+                | MidiAction::StopTrackNow { .. }
                 | MidiAction::ClearTrack { .. }
                 | MidiAction::Undo { .. }
                 | MidiAction::UndoLast
@@ -484,6 +488,7 @@ impl Router {
             Target::Overdub(_) => MidiAction::Overdub { track },
             Target::Play(_) => MidiAction::Play { track },
             Target::StopTrack(_) => MidiAction::StopTrack { track },
+            Target::StopTrackNow(_) => MidiAction::StopTrackNow { track },
             Target::ClearTrack(_) => MidiAction::ClearTrack { track },
             Target::Undo(_) => MidiAction::Undo { track },
             Target::LayerRemove(_, layer) => MidiAction::LayerRemove {

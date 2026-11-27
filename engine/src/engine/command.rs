@@ -118,6 +118,14 @@ pub enum Command {
     /// than answer every waiting command with a counter-command where it lands. What is sent after
     /// it (the stop itself) stays. Timed, so whatever was due before `at` still happens in order.
     DropWaiting { at: u64 },
+    /// Take back a stop pressed by hand while it still waits for its bar line: the newest waiting
+    /// `StopPlay { track, at }` - or, with `take`, the newest waiting `StopRecord { track, at }`
+    /// together with the newest waiting `StartPlay { track, at }` (a take that was to end early on
+    /// that bar line runs on to its own end). The *newest* matching one, so a take whose own end
+    /// is on the same sample keeps its own pair. Untimed. Too late (the stop already acted, or
+    /// began its fade) it does nothing at all: a stop is never half taken back. Free looping's
+    /// "Stop at bar end" (`schedule::Scheduler::stop`); the score never sends it.
+    CancelStop { track: usize, at: u64, take: bool },
     /// Input monitoring (hearing yourself through the engine) for one track, independent of whether
     /// that track is playing. On an instrument track: the live keys (a MIDI loop cuts the live
     /// MIDI before the instrument and plays on; see `Track::set_monitor`).
@@ -293,6 +301,8 @@ impl Command {
             | Command::TouchFxEnabled { .. }
             | Command::TouchFxParam { .. }
             | Command::LoadFxPreset { .. }
+            // Its `at` names the stop it takes back; the cancel itself acts at once.
+            | Command::CancelStop { .. }
             | Command::TransportStop
             | Command::Stop => None,
         }
@@ -344,6 +354,7 @@ impl Command {
             Command::ClickGate { .. } => 39,
             Command::TransportStop => 40,
             Command::Stop => 41,
+            Command::CancelStop { .. } => 42,
         }
     }
 
@@ -357,6 +368,7 @@ impl Command {
             | Command::StopPlay { track, .. }
             | Command::RestartLoop { track, .. }
             | Command::ClearTrack { track, .. }
+            | Command::CancelStop { track, .. }
             | Command::CutTake { track, .. }
             | Command::MonitorFade { track, .. }
             | Command::LatchOverdub { track, .. }
@@ -397,7 +409,7 @@ impl Command {
 }
 
 /// The names of [`Command::kind`], in its order.
-pub const COMMAND_KINDS: [&str; 42] = [
+pub const COMMAND_KINDS: [&str; 43] = [
     "StartRecord",
     "StartOverdub",
     "StopRecord",
@@ -440,6 +452,7 @@ pub const COMMAND_KINDS: [&str; 42] = [
     "ClickGate",
     "TransportStop",
     "Stop",
+    "CancelStop",
 ];
 
 /// Why the engine refused the last command it refused. Travels in the status snapshot so the

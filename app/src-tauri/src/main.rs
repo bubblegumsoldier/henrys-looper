@@ -201,10 +201,17 @@ async fn track_overdub(track: usize, engine: State<'_, EngineHandle>) -> Result<
     act(engine, Action::Overdub { track }).await
 }
 
-/// Cancel a scheduled recording, end a running one on the next bar, or stop playback.
+/// Cancel a scheduled recording, end a running one on the next bar, or stop playback at the end of
+/// the bar. Pressed again while that stop waits, it is taken back.
 #[tauri::command(rename_all = "snake_case")]
 async fn track_stop(track: usize, engine: State<'_, EngineHandle>) -> Result<(), String> {
     act(engine, Action::StopTrack { track }).await
+}
+
+/// Stop playback now, mid-bar. A running recording still ends on the next bar line.
+#[tauri::command(rename_all = "snake_case")]
+async fn track_stop_now(track: usize, engine: State<'_, EngineHandle>) -> Result<(), String> {
+    act(engine, Action::StopTrackNow { track }).await
 }
 
 /// Start playback from the next bar.
@@ -1248,6 +1255,7 @@ fn main() {
             track_record,
             track_overdub,
             track_stop,
+            track_stop_now,
             track_play,
             track_clear,
             track_monitor,

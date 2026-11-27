@@ -1942,6 +1942,7 @@ impl EngineCore {
             Command::TransportStop => self.stop_transport(),
             // The waiting room was emptied where it was taken out of it.
             Command::DropWaiting { .. } => {}
+            Command::CancelStop { track, at, take } => self.cancel_stop(track, at, take),
             Command::Stop => {
                 self.latch.all_off();
                 for track in 0..self.tracks.len() {
@@ -1957,6 +1958,41 @@ impl EngineCore {
                 self.stopped = true;
             }
         }
+    }
+
+    /// Take a stop pressed by hand back while it still waits (`Command::CancelStop`).
+    ///
+    /// Only the waiting room is touched: a stop that has already acted - or started its fade, which
+    /// is the same thing on an audio loop, see [`Self::due`] - is not in it any more, and then
+    /// nothing changes. For an early take end both halves have to be waiting; finding the
+    /// `StopRecord` gone means the take's end is already set, and dropping only the `StartPlay`
+    /// would leave a take that ends into silence. `rposition` + `remove` on a `Vec` of `Copy`
+    /// commands: a scan and a memmove, nothing allocated.
+    fn cancel_stop(&mut self, track: usize, at: u64, take: bool) {
+        // Which waiting command is which: 0 a playback stop, 1 a take end, 2 the play after it.
+        let slot = |cmd: &Command| match *cmd {
+            Command::StopPlay { track: t, at: a } if t == track && a == at => Some(0),
+            Command::StopRecord { track: t, at: a } if t == track && a == at => Some(1),
+            Command::StartPlay { track: t, at: a } if t == track && a == at => Some(2),
+            _ => None,
+        };
+        let newest = |which: usize| {
+            self.scheduled
+                .iter()
+                .rposition(|(_, cmd)| slot(cmd) == Some(which))
+        };
+        if !take {
+            if let Some(i) = newest(0) {
+                self.scheduled.remove(i);
+            }
+            return;
+        }
+        let (Some(end), Some(play)) = (newest(1), newest(2)) else {
+            return;
+        };
+        // The later slot first, so the earlier index still points at its command.
+        self.scheduled.remove(end.max(play));
+        self.scheduled.remove(end.min(play));
     }
 
     /// Start or stop a track's loop counting from output position `at`: on an audio loop a switch

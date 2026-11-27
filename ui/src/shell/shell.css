@@ -574,7 +574,49 @@ table.tt .tn2 input.name-in { height: 24px; }
 .tbtns { grid-template-columns: repeat(12, minmax(0, 1fr)); }
 .tbtns .tb { grid-column: span 4; }
 .tbtns .tb.stop, .tbtns .tb.hear { grid-column: span 3; }
-.live.tiles-two .tbtns { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+.live.tiles-two .tbtns { grid-template-columns: repeat(8, minmax(0, 1fr)); }
 .tile .tn .more:disabled { opacity: .35; }
+
+/* Stop as a split button (`StopSplit` in TrackTile.tsx): the big part stops at the end of the bar,
+   the small square on its right stops now - in the error colour, the only red edge among the tile's
+   buttons. Joined: one outer radius, a red hairline between the parts. It needs more room than
+   the single button had, so the second row is split 5 / 3 / 2 / 2: Stop, Monitor, then Undo and
+   Mute as icons (title and aria-label carry their words). The tile does not grow. */
+.tbtns .tsplit { grid-column: span 5; display: flex; min-width: 0; }
+.tbtns .tb.hear.undo, .tbtns .tb.hear.mute { grid-column: span 2; }
+.tbtns .tb.hear.undo > span:not(.mb), .tbtns .tb.hear.mute > span:not(.mb) { display: none; }
+.tbtns .tsplit .tb { height: 48px; }
+.tbtns .tsplit .tb.sp-main { flex: 1 1 auto; min-width: 0; padding: 0 6px; border-radius: 9px 0 0 9px; }
+/* Text only - "Stop" over "at bar end"; the square icon is the other half's. Layouts that drop
+   button words (two rows of tiles; six narrow tiles) show the icon instead, below. */
+.tbtns .tsplit .tb.sp-main > .ic { display: none; }
+.tbtns .tsplit .tb.sp-main > .sp-l { display: flex; flex-direction: column; align-items: center; line-height: 1.12; min-width: 0; max-width: 100%; }
+.tbtns .tsplit .sp-main .sp-l b { font-weight: var(--fw-semibold); }
+.tbtns .tsplit .sp-main .sp-l small { font-size: 10.5px; font-weight: var(--fw-medium); color: var(--tx-3); overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.tbtns .tsplit .tb.sp-now {
+  flex: 0 0 36px; padding: 0; border-radius: 0 9px 9px 0; border-left-width: 0;
+  background: rgba(255, 92, 108, 0.08); border-color: rgba(255, 92, 108, 0.55);
+  box-shadow: inset 1px 0 0 rgba(255, 92, 108, 0.55);
+}
+.tbtns .tsplit .tb.sp-now .ic { --ic: 16px; color: var(--err); }
+.tbtns .tsplit .tb.sp-now:not(:disabled):hover { background: rgba(255, 92, 108, 0.2); }
+.tbtns .tsplit .tb.sp-now:not(:disabled):active { background: var(--err); }
+.tbtns .tsplit .tb.sp-now:not(:disabled):active .ic { color: #fff; }
+/* A stop that waits for its bar line looks armed, like every countdown: hatch, dashed edge, and the
+   `.tb.pend` outline and beat pulse every armed button has. */
+.tbtns .tsplit .tb.sp-main.pend { background: var(--hatch-armed), #1d1b12; color: var(--st-armed); }
+.tbtns .tsplit .tb.sp-main.pend .ic, .tbtns .tsplit .tb.sp-main.pend .sp-l small { color: var(--st-armed); }
+.live.tiles-six .tbtns .tsplit .tb { height: 40px; }
+.live.tiles-two .tbtns .tsplit { grid-column: span 2; }
+.live.tiles-two .tbtns .tsplit .tb.sp-main > .ic { display: inline-block; }
+.live.tiles-two .tbtns .tsplit .tb.sp-now { flex-basis: 42%; }
+@container (max-width: 1200px) {
+  .tbtns .tsplit .tb { height: 40px; }
+  .tbtns .tsplit .tb.sp-main .sp-l small { display: none; }
+  .tbtns .tsplit .tb.sp-now { flex-basis: 30px; }
+  .tbtns .tsplit .tb.sp-now .ic { --ic: 14px; }
+  .live.tiles-six .tbtns .tsplit .tb.sp-main > .ic { display: inline-block; }
+  .live.tiles-two .tbtns .tsplit .tb { height: 44px; }
+}
 
 .pos .kick .lv-chip.lock { color: var(--warn); border-color: rgba(245,185,66,.45); background: rgba(245,185,66,.08); white-space: nowrap; }

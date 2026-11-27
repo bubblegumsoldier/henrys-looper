@@ -34,7 +34,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { api } from "../api";
 import { currentStatus, structureSignature, useStatusEffect, useStatusSlice } from "../status";
 import { run } from "../shell/notes";
-import { useScore } from "../shell/scoreTransport";
+import { scoreRuns, useScore } from "../shell/scoreTransport";
 import { useLoadedScore } from "../shell/scoreModel";
 import { T } from "../shell/terms";
 import { PositionPanel, type Clock } from "./PositionPanel";
@@ -43,6 +43,7 @@ import { ArrangementStrip } from "./ArrangementStrip";
 import { TrackTile, clearTrackAsked, trackColor } from "./TrackTile";
 import { clearAllAsked } from "./ClockBar";
 import { TrackDetail, type TrackActions } from "./TrackDetail";
+import { stopKey } from "./stopKeys";
 import { DELAY_NOTES, FX_NAME, FX_PRESETS, FX_SLOT_ORDER } from "../mixer/fxModel";
 import { channelActions } from "../mixer/actions";
 import { SheetSidebar } from "../sheet/SheetSidebar";
@@ -116,6 +117,7 @@ const actions: TrackActions = {
   record: (t) => run(() => api.trackRecord(t)),
   overdub: (t) => run(() => api.trackOverdub(t)),
   stop: (t) => run(() => api.trackStop(t)),
+  stopNow: (t) => run(() => api.trackStopNow(t)),
   play: (t) => run(() => api.trackPlay(t)),
 };
 
@@ -222,8 +224,9 @@ function Stage({ onOpenArrangement }: Props) {
   });
 
   // --- keyboard --------------------------------------------------------------------------------
-  const state = useRef({ tracks, selected });
-  state.current = { tracks, selected };
+  const runs = scoreRuns(score);
+  const state = useRef({ tracks, selected, runs });
+  state.current = { tracks, selected, runs };
   const chord = useRef<Chord | null>(null);
   const chordTimer = useRef<number | undefined>(undefined);
   const [chordShown, setChordShown] = useState<Chord | null>(null);
@@ -262,7 +265,19 @@ function Stage({ onOpenArrangement }: Props) {
         clearAllAsked();
         return;
       }
-      // Other Shift keys belong to the score transport (Shift+S stops the whole run).
+      // S stops the selected track at the end of the bar, Shift+S now - unless a score runs, whose
+      // Shift+S is "Stop all" (`useScoreKeys`). See `stopKey`.
+      const stop = stopKey(e.key, e.shiftKey, state.current.runs);
+      if (stop) {
+        const track = state.current.tracks[state.current.selected];
+        if (chord.current) clearChord();
+        if (!track) return;
+        e.preventDefault();
+        if (stop === "now") actions.stopNow(track.index);
+        else actions.stop(track.index);
+        return;
+      }
+      // Other Shift keys belong to the score transport.
       if (e.shiftKey) return;
       // Z or Backspace: undo the last take, whichever track it was on.
       if (e.key === "Backspace" || e.key.toLowerCase() === "z") {
@@ -320,10 +335,6 @@ function Stage({ onOpenArrangement }: Props) {
         case "o":
           e.preventDefault();
           actions.overdub(track.index);
-          break;
-        case "s":
-          e.preventDefault();
-          actions.stop(track.index);
           break;
         case "p":
           e.preventDefault();
@@ -404,6 +415,7 @@ function Stage({ onOpenArrangement }: Props) {
                   barInLoop={writing ? t.take_bar || barInLoop : 0}
                   loopBars={t.loop_bars || clock.bars}
                   latchMode={latchMode}
+                  clockRuns={clock.transport && !clock.countingIn}
                 />
               );
             })}

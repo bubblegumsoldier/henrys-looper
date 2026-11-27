@@ -16,7 +16,7 @@ können sich jederzeit ändern. Die Oberfläche ist englisch, Doku und Code-Komm
 | Modus | Wofür |
 |---|---|
 | **Setup** (Zahnrad) | Audio-Gerät, Puffer, Spuren und Eingänge, Klick, Latenz, MIDI-Geräte, Plugins. Änderungen an Gerät und Spuren gelten beim Verlassen des Setups (die Engine baut sich selbst neu auf). |
-| **Live** | Die Bühnenansicht: je Spur eine Kachel mit *Record · Overdub · Play · Stop · Monitor*, Pegel, Ebenen. Ohne geladene Partitur ein freier Looper; mit Partitur oben Sektion, Takt, Schlag, *Release* und *Stop all*. |
+| **Live** | Die Bühnenansicht: je Spur eine Kachel mit *Record · Overdub · Play · Stop · Monitor*, Pegel, Ebenen. *Stop* ist geteilt: die große Fläche stoppt am Taktende, das kleine rote Quadrat sofort. Ohne geladene Partitur ein freier Looper; mit Partitur oben Sektion, Takt, Schlag, *Release* und *Stop all*. |
 | **Arrangement** | Die Partitur grafisch (Raster Sektionen × Spuren, Inspektor), als YAML-Text oder ihr **Blatt** (*Sheet*: Text, Akkorde, Regie); *File* (New/Open/Recent/Save) und *Load*. Darunter aufklappbar der **Mixer** (Fader, Pan, Mute/Solo, Effekte, VST3/AU-Plugins, Busse). Läuft eine Partitur, ist das Arrangement gesperrt. |
 | **MIDI Learn** | Jedes bedienbare Element lässt sich per Klick und Druck auf ein Pad/einen Regler belegen; die Seitenleiste zeigt alle Belegungen je Gerät. |
 
@@ -66,7 +66,8 @@ Stoppstelle.
 | Wo | Taste | Wirkung |
 |---|---|---|
 | Live | `1`–`8` | Spur wählen |
-| Live | `R` `O` `P` `S` `M` | Record · Overdub · Play · Stop · Monitor der gewählten Spur |
+| Live | `R` `O` `P` `S` `M` | Record · Overdub · Play · Stop · Monitor der gewählten Spur. `S` stoppt am **Taktende** (noch einmal `S` vor dem Taktstrich nimmt den Stopp zurück) |
+| Live, ohne laufende Partitur | `⇧S` | Spur **sofort** stoppen, mitten im Takt (das kleine rote Quadrat rechts am Stop-Knopf) |
 | Live | `I` | Spur-Detail auf/zu |
 | Live | `L` | Blatt (Text, Akkorde, Regie) rechts neben der Bühne auf/zu |
 | Live | `F` | Effekte der Spur umgehen (Bypass) |
@@ -74,7 +75,7 @@ Stoppstelle.
 | überall (außer im Textfeld) | `K` | Klick an/aus (auch der große *Click*-Schalter in der Kopfleiste; Rechtsklick: Lautstärke) |
 | Live/Arrangement | Leertaste oder `N` | Partitur starten bzw. *Release* |
 | Live/Arrangement, ohne Partitur | Leertaste | Uhr starten/stoppen (*Start*/*Stop*, MIDI `transport.toggle`) |
-| Live/Arrangement | `⇧S` | *Stop all* |
+| Live/Arrangement, Partitur läuft | `⇧S` | *Stop all* |
 | Arrangement | `⌘N` `⌘O` `⌘S` `⇧⌘S` | New · Open · Save · Save as |
 | Arrangement | `⌘Z` / `⇧⌘Z` · `⌘D` · `+`/`-` · `⌫` · `Esc` | Undo/Redo · Sektion duplizieren · Zoom · zurücksetzen · Auswahl aufheben |
 | Arrangement | Clip gewählt: `R` `O` `A` `P` `S` `M` | Zielzustand setzen (`A` = Stack) |
@@ -328,7 +329,7 @@ looper-engine calibrate --host asio --buffer 128 --click-gain 4.0 `
 ```
 
 Tasten in `live` (jeweils mit Enter): `1`–`N` Track wählen · `r` neuer Loop · `o` Overdub ·
-`s` Stopp · `p` Wiedergabe · `c` Track leeren · `a` alles leeren · `m` Mithören ·
+`s` Stopp am Taktende (noch einmal davor: zurückgenommen) · `s!` Stopp sofort · `p` Wiedergabe · `c` Track leeren · `a` alles leeren · `m` Mithören ·
 `e <nr>` Layer stumm · `w <nr>` Layer weg · `l <nr> <wert>` Layer-Lautstärke ·
 `n <wert>` Panorama · `i <frames|-> [zuschlag]` Latenzkompensation dieses Tracks · `k` Klick ·
 `t` Tempo · `q` Ende.

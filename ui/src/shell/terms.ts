@@ -21,6 +21,9 @@ export const T = {
   overdub: "Overdub",
   play: "Play",
   stop: "Stop",
+  /** The two halves of a track's stop button: the default waits for the bar line. */
+  stopBarEnd: "Stop at bar end",
+  stopNow: "Stop now",
   monitor: "Monitor",
   clear: "Clear",
   clearTrack: "Clear track",
